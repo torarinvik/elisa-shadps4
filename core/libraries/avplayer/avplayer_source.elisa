@@ -1,0 +1,163 @@
+# SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./avplayer_ffmpeg_ffi.elisa"
+
+const AVPLAYER_MAX_STREAMS: int = 8
+
+const AVPLAYER_STREAM_TYPE_VIDEO: u32 = 0
+const AVPLAYER_STREAM_TYPE_AUDIO: u32 = 1
+const AVPLAYER_STREAM_TYPE_TIMED_TEXT: u32 = 2
+const AVPLAYER_STREAM_TYPE_UNKNOWN: u32 = 3
+
+global mutable avsrc_has_source: bool[AVPLAYER_MAX_HANDLES] = zeroed
+global mutable avsrc_is_paused: bool[AVPLAYER_MAX_HANDLES] = zeroed
+global mutable avsrc_is_eof: bool[AVPLAYER_MAX_HANDLES] = zeroed
+global mutable avsrc_is_looping: bool[AVPLAYER_MAX_HANDLES] = zeroed
+global mutable avsrc_stream_count: s32[AVPLAYER_MAX_HANDLES] = zeroed
+global mutable avsrc_video_enabled: bool[AVPLAYER_MAX_HANDLES] = zeroed
+global mutable avsrc_audio_enabled: bool[AVPLAYER_MAX_HANDLES] = zeroed
+global mutable avsrc_last_audio_ts: u64[AVPLAYER_MAX_HANDLES] = zeroed
+global mutable avsrc_ffmpeg_handle: s32[AVPLAYER_MAX_HANDLES] = zeroed
+global mutable avsrc_ffmpeg_enabled: bool[AVPLAYER_MAX_HANDLES] = zeroed
+
+def avsrc_init_handle(slot: int):
+    avsrc_has_source[slot] <- false
+    avsrc_is_paused[slot] <- false
+    avsrc_is_eof[slot] <- false
+    avsrc_is_looping[slot] <- false
+    avsrc_stream_count[slot] <- 0
+    avsrc_video_enabled[slot] <- false
+    avsrc_audio_enabled[slot] <- false
+    avsrc_last_audio_ts[slot] <- 0
+    avsrc_ffmpeg_handle[slot] <- 0
+    avsrc_ffmpeg_enabled[slot] <- false
+
+def avsrc_add_source(slot: int) -> bool:
+    avsrc_has_source[slot] <- true
+    avsrc_stream_count[slot] <- 2
+    avsrc_video_enabled[slot] <- false
+    avsrc_audio_enabled[slot] <- false
+    avsrc_is_eof[slot] <- false
+    return true
+
+def avsrc_add_source_path(slot: int, path: i8&?) -> bool:
+    if path != null:
+        h: s32 = avplayer_ffmpeg_open(path)
+        if h > 0:
+            avsrc_ffmpeg_handle[slot] <- h
+            avsrc_ffmpeg_enabled[slot] <- true
+    return avsrc_add_source(slot)
+
+def avsrc_get_stream_count(slot: int) -> s32:
+    if not avsrc_has_source[slot]:
+        return -1
+    if avsrc_ffmpeg_enabled[slot]:
+        count: s32 = avplayer_ffmpeg_stream_count(avsrc_ffmpeg_handle[slot])
+        if count >= 0:
+            avsrc_stream_count[slot] <- count
+    return avsrc_stream_count[slot]
+
+def avsrc_get_stream_info(slot: int, stream_index: u32, info_type: mutable u32&, duration: mutable u64&, start_time: mutable u64&) -> bool:
+    if not avsrc_has_source[slot]:
+        return false
+    if stream_index >= avsrc_stream_count[slot].u32():
+        return false
+    if stream_index == 0:
+        info_type <- AVPLAYER_STREAM_TYPE_VIDEO
+    elif stream_index == 1:
+        info_type <- AVPLAYER_STREAM_TYPE_AUDIO
+    else:
+        info_type <- AVPLAYER_STREAM_TYPE_UNKNOWN
+    duration <- 0
+    start_time <- 0
+    return true
+
+def avsrc_enable_stream(slot: int, stream_index: u32) -> bool:
+    if not avsrc_has_source[slot]:
+        return false
+    if stream_index == 0:
+        avsrc_video_enabled[slot] <- true
+        return true
+    if stream_index == 1:
+        avsrc_audio_enabled[slot] <- true
+        return true
+    return false
+
+def avsrc_disable_stream(slot: int, stream_index: u32) -> bool:
+    if not avsrc_has_source[slot]:
+        return false
+    if stream_index == 0:
+        avsrc_video_enabled[slot] <- false
+        return true
+    if stream_index == 1:
+        avsrc_audio_enabled[slot] <- false
+        return true
+    return false
+
+def avsrc_set_looping(slot: int, is_looping: bool):
+    avsrc_is_looping[slot] <- is_looping
+
+def avsrc_has_frames(slot: int, num_frames: u32) -> bool:
+    _ = num_frames
+    return avsrc_has_source[slot] and (avsrc_video_enabled[slot] or avsrc_audio_enabled[slot] or avsrc_is_eof[slot])
+
+def avsrc_start(slot: int) -> bool:
+    if not avsrc_has_source[slot]:
+        return false
+    if not avsrc_video_enabled[slot] and not avsrc_audio_enabled[slot]:
+        return false
+    avsrc_is_paused[slot] <- false
+    avsrc_is_eof[slot] <- false
+    if avsrc_ffmpeg_enabled[slot] and avplayer_ffmpeg_start(avsrc_ffmpeg_handle[slot]) < 0:
+        return false
+    return true
+
+def avsrc_stop(slot: int) -> bool:
+    if not avsrc_has_source[slot]:
+        return false
+    avsrc_is_paused[slot] <- false
+    if avsrc_ffmpeg_enabled[slot]:
+        _ = avplayer_ffmpeg_stop(avsrc_ffmpeg_handle[slot])
+    return true
+
+def avsrc_pause(slot: int):
+    avsrc_is_paused[slot] <- true
+    if avsrc_ffmpeg_enabled[slot]:
+        _ = avplayer_ffmpeg_pause(avsrc_ffmpeg_handle[slot])
+
+def avsrc_resume(slot: int):
+    avsrc_is_paused[slot] <- false
+    if avsrc_ffmpeg_enabled[slot]:
+        _ = avplayer_ffmpeg_resume(avsrc_ffmpeg_handle[slot])
+
+def avsrc_get_video_data(slot: int, timestamp: mutable u64&) -> bool:
+    if not avsrc_has_source[slot] or avsrc_is_paused[slot] or not avsrc_video_enabled[slot]:
+        return false
+    if avsrc_ffmpeg_enabled[slot]:
+        if avplayer_ffmpeg_get_video_ts(avsrc_ffmpeg_handle[slot], timestamp) == 0:
+            return true
+        return false
+    timestamp <- avsrc_last_audio_ts[slot]
+    return true
+
+def avsrc_get_audio_data(slot: int, timestamp: mutable u64&) -> bool:
+    if not avsrc_has_source[slot] or avsrc_is_paused[slot] or not avsrc_audio_enabled[slot]:
+        return false
+    if avsrc_ffmpeg_enabled[slot]:
+        if avplayer_ffmpeg_get_audio_ts(avsrc_ffmpeg_handle[slot], timestamp) == 0:
+            avsrc_last_audio_ts[slot] <- timestamp
+            return true
+        return false
+    avsrc_last_audio_ts[slot] <- avsrc_last_audio_ts[slot] + 33
+    timestamp <- avsrc_last_audio_ts[slot]
+    return true
+
+def avsrc_release(slot: int):
+    if avsrc_ffmpeg_enabled[slot] and avsrc_ffmpeg_handle[slot] > 0:
+        avplayer_ffmpeg_close(avsrc_ffmpeg_handle[slot])
+    avsrc_ffmpeg_enabled[slot] <- false
+    avsrc_ffmpeg_handle[slot] <- 0
+
+def avsrc_is_active(slot: int) -> bool:
+    return avsrc_has_source[slot] and not avsrc_is_eof[slot]

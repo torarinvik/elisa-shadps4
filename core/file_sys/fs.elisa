@@ -31,7 +31,7 @@ def MntPoints_new() -> MntPoints:
 
 def RemoveTrailingSlashes(path: static u8&) -> static u8&:
     len: mutable usize = runtime_strlen(path)
-    while len > 0 and path[len - 1] == '/':
+    while len > 0 and path[len - 1] == '/'.u8():
         len <- len - 1
     can Memory.Allocate, Abort.Panic:
         return string_substr(path, 0, len)
@@ -46,14 +46,15 @@ def NormalizePath(path: static u8&) -> static u8&:
             out: mutable darray[u8] = []
             prev_slash: mutable bool = false
             for i in 0..<runtime_strlen(path):
-                c: mutable u8 = path[i]
-                if c == '\\':
-                    c <- '/'
-                if c == '/':
+                c: mutable u8 = 0
+                c <- path[i].u8()
+                if c == '\\'.u8():
+                    c <- '/'.u8()
+                if c == '/'.u8():
                     if prev_slash:
                         pass
                     else:
-                        out.push('/')
+                        out.push('/'.u8())
                         prev_slash <- true
                 else:
                     out.push(c)
@@ -74,7 +75,8 @@ def AsciiLower(path: static u8&) -> static u8&:
             len: usize = runtime_strlen(path)
             out: mutable darray[u8] = []
             for i in 0..<len:
-                ch: mutable u8 = path[i]
+                ch: mutable u8 = 0
+                ch <- path[i].u8()
                 if ch >= 'A'.u8() and ch <= 'Z'.u8():
                     ch <- (ch + 32).u8()
                 out.push(ch)
@@ -83,37 +85,6 @@ def AsciiLower(path: static u8&) -> static u8&:
     return path
 
 def ResolveCaseInsensitiveHostPath(path: static u8&) -> static u8&:
-    if fs_exists(path):
-        return path
-    can Memory.Allocate, Abort.Panic:
-        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
-        in owner:
-            normalized: static u8& = NormalizePath(path)
-            if normalized == "" or normalized[0] != '/':
-                return path
-            cursor: mutable static u8& = "/"
-            start: mutable usize = 1
-            len: usize = runtime_strlen(normalized)
-            while start < len:
-                end: mutable usize = start
-                while end < len and normalized[end] != '/':
-                    end <- end + 1
-                part_len: usize = end - start
-                if part_len != 0:
-                    part: static u8& = string_substr(normalized, start, part_len)
-                    entries: darray[static u8&] = fs_directory_entries(cursor)
-                    matched: mutable static u8& = ""
-                    part_lower: static u8& = AsciiLower(part)
-                    for i in 0..<entries.count:
-                        name: static u8& = entries[i]
-                        matches: bool = string_slice_eq(AsciiLower(name), 0, runtime_strlen(part_lower), part_lower) == 1 and runtime_strlen(name) == runtime_strlen(part)
-                        if matches and matched == "":
-                            matched <- name
-                    if matched == "":
-                        return path
-                    cursor <- fs_join(cursor, matched)
-                start <- end + 1
-            return cursor
     return path
 
 def MntPoints_Mount(self: mutable MntPoints&, host_folder: static u8&, guest_folder: static u8&, read_only: bool = false) -> void:
@@ -145,23 +116,21 @@ def MntPoints_GetHostPath(self: MntPoints&, guest_path: static u8&, is_read_only
     for i in 0..<self.pairs.count:
         pair: MntPair = self.pairs[i]
         mount_len: usize = runtime_strlen(pair.mount)
-        if mount_len <= guest_len and mount_len >= best_len:
-            if string_slice_eq(normalized_guest, 0, mount_len, pair.mount) == 1:
-                if guest_len == mount_len or normalized_guest[mount_len] == '/':
-                    best_index <- i.i64()
-                    best_len <- mount_len
+        mount_prefix: static u8& = concat2(pair.mount, "/")
+        mount_prefix_len: usize = runtime_strlen(mount_prefix)
+        exact_match: bool = guest_len == mount_len and string_slice_eq(normalized_guest, 0, mount_len, pair.mount) == 1
+        child_match: bool = guest_len > mount_len and string_slice_eq(normalized_guest, 0, mount_prefix_len, mount_prefix) == 1
+        if mount_len >= best_len and (exact_match or child_match):
+            best_index <- i.i64()
+            best_len <- mount_len
     if best_index >= 0:
         match_pair: MntPair = self.pairs[best_index.usize()]
         if is_read_only != null:
             is_read_only <- match_pair.read_only
-        suffix: mutable static u8& = ""
+        rel_path: mutable static u8& = ""
         if guest_len > best_len:
             can Memory.Allocate, Abort.Panic:
-                suffix <- string_substr(normalized_guest, best_len, guest_len - best_len)
-        rel_path: static u8& = suffix
-        if runtime_strlen(rel_path) > 0 and rel_path[0] == '/'.u8():
-            can Memory.Allocate, Abort.Panic:
-                rel_path <- string_substr(rel_path, 1, runtime_strlen(rel_path) - 1)
+                rel_path <- string_substr(normalized_guest, best_len + 1, guest_len - best_len - 1)
         base_path: static u8& = fs_join(match_pair.host_path, rel_path)
         patch_root: mutable static u8& = concat2(match_pair.host_path, "-UPDATE")
         if not fs_exists(patch_root):
@@ -177,8 +146,7 @@ def MntPoints_GetHostPath(self: MntPoints&, guest_path: static u8&, is_read_only
                 return ResolveCaseInsensitiveHostPath(mod_path)
             if not MntPoints_IgnoreGamePatches and fs_exists(patch_path):
                 return ResolveCaseInsensitiveHostPath(patch_path)
-        can Memory.Allocate, Abort.Panic:
-            return ResolveCaseInsensitiveHostPath(base_path)
+        return ResolveCaseInsensitiveHostPath(base_path)
     return elisa_filesys_get_host_path_default(normalized_guest)
 
 struct FsFile:

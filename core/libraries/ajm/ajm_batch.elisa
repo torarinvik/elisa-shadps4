@@ -1,0 +1,377 @@
+# SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./ajm_context.elisa"
+
+global mutable ajm_next_batch_id: u32 = 1
+const AJM_PARSED_BATCH_TABLE_CAP: usize = 512
+
+struct AjmParsedBatchSlot:
+    in_use: mutable bool
+    batch_id: mutable u32
+    context_id: mutable u32
+    summary: mutable AjmParsedBatch
+
+global mutable ajm_parsed_batch_table: array[AjmParsedBatchSlot, AJM_PARSED_BATCH_TABLE_CAP] = zeroed
+
+const AjmIdentJob: u32 = 0
+const AjmIdentInputRunBuf: u32 = 1
+const AjmIdentInputControlBuf: u32 = 2
+const AjmIdentControlFlags: u32 = 3
+const AjmIdentRunFlags: u32 = 4
+const AjmIdentReturnAddressBuf: u32 = 6
+const AjmIdentInlineBuf: u32 = 7
+const AjmIdentOutputRunBuf: u32 = 17
+const AjmIdentOutputControlBuf: u32 = 18
+
+struct AjmParsedBatch:
+    job_count: mutable u32
+    statistics_job_count: mutable u32
+    bytes_consumed: mutable usize
+    parse_error: mutable int
+
+struct AjmParsedJobSummary:
+    instance_id: mutable u32
+    has_input_run: mutable bool
+    has_input_control: mutable bool
+    has_output_run: mutable bool
+    has_output_control: mutable bool
+    has_return_address: mutable bool
+    has_inline: mutable bool
+    has_flags: mutable bool
+    flags_raw: mutable u64
+    version: mutable u32
+    codec_id: mutable u32
+    run_flags: mutable u32
+    control_flags: mutable u32
+    sideband_flags: mutable u32
+    wants_sideband_format: mutable bool
+    wants_sideband_stream: mutable bool
+    wants_sideband_gapless: mutable bool
+    wants_control_initialize: mutable bool
+    wants_control_resample: mutable bool
+    wants_run_codec_info: mutable bool
+    wants_run_multiple_frames: mutable bool
+    input_control_size: mutable u32
+    output_control_size: mutable u32
+    min_input_control_size: mutable u32
+    min_output_control_size: mutable u32
+    expected_input_format: mutable bool
+    expected_input_gapless: mutable bool
+    expected_input_resample: mutable bool
+    expected_input_init: mutable bool
+    expected_output_result: mutable bool
+    expected_output_stream: mutable bool
+    expected_output_format: mutable bool
+    expected_output_gapless: mutable bool
+    expected_output_mframe: mutable bool
+    expected_output_codec_info: mutable bool
+    input_format_offset: mutable u32
+    input_gapless_offset: mutable u32
+    input_resample_offset: mutable u32
+    input_init_offset: mutable u32
+    output_result_offset: mutable u32
+    output_stream_offset: mutable u32
+    output_format_offset: mutable u32
+    output_gapless_offset: mutable u32
+    output_mframe_offset: mutable u32
+    output_codec_info_offset: mutable u32
+    input_run_chunk_count: mutable u32
+    output_run_chunk_count: mutable u32
+    input_run_total_size: mutable u32
+    output_run_total_size: mutable u32
+    parse_error: mutable int
+
+def AjmBatch_ParseFlagsLowHigh(high_payload: u32, low_word: u32) -> u64:
+    return (high_payload.u64() << 32) | low_word.u64()
+
+def AjmBatch_DecodeFlags(summary: mutable AjmParsedJobSummary&):
+    raw: u64 = summary.flags_raw
+    summary.version <- (raw & 0x7).u32()
+    summary.codec_id <- ((raw >> 3) & 0xff).u32()
+    summary.run_flags <- ((raw >> 11) & 0x3).u32()
+    summary.control_flags <- ((raw >> 13) & 0x7).u32()
+    summary.sideband_flags <- ((raw >> 45) & 0x7).u32()
+
+    summary.wants_run_codec_info <- (summary.run_flags & 0x1) != 0
+    summary.wants_run_multiple_frames <- (summary.run_flags & 0x2) != 0
+    summary.wants_control_initialize <- (summary.control_flags & 0x2) != 0
+    summary.wants_control_resample <- (summary.control_flags & 0x4) != 0
+    summary.wants_sideband_gapless <- (summary.sideband_flags & 0x1) != 0
+    summary.wants_sideband_format <- (summary.sideband_flags & 0x2) != 0
+    summary.wants_sideband_stream <- (summary.sideband_flags & 0x4) != 0
+
+def AjmBatch_ValidateControlLayouts(summary: mutable AjmParsedJobSummary&):
+    # Input control sideband order mirrors C++ AjmJobFromBatchBuffer:
+    # Format -> Gapless -> Resample -> Initialize
+    input_need: mutable u32 = 0
+    if summary.wants_sideband_format:
+        summary.expected_input_format <- true
+        summary.input_format_offset <- input_need
+        input_need += 24
+    if summary.wants_sideband_gapless:
+        summary.expected_input_gapless <- true
+        summary.input_gapless_offset <- input_need
+        input_need += 8
+    if summary.wants_control_resample:
+        summary.expected_input_resample <- true
+        summary.input_resample_offset <- input_need
+        input_need += 8
+    if summary.wants_control_initialize:
+        summary.expected_input_init <- true
+        summary.input_init_offset <- input_need
+        input_need += 8
+    summary.min_input_control_size <- input_need
+
+    # Output control sideband order mirrors C++ AjmJobFromBatchBuffer:
+    # Result -> Stream -> Format -> Gapless -> MFrame -> CodecInfo(ptr tail)
+    output_need: mutable u32 = 0
+    summary.expected_output_result <- true
+    summary.output_result_offset <- output_need
+    output_need += 8
+    if summary.wants_sideband_stream:
+        summary.expected_output_stream <- true
+        summary.output_stream_offset <- output_need
+        output_need += 16
+    if summary.wants_sideband_format:
+        summary.expected_output_format <- true
+        summary.output_format_offset <- output_need
+        output_need += 24
+    if summary.wants_sideband_gapless:
+        summary.expected_output_gapless <- true
+        summary.output_gapless_offset <- output_need
+        output_need += 8
+    if summary.wants_run_multiple_frames:
+        summary.expected_output_mframe <- true
+        summary.output_mframe_offset <- output_need
+        output_need += 8
+    if summary.wants_run_codec_info:
+        summary.expected_output_codec_info <- true
+        summary.output_codec_info_offset <- output_need
+    summary.min_output_control_size <- output_need
+
+    if summary.has_input_control and summary.input_control_size < summary.min_input_control_size:
+        summary.parse_error <- ORBIS_AJM_ERROR_MALFORMED_BATCH
+    if summary.has_output_control and summary.output_control_size < summary.min_output_control_size:
+        summary.parse_error <- ORBIS_AJM_ERROR_MALFORMED_BATCH
+
+def AjmBatch_ParseJobSummary(batch: u8&, job_payload: u32, job_size: u32) -> AjmParsedJobSummary:
+    out: mutable AjmParsedJobSummary = zeroed
+    out.instance_id <- job_payload
+    out.parse_error <- ORBIS_OK
+    if job_size < 8:
+        out.parse_error <- ORBIS_AJM_ERROR_MALFORMED_BATCH
+        return out
+
+    cursor: mutable usize = 0
+    total: usize = job_size.usize()
+    while cursor + 8 <= total:
+        h0: u32 = batch[cursor + 0].u32()
+        h1: u32 = batch[cursor + 1].u32() << 8
+        h2: u32 = batch[cursor + 2].u32() << 16
+        h3: u32 = batch[cursor + 3].u32() << 24
+        header_word: u32 = h0 | h1 | h2 | h3
+
+        s0: u32 = batch[cursor + 4].u32()
+        s1: u32 = batch[cursor + 5].u32() << 8
+        s2: u32 = batch[cursor + 6].u32() << 16
+        s3: u32 = batch[cursor + 7].u32() << 24
+        chunk_size: u32 = s0 | s1 | s2 | s3
+
+        ident: mutable u32 = 0
+        payload: mutable u32 = 0
+        reserved: mutable u32 = 0
+        AjmBatch_ParseHeaderWord(header_word, ident.ref[mutable u32&], payload.ref[mutable u32&], reserved.ref[mutable u32&])
+        _ = reserved
+
+        cursor += 8
+        if cursor + chunk_size.usize() > total:
+            out.parse_error <- ORBIS_AJM_ERROR_MALFORMED_BATCH
+            return out
+
+        if ident == AjmIdentInputRunBuf:
+            out.has_input_run <- true
+            out.input_run_chunk_count += 1
+            out.input_run_total_size += chunk_size
+        if ident == AjmIdentInputControlBuf:
+            out.has_input_control <- true
+            out.input_control_size <- chunk_size
+        if ident == AjmIdentOutputRunBuf:
+            out.has_output_run <- true
+            out.output_run_chunk_count += 1
+            out.output_run_total_size += chunk_size
+        if ident == AjmIdentOutputControlBuf:
+            out.has_output_control <- true
+            out.output_control_size <- chunk_size
+        if ident == AjmIdentReturnAddressBuf:
+            out.has_return_address <- true
+        if ident == AjmIdentInlineBuf:
+            out.has_inline <- true
+        if ident == AjmIdentControlFlags or ident == AjmIdentRunFlags:
+            out.has_flags <- true
+            out.flags_raw <- AjmBatch_ParseFlagsLowHigh(payload, chunk_size)
+
+        cursor += chunk_size.usize()
+
+    if cursor != total:
+        out.parse_error <- ORBIS_AJM_ERROR_MALFORMED_BATCH
+    if out.parse_error == ORBIS_OK and out.has_flags:
+        AjmBatch_DecodeFlags(out.ref[mutable AjmParsedJobSummary&])
+        AjmBatch_ValidateControlLayouts(out.ref[mutable AjmParsedJobSummary&])
+    return out
+
+def AjmBatch_ParseHeaderWord(word: u32, ident: mutable u32&, payload: mutable u32&, reserved: mutable u32&):
+    ident <- word & 0x3f
+    payload <- (word >> 6) & 0x000fffff
+    reserved <- (word >> 26) & 0x3f
+
+def AjmBatch_ParseJobBuffer(batch: u8&, batch_size: usize) -> AjmParsedBatch:
+    out: mutable AjmParsedBatch = zeroed
+    if batch_size < 8:
+        out.parse_error <- ORBIS_AJM_ERROR_MALFORMED_BATCH
+        return out
+    if (batch_size & 7) != 0:
+        out.parse_error <- ORBIS_AJM_ERROR_MALFORMED_BATCH
+        return out
+
+    cursor: mutable usize = 0
+    while cursor + 8 <= batch_size:
+        h0: u32 = batch[cursor + 0].u32()
+        h1: u32 = batch[cursor + 1].u32() << 8
+        h2: u32 = batch[cursor + 2].u32() << 16
+        h3: u32 = batch[cursor + 3].u32() << 24
+        header_word: u32 = h0 | h1 | h2 | h3
+
+        s0: u32 = batch[cursor + 4].u32()
+        s1: u32 = batch[cursor + 5].u32() << 8
+        s2: u32 = batch[cursor + 6].u32() << 16
+        s3: u32 = batch[cursor + 7].u32() << 24
+        job_size: u32 = s0 | s1 | s2 | s3
+
+        ident: mutable u32 = 0
+        payload: mutable u32 = 0
+        reserved: mutable u32 = 0
+        AjmBatch_ParseHeaderWord(header_word, ident.ref[mutable u32&], payload.ref[mutable u32&], reserved.ref[mutable u32&])
+        _ = reserved
+
+        cursor += 8
+        if cursor + job_size.usize() > batch_size:
+            out.parse_error <- ORBIS_AJM_ERROR_MALFORMED_BATCH
+            out.bytes_consumed <- cursor
+            return out
+
+        if ident == AjmIdentInlineBuf:
+            cursor += job_size.usize()
+        else:
+            if ident != AjmIdentJob:
+                out.parse_error <- ORBIS_AJM_ERROR_INVALID_OPCODE
+                out.bytes_consumed <- cursor
+                return out
+        out.job_count += 1
+        if payload == AJM_INSTANCE_STATISTICS:
+            out.statistics_job_count += 1
+        summary: AjmParsedJobSummary = AjmBatch_ParseJobSummary((batch + cursor).cast[u8&], payload, job_size)
+        if summary.parse_error != ORBIS_OK:
+            out.parse_error <- summary.parse_error
+            out.bytes_consumed <- cursor
+            return out
+        cursor += job_size.usize()
+
+    if cursor != batch_size:
+        out.parse_error <- ORBIS_AJM_ERROR_MALFORMED_BATCH
+        out.bytes_consumed <- cursor
+        return out
+    out.bytes_consumed <- cursor
+    out.parse_error <- ORBIS_OK
+    return out
+
+def AjmBatchTable_Upsert(batch_id: u32, context_id: u32, parsed: AjmParsedBatch):
+    # First try updating an existing slot for this batch id.
+    for i in 0..<AJM_PARSED_BATCH_TABLE_CAP:
+        slot: AjmParsedBatchSlot& = ajm_parsed_batch_table[i].ref[AjmParsedBatchSlot&]
+        if slot.in_use and slot.batch_id == batch_id:
+            slot.context_id <- context_id
+            slot.summary <- parsed
+            return
+    # Then insert into the first free slot.
+    for i in 0..<AJM_PARSED_BATCH_TABLE_CAP:
+        slot: AjmParsedBatchSlot& = ajm_parsed_batch_table[i].ref[AjmParsedBatchSlot&]
+        if not slot.in_use:
+            slot.in_use <- true
+            slot.batch_id <- batch_id
+            slot.context_id <- context_id
+            slot.summary <- parsed
+            return
+
+def AjmBatchTable_Remove(batch_id: u32):
+    for i in 0..<AJM_PARSED_BATCH_TABLE_CAP:
+        slot: AjmParsedBatchSlot& = ajm_parsed_batch_table[i].ref[AjmParsedBatchSlot&]
+        if slot.in_use and slot.batch_id == batch_id:
+            slot.in_use <- false
+            slot.batch_id <- 0
+            slot.context_id <- 0
+            slot.summary <- zeroed
+            return
+
+def AjmBatchTable_Find(batch_id: u32) -> AjmParsedBatchSlot&?:
+    for i in 0..<AJM_PARSED_BATCH_TABLE_CAP:
+        slot: AjmParsedBatchSlot& = ajm_parsed_batch_table[i].ref[AjmParsedBatchSlot&]
+        if slot.in_use and slot.batch_id == batch_id:
+            return slot.ref[AjmParsedBatchSlot&]
+    return null
+
+def sceAjmBatchCancel(context_id: u32, batch_id: u32) -> int:
+    _ = batch_id
+    return AjmContext_Ensure(context_id)
+
+def sceAjmBatchStartBuffer(context_id: u32, p_batch: mutable u8&, batch_size: u32, priority: int, batch_error: mutable AjmBatchError&, out_batch_id: mutable u32&) -> int:
+    _ = p_batch
+    _ = priority
+    be: mutable AjmBatchError& = batch_error
+    be.error_code <- ORBIS_OK
+    be.job_addr <- null
+    be.cmd_offset <- 0
+    be.job_ra <- null
+    if (batch_size & 7) != 0:
+        return ORBIS_AJM_ERROR_MALFORMED_BATCH
+    err: int = AjmContext_Ensure(context_id)
+    if err != ORBIS_OK:
+        return err
+    parsed: AjmParsedBatch = AjmBatch_ParseJobBuffer(p_batch, batch_size.usize())
+    if parsed.parse_error != ORBIS_OK:
+        be.error_code <- parsed.parse_error
+        be.cmd_offset <- parsed.bytes_consumed.u32()
+        return parsed.parse_error
+
+    assigned_batch_id: u32 = ajm_next_batch_id
+    out_batch_id <- assigned_batch_id
+    AjmBatchTable_Upsert(assigned_batch_id, context_id, parsed)
+    ajm_next_batch_id += 1
+    return ORBIS_OK
+
+def sceAjmBatchWait(context_id: u32, batch_id: u32, timeout: u32, batch_error: mutable AjmBatchError&) -> int:
+    _ = timeout
+    err: int = AjmContext_Ensure(context_id)
+    if err != ORBIS_OK:
+        return err
+
+    slot: AjmParsedBatchSlot&? = AjmBatchTable_Find(batch_id)
+    if slot == null:
+        be: mutable AjmBatchError& = batch_error
+        be.error_code <- ORBIS_AJM_ERROR_INVALID_BATCH
+        be.job_addr <- null
+        be.cmd_offset <- 0
+        be.job_ra <- null
+        return ORBIS_AJM_ERROR_INVALID_BATCH
+
+    if slot.context_id != context_id:
+        return ORBIS_AJM_ERROR_INVALID_CONTEXT
+
+    # Current Elisa AJM path performs immediate parse/accept; no async worker yet.
+    AjmBatchTable_Remove(batch_id)
+    be: mutable AjmBatchError& = batch_error
+    be.error_code <- ORBIS_OK
+    be.job_addr <- null
+    be.cmd_offset <- 0
+    be.job_ra <- null
+    return ORBIS_OK

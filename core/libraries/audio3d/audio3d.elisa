@@ -1,0 +1,342 @@
+# SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+# Incremental high-fidelity Elisa port of core/libraries/audio3d/audio3d.cpp
+
+const ORBIS_AUDIO3D_OBJECT_INVALID: u32 = 0xffffffffu32
+const AUDIO3D_SAMPLE_RATE: u32 = 48000u32
+
+const ORBIS_AUDIO3D_BUFFER_NO_ADVANCE: u32 = 0u32
+const ORBIS_AUDIO3D_BUFFER_ADVANCE_NO_PUSH: u32 = 1u32
+const ORBIS_AUDIO3D_BUFFER_ADVANCE_AND_PUSH: u32 = 2u32
+
+const ORBIS_AUDIO3D_FORMAT_S16: u32 = 0u32
+const ORBIS_AUDIO3D_FORMAT_FLOAT: u32 = 1u32
+
+const ORBIS_AUDIO3D_OUTPUT_BOTH: u32 = 0u32
+const ORBIS_AUDIO3D_OUTPUT_HMU_ONLY: u32 = 1u32
+const ORBIS_AUDIO3D_OUTPUT_TV_ONLY: u32 = 2u32
+
+const ORBIS_AUDIO3D_BLOCKING_ASYNC: u32 = 0u32
+const ORBIS_AUDIO3D_BLOCKING_SYNC: u32 = 1u32
+
+const ORBIS_AUDIO3D_ATTRIBUTE_PCM: u32 = 1u32
+const ORBIS_AUDIO3D_ATTRIBUTE_GAIN: u32 = 3u32
+const ORBIS_AUDIO3D_ATTRIBUTE_RESET_STATE: u32 = 9u32
+
+const AUDIO3D_MAX_PORTS: usize = 4
+const AUDIO3D_MAX_OBJECTS_PER_PORT: usize = 512
+const AUDIO3D_MAX_QUEUE_DEPTH: usize = 16
+
+audio3d_initialized: mutable bool = false
+
+port_open: mutable [AUDIO3D_MAX_PORTS]bool = [false, false, false, false]
+port_granularity: mutable [AUDIO3D_MAX_PORTS]u32 = [0u32, 0u32, 0u32, 0u32]
+port_queue_depth: mutable [AUDIO3D_MAX_PORTS]u32 = [0u32, 0u32, 0u32, 0u32]
+port_buffer_mode: mutable [AUDIO3D_MAX_PORTS]u32 = [0u32, 0u32, 0u32, 0u32]
+port_max_objects: mutable [AUDIO3D_MAX_PORTS]u32 = [0u32, 0u32, 0u32, 0u32]
+port_audioout_handle: mutable [AUDIO3D_MAX_PORTS]s32 = [-1, -1, -1, -1]
+
+port_mixed_level: mutable [AUDIO3D_MAX_PORTS]u32 = [0u32, 0u32, 0u32, 0u32]
+port_bed_level: mutable [AUDIO3D_MAX_PORTS]u32 = [0u32, 0u32, 0u32, 0u32]
+
+object_used: mutable [AUDIO3D_MAX_PORTS][AUDIO3D_MAX_OBJECTS_PER_PORT]bool = [
+    [false] * AUDIO3D_MAX_OBJECTS_PER_PORT,
+    [false] * AUDIO3D_MAX_OBJECTS_PER_PORT,
+    [false] * AUDIO3D_MAX_OBJECTS_PER_PORT,
+    [false] * AUDIO3D_MAX_OBJECTS_PER_PORT
+]
+object_gain: mutable [AUDIO3D_MAX_PORTS][AUDIO3D_MAX_OBJECTS_PER_PORT]f32 = [
+    [0.0f32] * AUDIO3D_MAX_OBJECTS_PER_PORT,
+    [0.0f32] * AUDIO3D_MAX_OBJECTS_PER_PORT,
+    [0.0f32] * AUDIO3D_MAX_OBJECTS_PER_PORT,
+    [0.0f32] * AUDIO3D_MAX_OBJECTS_PER_PORT
+]
+object_pcm_level: mutable [AUDIO3D_MAX_PORTS][AUDIO3D_MAX_OBJECTS_PER_PORT]u32 = [
+    [0u32] * AUDIO3D_MAX_OBJECTS_PER_PORT,
+    [0u32] * AUDIO3D_MAX_OBJECTS_PER_PORT,
+    [0u32] * AUDIO3D_MAX_OBJECTS_PER_PORT,
+    [0u32] * AUDIO3D_MAX_OBJECTS_PER_PORT
+]
+next_object_id: mutable [AUDIO3D_MAX_PORTS]u32 = [0u32, 0u32, 0u32, 0u32]
+
+# helpers
+
+def audio3d_valid_port(port_id: u32) -> bool:
+    return port_id >= 1u32 and port_id <= 3u32 and port_open[port_id.usize()]
+
+def audio3d_reset_port(port_id: u32):
+    p: usize = port_id.usize()
+    port_mixed_level[p] <- 0u32
+    port_bed_level[p] <- 0u32
+    next_object_id[p] <- 0u32
+    i: usize = 0
+    while i < AUDIO3D_MAX_OBJECTS_PER_PORT:
+        object_used[p][i] <- false
+        object_gain[p][i] <- 0.0f32
+        object_pcm_level[p][i] <- 0u32
+        i <- i + 1
+
+def audio3d_find_object_slot(port_id: u32, object_id: u32) -> s32:
+    i: usize = 0
+    while i < AUDIO3D_MAX_OBJECTS_PER_PORT:
+        if object_used[port_id.usize()][i] and (i.u32() + 1u32) == object_id:
+            return i.s32()
+        i <- i + 1
+    return -1
+
+def sceAudio3dInitialize(reserved: s64) -> s32:
+    if reserved != 0:
+        return ORBIS_AUDIO3D_ERROR_INVALID_PARAMETER
+    if audio3d_initialized:
+        return ORBIS_AUDIO3D_ERROR_NOT_READY
+    audio3d_initialized <- true
+    r: s32 = sceAudioOutInit()
+    if r < 0 and r != ORBIS_AUDIO_OUT_ERROR_ALREADY_INIT:
+        return r
+    return ORBIS_OK
+
+def sceAudio3dGetDefaultOpenParameters(params: mutable u8&?) -> s32:
+    _ = params
+    return ORBIS_OK
+
+def sceAudio3dPortOpen(user_id: s32, parameters: void&?, port_id: mutable u32&?) -> s32:
+    _ = user_id
+    if not audio3d_initialized:
+        return ORBIS_AUDIO3D_ERROR_NOT_READY
+    if parameters == null or port_id == null:
+        return ORBIS_AUDIO3D_ERROR_INVALID_PARAMETER
+
+    id: u32 = 1u32
+    while id <= 3u32 and port_open[id.usize()]:
+        id <- id + 1u32
+    if id > 3u32:
+        return ORBIS_AUDIO3D_ERROR_OUT_OF_RESOURCES
+
+    port_open[id.usize()] <- true
+    port_granularity[id.usize()] <- 0x100u32
+    port_queue_depth[id.usize()] <- 2u32
+    port_buffer_mode[id.usize()] <- ORBIS_AUDIO3D_BUFFER_ADVANCE_AND_PUSH
+    port_max_objects[id.usize()] <- 512u32
+    port_audioout_handle[id.usize()] <- -1
+    audio3d_reset_port(id)
+
+    port_id[0] <- id
+    return ORBIS_OK
+
+def sceAudio3dObjectReserve(port_id: u32, object_id: mutable u32&?) -> s32:
+    if object_id == null:
+        return ORBIS_AUDIO3D_ERROR_INVALID_PARAMETER
+    object_id[0] <- ORBIS_AUDIO3D_OBJECT_INVALID
+    if not audio3d_valid_port(port_id):
+        return ORBIS_AUDIO3D_ERROR_INVALID_PORT
+
+    used_count: u32 = 0u32
+    i: usize = 0
+    while i < AUDIO3D_MAX_OBJECTS_PER_PORT:
+        if object_used[port_id.usize()][i]:
+            used_count <- used_count + 1u32
+        i <- i + 1
+    if used_count >= port_max_objects[port_id.usize()]:
+        return ORBIS_AUDIO3D_ERROR_OUT_OF_RESOURCES
+
+    n: u32 = next_object_id[port_id.usize()] + 1u32
+    if n == 0u32 or n == ORBIS_AUDIO3D_OBJECT_INVALID:
+        n <- 1u32
+    if n > AUDIO3D_MAX_OBJECTS_PER_PORT.u32():
+        n <- 1u32
+    next_object_id[port_id.usize()] <- n
+
+    slot: usize = (n - 1u32).usize()
+    object_used[port_id.usize()][slot] <- true
+    object_gain[port_id.usize()][slot] <- 0.0f32
+    object_pcm_level[port_id.usize()][slot] <- 0u32
+    object_id[0] <- n
+    return ORBIS_OK
+
+def sceAudio3dObjectUnreserve(port_id: u32, object_id: u32) -> s32:
+    if not audio3d_valid_port(port_id):
+        return ORBIS_AUDIO3D_ERROR_INVALID_PORT
+    slot: s32 = audio3d_find_object_slot(port_id, object_id)
+    if slot < 0:
+        return ORBIS_AUDIO3D_ERROR_INVALID_OBJECT
+    object_used[port_id.usize()][slot.usize()] <- false
+    object_gain[port_id.usize()][slot.usize()] <- 0.0f32
+    object_pcm_level[port_id.usize()][slot.usize()] <- 0u32
+    return ORBIS_OK
+
+def sceAudio3dObjectSetAttribute(port_id: u32, object_id: u32, attribute_id: u32, attribute: void&?, attribute_size: u64) -> s32:
+    _ = attribute
+    if not audio3d_valid_port(port_id):
+        return ORBIS_AUDIO3D_ERROR_INVALID_PORT
+    slot: s32 = audio3d_find_object_slot(port_id, object_id)
+    if slot < 0:
+        return ORBIS_OK
+    if attribute_size == 0u64 and attribute_id != ORBIS_AUDIO3D_ATTRIBUTE_RESET_STATE:
+        return ORBIS_AUDIO3D_ERROR_INVALID_PARAMETER
+    if attribute_id == ORBIS_AUDIO3D_ATTRIBUTE_RESET_STATE:
+        object_pcm_level[port_id.usize()][slot.usize()] <- 0u32
+        object_gain[port_id.usize()][slot.usize()] <- 0.0f32
+    return ORBIS_OK
+
+def sceAudio3dObjectSetAttributes(port_id: u32, object_id: u32, num_attributes: u64, attribute_array: void&?) -> s32:
+    _ = object_id
+    if not audio3d_valid_port(port_id):
+        return ORBIS_AUDIO3D_ERROR_INVALID_PORT
+    if num_attributes == 0u64 or attribute_array == null:
+        return ORBIS_AUDIO3D_ERROR_INVALID_PARAMETER
+    return ORBIS_OK
+
+def sceAudio3dBedWrite2(port_id: u32, num_channels: u32, format: u32, buffer: void&?, num_samples: u32, output_route: u32, restricted: bool) -> s32:
+    _ = restricted
+    if not audio3d_valid_port(port_id):
+        return ORBIS_AUDIO3D_ERROR_INVALID_PORT
+    if output_route > ORBIS_AUDIO3D_OUTPUT_TV_ONLY:
+        return ORBIS_AUDIO3D_ERROR_INVALID_PARAMETER
+    if format > ORBIS_AUDIO3D_FORMAT_FLOAT:
+        return ORBIS_AUDIO3D_ERROR_INVALID_PARAMETER
+    if num_channels != 2u32 and num_channels != 6u32 and num_channels != 8u32:
+        return ORBIS_AUDIO3D_ERROR_INVALID_PARAMETER
+    if buffer == null or num_samples == 0u32:
+        return ORBIS_AUDIO3D_ERROR_INVALID_PARAMETER
+
+    if port_bed_level[port_id.usize()] < AUDIO3D_MAX_QUEUE_DEPTH.u32():
+        port_bed_level[port_id.usize()] <- port_bed_level[port_id.usize()] + 1u32
+    return ORBIS_OK
+
+def sceAudio3dBedWrite(port_id: u32, num_channels: u32, format: u32, buffer: void&?, num_samples: u32) -> s32:
+    return sceAudio3dBedWrite2(port_id, num_channels, format, buffer, num_samples, ORBIS_AUDIO3D_OUTPUT_BOTH, false)
+
+def sceAudio3dPortAdvance(port_id: u32) -> s32:
+    if not audio3d_valid_port(port_id):
+        return ORBIS_AUDIO3D_ERROR_INVALID_PORT
+    if port_buffer_mode[port_id.usize()] == ORBIS_AUDIO3D_BUFFER_NO_ADVANCE:
+        return ORBIS_AUDIO3D_ERROR_NOT_SUPPORTED
+    if port_mixed_level[port_id.usize()] >= port_queue_depth[port_id.usize()]:
+        return ORBIS_AUDIO3D_ERROR_NOT_READY
+
+    has_input: bool = port_bed_level[port_id.usize()] > 0u32
+    i: usize = 0
+    while i < AUDIO3D_MAX_OBJECTS_PER_PORT and not has_input:
+        if object_used[port_id.usize()][i] and object_pcm_level[port_id.usize()][i] > 0u32:
+            has_input <- true
+        i <- i + 1
+
+    if not has_input:
+        return ORBIS_OK
+
+    if port_bed_level[port_id.usize()] > 0u32:
+        port_bed_level[port_id.usize()] <- port_bed_level[port_id.usize()] - 1u32
+
+    i <- 0
+    while i < AUDIO3D_MAX_OBJECTS_PER_PORT:
+        if object_used[port_id.usize()][i] and object_pcm_level[port_id.usize()][i] > 0u32:
+            object_pcm_level[port_id.usize()][i] <- object_pcm_level[port_id.usize()][i] - 1u32
+        i <- i + 1
+
+    port_mixed_level[port_id.usize()] <- port_mixed_level[port_id.usize()] + 1u32
+    return ORBIS_OK
+
+def sceAudio3dPortPush(port_id: u32, blocking: u32) -> s32:
+    if not audio3d_valid_port(port_id):
+        return ORBIS_AUDIO3D_ERROR_INVALID_PORT
+    if port_buffer_mode[port_id.usize()] != ORBIS_AUDIO3D_BUFFER_ADVANCE_AND_PUSH:
+        return ORBIS_AUDIO3D_ERROR_NOT_SUPPORTED
+
+    if port_audioout_handle[port_id.usize()] < 0:
+        port_audioout_handle[port_id.usize()] <- sceAudioOutOpen(0xff, 4, 0, port_granularity[port_id.usize()], AUDIO3D_SAMPLE_RATE, 0)
+        if port_audioout_handle[port_id.usize()] < 0:
+            return port_audioout_handle[port_id.usize()]
+
+    if port_mixed_level[port_id.usize()] < port_queue_depth[port_id.usize()]:
+        return ORBIS_OK
+
+    if port_mixed_level[port_id.usize()] > 0u32:
+        port_mixed_level[port_id.usize()] <- port_mixed_level[port_id.usize()] - 1u32
+
+    if blocking == ORBIS_AUDIO3D_BLOCKING_SYNC:
+        while port_mixed_level[port_id.usize()] >= port_queue_depth[port_id.usize()] and port_mixed_level[port_id.usize()] > 0u32:
+            port_mixed_level[port_id.usize()] <- port_mixed_level[port_id.usize()] - 1u32
+
+    return ORBIS_OK
+
+def sceAudio3dPortFlush(port_id: u32) -> s32:
+    if not audio3d_valid_port(port_id):
+        return ORBIS_AUDIO3D_ERROR_INVALID_PORT
+    if port_mixed_level[port_id.usize()] == 0u32:
+        _ = sceAudio3dPortAdvance(port_id)
+    if port_mixed_level[port_id.usize()] > 0u32:
+        port_mixed_level[port_id.usize()] <- 0u32
+    return ORBIS_OK
+
+def sceAudio3dPortGetQueueLevel(port_id: u32, queue_level: mutable u32&?, queue_available: mutable u32&?) -> s32:
+    if not audio3d_valid_port(port_id):
+        return ORBIS_AUDIO3D_ERROR_INVALID_PORT
+    if queue_level == null and queue_available == null:
+        return ORBIS_AUDIO3D_ERROR_INVALID_PARAMETER
+    lvl: u32 = port_mixed_level[port_id.usize()]
+    depth: u32 = port_queue_depth[port_id.usize()]
+    if queue_level != null:
+        queue_level[0] <- lvl
+    if queue_available != null:
+        queue_available[0] <- 0u32 if lvl >= depth else (depth - lvl)
+    return ORBIS_OK
+
+def sceAudio3dAudioOutOpen(port_id: u32, user_id: s32, type: s32, index: s32, len: u32, freq: u32, param: u32) -> s32:
+    if not audio3d_valid_port(port_id):
+        return ORBIS_AUDIO3D_ERROR_INVALID_PORT
+    if len != port_granularity[port_id.usize()]:
+        return ORBIS_AUDIO3D_ERROR_INVALID_PARAMETER
+    return sceAudioOutOpen(user_id, type, index, len, freq, param)
+
+def sceAudio3dAudioOutClose(handle: s32) -> s32: return sceAudioOutClose(handle)
+def sceAudio3dAudioOutOutput(handle: s32, ptr: mutable u8&?) -> s32:
+    if ptr == null: return ORBIS_AUDIO3D_ERROR_INVALID_PARAMETER
+    if handle < 0 or (handle & 0xffff) > 25: return ORBIS_AUDIO3D_ERROR_INVALID_PORT
+    return sceAudioOutOutput(handle, ptr)
+def sceAudio3dAudioOutOutputs(param: void&?, num: u32) -> s32:
+    if param == null or num == 0u32: return ORBIS_AUDIO3D_ERROR_INVALID_PARAMETER
+    return sceAudioOutOutputs(param, num)
+
+def sceAudio3dPortClose(port_id: u32) -> s32:
+    if not audio3d_valid_port(port_id): return ORBIS_AUDIO3D_ERROR_INVALID_PORT
+    if port_audioout_handle[port_id.usize()] >= 0:
+        _ = sceAudioOutClose(port_audioout_handle[port_id.usize()])
+    port_audioout_handle[port_id.usize()] <- -1
+    port_open[port_id.usize()] <- false
+    audio3d_reset_port(port_id)
+    return ORBIS_OK
+
+def sceAudio3dTerminate() -> s32:
+    if not audio3d_initialized: return ORBIS_AUDIO3D_ERROR_NOT_READY
+    id: u32 = 1u32
+    while id <= 3u32:
+        if port_open[id.usize()]: _ = sceAudio3dPortClose(id)
+        id <- id + 1u32
+    audio3d_initialized <- false
+    return ORBIS_OK
+
+# Stubs kept from C++
+def sceAudio3dCreateSpeakerArray() -> s32: return ORBIS_OK
+def sceAudio3dDeleteSpeakerArray() -> s32: return ORBIS_OK
+def sceAudio3dGetSpeakerArrayMemorySize() -> s32: return ORBIS_OK
+def sceAudio3dGetSpeakerArrayMixCoefficients() -> s32: return ORBIS_OK
+def sceAudio3dGetSpeakerArrayMixCoefficients2() -> s32: return ORBIS_OK
+def sceAudio3dPortCreate() -> s32: return ORBIS_OK
+def sceAudio3dPortDestroy() -> s32: return ORBIS_OK
+def sceAudio3dPortFreeState() -> s32: return ORBIS_OK
+def sceAudio3dPortGetAttributesSupported() -> s32: return ORBIS_OK
+def sceAudio3dPortGetList() -> s32: return ORBIS_OK
+def sceAudio3dPortGetParameters() -> s32: return ORBIS_OK
+def sceAudio3dPortGetState() -> s32: return ORBIS_OK
+def sceAudio3dPortGetStatus() -> s32: return ORBIS_OK
+def sceAudio3dPortQueryDebug() -> s32: return ORBIS_OK
+def sceAudio3dPortSetAttribute(port_id: u32, attribute_id: u32, attribute: void&?, attribute_size: u64) -> s32:
+    _ = attribute_id; _ = attribute_size
+    if not audio3d_valid_port(port_id): return ORBIS_AUDIO3D_ERROR_INVALID_PORT
+    if attribute == null: return ORBIS_AUDIO3D_ERROR_INVALID_PARAMETER
+    return ORBIS_OK
+def sceAudio3dReportRegisterHandler() -> s32: return ORBIS_OK
+def sceAudio3dReportUnregisterHandler() -> s32: return ORBIS_OK
+def sceAudio3dSetGpuRenderer() -> s32: return ORBIS_OK
+def sceAudio3dStrError() -> s32: return ORBIS_OK

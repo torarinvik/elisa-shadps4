@@ -1,0 +1,68 @@
+# SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./ajm.elisa"
+
+const AJM_MAX_CONTEXTS: usize = 64
+const AJM_MAX_INSTANCES_PER_CONTEXT: usize = 0x2fff
+
+struct AjmContextState:
+    active: mutable bool
+    registered: mutable array[bool, 24]
+    next_instance_slot: mutable u32
+
+global mutable ajm_contexts: array[AjmContextState, AJM_MAX_CONTEXTS] = zeroed
+
+def AjmContext_IndexFromId(context_id: u32) -> int:
+    if context_id == 0:
+        return -1
+    idx: int = context_id.int() - 1
+    if idx < 0 or idx >= AJM_MAX_CONTEXTS.int():
+        return -1
+    return idx
+
+def AjmContext_Ensure(context_id: u32) -> int:
+    idx: int = AjmContext_IndexFromId(context_id)
+    if idx < 0:
+        return ORBIS_AJM_ERROR_INVALID_CONTEXT
+    state: mutable AjmContextState& = ajm_contexts[idx.usize()].ref[mutable AjmContextState&]
+    if not state.active:
+        state.active <- true
+        state.next_instance_slot <- 1
+    return ORBIS_OK
+
+def sceAjmModuleRegister(context_id: u32, codec_type: u32, reserved: i64) -> int:
+    if reserved != 0:
+        return ORBIS_AJM_ERROR_INVALID_PARAMETER
+    if codec_type >= 24:
+        return ORBIS_AJM_ERROR_INVALID_PARAMETER
+    err: int = AjmContext_Ensure(context_id)
+    if err != ORBIS_OK:
+        return err
+    idx: int = AjmContext_IndexFromId(context_id)
+    state: mutable AjmContextState& = ajm_contexts[idx.usize()].ref[mutable AjmContextState&]
+    if state.registered[codec_type.usize()]:
+        return ORBIS_AJM_ERROR_CODEC_ALREADY_REGISTERED
+    state.registered[codec_type.usize()] <- true
+    return ORBIS_OK
+
+def sceAjmInstanceCreate(context_id: u32, codec_type: u32, flags: AjmInstanceFlags, out_instance: mutable u32&?) -> int:
+    if out_instance == null:
+        return ORBIS_AJM_ERROR_INVALID_PARAMETER
+    if codec_type >= AjmCodecType_Max:
+        return ORBIS_AJM_ERROR_INVALID_PARAMETER
+    if (flags.raw & 0x7) == 0:
+        return ORBIS_AJM_ERROR_WRONG_REVISION_FLAG
+    err: int = AjmContext_Ensure(context_id)
+    if err != ORBIS_OK:
+        return err
+    idx: int = AjmContext_IndexFromId(context_id)
+    state: mutable AjmContextState& = ajm_contexts[idx.usize()].ref[mutable AjmContextState&]
+    if not state.registered[codec_type.usize()]:
+        return ORBIS_AJM_ERROR_CODEC_NOT_REGISTERED
+    slot: u32 = state.next_instance_slot
+    if slot >= AJM_MAX_INSTANCES_PER_CONTEXT.u32():
+        return ORBIS_AJM_ERROR_OUT_OF_RESOURCES
+    state.next_instance_slot += 1
+    out_instance <- slot | (codec_type << 14)
+    return ORBIS_OK

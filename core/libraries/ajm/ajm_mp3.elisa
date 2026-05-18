@@ -1,0 +1,86 @@
+# SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./ajm.elisa"
+
+const AjmDecMp3OflType_None: u32 = 0
+const AjmDecMp3OflType_Lame: u32 = 1
+const AjmDecMp3OflType_Vbri: u32 = 2
+const AjmDecMp3OflType_Fgh: u32 = 3
+const AjmDecMp3OflType_VbriAndFgh: u32 = 4
+
+struct AjmDecMp3ParseFrame:
+    frame_size: mutable u64
+    num_channels: mutable u32
+    samples_per_channel: mutable u32
+    bitrate: mutable u32
+    sample_rate: mutable u32
+    encoder_delay: mutable u32
+    num_frames: mutable u32
+    total_samples: mutable u32
+    ofl_type: mutable u32
+
+const MP3_SYNCWORDH: u8 = 0xff
+const MP3_SYNCWORDL_MASK: u8 = 0xe0
+
+def Mp3_ParseHeaderWord(stream: u8&) -> u32:
+    b0: u32 = stream[0].u32()
+    b1: u32 = stream[1].u32()
+    b2: u32 = stream[2].u32()
+    b3: u32 = stream[3].u32()
+    return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+
+def sceAjmDecMp3ParseFrame(stream: u8&?, stream_size: u32, parse_ofl: int, frame: mutable AjmDecMp3ParseFrame&?) -> int:
+    _ = parse_ofl
+    if stream == null or frame == null or stream_size < 4:
+        return ORBIS_AJM_ERROR_INVALID_PARAMETER
+
+    if stream[0] != MP3_SYNCWORDH:
+        return ORBIS_AJM_ERROR_INVALID_PARAMETER
+    if (stream[1] & MP3_SYNCWORDL_MASK) != MP3_SYNCWORDL_MASK:
+        return ORBIS_AJM_ERROR_INVALID_PARAMETER
+
+    header: u32 = Mp3_ParseHeaderWord(stream)
+    version_idx: u32 = (header >> 19) & 0x3
+    bitrate_idx: u32 = (header >> 12) & 0xf
+    sample_rate_idx: u32 = (header >> 10) & 0x3
+    padding: u32 = (header >> 9) & 0x1
+    channel_mode: u32 = (header >> 6) & 0x3
+
+    if version_idx == 1 or bitrate_idx == 0 or bitrate_idx == 15 or sample_rate_idx == 3:
+        return ORBIS_AJM_ERROR_INVALID_PARAMETER
+
+    sample_rate: mutable u32 = 0
+    if version_idx == 3:
+        sample_rate <- 44100 if sample_rate_idx == 0 else (48000 if sample_rate_idx == 1 else 32000)
+    if version_idx == 2:
+        sample_rate <- 22050 if sample_rate_idx == 0 else (24000 if sample_rate_idx == 1 else 16000)
+    if version_idx == 0:
+        sample_rate <- 11025 if sample_rate_idx == 0 else (12000 if sample_rate_idx == 1 else 8000)
+
+    bitrate_kbps: mutable u32 = 0
+    if version_idx == 3:
+        table: u32[16] = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0]
+        bitrate_kbps <- table[bitrate_idx].u32()
+    else:
+        table: u32[16] = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0]
+        bitrate_kbps <- table[bitrate_idx].u32()
+
+    bitrate: u32 = bitrate_kbps * 1000
+    samples_per_channel: u32 = 1152 if version_idx == 3 else 576
+    frame_size: mutable u32 = 0
+    if version_idx == 3:
+        frame_size <- ((144 * bitrate) / sample_rate) + padding
+    else:
+        frame_size <- ((72 * bitrate) / sample_rate) + padding
+
+    frame.frame_size <- frame_size.u64()
+    frame.num_channels <- 1 if channel_mode == 3 else 2
+    frame.samples_per_channel <- samples_per_channel
+    frame.bitrate <- bitrate
+    frame.sample_rate <- sample_rate
+    frame.encoder_delay <- 0
+    frame.num_frames <- 0
+    frame.total_samples <- 0
+    frame.ofl_type <- AjmDecMp3OflType_None
+    return ORBIS_OK
