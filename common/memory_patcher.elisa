@@ -27,7 +27,6 @@ global mutable pending_patches: darray[PatchInfo]
 
 extern patcher_parse_f32_bits(value: static u8&) -> u32
 extern patcher_parse_f64_bits(value: static u8&) -> u64
-extern patcher_apply_patch(info: PatchInfo) -> void
 
 def toHex(value: u64, byteSize: usize) -> static u8&:
     digits: usize = byteSize * 2
@@ -59,6 +58,23 @@ def patcher_parse_u64(value: static u8&, base: int) -> u64:
             return out
         out <- out * base.u64() + digit.u64()
     return out
+
+def patcher_write_u32_le(address: uintptr, value: u32) -> void:
+    out: mutable u8& = address.cast[mutable u8&]
+    out[0] <- (value & 0xff).u8()
+    out[1] <- ((value >> 8) & 0xff).u8()
+    out[2] <- ((value >> 16) & 0xff).u8()
+    out[3] <- ((value >> 24) & 0xff).u8()
+
+def patcher_write_hex_bytes(address: uintptr, valueStr: static u8&, littleEndian: bool) -> void:
+    out: mutable u8& = address.cast[mutable u8&]
+    len: usize = runtime_strlen(valueStr)
+    byteCount: usize = len / 2
+    for i in 0..<byteCount:
+        source: usize = byteCount - 1 - i if littleEndian else i
+        high: u8 = try hex_char_to_int(valueStr[source * 2]) else 0
+        low: u8 = try hex_char_to_int(valueStr[source * 2 + 1]) else 0
+        out[i] <- (high << 4) | low
 
 def patcher_utf8_to_hex(value: static u8&) -> static u8&:
     len: usize = runtime_strlen(value)
@@ -147,6 +163,55 @@ def PatchMemory(modNameStr: static u8&, offsetStr: static u8&, valueStr: static 
         patcher_apply_patch(info)
     else:
         AddPatchToQueue(info)
+
+def patcher_apply_patch(info: PatchInfo) -> void:
+    cheatAddress: mutable uintptr = 0.uintptr()
+
+    if info.patchMask == PatchMask.None:
+        offset: uintptr = patcher_parse_u64(info.offsetStr, 16).uintptr()
+        if info.isOffset:
+            cheatAddress <- g_eboot_address + offset
+        else:
+            cheatAddress <- g_eboot_address + (offset - 0x400000.uintptr())
+
+    if info.patchMask == PatchMask.Mask:
+        cheatAddress <- PatternScan(info.offsetStr) + info.maskOffset.uintptr()
+
+    if info.patchMask == PatchMask.Mask_Jump32:
+        jumpSize: int = patcher_parse_u64(info.sizeStr, 10).int()
+        if jumpSize < 5 or jumpSize > 256:
+            return
+
+        baseAddress: uintptr = PatternScan(info.offsetStr)
+        if baseAddress == 0.uintptr():
+            return
+        patchAddress: uintptr = baseAddress + info.maskOffset.uintptr()
+        patchBytes: mutable u8& = patchAddress.cast[mutable u8&]
+        for i in 0..<jumpSize.usize():
+            patchBytes[i] <- 0x90
+
+        jumpTarget: uintptr = PatternScan(info.targetStr)
+        if jumpTarget == 0.uintptr():
+            return
+
+        patcher_write_hex_bytes(jumpTarget, info.valueStr, false)
+        payloadSize: uintptr = (runtime_strlen(info.valueStr) / 2).uintptr()
+        codeCaveEnd: uintptr = jumpTarget + payloadSize
+
+        patchBytes[0] <- 0xe9
+        relJump: i64 = jumpTarget.i64() - patchAddress.i64() - 5
+        patcher_write_u32_le(patchAddress + 1.uintptr(), relJump.u32())
+
+        caveEndBytes: mutable u8& = codeCaveEnd.cast[mutable u8&]
+        caveEndBytes[0] <- 0xe9
+        targetReturn: i64 = (patchAddress + jumpSize.uintptr()).i64() - codeCaveEnd.i64() - 5
+        patcher_write_u32_le(codeCaveEnd + 1.uintptr(), targetReturn.u32())
+        return
+
+    if cheatAddress == 0.uintptr():
+        return
+
+    patcher_write_hex_bytes(cheatAddress, info.valueStr, info.littleEndian)
 
 def PatternToByte(pattern: static u8&) -> darray[i32]:
     out: mutable darray[i32] = []
