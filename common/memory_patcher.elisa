@@ -25,9 +25,6 @@ global mutable patch_file: static u8&
 global mutable patches_applied: bool = false
 global mutable pending_patches: darray[PatchInfo]
 
-extern patcher_parse_f32_bits(value: static u8&) -> u32
-extern patcher_parse_f64_bits(value: static u8&) -> u64
-
 def toHex(value: u64, byteSize: usize) -> static u8&:
     digits: usize = byteSize * 2
     hexDigits: static u8& = "0123456789abcdef"
@@ -58,6 +55,59 @@ def patcher_parse_u64(value: static u8&, base: int) -> u64:
             return out
         out <- out * base.u64() + digit.u64()
     return out
+
+def patcher_parse_f64(value: static u8&) -> f64:
+    len: usize = runtime_strlen(value)
+    i: mutable usize = 0
+    sign: mutable f64 = 1.0
+    if i < len and value[i] == '-':
+        sign <- -1.0
+        i <- i + 1
+    elif i < len and value[i] == '+':
+        i <- i + 1
+
+    out: mutable f64 = 0.0
+    while i < len and value[i] >= '0' and value[i] <= '9':
+        out <- out * 10.0 + (value[i] - '0').f64()
+        i <- i + 1
+
+    if i < len and value[i] == '.':
+        i <- i + 1
+        scale: mutable f64 = 0.1
+        while i < len and value[i] >= '0' and value[i] <= '9':
+            out <- out + (value[i] - '0').f64() * scale
+            scale <- scale * 0.1
+            i <- i + 1
+
+    if i < len and (value[i] == 'e' or value[i] == 'E'):
+        i <- i + 1
+        exp_sign: mutable int = 1
+        if i < len and value[i] == '-':
+            exp_sign <- -1
+            i <- i + 1
+        elif i < len and value[i] == '+':
+            i <- i + 1
+        exp: mutable int = 0
+        while i < len and value[i] >= '0' and value[i] <= '9':
+            exp <- exp * 10 + (value[i] - '0').int()
+            i <- i + 1
+        for _ in 0..<exp:
+            if exp_sign < 0:
+                out <- out / 10.0
+            else:
+                out <- out * 10.0
+
+    return out * sign
+
+def patcher_parse_f32_bits(value: static u8&) -> u32:
+    parsed: f32 = patcher_parse_f64(value).f32()
+    bits: u32 = parsed.ref[f32&].cast[u32&][0]
+    return byteswap_u32(bits)
+
+def patcher_parse_f64_bits(value: static u8&) -> u64:
+    parsed: f64 = patcher_parse_f64(value)
+    bits: u64 = parsed.ref[f64&].cast[u64&][0]
+    return byteswap_u64(bits)
 
 def patcher_write_u32_le(address: uintptr, value: u32) -> void:
     out: mutable u8& = address.cast[mutable u8&]

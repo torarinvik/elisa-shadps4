@@ -16,9 +16,6 @@ struct KeyManager:
 
 global mutable key_manager_instance: heap KeyManager&? = null
 
-extern key_file_load(path: static u8&, out: mutable KeyManager&) -> bool
-extern key_file_save(path: static u8&, value: KeyManager&) -> bool
-
 def key_manager_keys_path() -> static u8&:
     can Memory.Allocate, Abort.Panic:
         return fs_join(GetUserPath(PathType.UserDir), "keys.json")
@@ -112,3 +109,95 @@ def KeyManager_BytesToHexString(bytes: darray[u8]) -> static u8&:
         cursor <- cursor + 2
     out[cursor] <- 0
     return out.cast[static u8&]
+
+def key_json_is_quote(json: static u8&, len: usize, cursor: usize) -> bool:
+    return cursor < len and (json[cursor] == '"' or (json[cursor] == '\\' and cursor + 1 < len and json[cursor + 1] == '"'))
+
+def key_json_advance_quote(json: static u8&, len: usize, cursor: usize) -> usize:
+    if cursor < len and json[cursor] == '\\' and cursor + 1 < len and json[cursor + 1] == '"':
+        return cursor + 2
+    return cursor + 1
+
+def key_json_find_release_trophy_key(json: static u8&) -> static u8&:
+    needle: static u8& = "ReleaseTrophyKey"
+    json_len: usize = runtime_strlen(json)
+    needle_len: usize = runtime_strlen(needle)
+    if json_len < needle_len:
+        return ""
+
+    for i in 0..<(json_len - needle_len + 1):
+        if string_slice_eq(json, i.i64(), (i + needle_len).i64(), needle) == 1:
+            cursor: mutable usize = i + needle_len
+            while cursor < json_len and json[cursor] != ':':
+                cursor <- cursor + 1
+            if cursor >= json_len:
+                return ""
+            cursor <- cursor + 1
+            while cursor < json_len and (json[cursor] == ' ' or json[cursor] == '\n' or json[cursor] == '\t'):
+                cursor <- cursor + 1
+            if cursor >= json_len:
+                return ""
+            quoted: bool = key_json_is_quote(json, json_len, cursor)
+            if quoted:
+                cursor <- key_json_advance_quote(json, json_len, cursor)
+            start: usize = cursor
+            if quoted:
+                while cursor < json_len and not key_json_is_quote(json, json_len, cursor):
+                    cursor <- cursor + 1
+                if cursor >= json_len:
+                    return ""
+            else:
+                while cursor < json_len and ((json[cursor] >= '0' and json[cursor] <= '9') or (json[cursor] >= 'A' and json[cursor] <= 'F') or (json[cursor] >= 'a' and json[cursor] <= 'f')):
+                    cursor <- cursor + 1
+            out: mutable heap u8& = zeroed
+            can Memory.Allocate, Abort.Panic:
+                out <- string_alloc(cursor - start + 1)
+            for j in 0..<(cursor - start):
+                out[j] <- json[start + j]
+            out[cursor - start] <- 0
+            return out.cast[static u8&]
+
+    return ""
+
+def key_manager_apply_json(self: mutable KeyManager&, json: static u8&) -> bool:
+    key_hex: static u8& = key_json_find_release_trophy_key(json)
+    if runtime_strlen(key_hex) == 0:
+        return true
+    empty: darray[u8] = []
+    bytes: darray[u8] = try KeyManager_HexStringToBytes(key_hex) else empty
+    self.keys.TrophyKeySet.ReleaseTrophyKey <- bytes
+    return true
+
+def key_manager_to_json(value: KeyManager&) -> static u8&:
+    key_hex: mutable static u8& = ""
+    can Memory.Allocate, Abort.Panic:
+        key_hex <- KeyManager_BytesToHexString(value.keys.TrophyKeySet.ReleaseTrophyKey)
+        builder: mutable heap StringBuilder& = string_builder_new("{\n    \"TrophyKeySet\": {\n        \"ReleaseTrophyKey\": \"")
+        builder <- string_builder_append(builder, key_hex)
+        builder <- string_builder_append(builder, "\"\n    }\n}\n")
+        return string_builder_finish(builder).cast[static u8&]
+    return "{}"
+
+def key_file_load(path: static u8&, out: mutable KeyManager&) -> bool:
+    if not fs_exists(path):
+        KeyManager_SetDefaultKeys(out)
+        return key_file_save(path, out)
+
+    file: mutable IOFile = IOFile_opened(path, FileAccessMode.Read)
+    if not IOFile_IsOpen(file):
+        return false
+    size: usize = IOFile_GetSize(file).usize()
+    json: static u8& = IOFile_ReadString(file, size)
+    IOFile_Close(file)
+    return key_manager_apply_json(out, json)
+
+def key_file_save(path: static u8&, value: KeyManager&) -> bool:
+    file: mutable IOFile = IOFile_opened(path, FileAccessMode.Create)
+    if not IOFile_IsOpen(file):
+        return false
+    json: static u8& = key_manager_to_json(value)
+    len: usize = runtime_strlen(json)
+    written: usize = IOFile_WriteSpan(file, json[0].ref[u8&], len)
+    _ = IOFile_Flush(file)
+    IOFile_Close(file)
+    return written == len
