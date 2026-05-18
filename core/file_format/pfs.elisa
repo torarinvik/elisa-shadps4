@@ -25,7 +25,22 @@ const INODE_MODE_DIR: u16 = 16384
 const INODE_MODE_FILE: u16 = 32768
 
 const INODE_FLAG_COMPRESSED: u32 = 0x1
+const INODE_FLAG_UNK1: u32 = 0x2
+const INODE_FLAG_UNK2: u32 = 0x4
+const INODE_FLAG_UNK3: u32 = 0x8
 const INODE_FLAG_READONLY: u32 = 0x10
+const INODE_FLAG_UNK4: u32 = 0x20
+const INODE_FLAG_UNK5: u32 = 0x40
+const INODE_FLAG_UNK6: u32 = 0x80
+const INODE_FLAG_UNK7: u32 = 0x100
+const INODE_FLAG_UNK8: u32 = 0x200
+const INODE_FLAG_UNK9: u32 = 0x400
+const INODE_FLAG_UNK10: u32 = 0x800
+const INODE_FLAG_UNK11: u32 = 0x1000
+const INODE_FLAG_UNK12: u32 = 0x2000
+const INODE_FLAG_UNK13: u32 = 0x4000
+const INODE_FLAG_UNK14: u32 = 0x8000
+const INODE_FLAG_UNK15: u32 = 0x10000
 const INODE_FLAG_INTERNAL: u32 = 0x20000
 
 struct PfsHeader:
@@ -62,6 +77,18 @@ struct PfsInode:
     flags: mutable u32
     size: mutable i64
     size_compressed: mutable i64
+    time1_sec: mutable i64
+    time2_sec: mutable i64
+    time3_sec: mutable i64
+    time4_sec: mutable i64
+    time1_nsec: mutable u32
+    time2_nsec: mutable u32
+    time3_nsec: mutable u32
+    time4_nsec: mutable u32
+    uid: mutable u32
+    gid: mutable u32
+    unk1: mutable u64
+    unk2: mutable u64
     blocks: mutable u32
     loc: mutable u32
 
@@ -76,3 +103,101 @@ struct PfsDirent:
     namelen: mutable i32
     entsize: mutable i32
     name: mutable static u8&
+
+struct PfsFile:
+    header: mutable PfsHeader
+    valid: mutable bool
+
+def PfsHeader_empty() -> PfsHeader:
+    return PfsHeader(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+
+def PfscHeader_empty() -> PfscHeader:
+    return PfscHeader(0, 0, 0, 0, 0, 0, 0, 0)
+
+def PfsFile_empty() -> PfsFile:
+    return PfsFile(PfsHeader_empty(), false)
+
+def PfsInode_empty() -> PfsInode:
+    return PfsInode(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+
+def Pfs_ReadHeader(reader: mutable FileFormatReader&) -> PfsHeader:
+    return PfsHeader(
+        ff_read_u64_le(reader).i64(),
+        ff_read_u64_le(reader).i64(),
+        ff_read_u64_le(reader).i64(),
+        ff_read_u8(reader),
+        ff_read_u8(reader),
+        ff_read_u8(reader),
+        ff_read_u8(reader),
+        ff_read_u16_le(reader),
+        ff_read_u16_le(reader).i16(),
+        ff_read_u32_le(reader).i32(),
+        ff_read_u32_le(reader).i32(),
+        ff_read_u64_le(reader).i64(),
+        ff_read_u64_le(reader).i64(),
+        ff_read_u64_le(reader).i64(),
+        ff_read_u64_le(reader).i64(),
+        ff_read_u64_le(reader).i64()
+    )
+
+def Pfsc_ReadHeader(reader: mutable FileFormatReader&) -> PfscHeader:
+    return PfscHeader(
+        ff_read_u32_le(reader).i32(),
+        ff_read_u32_le(reader).i32(),
+        ff_read_u32_le(reader).i32(),
+        ff_read_u32_le(reader).i32(),
+        ff_read_u64_le(reader).i64(),
+        ff_read_u64_le(reader).i64(),
+        ff_read_u64_le(reader),
+        ff_read_u64_le(reader).i64()
+    )
+
+def Pfs_ReadInode(reader: mutable FileFormatReader&) -> PfsInode:
+    return PfsInode(
+        ff_read_u16_le(reader),
+        ff_read_u16_le(reader),
+        ff_read_u32_le(reader),
+        ff_read_u64_le(reader).i64(),
+        ff_read_u64_le(reader).i64(),
+        ff_read_u64_le(reader).i64(),
+        ff_read_u64_le(reader).i64(),
+        ff_read_u64_le(reader).i64(),
+        ff_read_u64_le(reader).i64(),
+        ff_read_u32_le(reader),
+        ff_read_u32_le(reader),
+        ff_read_u32_le(reader),
+        ff_read_u32_le(reader),
+        ff_read_u32_le(reader),
+        ff_read_u32_le(reader),
+        ff_read_u64_le(reader),
+        ff_read_u64_le(reader),
+        ff_read_u32_le(reader),
+        ff_read_u32_le(reader)
+    )
+
+def Pfs_ReadDirent(reader: mutable FileFormatReader&) -> PfsDirent:
+    ino: i32 = ff_read_u32_le(reader).i32()
+    entry_type: i32 = ff_read_u32_le(reader).i32()
+    namelen: i32 = ff_read_u32_le(reader).i32()
+    entsize: i32 = ff_read_u32_le(reader).i32()
+    name_offset: usize = reader.offset
+    _ = ff_skip(reader, 512)
+    name: static u8& = ff_read_cstr_at(reader.data, name_offset)
+    return PfsDirent(ino, entry_type, namelen, entsize, name)
+
+def Pfs_ParseHeader(data: darray[u8]) -> PfsFile:
+    if data.count < 88:
+        return PfsFile_empty()
+    reader: mutable FileFormatReader = FileFormatReader_new(data)
+    header: PfsHeader = Pfs_ReadHeader(reader)
+    valid: bool = header.block_size > 0 and header.dinode_count >= 0 and header.n_block >= 0
+    return PfsFile(header, valid)
+
+def Pfs_LoadHeader(path: static u8&) -> PfsFile:
+    data: darray[u8] = ff_file_read_all(path)
+    if data.count == 0:
+        return PfsFile_empty()
+    return Pfs_ParseHeader(data)
+
+def Pfs_IsValid(file: PfsFile&) -> bool:
+    return file.valid
