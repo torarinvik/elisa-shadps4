@@ -53,7 +53,6 @@ struct PathEntry:
 global mutable UserPaths: darray[PathEntry]
 
 extern fs_current_path() -> static u8&
-extern fs_join(left: static u8&, right: static u8&) -> static u8&
 extern fs_home_dir() -> static u8&
 extern fs_xdg_data_home() -> static u8&?
 extern windows_appdata_dir() -> static u8&
@@ -62,10 +61,55 @@ extern fs_exists(path: static u8&) -> bool
 extern fs_is_directory(path: static u8&) -> bool
 extern fs_create_directory(path: static u8&) -> void
 extern fs_directory_entries(path: static u8&) -> darray[static u8&]
-extern fs_filename(path: static u8&) -> static u8&
-extern fs_path_empty(path: static u8&) -> bool
-extern fs_path_len(path: static u8&) -> usize
 extern common_log_error(format: static u8&, path: static u8&) -> void
+
+def fs_path_len(path: static u8&) -> usize:
+    return runtime_strlen(path)
+
+def fs_path_empty(path: static u8&) -> bool:
+    return fs_path_len(path) == 0
+
+def fs_join(left: static u8&, right: static u8&) -> static u8&:
+    left_len: usize = runtime_strlen(left)
+    if left_len == 0:
+        return right
+    right_len: usize = runtime_strlen(right)
+    if right_len == 0:
+        return left
+    last: u8 = left[left_len - 1]
+    needs_sep: bool = not (last == '/' or last == '\\')
+    sep_count: usize = 1 if needs_sep else 0
+    out: mutable heap u8& = zeroed
+    can Memory.Allocate, Abort.Panic:
+        out <- string_alloc(left_len + sep_count + right_len + 1)
+    cursor: mutable usize = 0
+    for i in 0..<left_len:
+        out[cursor] <- left[i]
+        cursor <- cursor + 1
+    if needs_sep:
+        out[cursor] <- '/'
+        cursor <- cursor + 1
+    for i in 0..<right_len:
+        out[cursor] <- right[i]
+        cursor <- cursor + 1
+    out[cursor] <- 0
+    return out.cast[static u8&]
+
+def fs_filename(path: static u8&) -> static u8&:
+    len: usize = runtime_strlen(path)
+    if len == 0:
+        return path
+    end: mutable usize = len
+    while end > 0 and (path[end - 1] == '/' or path[end - 1] == '\\'):
+        end <- end - 1
+    if end == 0:
+        return ""
+    start: mutable usize = end
+    while start > 0 and path[start - 1] != '/' and path[start - 1] != '\\':
+        start <- start - 1
+    can Memory.Allocate, Abort.Panic:
+        return string_substr(path, start, end - start)
+    return path
 
 def create_path(kind: PathType, new_path: static u8&) -> void:
     fs_create_directory(new_path)
