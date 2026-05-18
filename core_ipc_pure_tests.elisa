@@ -59,3 +59,42 @@ def ipc_init_from_env_uses_true_flag() -> void:
         lines_true: darray[static u8&] = IPC_InitFromEnv(state_true, "true")
         assert IPC_IsEnabled(state_true)
         assert lines_true.count == 4
+
+@test
+def ipc_run_wait_times_out_after_5_seconds_when_run_missing() -> void:
+    can Abort.Panic:
+        state: mutable IpcState = IpcState_new()
+        _ = IPC_Init(state, true)
+        IPC_BeginRunWait(state, 1000, 5000)
+        assert IPC_UpdateRunWait(state, 5999)
+        assert not IPC_ShouldClose(state)
+        assert not IPC_UpdateRunWait(state, 6000)
+        assert IPC_ShouldClose(state)
+        assert string_slice_eq(IPC_CloseReason(state), 0, runtime_strlen("IPC: Failed to acquire run semaphore, closing process."), "IPC: Failed to acquire run semaphore, closing process.") == 1
+
+@test
+def ipc_run_wait_passes_when_run_arrives() -> void:
+    can Abort.Panic:
+        state: mutable IpcState = IpcState_new()
+        _ = IPC_Init(state, true)
+        IPC_BeginRunWait(state, 0, 5000)
+        _ = IPC_ProcessCommand(state, "RUN", [])
+        assert IPC_CanRun(state)
+        assert IPC_UpdateRunWait(state, 99999)
+        assert not IPC_ShouldClose(state)
+
+@test
+def ipc_process_lines_handles_multiple_commands_with_arity() -> void:
+    can Abort.Panic, Memory.Allocate:
+        state: mutable IpcState = IpcState_new()
+        lines: mutable darray[static u8&] = []
+        lines.push("RUN")
+        lines.push("START")
+        lines.push("SET_FSR")
+        lines.push("1")
+        lines.push("SET_RCAS_ATTENUATION")
+        lines.push("700")
+        outputs: darray[static u8&] = IPC_ProcessLines(state, lines)
+        assert outputs.count == 0
+        assert state.run_ready
+        assert state.start_ready

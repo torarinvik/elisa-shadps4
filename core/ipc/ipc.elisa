@@ -5,15 +5,23 @@ struct IpcState:
     enabled: mutable bool
     run_ready: mutable bool
     start_ready: mutable bool
+    run_wait_deadline_ms: mutable i64
+    should_close: mutable bool
+    close_reason: mutable static u8&
 
 def IpcState_new() -> IpcState:
-    return IpcState(false, false, false)
+    return IpcState(false, false, false, 0, false, "")
 
 def IPC_IsEnabled(state: IpcState&) -> bool:
     return state.enabled
 
 def IPC_Init(state: mutable IpcState&, enable_ipc: bool) -> darray[static u8&]:
     state.enabled <- enable_ipc
+    state.run_ready <- false
+    state.start_ready <- false
+    state.should_close <- false
+    state.close_reason <- ""
+    state.run_wait_deadline_ms <- 0
     if not state.enabled:
         return []
 
@@ -40,6 +48,24 @@ def IPC_WaitForStart(state: mutable IpcState&) -> bool:
 def IPC_CanRun(state: IpcState&) -> bool:
     return state.run_ready
 
+def IPC_BeginRunWait(state: mutable IpcState&, now_ms: i64, timeout_ms: i64 = 5000) -> void:
+    state.run_wait_deadline_ms <- now_ms + timeout_ms
+
+def IPC_UpdateRunWait(state: mutable IpcState&, now_ms: i64) -> bool:
+    if not state.enabled or state.run_ready or state.should_close:
+        return true
+    if state.run_wait_deadline_ms != 0 and now_ms >= state.run_wait_deadline_ms:
+        state.should_close <- true
+        state.close_reason <- "IPC: Failed to acquire run semaphore, closing process."
+        return false
+    return true
+
+def IPC_ShouldClose(state: IpcState&) -> bool:
+    return state.should_close
+
+def IPC_CloseReason(state: IpcState&) -> static u8&:
+    return state.close_reason
+
 def IPC_SendRestart(args: darray[static u8&]) -> darray[static u8&]:
     out: mutable darray[static u8&] = []
     arg_count: static u8& = UIntToString(args.count.u64()).cast[static u8&]
@@ -47,10 +73,10 @@ def IPC_SendRestart(args: darray[static u8&]) -> darray[static u8&]:
         owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
         in owner:
             out.push(";RESTART")
-            out.push(string_concat(";", arg_count))
+            out.push(concat2(";", arg_count))
         for i in 0..<args.count:
             in owner:
-                out.push(string_concat(";", args[i]))
+                out.push(concat2(";", args[i]))
     return out
 
 def IPC_NextU64(args: darray[static u8&], index: mutable usize&) -> u64:
@@ -138,15 +164,15 @@ def IPC_ProcessCommand(state: mutable IpcState&, cmd: static u8&, args: darray[s
         Input_ParseInputConfig(IPC_NextStr(args, index))
         return ""
 
-    return string_concat(";UNKNOWN CMD: ", cmd)
+    return concat2(";UNKNOWN CMD: ", cmd)
 
 def IPC_IsEscapedLine(line: static u8&) -> bool:
     len: usize = runtime_strlen(line)
     if len == 0:
         return false
-    return line[len - 1] == '\\'
+    return line[len - 1] == '\\'.u8()
 
-def IPC_MergeEscapedLineParts(parts: darray[static u8&], start_index: mutable usize, consumed: mutable usize&) -> static u8&:
+def IPC_MergeEscapedLineParts(parts: darray[static u8&], start_index: usize, consumed: mutable usize&) -> static u8&:
     can Memory.Allocate, Abort.Panic:
         merged: mutable static u8& = ""
         i: mutable usize = start_index
@@ -154,13 +180,13 @@ def IPC_MergeEscapedLineParts(parts: darray[static u8&], start_index: mutable us
             part: static u8& = parts[i]
             if IPC_IsEscapedLine(part):
                 if runtime_strlen(part) > 0:
-                    merged <- string_concat(merged, string_substr(part, 0, runtime_strlen(part) - 1))
+                    merged <- concat2(merged, string_substr(part, 0, runtime_strlen(part) - 1))
             else:
-                merged <- string_concat(merged, part)
-                consumed <- i - start_index + 1
+                merged <- concat2(merged, part)
+                consumed <- (i - start_index + 1).usize()
                 return merged
             i <- i + 1
-        consumed <- i - start_index
+        consumed <- (i - start_index).usize()
         return merged
     return ""
 
@@ -173,27 +199,54 @@ def IPC_ProcessLines(state: mutable IpcState&, lines: darray[static u8&]) -> dar
         if consumed_cmd == 0:
             consumed_cmd <- 1
         i <- i + consumed_cmd
-        if runtime_strlen(cmd) == 0:
-            continue
+        if runtime_strlen(cmd) != 0:
+            args: mutable darray[static u8&] = []
+            expected_args: mutable usize = 0
+            if string_slice_eq(cmd, 0, runtime_strlen("PATCH_MEMORY"), "PATCH_MEMORY") == 1:
+                expected_args <- 9
+            elif string_slice_eq(cmd, 0, runtime_strlen("ADJUST_VOLUME"), "ADJUST_VOLUME") == 1:
+                expected_args <- 2
+            elif string_slice_eq(cmd, 0, runtime_strlen("SET_FSR"), "SET_FSR") == 1:
+                expected_args <- 1
+            elif string_slice_eq(cmd, 0, runtime_strlen("SET_RCAS"), "SET_RCAS") == 1:
+                expected_args <- 1
+            elif string_slice_eq(cmd, 0, runtime_strlen("SET_RCAS_ATTENUATION"), "SET_RCAS_ATTENUATION") == 1:
+                expected_args <- 1
+            elif string_slice_eq(cmd, 0, runtime_strlen("USB_LOAD_FIGURE"), "USB_LOAD_FIGURE") == 1:
+                expected_args <- 3
+            elif string_slice_eq(cmd, 0, runtime_strlen("USB_REMOVE_FIGURE"), "USB_REMOVE_FIGURE") == 1:
+                expected_args <- 3
+            elif string_slice_eq(cmd, 0, runtime_strlen("USB_MOVE_FIGURE"), "USB_MOVE_FIGURE") == 1:
+                expected_args <- 4
+            elif string_slice_eq(cmd, 0, runtime_strlen("USB_TEMP_REMOVE_FIGURE"), "USB_TEMP_REMOVE_FIGURE") == 1:
+                expected_args <- 1
+            elif string_slice_eq(cmd, 0, runtime_strlen("USB_CANCEL_REMOVE_FIGURE"), "USB_CANCEL_REMOVE_FIGURE") == 1:
+                expected_args <- 1
+            elif string_slice_eq(cmd, 0, runtime_strlen("RELOAD_INPUTS"), "RELOAD_INPUTS") == 1:
+                expected_args <- 1
 
-        # For compatibility with the C++ protocol, all following lines are treated as
-        # command parameters for this command batch until the caller starts a new batch.
-        args: mutable darray[static u8&] = []
-        if i < lines.count:
-            can Memory.Allocate, Abort.Panic:
-                owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
-                while i < lines.count:
-                    consumed_arg: mutable usize = 0
-                    arg: static u8& = IPC_MergeEscapedLineParts(lines, i, consumed_arg)
-                    if consumed_arg == 0:
-                        consumed_arg <- 1
-                    i <- i + consumed_arg
+            if expected_args > 0 and i < lines.count:
+                can Memory.Allocate, Abort.Panic:
+                    owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+                    for _ in 0..<expected_args:
+                        if i >= lines.count:
+                            break
+                        consumed_arg: mutable usize = 0
+                        arg: static u8& = IPC_MergeEscapedLineParts(lines, i, consumed_arg)
+                        if consumed_arg == 0:
+                            consumed_arg <- 1
+                        i <- i + consumed_arg
+                        in owner:
+                            args.push(arg)
+            out: static u8& = IPC_ProcessCommand(state, cmd, args)
+            if runtime_strlen(out) > 0:
+                can Memory.Allocate, Abort.Panic:
+                    owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
                     in owner:
-                        args.push(arg)
-        out: static u8& = IPC_ProcessCommand(state, cmd, args)
-        if runtime_strlen(out) > 0:
-            can Memory.Allocate, Abort.Panic:
-                owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
-                in owner:
-                    outputs.push(out)
+                        outputs.push(out)
     return outputs
+
+def IPC_ProcessStreamFrame(state: mutable IpcState&, now_ms: i64, lines: darray[static u8&]) -> darray[static u8&]:
+    if not IPC_UpdateRunWait(state, now_ms):
+        return [IPC_CloseReason(state)]
+    return IPC_ProcessLines(state, lines)
