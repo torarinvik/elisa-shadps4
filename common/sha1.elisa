@@ -9,9 +9,99 @@ struct SHA1Context:
     count: mutable u64
     buffer: mutable u8[64]
 
-extern sha1_init(ctx: mutable SHA1Context&) -> void
-extern sha1_update(ctx: mutable SHA1Context&, data: u8&, size: usize) -> void
-extern sha1_final(ctx: mutable SHA1Context&, digest: mutable SHA1Digest&) -> void
+def sha1_left_rotate(value: u32, count: usize) -> u32:
+    return (value << count) ^ (value >> (32 - count))
+
+def sha1_process_block(ctx: mutable SHA1Context&) -> void:
+    w: mutable u32[80]
+    for i in 0..<16:
+        base: usize = i * 4
+        word: u32 = (ctx.buffer[base].u32() << 24) | (ctx.buffer[base + 1].u32() << 16) | (ctx.buffer[base + 2].u32() << 8) | ctx.buffer[base + 3].u32()
+        w[i] <- word
+
+    for i in 16..<80:
+        w[i] <- sha1_left_rotate(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1)
+
+    a: mutable u32 = ctx.state[0]
+    b: mutable u32 = ctx.state[1]
+    c: mutable u32 = ctx.state[2]
+    d: mutable u32 = ctx.state[3]
+    e: mutable u32 = ctx.state[4]
+
+    for i in 0..<80:
+        f: mutable u32 = 0
+        k: mutable u32 = 0
+        if i < 20:
+            f <- (b & c) | (~b & d)
+            k <- 0x5A827999
+        elif i < 40:
+            f <- b ^ c ^ d
+            k <- 0x6ED9EBA1
+        elif i < 60:
+            f <- (b & c) | (b & d) | (c & d)
+            k <- 0x8F1BBCDC
+        else:
+            f <- b ^ c ^ d
+            k <- 0xCA62C1D6
+
+        temp: u32 = sha1_left_rotate(a, 5) + f + e + k + w[i]
+        e <- d
+        d <- c
+        c <- sha1_left_rotate(b, 30)
+        b <- a
+        a <- temp
+
+    ctx.state[0] <- ctx.state[0] + a
+    ctx.state[1] <- ctx.state[1] + b
+    ctx.state[2] <- ctx.state[2] + c
+    ctx.state[3] <- ctx.state[3] + d
+    ctx.state[4] <- ctx.state[4] + e
+
+def sha1_process_byte(ctx: mutable SHA1Context&, octet: u8) -> void:
+    block_index: usize = (ctx.count % 64).usize()
+    ctx.buffer[block_index] <- octet
+    ctx.count <- ctx.count + 1
+    if block_index == 63:
+        sha1_process_block(ctx)
+
+def sha1_init(ctx: mutable SHA1Context&) -> void:
+    ctx.state[0] <- 0x67452301
+    ctx.state[1] <- 0xEFCDAB89
+    ctx.state[2] <- 0x98BADCFE
+    ctx.state[3] <- 0x10325476
+    ctx.state[4] <- 0xC3D2E1F0
+    ctx.count <- 0
+    for i in 0..<64:
+        ctx.buffer[i] <- 0
+
+def sha1_update(ctx: mutable SHA1Context&, data: u8&, size: usize) -> void:
+    for i in 0..<size:
+        sha1_process_byte(ctx, data[i])
+
+def sha1_final(ctx: mutable SHA1Context&, digest: mutable SHA1Digest&) -> void:
+    bit_count: u64 = ctx.count * 8
+    sha1_process_byte(ctx, 0x80)
+
+    while (ctx.count % 64) != 56:
+        sha1_process_byte(ctx, 0)
+
+    sha1_process_byte(ctx, 0)
+    sha1_process_byte(ctx, 0)
+    sha1_process_byte(ctx, 0)
+    sha1_process_byte(ctx, 0)
+    sha1_process_byte(ctx, ((bit_count >> 24) & 0xff).u32().u8())
+    sha1_process_byte(ctx, ((bit_count >> 16) & 0xff).u32().u8())
+    sha1_process_byte(ctx, ((bit_count >> 8) & 0xff).u32().u8())
+    sha1_process_byte(ctx, (bit_count & 0xff).u32().u8())
+
+    di: mutable usize = 0
+    for i in 0..<5:
+        word: u32 = ctx.state[i]
+        digest.bytes[di] <- ((word >> 24) & 0xff).u8()
+        digest.bytes[di + 1] <- ((word >> 16) & 0xff).u8()
+        digest.bytes[di + 2] <- ((word >> 8) & 0xff).u8()
+        digest.bytes[di + 3] <- (word & 0xff).u8()
+        di <- di + 4
 
 def SHA1Context_new() -> SHA1Context:
     ctx: mutable SHA1Context = zeroed
@@ -25,4 +115,3 @@ def SHA1_Final(ctx: mutable SHA1Context&) -> SHA1Digest:
     digest: mutable SHA1Digest = zeroed
     sha1_final(ctx, digest.ref[mutable SHA1Digest&])
     return digest
-
