@@ -1,0 +1,90 @@
+# SPDX-FileCopyrightText: 2013 Dolphin Emulator Project
+# SPDX-FileCopyrightText: 2014 Citra Emulator Project
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+enum ThreadPriority:
+    Low
+    Normal
+    High
+    VeryHigh
+    Critical
+
+struct AccurateTimer:
+    target_interval_ns: mutable i64
+    total_wait_ns: mutable i64
+    start_time_ns: mutable i64
+
+extern apple_set_current_thread_realtime(period_ns: i64) -> void
+extern windows_set_current_thread_priority(priority: ThreadPriority) -> void
+extern posix_set_current_thread_priority(priority: ThreadPriority) -> void
+extern windows_set_current_thread_name(name: static u8&) -> void
+extern apple_set_current_thread_name(name: static u8&) -> void
+extern bsd_set_current_thread_name(name: static u8&) -> void
+extern linux_set_current_thread_name(name: static u8&) -> void
+extern posix_set_current_thread_name(name: static u8&) -> void
+extern windows_set_thread_name(thread: void&, name: static u8&) -> void
+extern posix_set_thread_name(thread: void&, name: static u8&) -> void
+extern windows_accurate_sleep(duration_ns: i64, remaining: mutable stack i64&?, interruptible: bool) -> bool
+extern posix_accurate_sleep(duration_ns: i64, remaining: mutable stack i64&?, interruptible: bool) -> bool
+extern high_resolution_now_ns() -> i64
+extern kernel_current_thread_name() -> static u8&
+extern pthread_current_thread_name() -> static u8&
+
+def SetCurrentThreadRealtime(period_ns: i64) -> void:
+    static if PLATFORM_APPLE:
+        apple_set_current_thread_realtime(period_ns)
+    static else:
+        pass
+
+def SetCurrentThreadPriority(new_priority: ThreadPriority) -> void:
+    static if PLATFORM_WINDOWS:
+        windows_set_current_thread_priority(new_priority)
+    static else:
+        posix_set_current_thread_priority(new_priority)
+
+def SetCurrentThreadName(name: static u8&) -> void:
+    static if PLATFORM_WINDOWS:
+        windows_set_current_thread_name(name)
+    static elif PLATFORM_APPLE:
+        apple_set_current_thread_name(name)
+    static elif PLATFORM_FREEBSD:
+        bsd_set_current_thread_name(name)
+    static elif PLATFORM_LINUX:
+        linux_set_current_thread_name(name)
+    static else:
+        posix_set_current_thread_name(name)
+
+def SetThreadName(thread: void&, name: static u8&) -> void:
+    static if PLATFORM_WINDOWS:
+        windows_set_thread_name(thread, name)
+    static else:
+        posix_set_thread_name(thread, name)
+
+def AccurateSleep(duration_ns: i64, remaining: mutable stack i64&?, interruptible: bool) -> bool:
+    static if PLATFORM_WINDOWS:
+        return windows_accurate_sleep(duration_ns, remaining, interruptible)
+    static else:
+        return posix_accurate_sleep(duration_ns, remaining, interruptible)
+
+def AccurateTimer_new(target_interval_ns: i64) -> AccurateTimer:
+    return AccurateTimer(target_interval_ns, 0, 0)
+
+def AccurateTimer_Start(self: mutable AccurateTimer&) -> void:
+    self.start_time_ns <- high_resolution_now_ns()
+
+def AccurateTimer_End(self: mutable AccurateTimer&) -> void:
+    elapsed_ns: i64 = high_resolution_now_ns() - self.start_time_ns
+    if elapsed_ns < self.target_interval_ns:
+        remaining: mutable i64 = 0
+        _ = AccurateSleep(self.target_interval_ns - elapsed_ns, remaining.ref[mutable stack i64&], false)
+        self.total_wait_ns <- self.total_wait_ns + remaining
+
+def AccurateTimer_GetTotalWait(self: AccurateTimer&) -> i64:
+    return self.total_wait_ns
+
+def GetCurrentThreadName() -> static u8&:
+    static if PLATFORM_WINDOWS:
+        return kernel_current_thread_name()
+    static else:
+        return pthread_current_thread_name()

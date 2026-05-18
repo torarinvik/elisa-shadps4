@@ -1,0 +1,102 @@
+# SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+enum PatchMask:
+    None
+    Mask
+    Mask_Jump32
+
+struct patchInfo:
+    gameSerial: mutable static u8&
+    modNameStr: mutable static u8&
+    offsetStr: mutable static u8&
+    valueStr: mutable static u8&
+    targetStr: mutable static u8&
+    sizeStr: mutable static u8&
+    isOffset: mutable bool
+    littleEndian: mutable bool
+    patchMask: mutable PatchMask
+    maskOffset: mutable int
+
+global mutable g_eboot_address: uintptr = 0.uintptr()
+global mutable g_eboot_image_size: u64 = 0
+global mutable g_game_serial: static u8& = ""
+global mutable patch_file: static u8& = ""
+global mutable patches_applied: bool = false
+global mutable pending_patches: darray[patchInfo] = []
+
+extern patcher_to_hex(value: u64, byte_size: usize) -> static u8&
+extern patcher_parse_u64(value: static u8&, base: int) -> u64
+extern patcher_parse_f32_bits(value: static u8&) -> u32
+extern patcher_parse_f64_bits(value: static u8&) -> u64
+extern patcher_utf8_to_hex(value: static u8&) -> static u8&
+extern patcher_utf16_to_hex(value: static u8&) -> static u8&
+extern patcher_apply_patch(info: patchInfo) -> void
+extern patcher_scan_pattern(base: uintptr, image_size: u64, signature: static u8&) -> uintptr
+
+def toHex(value: u64, byteSize: usize) -> static u8&:
+    return patcher_to_hex(value, byteSize)
+
+def convertValueToHex(value_type: static u8&, valueStr: static u8&) -> static u8&:
+    if value_type == "byte":
+        return toHex(patcher_parse_u64(valueStr, 16), 1)
+    if value_type == "bytes16":
+        return toHex(patcher_parse_u64(valueStr, 16), 2)
+    if value_type == "bytes32":
+        return toHex(patcher_parse_u64(valueStr, 16), 4)
+    if value_type == "bytes64":
+        return toHex(patcher_parse_u64(valueStr, 16), 8)
+    if value_type == "float32":
+        return toHex(patcher_parse_f32_bits(valueStr).u64(), 4)
+    if value_type == "float64":
+        return toHex(patcher_parse_f64_bits(valueStr), 8)
+    if value_type == "utf8":
+        return patcher_utf8_to_hex(valueStr)
+    if value_type == "utf16":
+        return patcher_utf16_to_hex(valueStr)
+    return valueStr
+
+def OnGameLoaded() -> void:
+    patches_applied <- false
+    ApplyPendingPatches()
+
+def AddPatchToQueue(patchToAdd: patchInfo) -> void:
+    pending_patches.push(patchToAdd)
+
+def ApplyPendingPatches() -> void:
+    for patch in pending_patches:
+        patcher_apply_patch(patch)
+    patches_applied <- true
+
+def PatchMemory(modNameStr: static u8&, offsetStr: static u8&, valueStr: static u8&, targetStr: static u8&, sizeStr: static u8&, isOffset: bool, littleEndian: bool, patchMask: PatchMask = PatchMask.None, maskOffset: int = 0) -> void:
+    info: patchInfo = patchInfo(g_game_serial, modNameStr, offsetStr, valueStr, targetStr, sizeStr, isOffset, littleEndian, patchMask, maskOffset)
+    if patches_applied:
+        patcher_apply_patch(info)
+    else:
+        AddPatchToQueue(info)
+
+def PatternToByte(pattern: static u8&) -> darray[i32]:
+    out: mutable darray[i32] = []
+    i: mutable usize = 0
+    len: usize = runtime_strlen(pattern)
+    trusted Unsafe.AssumeProgress:
+        while i < len:
+            if pattern[i] == ' ':
+                i <- i + 1
+                continue
+            if pattern[i] == '?':
+                out.push(-1)
+                i <- i + 1
+                if i < len and pattern[i] == '?':
+                    i <- i + 1
+                continue
+            high: u8 = try hex_char_to_int(pattern[i]) else 0
+            low: u8 = 0
+            if i + 1 < len:
+                low <- try hex_char_to_int(pattern[i + 1]) else 0
+            out.push(((high << 4) | low).i32())
+            i <- i + 2
+    return out
+
+def PatternScan(signature: static u8&) -> uintptr:
+    return patcher_scan_pattern(g_eboot_address, g_eboot_image_size, signature)

@@ -1,0 +1,92 @@
+# SPDX-FileCopyrightText: Copyright 2025-2026 shadLauncher4 Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+error KeyManagerError:
+    InvalidHexStringLength
+    InvalidHexCharacter
+
+struct TrophyKeySet:
+    ReleaseTrophyKey: mutable darray[u8]
+
+struct AllKeys:
+    TrophyKeySet: mutable TrophyKeySet
+
+struct KeyManager:
+    keys: mutable AllKeys
+
+global mutable key_manager_instance: heap KeyManager&? = null
+
+extern key_file_load(path: static u8&, out: mutable KeyManager&) -> bool
+extern key_file_save(path: static u8&, value: KeyManager&) -> bool
+extern key_manager_keys_path() -> static u8&
+extern alloc_key_manager() -> mutable heap KeyManager&?
+
+def KeyManager_new() -> KeyManager:
+    out: mutable KeyManager = zeroed
+    KeyManager_SetDefaultKeys(out.ref[mutable KeyManager&])
+    return out
+
+def KeyManager_GetInstance() -> heap KeyManager&:
+    if key_manager_instance == null:
+        ptr: mutable heap KeyManager& = alloc_key_manager() else panic("KeyManager allocation failed")
+        ptr.keys <- AllKeys(TrophyKeySet([]))
+        key_manager_instance <- ptr
+    return key_manager_instance.cast[heap KeyManager&]
+
+def KeyManager_SetInstance(instance: heap KeyManager&?) -> void:
+    key_manager_instance <- instance
+
+def KeyManager_LoadFromFile(self: mutable KeyManager&) -> bool:
+    KeyManager_SetDefaultKeys(self)
+    return key_file_load(key_manager_keys_path(), self)
+
+def KeyManager_SaveToFile(self: KeyManager&) -> bool:
+    return key_file_save(key_manager_keys_path(), self)
+
+def KeyManager_KeysToJson(self: KeyManager&, out: mutable KeyManager&) -> void:
+    out.keys <- self.keys
+
+def KeyManager_JsonToKeys(self: mutable KeyManager&, source: KeyManager&) -> void:
+    self.keys <- source.keys
+
+def KeyManager_SetDefaultKeys(self: mutable KeyManager&) -> void:
+    self.keys <- AllKeys(TrophyKeySet([]))
+
+def KeyManager_HasKeys(self: KeyManager&) -> bool:
+    return self.keys.TrophyKeySet.ReleaseTrophyKey.count != 0
+
+def hex_char_to_int(c: u8) -> u8 error[KeyManagerError]:
+    if c >= '0' and c <= '9':
+        return c - '0'
+    if c >= 'A' and c <= 'F':
+        return c - 'A' + 10
+    if c >= 'a' and c <= 'f':
+        return c - 'a' + 10
+    raise KeyManagerError.InvalidHexCharacter
+
+def KeyManager_HexStringToBytes(hexStr: static u8&) -> darray[u8] error[KeyManagerError]:
+    bytes: mutable darray[u8] = []
+    len: usize = runtime_strlen(hexStr)
+    if len == 0:
+        return bytes
+    if len % 2 != 0:
+        raise KeyManagerError.InvalidHexStringLength
+
+    for i in 0..<len step 2:
+        high: u8 = try hex_char_to_int(hexStr[i])
+        low: u8 = try hex_char_to_int(hexStr[i + 1])
+        bytes.push((high << 4) | low)
+
+    return bytes
+
+def KeyManager_BytesToHexString(bytes: darray[u8]) -> static u8&:
+    hexDigits: static u8& = "0123456789ABCDEF"
+    out: mutable heap u8& = string_alloc(bytes.count * 2 + 1)
+    cursor: mutable usize = 0
+    for b in bytes:
+        out[cursor] <- hexDigits[((b >> 4) & 0xF).usize()]
+        out[cursor + 1] <- hexDigits[(b & 0xF).usize()]
+        cursor <- cursor + 2
+    out[cursor] <- 0
+    return out.cast[static u8&]
+

@@ -1,0 +1,210 @@
+# SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+enum FileAccessMode:
+    Read
+    Write
+    ReadWrite
+    Append
+    ReadAppend
+    Create
+
+enum FileType:
+    BinaryFile
+    TextFile
+
+enum FileShareFlag:
+    ShareNone
+    ShareReadOnly
+    ShareWriteOnly
+    ShareReadWrite
+
+enum SeekOrigin:
+    SetOrigin
+    CurrentPosition
+    End
+
+def AccessModeToStr(mode: FileAccessMode, file_type: FileType) -> static u8&:
+    static if PLATFORM_WINDOWS:
+        return AccessModeToWStr(mode, file_type)
+    static else:
+        match file_type:
+            FileType.BinaryFile:
+                match mode:
+                    FileAccessMode.Read:
+                        return "rb"
+                    FileAccessMode.Append:
+                        return "ab"
+                    FileAccessMode.Write:
+                        return "r+b"
+                    FileAccessMode.ReadWrite:
+                        return "r+b"
+                    FileAccessMode.ReadAppend:
+                        return "a+b"
+                    FileAccessMode.Create:
+                        return "wb"
+            FileType.TextFile:
+                match mode:
+                    FileAccessMode.Read:
+                        return "r"
+                    FileAccessMode.Append:
+                        return "a"
+                    FileAccessMode.Write:
+                        return "r+"
+                    FileAccessMode.ReadWrite:
+                        return "r+"
+                    FileAccessMode.ReadAppend:
+                        return "a+"
+                    FileAccessMode.Create:
+                        return "w"
+
+def AccessModeToWStr(mode: FileAccessMode, file_type: FileType) -> static u8&:
+    match file_type:
+        FileType.BinaryFile:
+            match mode:
+                FileAccessMode.Read:
+                    return "rb"
+                FileAccessMode.Append:
+                    return "ab"
+                FileAccessMode.Write:
+                    return "r+b"
+                FileAccessMode.ReadWrite:
+                    return "r+b"
+                FileAccessMode.ReadAppend:
+                    return "a+b"
+                FileAccessMode.Create:
+                    return "wb"
+        FileType.TextFile:
+            match mode:
+                FileAccessMode.Read:
+                    return "r"
+                FileAccessMode.Append:
+                    return "a"
+                FileAccessMode.Write:
+                    return "r+"
+                FileAccessMode.ReadWrite:
+                    return "r+"
+                FileAccessMode.ReadAppend:
+                    return "a+"
+                FileAccessMode.Create:
+                    return "w"
+
+def ToWindowsFileShareFlag(flag: FileShareFlag) -> int:
+    match flag:
+        FileShareFlag.ShareNone:
+            return 0
+        FileShareFlag.ShareReadOnly:
+            return 1
+        FileShareFlag.ShareWriteOnly:
+            return 2
+        FileShareFlag.ShareReadWrite:
+            return 3
+
+def ToSeekOrigin(origin: SeekOrigin) -> int:
+    match origin:
+        SeekOrigin.SetOrigin:
+            return 0
+        SeekOrigin.CurrentPosition:
+            return 1
+        SeekOrigin.End:
+            return 2
+
+struct IOFile:
+    file: mutable void&?
+    file_path: mutable static u8&
+    file_access_mode: mutable FileAccessMode
+    file_type: mutable FileType
+    file_mapping: mutable uintptr
+
+extern io_open(path: static u8&, mode: FileAccessMode, file_type: FileType, share: FileShareFlag) -> void&?
+extern io_close(file: void&) -> void
+extern io_unlink(path: static u8&) -> void
+extern io_flush(file: void&) -> bool
+extern io_commit(file: void&) -> bool
+extern io_set_size(file: void&, size: u64) -> bool
+extern io_get_size(file: void&) -> u64
+extern io_seek(file: void&, offset: i64, origin: SeekOrigin) -> bool
+extern io_tell(file: void&) -> i64
+extern io_read(file: void&, data: mutable void&, elem_size: usize, count: usize) -> usize
+extern io_write(file: void&, data: void&, elem_size: usize, count: usize) -> usize
+extern io_read_string(file: void&, length: usize) -> static u8&
+extern io_get_mapping(file: void&) -> uintptr
+extern fs_directory_size(path: static u8&) -> u64
+
+def IOFile_new() -> IOFile:
+    return IOFile(null, "", FileAccessMode.Read, FileType.BinaryFile, 0.uintptr())
+
+def IOFile_opened(path: static u8&, mode: FileAccessMode, file_type: FileType = FileType.BinaryFile, flag: FileShareFlag = FileShareFlag.ShareReadOnly) -> IOFile:
+    out: mutable IOFile = IOFile_new()
+    _ = IOFile_Open(out.ref[mutable IOFile&], path, mode, file_type, flag)
+    return out
+
+def IOFile_IsOpen(self: IOFile&) -> bool:
+    return self.file != null
+
+def IOFile_IsWriteOnly(self: IOFile&) -> bool:
+    return self.file_access_mode == FileAccessMode.Append or self.file_access_mode == FileAccessMode.Write
+
+def IOFile_Open(self: mutable IOFile&, path: static u8&, mode: FileAccessMode, file_type: FileType = FileType.BinaryFile, flag: FileShareFlag = FileShareFlag.ShareReadOnly) -> int:
+    IOFile_Close(self)
+    self.file <- io_open(path, mode, file_type, flag)
+    self.file_path <- path
+    self.file_access_mode <- mode
+    self.file_type <- file_type
+    return 0 if self.file != null else -1
+
+def IOFile_Close(self: mutable IOFile&) -> void:
+    if self.file != null:
+        io_close(self.file.cast[void&])
+        self.file <- null
+
+def IOFile_Unlink(self: IOFile&) -> void:
+    if self.file_path != "":
+        io_unlink(self.file_path)
+
+def IOFile_Flush(self: IOFile&) -> bool:
+    return false if self.file == null else io_flush(self.file.cast[void&])
+
+def IOFile_Commit(self: IOFile&) -> bool:
+    return false if self.file == null else io_commit(self.file.cast[void&])
+
+def IOFile_SetSize(self: IOFile&, size: u64) -> bool:
+    return false if self.file == null else io_set_size(self.file.cast[void&], size)
+
+def IOFile_GetSize(self: IOFile&) -> u64:
+    return 0 if self.file == null else io_get_size(self.file.cast[void&])
+
+def IOFile_Seek(self: IOFile&, offset: i64, origin: SeekOrigin = SeekOrigin.SetOrigin) -> bool:
+    return false if self.file == null else io_seek(self.file.cast[void&], offset, origin)
+
+def IOFile_Tell(self: IOFile&) -> i64:
+    return -1 if self.file == null else io_tell(self.file.cast[void&])
+
+def IOFile_ReadRaw(self: IOFile&, data: mutable void&, elem_size: usize, count: usize) -> usize:
+    return 0 if self.file == null else io_read(self.file.cast[void&], data, elem_size, count)
+
+def IOFile_WriteRaw(self: IOFile&, data: void&, elem_size: usize, count: usize) -> usize:
+    return 0 if self.file == null else io_write(self.file.cast[void&], data, elem_size, count)
+
+def IOFile_ReadObject[T](self: IOFile&, out: mutable T&) -> bool:
+    return IOFile_ReadRaw(self, out.cast[mutable void&], size_of(T), 1) == 1
+
+def IOFile_WriteObject[T](self: IOFile&, value: T&) -> bool:
+    return IOFile_WriteRaw(self, value.cast[void&], size_of(T), 1) == 1
+
+def IOFile_ReadSpan[T](self: IOFile&, data: mutable T&, count: usize) -> usize:
+    return IOFile_ReadRaw(self, data.cast[mutable void&], size_of(T), count)
+
+def IOFile_WriteSpan[T](self: IOFile&, data: T&, count: usize) -> usize:
+    return IOFile_WriteRaw(self, data.cast[void&], size_of(T), count)
+
+def IOFile_ReadString(self: IOFile&, length: usize) -> static u8&:
+    return "" if self.file == null else io_read_string(self.file.cast[void&], length)
+
+def IOFile_GetFileMapping(self: mutable IOFile&) -> uintptr:
+    if self.file_mapping == 0.uintptr() and self.file != null:
+        self.file_mapping <- io_get_mapping(self.file.cast[void&])
+    return self.file_mapping
+
+def GetDirectorySize(path: static u8&) -> u64:
+    return fs_directory_size(path)

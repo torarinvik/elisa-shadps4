@@ -1,0 +1,60 @@
+# SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+struct SlotId:
+    index: mutable u32
+    generation: mutable u32
+
+struct SlotVectorEntry[T]:
+    value: mutable T
+    generation: mutable u32
+    occupied: mutable bool
+
+struct SlotVector[T]:
+    owner: mutable Arena&?
+    entries: mutable darray[SlotVectorEntry[T]]
+    free_list: mutable darray[u32]
+
+def SlotVector_new[T](owner: mutable Arena&) -> SlotVector[T]:
+    out: mutable SlotVector[T] = zeroed
+    out.owner as & <- owner
+    return out
+
+def SlotVector_insert[T](self: mutable SlotVector[T]&, value: T) -> SlotId:
+    can Memory.Allocate, Abort.Panic:
+        if self.free_list.count != 0:
+            index: u32 = self.free_list[self.free_list.count - 1]
+            _ = self.free_list.pop()
+            entry: mutable SlotVectorEntry[T]& = self.entries[index.usize()].ref[mutable SlotVectorEntry[T]&]
+            entry.value <- value
+            entry.occupied <- true
+            return SlotId(index, entry.generation)
+        index: u32 = self.entries.count.u32()
+        assert self.owner != null
+        owner: mutable Arena& = self.owner
+        in owner:
+            self.entries.push(SlotVectorEntry[T](value, 0, true))
+        return SlotId(index, 0)
+
+def SlotVector_get[T](self: mutable SlotVector[T]&, id: SlotId) -> mutable T&?:
+    if id.index.usize() >= self.entries.count:
+        return null
+    entry: mutable SlotVectorEntry[T]& = self.entries[id.index.usize()].ref[mutable SlotVectorEntry[T]&]
+    if not entry.occupied or entry.generation != id.generation:
+        return null
+    return entry.value.ref[mutable T&]
+
+def SlotVector_erase[T](self: mutable SlotVector[T]&, id: SlotId) -> bool:
+    can Memory.Allocate, Abort.Panic:
+        if id.index.usize() >= self.entries.count:
+            return false
+        entry: mutable SlotVectorEntry[T]& = self.entries[id.index.usize()].ref[mutable SlotVectorEntry[T]&]
+        if not entry.occupied or entry.generation != id.generation:
+            return false
+        entry.occupied <- false
+        entry.generation <- entry.generation + 1
+        assert self.owner != null
+        owner: mutable Arena& = self.owner
+        in owner:
+            self.free_list.push(id.index)
+        return true

@@ -1,0 +1,165 @@
+# SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+static if PLATFORM_WINDOWS:
+    const MAX_PATH = 260
+static else:
+    const MAX_PATH = 1024
+
+const PORTABLE_DIR = "user"
+const LOG_DIR = "log"
+const SCREENSHOTS_DIR = "screenshots"
+const SHADER_DIR = "shader"
+const GAMEDATA_DIR = "data"
+const TEMPDATA_DIR = "temp"
+const SYSMODULES_DIR = "sys_modules"
+const DOWNLOAD_DIR = "download"
+const CAPTURES_DIR = "captures"
+const CHEATS_DIR = "cheats"
+const PATCHES_DIR = "patches"
+const METADATA_DIR = "game_data"
+const CUSTOM_TROPHY = "custom_trophy"
+const CUSTOM_CONFIGS = "custom_configs"
+const CACHE_DIR = "cache"
+const FONTS_DIR = "fonts"
+const HOME_DIR = "home"
+const CUSTOM_MODULES_DIR = "custom_modules"
+const LOG_FILE = "shad_log.txt"
+
+enum PathType:
+    UserDir
+    LogDir
+    ScreenshotsDir
+    ShaderDir
+    TempDataDir
+    GameDataDir
+    SysModuleDir
+    DownloadDir
+    CapturesDir
+    CheatsDir
+    PatchesDir
+    MetaDataDir
+    CustomTrophy
+    CustomConfigs
+    CacheDir
+    FontsDir
+    HomeDir
+    CustomModulesDir
+
+struct PathEntry:
+    kind: mutable PathType
+    path: mutable static u8&
+
+global mutable UserPaths: darray[PathEntry] = []
+
+extern fs_current_path() -> static u8&
+extern fs_join(left: static u8&, right: static u8&) -> static u8&
+extern fs_home_dir() -> static u8&
+extern fs_xdg_data_home() -> static u8&?
+extern windows_appdata_dir() -> static u8&
+extern apple_bundle_parent_dir() -> static u8&?
+extern fs_exists(path: static u8&) -> bool
+extern fs_is_directory(path: static u8&) -> bool
+extern fs_create_directory(path: static u8&) -> void
+extern fs_directory_entries(path: static u8&) -> darray[static u8&]
+extern fs_filename(path: static u8&) -> static u8&
+extern fs_path_empty(path: static u8&) -> bool
+extern fs_path_len(path: static u8&) -> usize
+extern common_log_error(format: static u8&, path: static u8&) -> void
+
+def create_path(kind: PathType, new_path: static u8&) -> void:
+    fs_create_directory(new_path)
+    SetUserPathRaw(kind, new_path)
+
+def InitUserPaths() -> void:
+    user_dir: static u8& = fs_join(fs_current_path(), PORTABLE_DIR)
+    if not fs_exists(user_dir):
+        static if PLATFORM_APPLE:
+            bundle_parent: static u8&? = apple_bundle_parent_dir()
+            if bundle_parent != null:
+                user_dir <- fs_join(fs_join(fs_join(fs_home_dir(), "Library"), "Application Support"), "shadPS4")
+            else:
+                user_dir <- fs_join(fs_join(fs_join(fs_home_dir(), "Library"), "Application Support"), "shadPS4")
+        static elif PLATFORM_LINUX:
+            xdg_data_home: static u8&? = fs_xdg_data_home()
+            if xdg_data_home != null and runtime_strlen(xdg_data_home.cast[static u8&]) > 0:
+                user_dir <- fs_join(xdg_data_home.cast[static u8&], "shadPS4")
+            else:
+                user_dir <- fs_join(fs_join(fs_join(fs_home_dir(), ".local"), "share"), "shadPS4")
+        static elif PLATFORM_WINDOWS:
+            user_dir <- fs_join(windows_appdata_dir(), "shadPS4")
+
+    create_path(PathType.UserDir, user_dir)
+    create_path(PathType.LogDir, fs_join(user_dir, LOG_DIR))
+    create_path(PathType.ScreenshotsDir, fs_join(user_dir, SCREENSHOTS_DIR))
+    create_path(PathType.ShaderDir, fs_join(user_dir, SHADER_DIR))
+    create_path(PathType.GameDataDir, fs_join(user_dir, GAMEDATA_DIR))
+    create_path(PathType.TempDataDir, fs_join(user_dir, TEMPDATA_DIR))
+    create_path(PathType.SysModuleDir, fs_join(user_dir, SYSMODULES_DIR))
+    create_path(PathType.DownloadDir, fs_join(user_dir, DOWNLOAD_DIR))
+    create_path(PathType.CapturesDir, fs_join(user_dir, CAPTURES_DIR))
+    create_path(PathType.CheatsDir, fs_join(user_dir, CHEATS_DIR))
+    create_path(PathType.PatchesDir, fs_join(user_dir, PATCHES_DIR))
+    create_path(PathType.MetaDataDir, fs_join(user_dir, METADATA_DIR))
+    create_path(PathType.CustomTrophy, fs_join(user_dir, CUSTOM_TROPHY))
+    create_path(PathType.CustomConfigs, fs_join(user_dir, CUSTOM_CONFIGS))
+    create_path(PathType.CacheDir, fs_join(user_dir, CACHE_DIR))
+    create_path(PathType.FontsDir, fs_join(user_dir, FONTS_DIR))
+    create_path(PathType.HomeDir, fs_join(user_dir, HOME_DIR))
+    create_path(PathType.CustomModulesDir, fs_join(user_dir, CUSTOM_MODULES_DIR))
+
+def ValidatePath(path: static u8&) -> bool:
+    if fs_path_empty(path):
+        common_log_error("Input path is empty, path={}", path)
+        return false
+    if fs_path_len(path) >= MAX_PATH:
+        common_log_error("Input path is too long, path={}", path)
+        return false
+    return true
+
+def PathToUTF8String(path: static u8&) -> static u8&:
+    return path
+
+def SetUserPathRaw(kind: PathType, new_path: static u8&) -> void:
+    for entry in UserPaths:
+        if entry.kind == kind:
+            entry.path <- new_path
+            return
+    UserPaths.push(PathEntry(kind, new_path))
+
+def GetUserPath(kind: PathType) -> static u8&:
+    for entry in UserPaths:
+        if entry.kind == kind:
+            return entry.path
+    InitUserPaths()
+    for entry in UserPaths:
+        if entry.kind == kind:
+            return entry.path
+    return ""
+
+def GetUserPathString(kind: PathType) -> static u8&:
+    return PathToUTF8String(GetUserPath(kind))
+
+def SetUserPath(kind: PathType, new_path: static u8&) -> void:
+    if not fs_is_directory(new_path):
+        common_log_error("Filesystem object at new_path={} is not a directory", new_path)
+        return
+    SetUserPathRaw(kind, new_path)
+
+def FindGameByID(dir: static u8&, game_id: static u8&, max_depth: int) -> static u8&?:
+    if max_depth < 0:
+        return null
+
+    param_path: static u8& = fs_join(fs_join(dir, "sce_sys"), "param.sfo")
+    eboot_path: static u8& = fs_join(dir, "eboot.bin")
+    if fs_filename(dir) == game_id and fs_exists(param_path) and fs_exists(eboot_path):
+        return eboot_path
+
+    for entry in fs_directory_entries(dir):
+        if not fs_is_directory(entry):
+            continue
+        found: static u8&? = FindGameByID(entry, game_id, max_depth - 1)
+        if found != null:
+            return found
+
+    return null

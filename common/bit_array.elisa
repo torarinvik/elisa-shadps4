@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+struct BitArray:
+    owner: mutable Arena&?
+    words: mutable darray[u64]
+    bit_count: mutable usize
+
+def BitArray_new(owner: mutable Arena&, bit_count: usize) -> BitArray:
+    out: mutable BitArray = zeroed
+    out.owner as & <- owner
+    out.bit_count <- bit_count
+    needed: usize = DivCeil(bit_count, 64)
+    in owner:
+        _ = out.words.reserve(needed)
+        for i in 0..<needed:
+            out.words.push(0)
+    return out
+
+def BitArray_get(self: BitArray&, index: usize) -> bool:
+    if index >= self.bit_count:
+        return false
+    return ((self.words[index / 64] >> (index % 64)) & 1) != 0
+
+def BitArray_count_true(self: BitArray&) -> usize:
+    static if HAS_AVX2:
+        return bit_array_count_true_avx2(self)
+    static else:
+        count: mutable usize = 0
+        for word in self.words:
+            count <- count + popcount_u64(word)
+        return count
+
+extern bit_array_count_true_avx2(self: BitArray&) -> usize
+
+@intrinsic(llvm.ctpop.i64)
+extern popcount_u64(value: u64) -> u64
+
+def BitArray_set(self: mutable BitArray&, index: usize) -> void:
+    if index < self.bit_count:
+        self.words[index / 64] <- self.words[index / 64] | (1.u64() << (index % 64))
+
+def BitArray_clear(self: mutable BitArray&, index: usize) -> void:
+    if index < self.bit_count:
+        self.words[index / 64] <- self.words[index / 64] & ~(1.u64() << (index % 64))
+
+def BitArray_clear_all(self: mutable BitArray&) -> void:
+    for i in 0..<self.words.count:
+        self.words[i] <- 0

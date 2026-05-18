@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright 2023 yuzu Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+const SecondToNanoseconds: u64 = 1000000000
+
+extern FencedRDTSC() -> u64
+extern common_sleep_for_ms(milliseconds: u64) -> void
+extern windows_precise_time_ns() -> u64
+extern apple_clock_gettime_nsec_np() -> u64
+extern posix_clock_gettime_ns() -> u64
+
+def RoundToNearest_100000(value: u64) -> u64:
+    nearest: u64 = 100000
+    mod: u64 = value % nearest
+    if mod >= nearest / 2:
+        return value - mod + nearest
+    return value - mod
+
+def GetTimeNs() -> u64:
+    static if PLATFORM_WINDOWS:
+        return windows_precise_time_ns()
+    static elif PLATFORM_APPLE:
+        return apple_clock_gettime_nsec_np()
+    static else:
+        return posix_clock_gettime_ns()
+
+def EstimateRDTSCFrequency() -> u64:
+    # Discard the first result measuring the rdtsc.
+    _ = FencedRDTSC()
+    common_sleep_for_ms(1)
+    _ = FencedRDTSC()
+
+    start_time: u64 = GetTimeNs()
+    tsc_start: u64 = FencedRDTSC()
+    common_sleep_for_ms(100)
+    end_time: u64 = GetTimeNs()
+    tsc_end: u64 = FencedRDTSC()
+
+    tsc_diff: u64 = tsc_end - tsc_start
+    tsc_freq: u64 = MultiplyAndDivide64(tsc_diff, 1000000000, end_time - start_time)
+    return RoundToNearest_100000(tsc_freq)

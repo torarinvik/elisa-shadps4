@@ -1,0 +1,61 @@
+# SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+const ZYDIS_MACHINE_MODE_LONG_64 = 0
+const ZYDIS_STACK_WIDTH_64 = 0
+const ZYDIS_FORMATTER_STYLE_INTEL = 0
+const ZYDIS_MAX_OPERAND_COUNT_VISIBLE = 10
+const ZYDIS_FORMAT_BUFFER_LEN = 256
+
+extern ZYAN_SUCCESS(status: int) -> bool
+extern ZydisDecoderInit(decoder: mutable ZydisDecoder&, machine_mode: int, stack_width: int) -> int
+extern ZydisFormatterInit(formatter: mutable ZydisFormatter&, style: int) -> int
+extern ZydisFormatterFormatInstruction(formatter: ZydisFormatter&, inst: ZydisDecodedInstruction&, operands: ZydisDecodedOperand&, operand_count: usize, buffer: mutable u8&, buffer_len: usize, address: u64, user_context: void&?) -> int
+extern ZydisDecoderDecodeFull(decoder: ZydisDecoder&, data: void&, size: u64, inst: mutable ZydisDecodedInstruction&, operands: mutable ZydisDecodedOperand&) -> int
+extern fmt_print(format: static u8&, value: u8&) -> void effects[Console.Write]
+extern fmt_print_ptr(format: static u8&, value: void&) -> void effects[Console.Write]
+
+struct ZydisDecoder:
+    opaque: mutable u8[256]
+
+struct ZydisFormatter:
+    opaque: mutable u8[256]
+
+struct ZydisDecodedInstruction:
+    operand_count_visible: mutable usize
+
+struct ZydisDecodedOperand:
+    opaque: mutable u8[64]
+
+struct DecoderImpl:
+    decoder: mutable ZydisDecoder
+    formatter: mutable ZydisFormatter
+
+def DecoderImpl_new() -> DecoderImpl:
+    out: mutable DecoderImpl = zeroed
+    _ = ZydisDecoderInit(out.decoder.ref[mutable ZydisDecoder&], ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64)
+    _ = ZydisFormatterInit(out.formatter.ref[mutable ZydisFormatter&], ZYDIS_FORMATTER_STYLE_INTEL)
+    return out
+
+def DecoderImpl_disassembleInst(self: DecoderImpl&, inst: mutable ZydisDecodedInstruction&, operands: mutable ZydisDecodedOperand&, address: u64) -> u8&:
+    buffer: mutable u8[ZYDIS_FORMAT_BUFFER_LEN]
+    _ = ZydisFormatterFormatInstruction(self.formatter, inst, operands, inst.operand_count_visible, buffer[0].ref[mutable u8&], ZYDIS_FORMAT_BUFFER_LEN, address, null)
+    return buffer[0].ref[u8&]
+
+def DecoderImpl_printInstruction(self: DecoderImpl&, code: void&, address: u64) -> void:
+    can Console.Write:
+        instruction: mutable ZydisDecodedInstruction = zeroed
+        operands: mutable ZydisDecodedOperand[ZYDIS_MAX_OPERAND_COUNT_VISIBLE]
+        status: int = ZydisDecoderDecodeFull(self.decoder, code, size_of(void&).u64(), instruction.ref[mutable ZydisDecodedInstruction&], operands[0].ref[mutable ZydisDecodedOperand&])
+        if not ZYAN_SUCCESS(status):
+            fmt_print_ptr("decode instruction failed at {}\n", code)
+        else:
+            DecoderImpl_printInst(self, instruction, operands[0].ref[mutable ZydisDecodedOperand&], address)
+
+def DecoderImpl_printInst(self: DecoderImpl&, inst: mutable ZydisDecodedInstruction&, operands: mutable ZydisDecodedOperand&, address: u64) -> void:
+    can Console.Write:
+        text: u8& = DecoderImpl_disassembleInst(self, inst, operands, address)
+        fmt_print("instruction: {}\n", text)
+
+def DecoderImpl_decodeInstruction(self: DecoderImpl&, inst: mutable ZydisDecodedInstruction&, operands: mutable ZydisDecodedOperand&, data: void&, size: u64 = 15) -> int:
+    return ZydisDecoderDecodeFull(self.decoder, data, size, inst, operands)

@@ -1,0 +1,88 @@
+# SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+enum RecursiveLockType:
+    None
+    Shared
+    Exclusive
+
+struct RecursiveLockState:
+    type: mutable RecursiveLockType
+    count: mutable int
+
+global mutable recursive_lock_mutexes: darray[void&]
+global mutable recursive_lock_states: darray[RecursiveLockState]
+
+def find_recursive_lock(mutex: void&) -> int:
+    for i, item in recursive_lock_mutexes.enumerate():
+        if item == mutex:
+            return i.int()
+    return -1
+
+def IncrementRecursiveLock(mutex: void&, lock_type: RecursiveLockType) -> bool:
+    index: int = find_recursive_lock(mutex)
+    if index < 0:
+        recursive_lock_mutexes.push(mutex)
+        recursive_lock_states.push(RecursiveLockState(lock_type, 1))
+        return true
+
+    state: mutable RecursiveLockState& = recursive_lock_states[index.usize()].ref[mutable RecursiveLockState&]
+    assert state.type == lock_type
+    state.count <- state.count + 1
+    return false
+
+def DecrementRecursiveLock(mutex: void&, lock_type: RecursiveLockType) -> bool:
+    index: int = find_recursive_lock(mutex)
+    assert index >= 0
+
+    state: mutable RecursiveLockState& = recursive_lock_states[index.usize()].ref[mutable RecursiveLockState&]
+    assert state.type == lock_type and state.count > 0
+    state.count <- state.count - 1
+
+    if state.count == 0:
+        recursive_lock_mutexes.remove_at(index.usize())
+        recursive_lock_states.remove_at(index.usize())
+        return true
+
+    return false
+
+struct RecursiveScopedLock:
+    mutex: mutable void&?
+    locked: mutable bool
+
+struct RecursiveSharedLock:
+    mutex: mutable void&?
+    locked: mutable bool
+
+extern recursive_mutex_lock(mutex: void&) -> void
+extern recursive_mutex_unlock(mutex: void&) -> void
+extern recursive_mutex_lock_shared(mutex: void&) -> void
+extern recursive_mutex_unlock_shared(mutex: void&) -> void
+
+def RecursiveScopedLock_new(mutex: void&) -> RecursiveScopedLock:
+    locked: bool = IncrementRecursiveLock(mutex, RecursiveLockType.Exclusive)
+    if locked:
+        recursive_mutex_lock(mutex)
+    return RecursiveScopedLock(mutex, locked)
+
+def RecursiveScopedLock_destroy(self: mutable RecursiveScopedLock&) -> void:
+    if self.mutex == null:
+        return
+    should_unlock: bool = DecrementRecursiveLock(self.mutex.cast[void&], RecursiveLockType.Exclusive)
+    if should_unlock and self.locked:
+        recursive_mutex_unlock(self.mutex.cast[void&])
+    self.mutex <- null
+
+def RecursiveSharedLock_new(mutex: void&) -> RecursiveSharedLock:
+    locked: bool = IncrementRecursiveLock(mutex, RecursiveLockType.Shared)
+    if locked:
+        recursive_mutex_lock_shared(mutex)
+    return RecursiveSharedLock(mutex, locked)
+
+def RecursiveSharedLock_destroy(self: mutable RecursiveSharedLock&) -> void:
+    if self.mutex == null:
+        return
+    should_unlock: bool = DecrementRecursiveLock(self.mutex.cast[void&], RecursiveLockType.Shared)
+    if should_unlock and self.locked:
+        recursive_mutex_unlock_shared(self.mutex.cast[void&])
+    self.mutex <- null

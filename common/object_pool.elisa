@@ -1,0 +1,39 @@
+# SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+struct ObjectPool[T]:
+    owner: mutable Arena&?
+    objects: mutable darray[heap T&]
+    free_indices: mutable darray[usize]
+
+extern object_pool_alloc[T]() -> mutable heap T&
+extern object_pool_free[T](item: heap T&) -> void
+
+def ObjectPool_new[T](owner: mutable Arena&) -> ObjectPool[T]:
+    out: mutable ObjectPool[T] = zeroed
+    out.owner as & <- owner
+    return out
+
+def ObjectPool_Create[T](self: mutable ObjectPool[T]&) -> mutable heap T&:
+    can Memory.Allocate, Abort.Panic:
+        if self.free_indices.count != 0:
+            index: usize = self.free_indices[self.free_indices.count - 1]
+            _ = self.free_indices.pop()
+            return self.objects[index]
+        item: mutable heap T& = object_pool_alloc[T]()
+        assert self.owner != null
+        owner: mutable Arena& = self.owner
+        in owner:
+            self.objects.push(item)
+        return item
+
+def ObjectPool_Destroy[T](self: mutable ObjectPool[T]&, item: heap T&) -> void:
+    can Memory.Allocate, Abort.Panic:
+        for i, candidate in self.objects.enumerate():
+            if candidate == item:
+                assert self.owner != null
+                owner: mutable Arena& = self.owner
+                in owner:
+                    self.free_indices.push(i)
+                return
+        object_pool_free[T](item)

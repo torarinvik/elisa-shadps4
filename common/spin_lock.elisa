@@ -1,0 +1,42 @@
+# SPDX-FileCopyrightText: Copyright 2020 yuzu Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+struct AtomicFlag:
+    value: mutable bool
+
+extern atomic_flag_test_and_set(flag: mutable AtomicFlag&, order: MemoryOrder) -> bool
+extern atomic_flag_clear(flag: mutable AtomicFlag&, order: MemoryOrder) -> void
+
+@intrinsic(llvm.x86.sse2.pause)
+extern x86_mm_pause() -> void
+
+extern arm64_msvc_yield() -> void
+extern arm64_asm_yield() -> void
+
+struct SpinLock:
+    lck: mutable AtomicFlag
+
+def SpinLock_new() -> SpinLock:
+    return SpinLock(AtomicFlag(false))
+
+def ThreadPause() -> void:
+    static if ARCH_X86_64:
+        x86_mm_pause()
+    static elif ARCH_ARM64 and COMPILER_MSVC:
+        arm64_msvc_yield()
+    static elif ARCH_ARM64:
+        arm64_asm_yield()
+    static else:
+        pass
+
+def SpinLock_lock(self: mutable SpinLock&) -> void:
+    while atomic_flag_test_and_set(self.lck.ref[mutable AtomicFlag&], MemoryOrder.Acquire):
+        ThreadPause()
+
+def SpinLock_unlock(self: mutable SpinLock&) -> void:
+    atomic_flag_clear(self.lck.ref[mutable AtomicFlag&], MemoryOrder.Release)
+
+def SpinLock_try_lock(self: mutable SpinLock&) -> bool:
+    if atomic_flag_test_and_set(self.lck.ref[mutable AtomicFlag&], MemoryOrder.Acquire):
+        return false
+    return true
