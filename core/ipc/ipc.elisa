@@ -1,0 +1,199 @@
+# SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+struct IpcState:
+    enabled: mutable bool
+    run_ready: mutable bool
+    start_ready: mutable bool
+
+def IpcState_new() -> IpcState:
+    return IpcState(false, false, false)
+
+def IPC_IsEnabled(state: IpcState&) -> bool:
+    return state.enabled
+
+def IPC_Init(state: mutable IpcState&, enable_ipc: bool) -> darray[static u8&]:
+    state.enabled <- enable_ipc
+    if not state.enabled:
+        return []
+
+    emu: heap EmulatorState& = EmulatorState_GetInstance()
+    EmulatorState_SetAutoPatchesLoadEnabled(emu, false)
+
+    out: mutable darray[static u8&] = []
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            out.push(";#IPC_ENABLED")
+            out.push(";ENABLE_MEMORY_PATCH")
+            out.push(";ENABLE_EMU_CONTROL")
+            out.push(";#IPC_END")
+    return out
+
+def IPC_InitFromEnv(state: mutable IpcState&, shadps4_enable_ipc: static u8&) -> darray[static u8&]:
+    enabled: bool = runtime_strlen(shadps4_enable_ipc) == runtime_strlen("true") and string_slice_eq(shadps4_enable_ipc, 0, runtime_strlen("true"), "true") == 1
+    return IPC_Init(state, enabled)
+
+def IPC_WaitForStart(state: mutable IpcState&) -> bool:
+    return state.start_ready
+
+def IPC_CanRun(state: IpcState&) -> bool:
+    return state.run_ready
+
+def IPC_SendRestart(args: darray[static u8&]) -> darray[static u8&]:
+    out: mutable darray[static u8&] = []
+    arg_count: static u8& = UIntToString(args.count.u64()).cast[static u8&]
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            out.push(";RESTART")
+            out.push(string_concat(";", arg_count))
+        for i in 0..<args.count:
+            in owner:
+                out.push(string_concat(";", args[i]))
+    return out
+
+def IPC_NextU64(args: darray[static u8&], index: mutable usize&) -> u64:
+    if index >= args.count:
+        return 0
+    value: u64 = StringToUInt(args[index])
+    index <- index + 1
+    return value
+
+def IPC_NextStr(args: darray[static u8&], index: mutable usize&) -> static u8&:
+    if index >= args.count:
+        return ""
+    value: static u8& = args[index]
+    index <- index + 1
+    return value
+
+def IPC_ProcessCommand(state: mutable IpcState&, cmd: static u8&, args: darray[static u8&]) -> static u8&:
+    if runtime_strlen(cmd) == 0:
+        return ""
+    index: mutable usize = 0
+
+    if string_slice_eq(cmd, 0, runtime_strlen("RUN"), "RUN") == 1:
+        state.run_ready <- true
+        return ""
+    if string_slice_eq(cmd, 0, runtime_strlen("START"), "START") == 1:
+        state.start_ready <- true
+        return ""
+    if string_slice_eq(cmd, 0, runtime_strlen("PATCH_MEMORY"), "PATCH_MEMORY") == 1:
+        entry: mutable MemoryPatcherPatchInfo = MemoryPatcherPatchInfo_new()
+        entry.gameSerial <- "*"
+        entry.modNameStr <- IPC_NextStr(args, index)
+        entry.offsetStr <- IPC_NextStr(args, index)
+        entry.valueStr <- IPC_NextStr(args, index)
+        entry.targetStr <- IPC_NextStr(args, index)
+        entry.sizeStr <- IPC_NextStr(args, index)
+        entry.isOffset <- IPC_NextU64(args, index) != 0
+        entry.littleEndian <- IPC_NextU64(args, index) != 0
+        entry.patchMask <- IPC_NextU64(args, index).int()
+        entry.maskOffset <- IPC_NextU64(args, index).int()
+        MemoryPatcher_AddPatchToQueue(entry)
+        return ""
+    if string_slice_eq(cmd, 0, runtime_strlen("PAUSE"), "PAUSE") == 1:
+        DebugState_PauseGuestThreads()
+        return ""
+    if string_slice_eq(cmd, 0, runtime_strlen("RESUME"), "RESUME") == 1:
+        DebugState_ResumeGuestThreads()
+        return ""
+    if string_slice_eq(cmd, 0, runtime_strlen("STOP"), "STOP") == 1:
+        SDL_PushQuitEvent()
+        return ""
+    if string_slice_eq(cmd, 0, runtime_strlen("TOGGLE_FULLSCREEN"), "TOGGLE_FULLSCREEN") == 1:
+        SDL_PushToggleFullscreenEvent()
+        return ""
+    if string_slice_eq(cmd, 0, runtime_strlen("ADJUST_VOLUME"), "ADJUST_VOLUME") == 1:
+        value: int = IPC_NextU64(args, index).int()
+        is_game_specific: bool = IPC_NextU64(args, index) != 0
+        EmulatorSettings_SetVolumeSlider(value, is_game_specific)
+        AudioOut_AdjustVol()
+        return ""
+    if string_slice_eq(cmd, 0, runtime_strlen("SET_FSR"), "SET_FSR") == 1:
+        Presenter_SetFsrEnabled(IPC_NextU64(args, index) != 0)
+        return ""
+    if string_slice_eq(cmd, 0, runtime_strlen("SET_RCAS"), "SET_RCAS") == 1:
+        Presenter_SetRcasEnabled(IPC_NextU64(args, index) != 0)
+        return ""
+    if string_slice_eq(cmd, 0, runtime_strlen("SET_RCAS_ATTENUATION"), "SET_RCAS_ATTENUATION") == 1:
+        Presenter_SetRcasAttenuation(IPC_NextU64(args, index).int())
+        return ""
+    if string_slice_eq(cmd, 0, runtime_strlen("USB_LOAD_FIGURE"), "USB_LOAD_FIGURE") == 1:
+        Usbd_LoadFigure(IPC_NextStr(args, index), IPC_NextU64(args, index).u8(), IPC_NextU64(args, index).u8())
+        return ""
+    if string_slice_eq(cmd, 0, runtime_strlen("USB_REMOVE_FIGURE"), "USB_REMOVE_FIGURE") == 1:
+        Usbd_RemoveFigure(IPC_NextU64(args, index).u8(), IPC_NextU64(args, index).u8(), IPC_NextU64(args, index) != 0)
+        return ""
+    if string_slice_eq(cmd, 0, runtime_strlen("USB_MOVE_FIGURE"), "USB_MOVE_FIGURE") == 1:
+        Usbd_MoveFigure(IPC_NextU64(args, index).u8(), IPC_NextU64(args, index).u8(), IPC_NextU64(args, index).u8(), IPC_NextU64(args, index).u8())
+        return ""
+    if string_slice_eq(cmd, 0, runtime_strlen("USB_TEMP_REMOVE_FIGURE"), "USB_TEMP_REMOVE_FIGURE") == 1:
+        Usbd_TempRemoveFigure(IPC_NextU64(args, index).u8())
+        return ""
+    if string_slice_eq(cmd, 0, runtime_strlen("USB_CANCEL_REMOVE_FIGURE"), "USB_CANCEL_REMOVE_FIGURE") == 1:
+        Usbd_CancelRemoveFigure(IPC_NextU64(args, index).u8())
+        return ""
+    if string_slice_eq(cmd, 0, runtime_strlen("RELOAD_INPUTS"), "RELOAD_INPUTS") == 1:
+        Input_ParseInputConfig(IPC_NextStr(args, index))
+        return ""
+
+    return string_concat(";UNKNOWN CMD: ", cmd)
+
+def IPC_IsEscapedLine(line: static u8&) -> bool:
+    len: usize = runtime_strlen(line)
+    if len == 0:
+        return false
+    return line[len - 1] == '\\'
+
+def IPC_MergeEscapedLineParts(parts: darray[static u8&], start_index: mutable usize, consumed: mutable usize&) -> static u8&:
+    can Memory.Allocate, Abort.Panic:
+        merged: mutable static u8& = ""
+        i: mutable usize = start_index
+        while i < parts.count:
+            part: static u8& = parts[i]
+            if IPC_IsEscapedLine(part):
+                if runtime_strlen(part) > 0:
+                    merged <- string_concat(merged, string_substr(part, 0, runtime_strlen(part) - 1))
+            else:
+                merged <- string_concat(merged, part)
+                consumed <- i - start_index + 1
+                return merged
+            i <- i + 1
+        consumed <- i - start_index
+        return merged
+    return ""
+
+def IPC_ProcessLines(state: mutable IpcState&, lines: darray[static u8&]) -> darray[static u8&]:
+    outputs: mutable darray[static u8&] = []
+    i: mutable usize = 0
+    while i < lines.count:
+        consumed_cmd: mutable usize = 0
+        cmd: static u8& = IPC_MergeEscapedLineParts(lines, i, consumed_cmd)
+        if consumed_cmd == 0:
+            consumed_cmd <- 1
+        i <- i + consumed_cmd
+        if runtime_strlen(cmd) == 0:
+            continue
+
+        # For compatibility with the C++ protocol, all following lines are treated as
+        # command parameters for this command batch until the caller starts a new batch.
+        args: mutable darray[static u8&] = []
+        if i < lines.count:
+            can Memory.Allocate, Abort.Panic:
+                owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+                while i < lines.count:
+                    consumed_arg: mutable usize = 0
+                    arg: static u8& = IPC_MergeEscapedLineParts(lines, i, consumed_arg)
+                    if consumed_arg == 0:
+                        consumed_arg <- 1
+                    i <- i + consumed_arg
+                    in owner:
+                        args.push(arg)
+        out: static u8& = IPC_ProcessCommand(state, cmd, args)
+        if runtime_strlen(out) > 0:
+            can Memory.Allocate, Abort.Panic:
+                owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+                in owner:
+                    outputs.push(out)
+    return outputs

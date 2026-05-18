@@ -1,0 +1,61 @@
+include "../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "./common/types.elisa"
+include "./core/emulator_state.elisa"
+include "./core/ipc/ipc.elisa"
+
+@test
+def ipc_init_sets_enabled_and_emits_capabilities() -> void:
+    can Abort.Panic:
+        EmulatorState_ResetInstance()
+        state: mutable IpcState = IpcState_new()
+        lines: darray[static u8&] = IPC_Init(state, true)
+        assert IPC_IsEnabled(state)
+        assert lines.count == 4
+        assert string_slice_eq(lines[0], 0, runtime_strlen(";#IPC_ENABLED"), ";#IPC_ENABLED") == 1
+        assert string_slice_eq(lines[3], 0, runtime_strlen(";#IPC_END"), ";#IPC_END") == 1
+
+        emu: mutable EmulatorState& = EmulatorState_GetInstance()
+        assert not EmulatorState_IsAutoPatchesLoadEnabled(emu)
+
+@test
+def ipc_run_start_update_state() -> void:
+    can Abort.Panic:
+        state: mutable IpcState = IpcState_new()
+        _ = IPC_ProcessCommand(state, "RUN", [])
+        _ = IPC_ProcessCommand(state, "START", [])
+        assert state.run_ready
+        assert IPC_WaitForStart(state)
+
+@test
+def ipc_send_restart_formats_protocol_lines() -> void:
+    can Abort.Panic, Memory.Allocate:
+        args: mutable darray[static u8&] = []
+        args.push("game.elf")
+        args.push("--safe")
+        lines: darray[static u8&] = IPC_SendRestart(args)
+        assert lines.count == 4
+        assert string_slice_eq(lines[0], 0, runtime_strlen(";RESTART"), ";RESTART") == 1
+        assert string_slice_eq(lines[1], 0, runtime_strlen(";2"), ";2") == 1
+        assert string_slice_eq(lines[2], 0, runtime_strlen(";game.elf"), ";game.elf") == 1
+        assert string_slice_eq(lines[3], 0, runtime_strlen(";--safe"), ";--safe") == 1
+
+@test
+def ipc_unknown_command_reports_error_line() -> void:
+    can Abort.Panic:
+        state: mutable IpcState = IpcState_new()
+        msg: static u8& = IPC_ProcessCommand(state, "MYSTERY_CMD", [])
+        assert runtime_strlen(msg) > 0
+        assert string_slice_eq(msg, 0, runtime_strlen(";UNKNOWN CMD: "), ";UNKNOWN CMD: ") == 1
+
+@test
+def ipc_init_from_env_uses_true_flag() -> void:
+    can Abort.Panic:
+        state_false: mutable IpcState = IpcState_new()
+        lines_false: darray[static u8&] = IPC_InitFromEnv(state_false, "false")
+        assert not IPC_IsEnabled(state_false)
+        assert lines_false.count == 0
+
+        state_true: mutable IpcState = IpcState_new()
+        lines_true: darray[static u8&] = IPC_InitFromEnv(state_true, "true")
+        assert IPC_IsEnabled(state_true)
+        assert lines_true.count == 4
