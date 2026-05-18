@@ -14,6 +14,9 @@ audioout_backend_mode_openal: mutable bool = false
 audioout_frame_bytes: mutable [ORBIS_AUDIO_OUT_NUM_PORTS]u32 = [0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32]
 audioout_decode_handles_buf: mutable [ORBIS_AUDIO_OUT_NUM_PORTS]s32 = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 audioout_decode_ptrs_buf: mutable [ORBIS_AUDIO_OUT_NUM_PORTS]void&? = [null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null]
+audioout_param_stride_bytes: mutable usize = 16usize
+audioout_param_ptr_offset_bytes: mutable usize = 8usize
+audioout_param_ptr_width_bytes: mutable usize = 8usize
 
 def audioout_get_port_id(handle: s32) -> s32:
     pid: s32 = handle & 0xff
@@ -73,6 +76,20 @@ def sceAudioOutSelectBackendOpenAL(enable: bool) -> s32:
     audioout_backend_mode_openal <- enable
     return ORBIS_OK
 
+# Configure ABI layout for OrbisAudioOutOutputParam decode.
+# 64-bit default: { s32 handle; pad4; void* ptr } => stride 16, ptr offset 8, ptr width 8.
+# 32-bit option:  { s32 handle; void* ptr }      => stride 8,  ptr offset 4, ptr width 4.
+def sceAudioOutSetOutputParamLayout64(is_64bit: bool) -> s32:
+    if is_64bit:
+        audioout_param_stride_bytes <- 16usize
+        audioout_param_ptr_offset_bytes <- 8usize
+        audioout_param_ptr_width_bytes <- 8usize
+    else:
+        audioout_param_stride_bytes <- 8usize
+        audioout_param_ptr_offset_bytes <- 4usize
+        audioout_param_ptr_width_bytes <- 4usize
+    return ORBIS_OK
+
 def sceAudioOutOpen(user_id: s32, port_type: s32, index: s32, length: u32, sample_rate: u32, param_type: u32) -> s32:
     _ = user_id; _ = index
     if not audioout_inited:
@@ -103,7 +120,7 @@ def sceAudioOutOpen(user_id: s32, port_type: s32, index: s32, length: u32, sampl
 
     backend_ok: bool = false
     if audioout_backend_mode_openal:
-        backend_ok <- OpenALAudioOut_Open(1 as void&?) != null
+        backend_ok <- OpenALAudioOut_Open(1 as void&?) != null and AudioFFI_AudioOutSDLOpen(pid)
     else:
         backend_ok <- SDLAudioOut_Open(1 as void&?) != null and AudioFFI_AudioOutSDLOpen(pid)
     if not backend_ok:
@@ -132,8 +149,7 @@ def sceAudioOutClose(handle: s32) -> s32:
         return ORBIS_AUDIO_OUT_ERROR_NOT_OPENED
     audioout_open_mask[pid] <- false
     audioout_backend_open[pid] <- false
-    if not audioout_backend_mode_openal:
-        AudioFFI_AudioOutSDLClose(pid)
+    AudioFFI_AudioOutSDLClose(pid)
     audioout_last_time[pid] <- 0u64
     audioout_frame_bytes[pid] <- 0u32
     return ORBIS_OK
@@ -163,6 +179,28 @@ def sceAudioOutGetPortState(handle: s32, state: void&?) -> s32:
         return ORBIS_AUDIO_OUT_ERROR_INVALID_POINTER
     if not audioout_open_mask[pid]:
         return ORBIS_AUDIO_OUT_ERROR_NOT_OPENED
+    st: mutable u8& = state as mutable u8&
+    _ = memset(st as mutable void&, 0, 32usize)
+    pt: s32 = audioout_type[pid]
+    output: u16 = 0u16
+    channel: u8 = 0u8
+    volume: s16 = -1s16
+    if pt == 0 or pt == 1 or pt == 126:
+        output <- 0x01u16
+        channel <- 2u8
+    if pt == 2 or pt == 3:
+        output <- 0x40u16
+        channel <- 1u8
+    if pt == 4:
+        output <- 0x04u16
+        channel <- 1u8
+        volume <- 127s16
+    if pt == 127:
+        output <- 0x80u16
+        channel <- 0u8
+    _ = memcpy((st + 0usize) as mutable void&, (output as u16&) as void&, 2usize)
+    _ = memcpy((st + 2usize) as mutable void&, (channel as u8&) as void&, 1usize)
+    _ = memcpy((st + 4usize) as mutable void&, (volume as s16&) as void&, 2usize)
     return ORBIS_OK
 
 def sceAudioOutOutput(handle: s32, ptr: mutable u8&?) -> s32:
@@ -180,17 +218,19 @@ def sceAudioOutOutput(handle: s32, ptr: mutable u8&?) -> s32:
         return ORBIS_AUDIO_OUT_ERROR_NOT_OPENED
     if ptr == null:
         return 0
-    if audioout_backend_mode_openal:
-        # OpenAL backend bootstrap is present, but full Elisa streaming parity is pending.
+    bytes_len: u32 = audioout_frames[pid] * audioout_frame_bytes[pid]
+    if AudioFFI_AudioOutSDLQueue(pid, ptr as void&, bytes_len) != 0:
         return ORBIS_AUDIO_OUT_ERROR_TRANS_EVENT
-    else:
-        bytes_len: u32 = audioout_frames[pid] * audioout_frame_bytes[pid]
-        if AudioFFI_AudioOutSDLQueue(pid, ptr as void&, bytes_len) != 0:
-            return ORBIS_AUDIO_OUT_ERROR_TRANS_EVENT
     audioout_last_time[pid] <- audioout_last_time[pid] + 1u64
     return audioout_frames[pid].s32()
 
 def sceAudioOutOutputs(param: void&?, num: u32) -> s32:
+    if not audioout_inited:
+        return ORBIS_AUDIO_OUT_ERROR_NOT_INIT
+    if num == 0u32 or num > ORBIS_AUDIO_OUT_NUM_PORTS.u32():
+        return ORBIS_AUDIO_OUT_ERROR_PORT_FULL
+    if param == null:
+        return ORBIS_AUDIO_OUT_ERROR_INVALID_POINTER
     return sceAudioOutOutputsBridge(param, num, audioout_decode_output_param_handles_default)
 
 # Elisa helper port of sceAudioOutOutputs core semantics for callers that can pass split arrays.
@@ -276,8 +316,7 @@ def audioout_decode_output_param_handles_default(param: void&?, num: u32) -> s32
         return null
     if num == 0u32 or num > ORBIS_AUDIO_OUT_NUM_PORTS.u32():
         return null
-    # Decode layout: struct { s32 handle; void* ptr; } with 16-byte stride on 64-bit.
-    stride: usize = 16
+    stride: usize = audioout_param_stride_bytes
     base: u8& = param as u8&
     i: u32 = 0u32
     while i < num:
@@ -293,12 +332,18 @@ def audioout_decode_output_param_ptrs_default(param: void&?, num: u32) -> void&?
         return null
     if num == 0u32 or num > ORBIS_AUDIO_OUT_NUM_PORTS.u32():
         return null
-    stride: usize = 16
+    stride: usize = audioout_param_stride_bytes
+    ptr_off: usize = audioout_param_ptr_offset_bytes
+    ptr_w: usize = audioout_param_ptr_width_bytes
     base: u8& = param as u8&
     i: u32 = 0u32
     while i < num:
-        off: usize = i.usize() * stride + 8usize
-        audioout_decode_ptrs_buf[i.usize()] <- (base + off) as void&?
+        off: usize = i.usize() * stride + ptr_off
+        dstp: mutable void& = (audioout_decode_ptrs_buf as mutable void&?& + i.usize()) as mutable void&
+        srcp: void& = (base + off) as void&
+        # Clear then copy pointer-width bytes so 32-bit decode doesn't leave stale upper bits.
+        _ = memset(dstp, 0, 8usize)
+        _ = memcpy(dstp, srcp, ptr_w)
         i <- i + 1u32
     return audioout_decode_ptrs_buf as void&?&
 
@@ -342,6 +387,7 @@ def sceAudioOutGetSystemState(state: void&?) -> s32:
         return ORBIS_AUDIO_OUT_ERROR_NOT_INIT
     if state == null:
         return ORBIS_AUDIO_OUT_ERROR_INVALID_POINTER
+    _ = memset((state as mutable u8&) as mutable void&, 0, 32usize)
     return ORBIS_OK
 
 def AdjustVol() -> void: return
@@ -429,7 +475,7 @@ def AudioOut_RegisterLib(sym: void&?) -> void: _ = sym
 def AudioOut_ShutdownBackends() -> void:
     i: s32 = 0
     while i < ORBIS_AUDIO_OUT_NUM_PORTS:
-        if audioout_open_mask[i] and not audioout_backend_mode_openal:
+        if audioout_open_mask[i]:
             AudioFFI_AudioOutSDLClose(i)
         audioout_open_mask[i] <- false
         audioout_backend_open[i] <- false

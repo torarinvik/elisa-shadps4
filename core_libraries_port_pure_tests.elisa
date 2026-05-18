@@ -1,0 +1,241 @@
+include "../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "./common/types.elisa"
+include "./core/libraries/error_codes.elisa"
+include "./core/libraries/app_content/app_content.elisa"
+include "./core/libraries/app_content/app_content_harness.elisa"
+include "./core/libraries/avplayer/avplayer.elisa"
+include "./core/libraries/avplayer/avplayer_harness.elisa"
+include "./core/libraries/content_export/content_export.elisa"
+include "./core/libraries/ajm/ajm.elisa"
+include "./core/libraries/ajm/ajm_context.elisa"
+include "./core/libraries/ajm/ajm_instance.elisa"
+include "./core/libraries/ajm/ajm_aac.elisa"
+
+def content_export_dummy_malloc(datasize: u64, userdata: void&?) -> void&?:
+    _ = datasize
+    _ = userdata
+    return null
+
+def content_export_dummy_free(p: void&?, userdata: void&?) -> void:
+    _ = p
+    _ = userdata
+
+def reset_ajm_port_state():
+    ajm_next_context_id <- 1
+    ajm_contexts <- zeroed
+
+@test
+def app_content_harness_smoke() -> void:
+    can Abort.Panic:
+        assert app_content_harness_run() == ORBIS_OK
+        assert app_content_harness_run_bulk_loader() == ORBIS_OK
+
+@test
+def app_content_null_and_bounds_contracts() -> void:
+    can Abort.Panic:
+        assert sceAppContentDebugReset() == ORBIS_OK
+        assert sceAppContentDebugSetAddcontCount(-1) == ORBIS_APP_CONTENT_ERROR_PARAMETER
+        assert sceAppContentDebugSetAddcontCount(2501) == ORBIS_APP_CONTENT_ERROR_PARAMETER
+        assert sceAppContentLoadDiscoveredEntries(null, 0) == ORBIS_APP_CONTENT_ERROR_PARAMETER
+        assert sceAppContentLoadDiscoveredEntries(null, -1) == ORBIS_APP_CONTENT_ERROR_PARAMETER
+
+@test
+def app_content_list_and_init_behavior() -> void:
+    can Abort.Panic:
+        assert sceAppContentDebugReset() == ORBIS_OK
+
+        entries: AppContentDiscoveredEntry16[2] = zeroed
+        label0: i8[16] = build_label_16()
+        i: mutable int = 0
+        while i < 16:
+            entries[0].label16[i] <- label0[i]
+            entries[1].label16[i] <- label0[i]
+            i <- i + 1
+        entries[1].label16[15] <- 'E'.i8()
+        entries[0].status <- ORBIS_APP_CONTENT_DOWNLOAD_STATUS_INSTALLED
+        entries[1].status <- ORBIS_APP_CONTENT_DOWNLOAD_STATUS_INSTALLED
+        entries[0].key <- build_key()
+        entries[1].key <- build_key()
+
+        assert sceAppContentLoadDiscoveredEntries(entries[0].ref[AppContentDiscoveredEntry16&], 2) == ORBIS_OK
+
+        hit_num: u32 = 0
+        assert sceAppContentGetAddcontInfoList(0, null, 0, hit_num.ref[mutable u32&]) == ORBIS_OK
+        assert hit_num == 2
+
+        temp_mount: OrbisAppContentMountPoint = zeroed
+        assert sceAppContentTemporaryDataMount2(0, temp_mount.ref[mutable OrbisAppContentMountPoint&]) == ORBIS_OK
+        assert temp_mount.data[0] == '/'.i8()
+        assert temp_mount.data[1] == 't'.i8()
+
+        sdk_ver <- SDK_15_00_00
+        is_initialized <- false
+        assert sceAppContentInitialize(null, null) == ORBIS_OK
+        assert sceAppContentInitialize(null, null) == ORBIS_APP_CONTENT_ERROR_BUSY
+
+@test
+def app_content_negative_paths() -> void:
+    can Abort.Panic:
+        assert sceAppContentDebugReset() == ORBIS_OK
+
+        label: OrbisNpUnifiedEntitlementLabel = build_label_struct()
+        info: OrbisAppContentAddcontInfo = zeroed
+        key: OrbisAppContentGetEntitlementKey = zeroed
+        mount: OrbisAppContentMountPoint = zeroed
+
+        assert sceAppContentGetAddcontInfo(0, label.ref[OrbisNpUnifiedEntitlementLabel&], info.ref[mutable OrbisAppContentAddcontInfo&]) == ORBIS_APP_CONTENT_ERROR_DRM_NO_ENTITLEMENT
+        assert sceAppContentGetEntitlementKey(0, label.ref[OrbisNpUnifiedEntitlementLabel&], key.ref[mutable OrbisAppContentGetEntitlementKey&]) == ORBIS_APP_CONTENT_ERROR_DRM_NO_ENTITLEMENT
+        assert sceAppContentAddcontMount(0, label.ref[OrbisNpUnifiedEntitlementLabel&], mount.ref[mutable OrbisAppContentMountPoint&]) == ORBIS_APP_CONTENT_ERROR_NOT_FOUND
+
+        assert sceAppContentGetAddcontInfo(0, null, info.ref[mutable OrbisAppContentAddcontInfo&]) == ORBIS_APP_CONTENT_ERROR_PARAMETER
+        assert sceAppContentGetEntitlementKey(0, label.ref[OrbisNpUnifiedEntitlementLabel&], null) == ORBIS_APP_CONTENT_ERROR_PARAMETER
+        assert sceAppContentAddcontMount(0, null, mount.ref[mutable OrbisAppContentMountPoint&]) == ORBIS_APP_CONTENT_ERROR_PARAMETER
+
+@test
+def avplayer_harness_smoke() -> void:
+    can Abort.Panic:
+        assert avplayer_harness_run() == ORBIS_OK
+
+@test
+def avplayer_invalid_param_contracts() -> void:
+    can Abort.Panic:
+        assert sceAvPlayerInit(null) == 0
+        assert sceAvPlayerStart(0) == ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+        assert sceAvPlayerStop(0) == ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+        assert sceAvPlayerPause(0) == ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+        assert sceAvPlayerResume(0) == ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+        assert sceAvPlayerEnableStream(0, 0) == ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+        assert sceAvPlayerDisableStream(0, 0) == ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+        assert sceAvPlayerStreamCount(0) == ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+        assert not sceAvPlayerGetVideoData(0, null)
+        assert not sceAvPlayerGetAudioData(0, null)
+
+@test
+def avplayer_close_invalidates_handle() -> void:
+    can Abort.Panic:
+        init_data: AvPlayerInitData = build_init_data()
+        handle: AvPlayerHandle = sceAvPlayerInit(init_data.ref[mutable AvPlayerInitData&])
+        assert handle != 0
+        assert sceAvPlayerStart(handle) == ORBIS_OK
+        assert sceAvPlayerClose(handle) == ORBIS_OK
+        assert sceAvPlayerStart(handle) == ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+        assert sceAvPlayerPause(handle) == ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+        assert sceAvPlayerResume(handle) == ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+
+@test
+def content_export_init_contract() -> void:
+    can Abort.Panic:
+        g_is_initialized <- false
+
+        assert sceContentExportTerm() == ORBIS_CONTENT_EXPORT_ERROR_NOINIT
+        assert sceContentExportInit(null) == ORBIS_CONTENT_EXPORT_ERROR_INVALDPARAM
+
+        bad_param: OrbisContentExportInitParam = zeroed
+        bad_param.mallocfunc <- null
+        bad_param.freefunc <- null
+        assert sceContentExportInit(bad_param.ref[mutable OrbisContentExportInitParam&]) == ORBIS_CONTENT_EXPORT_ERROR_INVALDPARAM
+
+        ok_param: OrbisContentExportInitParam = zeroed
+        ok_param.mallocfunc <- content_export_dummy_malloc
+        ok_param.freefunc <- content_export_dummy_free
+        ok_param.bufsize <- 0
+        ok_param.reserved0 <- 0
+        ok_param.reserved1 <- 0
+
+        assert sceContentExportInit(ok_param.ref[mutable OrbisContentExportInitParam&]) == ORBIS_OK
+        assert sceContentExportInit(ok_param.ref[mutable OrbisContentExportInitParam&]) == ORBIS_CONTENT_EXPORT_ERROR_MULTIPLEINIT
+        assert sceContentExportTerm() == ORBIS_OK
+
+@test
+def content_export_init2_version1_reserved_rules() -> void:
+    can Abort.Panic:
+        g_is_initialized <- false
+
+        version1_bad_reserved: OrbisContentExportInitParam = zeroed
+        version1_bad_reserved.mallocfunc <- content_export_dummy_malloc
+        version1_bad_reserved.freefunc <- content_export_dummy_free
+        version1_bad_reserved.reserved0 <- 1
+        assert sceContentExportInit2(version1_bad_reserved.ref[mutable OrbisContentExportInitParam&]) == ORBIS_CONTENT_EXPORT_ERROR_INVALDPARAM
+
+        version1_bad_buf: OrbisContentExportInitParam = zeroed
+        version1_bad_buf.mallocfunc <- content_export_dummy_malloc
+        version1_bad_buf.freefunc <- content_export_dummy_free
+        version1_bad_buf.bufsize <- 0x80
+        assert sceContentExportInit2(version1_bad_buf.ref[mutable OrbisContentExportInitParam&]) == ORBIS_CONTENT_EXPORT_ERROR_INVALDPARAM
+
+        version1_ok: OrbisContentExportInitParam = zeroed
+        version1_ok.mallocfunc <- content_export_dummy_malloc
+        version1_ok.freefunc <- content_export_dummy_free
+        version1_ok.bufsize <- 0x100
+        assert sceContentExportInit2(version1_ok.ref[mutable OrbisContentExportInitParam&]) == ORBIS_OK
+        assert sceContentExportTerm() == ORBIS_OK
+
+@test
+def ajm_instance_lifecycle_reuses_freed_slot() -> void:
+    can Abort.Panic:
+        reset_ajm_port_state()
+
+        context_id: u32 = 0
+        assert sceAjmInitialize(0, context_id.ref[mutable u32&]) == ORBIS_OK
+        assert context_id == 1
+
+        flags: AjmInstanceFlags = AjmInstanceFlags(0x1)
+        instance: u32 = 0
+
+        assert sceAjmInstanceCreate(context_id, AjmCodecType_M4aacDec, flags, instance.ref[mutable u32&]) == ORBIS_AJM_ERROR_CODEC_NOT_REGISTERED
+        assert sceAjmModuleRegister(context_id, AjmCodecType_M4aacDec, 0) == ORBIS_OK
+        assert sceAjmInstanceCreate(context_id, AjmCodecType_M4aacDec, flags, instance.ref[mutable u32&]) == ORBIS_OK
+
+        first_slot: u32 = instance & 0x3fff
+        assert first_slot == 1
+        assert sceAjmInstanceDestroy(context_id, instance) == ORBIS_OK
+        assert sceAjmInstanceDestroy(context_id, instance) == ORBIS_AJM_ERROR_INVALID_PARAMETER
+
+        instance2: u32 = 0
+        assert sceAjmInstanceCreate(context_id, AjmCodecType_M4aacDec, flags, instance2.ref[mutable u32&]) == ORBIS_OK
+        second_slot: u32 = instance2 & 0x3fff
+        assert second_slot == first_slot
+
+@test
+def ajm_instance_destroy_rejects_wrong_context() -> void:
+    can Abort.Panic:
+        reset_ajm_port_state()
+
+        c1: u32 = 0
+        c2: u32 = 0
+        assert sceAjmInitialize(0, c1.ref[mutable u32&]) == ORBIS_OK
+        assert sceAjmInitialize(0, c2.ref[mutable u32&]) == ORBIS_OK
+        assert c1 != c2
+
+        flags: AjmInstanceFlags = AjmInstanceFlags(0x1)
+        instance: u32 = 0
+        assert sceAjmModuleRegister(c1, AjmCodecType_At9Dec, 0) == ORBIS_OK
+        assert sceAjmInstanceCreate(c1, AjmCodecType_At9Dec, flags, instance.ref[mutable u32&]) == ORBIS_OK
+        assert sceAjmInstanceDestroy(c2, instance) == ORBIS_AJM_ERROR_INVALID_PARAMETER
+        assert sceAjmInstanceDestroy(c1, instance) == ORBIS_OK
+
+@test
+def ajm_aac_mapping_and_validation_helpers() -> void:
+    can Abort.Panic:
+        assert AjmAac_TransportTypeFromConfigType(ConfigType_ADTS) == AjmAacTransportType_Adts
+        assert AjmAac_TransportTypeFromConfigType(ConfigType_RAW) == AjmAacTransportType_Raw
+        assert AjmAac_TransportTypeFromConfigType(999) == AjmAacTransportType_Invalid
+
+        assert AjmAac_ChannelConfigFromChannels(0) == 2
+        assert AjmAac_ChannelConfigFromChannels(6) == 6
+        assert AjmAac_ChannelConfigFromChannels(7) == 11
+        assert AjmAac_ChannelConfigFromChannels(8) == 12
+        assert AjmAac_ChannelConfigFromChannels(9) == AjmAacChannelConfig_Invalid
+
+        assert AjmAac_IsValidSamplingFreqType(0)
+        assert AjmAac_IsValidSamplingFreqType(11)
+        assert not AjmAac_IsValidSamplingFreqType(12)
+
+        ok_params: AjmAacInitializeParameters = AjmAacInitializeParameters(ConfigType_RAW, 4)
+        bad_config: AjmAacInitializeParameters = AjmAacInitializeParameters(77, 4)
+        bad_freq: AjmAacInitializeParameters = AjmAacInitializeParameters(ConfigType_ADTS, 99)
+
+        assert AjmAac_ValidateInitializeParams(ok_params, 2) == ORBIS_OK
+        assert AjmAac_ValidateInitializeParams(bad_config, 2) == ORBIS_AJM_ERROR_INVALID_PARAMETER
+        assert AjmAac_ValidateInitializeParams(bad_freq, 2) == ORBIS_AJM_ERROR_INVALID_PARAMETER
+        assert AjmAac_ValidateInitializeParams(ok_params, 9) == ORBIS_AJM_ERROR_INVALID_PARAMETER
