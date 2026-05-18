@@ -25,35 +25,107 @@ global mutable patch_file: static u8&
 global mutable patches_applied: bool = false
 global mutable pending_patches: darray[PatchInfo]
 
-extern patcher_to_hex(value: u64, byte_size: usize) -> static u8&
-extern patcher_parse_u64(value: static u8&, base: int) -> u64
 extern patcher_parse_f32_bits(value: static u8&) -> u32
 extern patcher_parse_f64_bits(value: static u8&) -> u64
-extern patcher_utf8_to_hex(value: static u8&) -> static u8&
-extern patcher_utf16_to_hex(value: static u8&) -> static u8&
 extern patcher_apply_patch(info: PatchInfo) -> void
 extern patcher_scan_pattern(base: uintptr, image_size: u64, signature: static u8&) -> uintptr
 
 def toHex(value: u64, byteSize: usize) -> static u8&:
-    return patcher_to_hex(value, byteSize)
+    digits: usize = byteSize * 2
+    hexDigits: static u8& = "0123456789abcdef"
+    out: mutable heap u8& = zeroed
+    can Memory.Allocate, Abort.Panic:
+        out <- string_alloc(digits + 1)
+    for i in 0..<digits:
+        shift: usize = (digits - 1 - i) * 4
+        out[i] <- hexDigits[((value >> shift) & 0xF).usize()]
+    out[digits] <- 0
+    return out.cast[static u8&]
+
+def patcher_parse_u64(value: static u8&, base: int) -> u64:
+    out: mutable u64 = 0
+    len: usize = runtime_strlen(value)
+    for i in 0..<len:
+        c: u8 = value[i]
+        digit: mutable u8 = 0
+        if c >= '0' and c <= '9':
+            digit <- c - '0'
+        elif c >= 'A' and c <= 'F':
+            digit <- c - 'A' + 10
+        elif c >= 'a' and c <= 'f':
+            digit <- c - 'a' + 10
+        else:
+            return out
+        if digit.int() >= base:
+            return out
+        out <- out * base.u64() + digit.u64()
+    return out
+
+def patcher_utf8_to_hex(value: static u8&) -> static u8&:
+    len: usize = runtime_strlen(value)
+    out: mutable heap u8& = zeroed
+    can Memory.Allocate, Abort.Panic:
+        out <- string_alloc((len + 1) * 2 + 1)
+    cursor: mutable usize = 0
+    for i in 0..<len:
+        byte_hex: mutable static u8& = ""
+        can Memory.Allocate, Abort.Panic:
+            byte_hex <- toHex(value[i].u64(), 1)
+        out[cursor] <- byte_hex[0]
+        out[cursor + 1] <- byte_hex[1]
+        cursor <- cursor + 2
+    out[cursor] <- '0'
+    out[cursor + 1] <- '0'
+    out[cursor + 2] <- 0
+    return out.cast[static u8&]
+
+def patcher_utf16_to_hex(value: static u8&) -> static u8&:
+    len: usize = runtime_strlen(value)
+    out: mutable heap u8& = zeroed
+    can Memory.Allocate, Abort.Panic:
+        out <- string_alloc((len + 1) * 4 + 1)
+    cursor: mutable usize = 0
+    for i in 0..<len:
+        byte_hex: mutable static u8& = ""
+        can Memory.Allocate, Abort.Panic:
+            byte_hex <- toHex(value[i].u64(), 1)
+        out[cursor] <- byte_hex[0]
+        out[cursor + 1] <- byte_hex[1]
+        out[cursor + 2] <- '0'
+        out[cursor + 3] <- '0'
+        cursor <- cursor + 4
+    out[cursor] <- '0'
+    out[cursor + 1] <- '0'
+    out[cursor + 2] <- '0'
+    out[cursor + 3] <- '0'
+    out[cursor + 4] <- 0
+    return out.cast[static u8&]
 
 def convertValueToHex(value_type: static u8&, valueStr: static u8&) -> static u8&:
     if value_type == "byte":
-        return toHex(patcher_parse_u64(valueStr, 16), 1)
+        can Memory.Allocate, Abort.Panic:
+            return toHex(patcher_parse_u64(valueStr, 16), 1)
     if value_type == "bytes16":
-        return toHex(patcher_parse_u64(valueStr, 16), 2)
+        can Memory.Allocate, Abort.Panic:
+            return toHex(patcher_parse_u64(valueStr, 16), 2)
     if value_type == "bytes32":
-        return toHex(patcher_parse_u64(valueStr, 16), 4)
+        can Memory.Allocate, Abort.Panic:
+            return toHex(patcher_parse_u64(valueStr, 16), 4)
     if value_type == "bytes64":
-        return toHex(patcher_parse_u64(valueStr, 16), 8)
+        can Memory.Allocate, Abort.Panic:
+            return toHex(patcher_parse_u64(valueStr, 16), 8)
     if value_type == "float32":
-        return toHex(patcher_parse_f32_bits(valueStr).u64(), 4)
+        can Memory.Allocate, Abort.Panic:
+            return toHex(patcher_parse_f32_bits(valueStr).u64(), 4)
     if value_type == "float64":
-        return toHex(patcher_parse_f64_bits(valueStr), 8)
+        can Memory.Allocate, Abort.Panic:
+            return toHex(patcher_parse_f64_bits(valueStr), 8)
     if value_type == "utf8":
-        return patcher_utf8_to_hex(valueStr)
+        can Memory.Allocate, Abort.Panic:
+            return patcher_utf8_to_hex(valueStr)
     if value_type == "utf16":
-        return patcher_utf16_to_hex(valueStr)
+        can Memory.Allocate, Abort.Panic:
+            return patcher_utf16_to_hex(valueStr)
     return valueStr
 
 def OnGameLoaded() -> void:
