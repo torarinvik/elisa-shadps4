@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+struct Devtools_Widget_CmdListFilter:
+    shader_name: mutable static u8&
+
+struct Devtools_Widget_CmdListViewer:
+    base_addr: mutable uintptr
+    name: mutable static u8&
+    events: mutable darray[Devtools_Widget_GPUEvent]
+    cmdb_addr: mutable uintptr
+    cmdb_size: mutable usize
+    batch_bp: mutable int
+    vqid: mutable int
+    highlight_batch: mutable u32
+    batch_view: mutable Devtools_Widget_RegView
+    last_selected_batch: mutable int
+
+global mutable Devtools_Widget_CmdListGroupBatches: bool = true
+global mutable Devtools_Widget_CmdListShowMarkers: bool = false
+
+def Devtools_Widget_CmdList_LoadConfig(line: static u8&) -> void can[Memory.Allocate, Abort.Panic]:
+    if Devtools_StringStartsWith(line, "cmd_list_group_batches="):
+        Devtools_Widget_CmdListGroupBatches <- Devtools_ParseBool(Devtools_ConfigValue(line, "cmd_list_group_batches="))
+    if Devtools_StringStartsWith(line, "cmd_list_show_markers="):
+        Devtools_Widget_CmdListShowMarkers <- Devtools_ParseBool(Devtools_ConfigValue(line, "cmd_list_show_markers="))
+
+def Devtools_Widget_CmdList_SerializeConfig() -> static u8&:
+    can Memory.Allocate, Abort.Panic:
+        builder: mutable heap StringBuilder& = string_builder_new("cmd_list_group_batches=")
+        builder <- string_builder_append(builder, "1" if Devtools_Widget_CmdListGroupBatches else "0")
+        builder <- string_builder_append(builder, "\ncmd_list_show_markers=")
+        builder <- string_builder_append(builder, "1" if Devtools_Widget_CmdListShowMarkers else "0")
+        builder <- string_builder_append(builder, "\n")
+        return string_builder_finish(builder).cast[static u8&]
+    return ""
+
+def Devtools_Widget_CmdList_GetNext(this_pm4: uintptr, n: u32) -> uintptr:
+    return this_pm4 + (4 + n * 4).uintptr()
+
+def Devtools_Widget_CmdList_New(base_addr: uintptr, name: static u8&) -> Devtools_Widget_CmdListViewer:
+    out: mutable Devtools_Widget_CmdListViewer = zeroed
+    out.base_addr <- base_addr
+    out.name <- name
+    out.batch_bp <- -1
+    out.vqid <- 255
+    out.highlight_batch <- 0xffffffff
+    out.batch_view <- Devtools_Widget_RegView_New()
+    out.last_selected_batch <- -1
+    return out
+
+def Devtools_Widget_CmdList_AddBatch(viewer: mutable Devtools_Widget_CmdListViewer&, batch: Devtools_Widget_BatchInfo) -> void can[Memory.Allocate, Abort.Panic]:
+    event: mutable Devtools_Widget_GPUEvent = zeroed
+    event.kind <- Devtools_Widget_GPUEventKind.BatchInfo
+    event.batch_info <- batch
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            viewer.events.push(event)
+
+def Devtools_Widget_CmdList_Draw(viewer: mutable Devtools_Widget_CmdListViewer&, only_batches_view: bool, filter: Devtools_Widget_CmdListFilter&) -> void:
+    _ = viewer
+    _ = only_batches_view
+    _ = filter

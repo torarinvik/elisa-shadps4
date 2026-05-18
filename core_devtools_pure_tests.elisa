@@ -1,10 +1,18 @@
 include "../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
 include "./common/string_util.elisa"
 include "./core/devtools/options.elisa"
-include "./core/devtools/gcn/gcn_op_names.elisa"
-include "./core/devtools/gcn/gcn_shader_regs.elisa"
-include "./core/devtools/gcn/gcn_context_regs.elisa"
+include "./core/devtools/gcn/gcn.elisa"
 include "./core/devtools/widget/common.elisa"
+include "./core/devtools/widget/imgui_memory_editor.elisa"
+include "./core/devtools/widget/text_editor.elisa"
+include "./core/devtools/widget/reg_popup.elisa"
+include "./core/devtools/widget/reg_view.elisa"
+include "./core/devtools/widget/cmd_list.elisa"
+include "./core/devtools/widget/frame_dump.elisa"
+include "./core/devtools/widget/frame_graph.elisa"
+include "./core/devtools/widget/memory_map.elisa"
+include "./core/devtools/widget/module_list.elisa"
+include "./core/devtools/widget/shader_list.elisa"
 
 @test
 def devtools_gcn_opcode_names_match_cpp_switch() -> void:
@@ -28,6 +36,10 @@ def devtools_gcn_register_names_match_cpp_switches() -> void:
 @test
 def devtools_widget_draw_call_classification_matches_cpp_switch() -> void:
     can Abort.Panic:
+        header: Devtools_Widget_PM4Header = Devtools_Widget_PM4HeaderFromU32(0xc0010000)
+        assert header.type == 3
+        assert header.count == 1
+        assert Devtools_Widget_PM4HeaderToU32(header) == 0xc0010000
         assert Devtools_Widget_IsDrawCall(PM4ItOpcode_DrawIndex2)
         assert Devtools_Widget_IsDrawCall(PM4ItOpcode_DrawIndexOffset2)
         assert Devtools_Widget_IsDrawCall(PM4ItOpcode_DrawIndexAuto)
@@ -49,3 +61,60 @@ def devtools_options_parse_and_serialize_config_lines() -> void:
         assert options.frame_dump_render_on_collapse
         serialized: static u8& = Devtools_SerializeOptionsConfig()
         assert Devtools_StringStartsWith(serialized, "disassembler_cli_isa=my-isa {src}\n")
+
+@test
+def devtools_widget_memory_and_frame_helpers_match_cpp_defaults() -> void:
+    can Abort.Panic:
+        editor: mutable Devtools_Widget_MemoryEditor = Devtools_Widget_MemoryEditor_New()
+        assert editor.Open
+        assert editor.Cols == 16
+        assert editor.OptShowAscii
+        assert Devtools_Widget_MemoryEditor_CalcAddrDigits(editor, 0x1000, 0) == 3
+        Devtools_Widget_MemoryEditor_GotoAddrAndHighlight(editor, 4, 7)
+        assert editor.GotoAddr == 4
+        assert editor.HighlightMax == 7
+
+        graph: mutable Devtools_Widget_FrameGraph = Devtools_Widget_FrameGraph_New()
+        Devtools_Widget_FrameGraph_AddFrame(graph, 1025, 0.016)
+        assert Devtools_Widget_FrameGraph_GetFrame(graph, 1).num == 1025
+        Devtools_Widget_FrameGraph_UpdateStats(graph, 20.0)
+        assert graph.frameRate == 50.0
+
+@test
+def devtools_widget_text_and_shader_helpers_keep_editor_state() -> void:
+    can Abort.Panic, Memory.Allocate:
+        editor: mutable Devtools_Widget_TextEditor = Devtools_Widget_TextEditor_New()
+        Devtools_Widget_TextEditor_SetText(editor, "a\nb")
+        assert Devtools_Widget_TextEditor_GetTotalLines(editor) == 2
+        Devtools_Widget_TextEditor_InsertText(editor, "\nc")
+        assert Devtools_Widget_TextEditor_GetTotalLines(editor) == 3
+        Devtools_Widget_TextEditor_SelectAll(editor)
+        assert Devtools_Widget_TextEditor_HasSelection(editor)
+
+        selection: mutable Devtools_Widget_ShaderSelection = Devtools_Widget_ShaderSelection_New(7)
+        Devtools_Widget_ShaderSelection_ReloadShader(selection, "OpCapability Shader", "void main() {}")
+        assert selection.index == 7
+        assert selection.open
+        assert streq(selection.isa_editor.language_name, "SPIR-V") == 1
+
+@test
+def devtools_widget_module_and_cmd_config_helpers_are_elisa_owned() -> void:
+    can Abort.Panic, Memory.Allocate:
+        assert streq(Devtools_Widget_NormalizePrxName("libSceFoo"), "libSceFoo.prx") == 1
+        assert Devtools_Widget_IsSystemModulePath("/sys/libSceFoo.prx", "/sys")
+        before: usize = Devtools_Widget_ModuleCount()
+        Devtools_Widget_AddModuleName("libSceFoo", false)
+        assert Devtools_Widget_ModuleCount() == before + 1
+        assert Devtools_Widget_ModuleAt(before).is_sys_module
+
+        Devtools_Widget_CmdList_LoadConfig("cmd_list_group_batches=0")
+        Devtools_Widget_CmdList_LoadConfig("cmd_list_show_markers=1")
+        assert not Devtools_Widget_CmdListGroupBatches
+        assert Devtools_Widget_CmdListShowMarkers
+        serialized: static u8& = Devtools_Widget_CmdList_SerializeConfig()
+        assert Devtools_StringStartsWith(serialized, "cmd_list_group_batches=0\n")
+
+        viewer: mutable Devtools_Widget_CmdListViewer = Devtools_Widget_CmdList_New(0x1000.uintptr(), "test")
+        batch: Devtools_Widget_BatchInfo = Devtools_Widget_BatchInfo(1, "marker", 0, 4, 0x1000, PM4ItOpcode_DrawIndex2, false)
+        Devtools_Widget_CmdList_AddBatch(viewer, batch)
+        assert viewer.events.count == 1

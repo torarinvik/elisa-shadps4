@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+struct Devtools_Widget_ModuleInfo:
+    name: mutable static u8&
+    is_sys_module: mutable bool
+    is_lle: mutable bool
+
+struct Devtools_Widget_ModuleList:
+    open: mutable bool
+
+global mutable Devtools_Widget_Modules: darray[Devtools_Widget_ModuleInfo]
+
+def Devtools_Widget_PathStartsWith(path: static u8&, prefix: static u8&) -> bool:
+    prefix_len: usize = runtime_strlen(prefix)
+    if runtime_strlen(path) < prefix_len:
+        return false
+    return string_slice_eq(path, 0, prefix_len, prefix) == 1
+
+def Devtools_Widget_IsSystemModulePath(path: static u8&, sys_modules_path: static u8&) -> bool:
+    return Devtools_Widget_PathStartsWith(path, sys_modules_path)
+
+def Devtools_Widget_HasSuffix(input: static u8&, suffix: static u8&) -> bool:
+    input_len: usize = runtime_strlen(input)
+    suffix_len: usize = runtime_strlen(suffix)
+    if input_len < suffix_len:
+        return false
+    return string_slice_eq(input, input_len - suffix_len, suffix_len, suffix) == 1
+
+def Devtools_Widget_NormalizePrxName(name: static u8&) -> static u8& can[Memory.Allocate, Abort.Panic]:
+    if Devtools_Widget_HasSuffix(name, ".prx"):
+        return name
+    can Memory.Allocate, Abort.Panic:
+        builder: mutable heap StringBuilder& = string_builder_new(name)
+        builder <- string_builder_append(builder, ".prx")
+        return string_builder_finish(builder).cast[static u8&]
+    return name
+
+def Devtools_Widget_ModuleExists(name: static u8&, is_lle: bool) -> bool:
+    for i in 0..<Devtools_Widget_Modules.count:
+        entry: Devtools_Widget_ModuleInfo = Devtools_Widget_Modules[i]
+        if entry.is_lle == is_lle and streq(entry.name, name) == 1:
+            return true
+    return false
+
+def Devtools_Widget_AddModulePath(name: static u8&, path: static u8&, sys_modules_path: static u8&) -> void:
+    if streq(name, "eboot.bin") == 1:
+        return
+    if Devtools_Widget_ModuleExists(name, true):
+        return
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            Devtools_Widget_Modules.push(Devtools_Widget_ModuleInfo(name, Devtools_Widget_IsSystemModulePath(path, sys_modules_path), true))
+
+def Devtools_Widget_AddModuleName(name: static u8&, game_module_exists: bool) -> void:
+    normalized: static u8& = Devtools_Widget_NormalizePrxName(name)
+    is_sys_module: bool = not game_module_exists
+    if Devtools_Widget_ModuleExists(normalized, false):
+        return
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            Devtools_Widget_Modules.push(Devtools_Widget_ModuleInfo(normalized, is_sys_module, false))
+
+def Devtools_Widget_ModuleCount() -> usize:
+    return Devtools_Widget_Modules.count
+
+def Devtools_Widget_ModuleAt(index: usize) -> Devtools_Widget_ModuleInfo:
+    return Devtools_Widget_Modules[index]
+
+def Devtools_Widget_ModuleList_Draw(viewer: mutable Devtools_Widget_ModuleList&) -> void:
+    _ = viewer
