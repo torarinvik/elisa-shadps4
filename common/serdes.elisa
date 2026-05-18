@@ -11,18 +11,47 @@ struct Writer:
 struct Reader:
     archive: mutable Archive
 
-extern serdes_write_bytes(archive: mutable Archive&, data: void&, size: usize) -> void
-extern serdes_read_bytes(archive: mutable Archive&, data: mutable void&, size: usize) -> void
-
 def Writer_new() -> Writer:
     return Writer(Archive([], 0))
 
 def Reader_new(data: darray[u8]) -> Reader:
     return Reader(Archive(data, 0))
 
+def Archive_Grow(self: mutable Archive&, size: usize) -> void:
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        for i in 0..<size:
+            in owner:
+                self.data.push(0)
+
+def Archive_Advance(self: mutable Archive&, size: usize) -> void:
+    can Abort.Panic:
+        assert self.offset + size <= self.data.count
+    self.offset <- self.offset + size
+
+def serdes_write_bytes(archive: mutable Archive&, data: void&, size: usize) -> void:
+    if archive.offset + size >= archive.data.count:
+        can Memory.Allocate, Abort.Panic:
+            Archive_Grow(archive, size)
+    source: u8& = data.cast[u8&]
+    for i in 0..<size:
+        archive.data[archive.offset + i] <- source[i]
+    can Abort.Panic:
+        Archive_Advance(archive, size)
+
+def serdes_read_bytes(archive: mutable Archive&, data: mutable void&, size: usize) -> void:
+    can Abort.Panic:
+        assert archive.offset + size <= archive.data.count
+    dest: mutable u8& = data.cast[mutable u8&]
+    for i in 0..<size:
+        dest[i] <- archive.data[archive.offset + i]
+    can Abort.Panic:
+        Archive_Advance(archive, size)
+
 def Writer_write[T](self: mutable Writer&, value: T&) -> void:
-    serdes_write_bytes(self.archive.ref[mutable Archive&], value.cast[void&], size_of(T))
+    can Memory.Allocate, Abort.Panic:
+        serdes_write_bytes(self.archive.ref[mutable Archive&], value.cast[void&], size_of(T))
 
 def Reader_read[T](self: mutable Reader&, out: mutable T&) -> void:
-    serdes_read_bytes(self.archive.ref[mutable Archive&], out.cast[mutable void&], size_of(T))
-
+    can Abort.Panic:
+        serdes_read_bytes(self.archive.ref[mutable Archive&], out.cast[mutable void&], size_of(T))

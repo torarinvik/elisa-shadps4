@@ -9,43 +9,46 @@ struct Div128Result:
     quotient: mutable u64
     remainder: mutable u64
 
-extern multiply_and_divide_64(a: u64, b: u64, d: u64) -> u64
-extern multiply_and_divide_64_u128(a: u64, b: u64, d: u64) -> u64
-extern multiply_and_divide_64_intrinsic(a: u64, b: u64, d: u64) -> u64
-extern multiply_64_into_128(a: u64, b: u64) -> U128Product
-extern multiply_64_into_128_u128(a: u64, b: u64) -> U128Product
-extern multiply_64_into_128_intrinsic(a: u64, b: u64) -> U128Product
-extern multiply_high_64(a: u64, b: u64) -> u64
-extern multiply_high_64_u128(a: u64, b: u64) -> u64
-extern multiply_high_64_intrinsic(a: u64, b: u64) -> u64
-extern divide_128_on_32(low: u64, high: u64, divisor: u32) -> Div128Result
-
 def MultiplyAndDivide64(a: u64, b: u64, d: u64) -> u64:
-    static if HAS_U128:
-        return multiply_and_divide_64_u128(a, b, d)
-    static elif COMPILER_MSVC:
-        return multiply_and_divide_64_intrinsic(a, b, d)
-    static else:
-        return multiply_and_divide_64(a, b, d)
+    diva: u64 = a / d
+    moda: u64 = a % d
+    divb: u64 = b / d
+    modb: u64 = b % d
+    return diva * b + moda * divb + moda * modb / d
 
 def Multiply64Into128(a: u64, b: u64) -> U128Product:
-    static if HAS_U128:
-        return multiply_64_into_128_u128(a, b)
-    static elif COMPILER_MSVC:
-        return multiply_64_into_128_intrinsic(a, b)
-    static else:
-        return multiply_64_into_128(a, b)
+    return U128Product(a * b, MultiplyHigh(a, b))
 
 def GetFixedPoint64Factor(numerator: u64, divisor: u64) -> u64:
-    return MultiplyAndDivide64(numerator, 1.u64() << 63, divisor) << 1
+    return MultiplyAndDivide64(0xffffffffffffffff, numerator, divisor)
 
 def MultiplyHigh(a: u64, b: u64) -> u64:
-    static if HAS_U128:
-        return multiply_high_64_u128(a, b)
-    static elif COMPILER_MSVC:
-        return multiply_high_64_intrinsic(a, b)
-    static else:
-        return multiply_high_64(a, b)
+    a_lo: u64 = a.u32().u64()
+    a_hi: u64 = a >> 32
+    b_lo: u64 = b.u32().u64()
+    b_hi: u64 = b >> 32
+
+    a_x_b_hi: u64 = a_hi * b_hi
+    a_x_b_mid: u64 = a_hi * b_lo
+    b_x_a_mid: u64 = b_hi * a_lo
+    a_x_b_lo: u64 = a_lo * b_lo
+
+    carry_bit: u64 = (a_x_b_mid.u32().u64() + b_x_a_mid.u32().u64() + (a_x_b_lo >> 32)) >> 32
+    return a_x_b_hi + (a_x_b_mid >> 32) + (b_x_a_mid >> 32) + carry_bit
 
 def Divide128On32(dividend: U128Product, divisor: u32) -> Div128Result:
-    return divide_128_on_32(dividend.low, dividend.high, divisor)
+    divisor64: u64 = divisor.u64()
+    remainder: mutable u64 = dividend.low % divisor64
+    accum: mutable u64 = dividend.low / divisor64
+    if dividend.high == 0:
+        return Div128Result(accum, remainder)
+
+    first_segment: u64 = (dividend.high % divisor64) << 32
+    accum <- accum + ((first_segment / divisor64) << 32)
+    second_segment: u64 = (first_segment % divisor64) << 32
+    accum <- accum + (second_segment / divisor64)
+    remainder <- remainder + (second_segment % divisor64)
+    if remainder >= divisor64:
+        accum <- accum + 1
+        remainder <- remainder - divisor64
+    return Div128Result(accum, remainder)

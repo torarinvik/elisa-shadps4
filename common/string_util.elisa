@@ -2,17 +2,42 @@
 # SPDX-FileCopyrightText: 2014 Citra Emulator Project
 # SPDX-License-Identifier: GPL-2.0-or-later
 
-extern runtime_strlen(value: static u8&) -> usize
-extern ascii_tolower(value: u8) -> u8
-extern string_alloc(size: usize) -> mutable heap u8&
-extern string_push_char(out: mutable darray[static u8&], value: static u8&) -> void
-extern string_substr(input: static u8&, start: usize, len: usize) -> static u8&
 extern wide_to_utf8(input: void&) -> static u8&
 extern utf8_to_wide(input: static u8&) -> void&
 
+def ascii_tolower(value: u8) -> u8:
+    if value >= 'A' and value <= 'Z':
+        return value + ('a' - 'A')
+    return value
+
+def string_alloc(size: usize) -> mutable heap u8&:
+    out: mutable heap u8& = zeroed
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        out <- arena_heap_u8_from_alloc(arena_alloc(owner, size))
+    return out
+
+def string_substr_in(owner: mutable Arena&, input: static u8&, start: usize, len: usize) -> static u8&:
+    out: mutable heap u8& = zeroed
+    can Memory.Allocate, Abort.Panic:
+        out <- arena_heap_u8_from_alloc(arena_alloc(owner, len + 1))
+    for i in 0..<len:
+        out[i] <- input[start + i]
+    out[len] <- 0
+    return out.cast[static u8&]
+
+def string_substr(input: static u8&, start: usize, len: usize) -> static u8&:
+    owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+    out: mutable static u8& = ""
+    can Memory.Allocate, Abort.Panic:
+        out <- string_substr_in(owner, input, start, len)
+    return out
+
 def ToLower(input: static u8&) -> static u8&:
     len: usize = runtime_strlen(input)
-    out: mutable heap u8& = string_alloc(len + 1)
+    out: mutable heap u8& = zeroed
+    can Memory.Allocate, Abort.Panic:
+        out <- string_alloc(len + 1)
     for i in 0..<len:
         out[i] <- ascii_tolower(input[i])
     out[len] <- 0
@@ -30,12 +55,18 @@ def SplitString(owner: mutable Arena&, str: static u8&, delimiter: u8) -> darray
 
     for i in 0..<len:
         if str[i] == delimiter:
+            part: mutable static u8& = ""
+            can Memory.Allocate, Abort.Panic:
+                part <- string_substr_in(owner, str, start, i - start)
             in owner:
-                output.push(string_substr(str, start, i - start))
+                output.push(part)
             start <- i + 1
 
+    part: mutable static u8& = ""
+    can Memory.Allocate, Abort.Panic:
+        part <- string_substr_in(owner, str, start, len - start)
     in owner:
-        output.push(string_substr(str, start, len - start))
+        output.push(part)
     return output
 
 def U8stringToString(u8str: static u8&) -> static u8&:
