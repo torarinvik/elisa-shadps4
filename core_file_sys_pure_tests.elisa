@@ -1,0 +1,69 @@
+include "../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "./common/arch.elisa"
+include "./common/io_file.elisa"
+include "./core/file_sys/bridge.elisa"
+include "./core/file_sys/devices/devices.elisa"
+include "./core/file_sys/directories/directories.elisa"
+include "./core/file_sys/file.elisa"
+include "./core/file_sys/fs.elisa"
+
+@test
+def file_sys_mount_points_use_longest_prefix_and_readonly() -> void:
+    can Memory.Allocate, Abort.Panic:
+        mnt: mutable MntPoints = MntPoints_new()
+        MntPoints_Mount(mnt, "/host/root", "/app0", false)
+        MntPoints_Mount(mnt, "/host/patch", "/app0/patch", true)
+        is_ro: mutable bool = false
+        host: static u8& = MntPoints_GetHostPath(mnt, "/app0/patch/data.bin", is_ro.ref[mutable bool&])
+        assert string_slice_eq(host, 0, runtime_strlen("/host/patch/data.bin"), "/host/patch/data.bin") == 1
+        assert is_ro
+
+@test
+def file_sys_handle_table_reuses_released_handles() -> void:
+    can Memory.Allocate, Abort.Panic:
+        table: mutable HandleTable = HandleTable_new()
+        a: s32 = HandleTable_CreateHandle(table)
+        b: s32 = HandleTable_CreateHandle(table)
+        assert a == 0
+        assert b == 1
+        HandleTable_DeleteHandle(table, a)
+        c: s32 = HandleTable_CreateHandle(table)
+        assert c == 0
+
+@test
+def file_sys_file_handle_lseek_validates_inputs() -> void:
+    fh: mutable FileHandle = FileHandle_new()
+    assert FileHandle_Lseek(fh, 0, 0) == ORBIS_KERNEL_ERROR_EBADF.i64()
+    fh.opened <- true
+    fh.size <- 100
+    assert FileHandle_Lseek(fh, -1, 0) == ORBIS_KERNEL_ERROR_EINVAL.i64()
+    assert FileHandle_Lseek(fh, 10, 0) == 10
+    assert FileHandle_Lseek(fh, 5, 1) == 15
+    assert FileHandle_Lseek(fh, -5, 2) == 95
+    assert FileHandle_Lseek(fh, 0, 9) == ORBIS_KERNEL_ERROR_EINVAL.i64()
+
+@test
+def file_sys_dirent_serialization_aligns_and_terminates_name() -> void:
+    can Memory.Allocate, Abort.Panic:
+        base: mutable BaseDirectory = BaseDirectory_new()
+        entries: mutable array[ElisaFsDirEntry, 1] = zeroed
+        entries[0].name <- "hello.txt"
+        entries[0].is_file <- 1
+        entries[0].dtype <- ELISA_DTYPE_FILE
+        entries[0].fileno <- 123
+        BaseDirectory_RebuildCacheFromEntries(base, entries[0].ref[ElisaFsDirEntry&], 1)
+        assert base.dirent_cache_bin.count >= ORBIS_DIRENT_BASE_SIZE + runtime_strlen("hello.txt") + 1
+        assert base.dirent_cache_bin[base.dirent_cache_bin.count - 1] == 0
+        assert base.dirent_cache_bin.count % ORBIS_DIRENT_ALIGN == 0
+
+@test
+def file_sys_devices_use_character_stats_and_enotdir_for_getdents() -> void:
+    random_dev: mutable RandomDevice = RandomDevice_Create(3)
+    rng_dev: mutable RngDevice = RngDevice_Create(4)
+    stat1: mutable OrbisKernelStat = zeroed
+    stat2: mutable OrbisKernelStat = zeroed
+    assert RandomDevice_fstat(random_dev, stat1.ref[mutable OrbisKernelStat&]) == ORBIS_OK.i32()
+    assert RngDevice_fstat(rng_dev, stat2.ref[mutable OrbisKernelStat&]) == ORBIS_OK.i32()
+    assert stat1.st_mode == DEVICE_CHAR_MODE
+    assert stat2.st_mode == DEVICE_CHAR_MODE
+    assert Device_StubGetdents("x", null, 0, null) == ORBIS_KERNEL_ERROR_ENOTDIR.i64()
