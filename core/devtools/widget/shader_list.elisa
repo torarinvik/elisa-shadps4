@@ -9,11 +9,22 @@ struct Devtools_Widget_ShaderSelection:
     showing_bin: mutable bool
     patch_path: mutable static u8&
     patch_bin_path: mutable static u8&
+    is_patched: mutable bool
+    has_patch_spv: mutable bool
+    loaded_data: mutable bool
 
 struct Devtools_Widget_ShaderList:
     open_shaders: mutable darray[Devtools_Widget_ShaderSelection]
     search_box: mutable static u8&
     open: mutable bool
+
+def Devtools_Widget_ShaderList_FindOpenShader(list: Devtools_Widget_ShaderList&, index: int) -> i32:
+    i: mutable usize = 0
+    while i < list.open_shaders.count:
+        if list.open_shaders[i].index == index:
+            return i.i32()
+        i <- i + 1
+    return -1
 
 def Devtools_Widget_ShaderSelection_New(index: int) -> Devtools_Widget_ShaderSelection:
     out: mutable Devtools_Widget_ShaderSelection = zeroed
@@ -30,23 +41,155 @@ def Devtools_Widget_ShaderSelection_ReloadShader(selection: mutable Devtools_Wid
     selection.glsl_editor.text <- glsl_text
     selection.isa_editor.text_changed <- true
     selection.glsl_editor.text_changed <- true
+    selection.loaded_data <- true
+
+def Devtools_Widget_ShaderSelection_ApplyPatchedState(selection: mutable Devtools_Widget_ShaderSelection&, cache_isa_disasm: static u8&, cache_spv_disasm: static u8&, cache_patch_disasm: static u8&, patch_source: static u8&) -> void:
+    if selection.is_patched:
+        Devtools_Widget_TextEditor_SetLanguageSPIRV(selection.isa_editor)
+        selection.isa_editor.text <- cache_patch_disasm
+        if runtime_strlen(patch_source) == 0:
+            selection.glsl_editor.text <- cache_spv_disasm
+        else:
+            selection.glsl_editor.text <- patch_source
+        selection.glsl_editor.read_only <- false
+    else:
+        selection.isa_editor.language_name <- ""
+        selection.isa_editor.text <- cache_isa_disasm
+        selection.glsl_editor.text <- cache_spv_disasm
+        selection.glsl_editor.read_only <- true
+    selection.isa_editor.text_changed <- true
+    selection.glsl_editor.text_changed <- true
+
+def Devtools_Widget_ShaderSelection_EnablePatch(selection: mutable Devtools_Widget_ShaderSelection&, enabled: bool) -> void:
+    selection.is_patched <- enabled
+    if enabled:
+        selection.isa_editor.language_name <- "SPIR-V"
+        selection.glsl_editor.language_name <- "GLSL"
+        selection.glsl_editor.read_only <- false
+    else:
+        selection.isa_editor.language_name <- ""
+        selection.glsl_editor.language_name <- "GLSL"
+        selection.glsl_editor.read_only <- true
+
+def Devtools_Widget_ShaderSelection_TogglePatch(selection: mutable Devtools_Widget_ShaderSelection&) -> bool:
+    new_state: bool = not selection.is_patched
+    Devtools_Widget_ShaderSelection_EnablePatch(selection, new_state)
+    return new_state
+
+def Devtools_Widget_ShaderSelection_ShaderTypeLabel(selection: Devtools_Widget_ShaderSelection&) -> static u8&:
+    if selection.is_patched:
+        if selection.showing_bin:
+            return "SPIRV"
+        return "GLSL"
+    if selection.showing_bin:
+        return "ISA"
+    return "GLSL"
+
+def Devtools_Widget_ShaderSelection_SetShaderType(selection: mutable Devtools_Widget_ShaderSelection&, label: static u8&) -> bool:
+    if selection.is_patched:
+        if streq(label, "SPIRV") == 1:
+            selection.showing_bin <- true
+            return true
+        if streq(label, "GLSL") == 1:
+            selection.showing_bin <- false
+            return true
+        return false
+    if streq(label, "ISA") == 1:
+        selection.showing_bin <- true
+        return true
+    if streq(label, "GLSL") == 1:
+        selection.showing_bin <- false
+        return true
+    return false
+
+def Devtools_Widget_ShaderList_StageArg(logical_stage: int) -> static u8&:
+    if logical_stage == 0:
+        return "vert"
+    if logical_stage == 1:
+        return "tesc"
+    if logical_stage == 2:
+        return "tese"
+    if logical_stage == 3:
+        return "geom"
+    if logical_stage == 4:
+        return "frag"
+    if logical_stage == 5:
+        return "comp"
+    return ""
+
+def Devtools_Widget_ShaderList_MatchesSearch(name: static u8&, search: static u8&) -> bool:
+    search_len: usize = runtime_strlen(search)
+    if search_len == 0:
+        return true
+    name_len: usize = runtime_strlen(name)
+    if search_len > name_len:
+        return false
+    i: mutable usize = 0
+    while i + search_len <= name_len:
+        if string_slice_eq(name, i, search_len, search) == 1:
+            return true
+        i <- i + 1
+    return false
+
+def Devtools_Widget_ShaderList_DisplayName(name: static u8&, is_patched: bool, has_patch_spv: bool) -> static u8&:
+    if is_patched:
+        can Memory.Allocate, Abort.Panic:
+            builder: mutable heap StringBuilder& = string_builder_new(name)
+            builder <- string_builder_append(builder, " (PATCH ON)")
+            return string_builder_finish(builder).cast[static u8&]
+    if has_patch_spv:
+        can Memory.Allocate, Abort.Panic:
+            builder2: mutable heap StringBuilder& = string_builder_new(name)
+            builder2 <- string_builder_append(builder2, " (PATCH OFF)")
+            return string_builder_finish(builder2).cast[static u8&]
+    return name
 
 def Devtools_Widget_ShaderList_OpenShader(list: mutable Devtools_Widget_ShaderList&, index: int) -> void:
+    if Devtools_Widget_ShaderList_FindOpenShader(list, index) != -1:
+        return
     can Memory.Allocate, Abort.Panic:
         owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
         in owner:
             list.open_shaders.push(Devtools_Widget_ShaderSelection_New(index))
 
+def Devtools_Widget_ShaderList_PruneClosedShaders(list: mutable Devtools_Widget_ShaderList&) -> usize:
+    write_i: mutable usize = 0
+    read_i: mutable usize = 0
+    while read_i < list.open_shaders.count:
+        if list.open_shaders[read_i].open:
+            if write_i != read_i:
+                list.open_shaders[write_i] <- list.open_shaders[read_i]
+            write_i <- write_i + 1
+        read_i <- read_i + 1
+    removed: usize = list.open_shaders.count - write_i
+    list.open_shaders.count <- write_i
+    return removed
+
+def Devtools_Widget_ShaderList_CloseShader(list: mutable Devtools_Widget_ShaderList&, index: int) -> bool:
+    i: mutable usize = 0
+    while i < list.open_shaders.count:
+        if list.open_shaders[i].index == index:
+            if i + 1 < list.open_shaders.count:
+                j: mutable usize = i
+                while j + 1 < list.open_shaders.count:
+                    list.open_shaders[j] <- list.open_shaders[j + 1]
+                    j <- j + 1
+            list.open_shaders.count <- list.open_shaders.count - 1
+            return true
+        i <- i + 1
+    return false
+
 def Devtools_Widget_ShaderList_Draw(list: mutable Devtools_Widget_ShaderList&) -> void:
     if not list.open:
         return
+    _ = Devtools_Widget_ShaderList_PruneClosedShaders(list)
     if elisa_imgui_begin("Shader List", list.open.ref[mutable bool&], 0):
-        if runtime_strlen(list.search_box) > 0:
-            elisa_imgui_text_unformatted(list.search_box)
         for i in 0..<list.open_shaders.count:
             selection: mutable Devtools_Widget_ShaderSelection& = list.open_shaders[i].ref[mutable Devtools_Widget_ShaderSelection&]
-            if selection.open:
-                if elisa_imgui_collapsing_header("Shader", 0):
+            header_name: static u8& = Devtools_Widget_ShaderList_DisplayName("Shader", selection.is_patched, selection.has_patch_spv)
+            if selection.open and Devtools_Widget_ShaderList_MatchesSearch(header_name, list.search_box):
+                if elisa_imgui_collapsing_header(header_name, 0):
+                    elisa_imgui_text_unformatted(Devtools_Widget_ShaderSelection_ShaderTypeLabel(selection))
                     if selection.showing_bin:
                         elisa_imgui_text_unformatted("Binary")
                     else:

@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+struct NormalDirectory:
+    base: mutable BaseDirectory
+    guest_directory: mutable static u8&
+    previous_file_offset: mutable s64
+
+def NormalDirectory_new(guest_directory: static u8&) -> NormalDirectory:
+    out: mutable NormalDirectory = NormalDirectory(BaseDirectory_new(), guest_directory, -1)
+    NormalDirectory_RebuildDirents(out)
+    return out
+
+def NormalDirectory_Create(guest_directory: static u8&) -> NormalDirectory:
+    return NormalDirectory_new(guest_directory)
+
+def NormalDirectory_read(self: mutable NormalDirectory&, buf: mutable void&?, nbytes: u64) -> s64:
+    NormalDirectory_RebuildDirents(self)
+    bytes_available: mutable s64 = self.base.dirent_cache_bin.count.i64() - self.base.file_offset
+    if bytes_available <= 0:
+        return 0
+    if bytes_available > nbytes.i64():
+        bytes_available <- nbytes.i64()
+    if buf == null:
+        return 0
+    raw: mutable u8& = buf.cast[mutable u8&]
+    for i in 0..<bytes_available:
+        raw[i.usize()] <- self.base.dirent_cache_bin[(self.base.file_offset + i).usize()]
+    self.base.file_offset <- self.base.file_offset + bytes_available
+    return bytes_available
+
+def NormalDirectory_fstat(self: mutable NormalDirectory&, stat: mutable OrbisKernelStat&?) -> s32:
+    if stat == null:
+        return ORBIS_KERNEL_ERROR_EBADF.i32()
+    st: mutable OrbisKernelStat& = stat
+    st.st_mode <- 511 | 16384
+    st.st_size <- self.base.directory_size.i64()
+    st.st_blksize <- 32768
+    st.st_blocks <- 8
+    return ORBIS_OK.i32()
+
+def NormalDirectory_getdents(self: mutable NormalDirectory&, buf: mutable void&?, nbytes: u64, basep: mutable s64&?) -> s64:
+    out: s64 = NormalDirectory_read(self, buf, nbytes)
+    if basep != null:
+        basep <- self.base.file_offset
+    return out
+
+def NormalDirectory_RebuildDirents(self: mutable NormalDirectory&) -> void:
+    if self.previous_file_offset == self.base.file_offset and self.base.dirent_cache_bin.count != 0:
+        return
+    self.previous_file_offset <- self.base.file_offset
+    entries: mutable array[ElisaFsDirEntry, 512] = zeroed
+    count: usize = elisa_filesys_iterate_directory(self.guest_directory, entries[0].ref[mutable ElisaFsDirEntry&], 512)
+    BaseDirectory_RebuildCacheFromEntries(self.base, entries[0].ref[ElisaFsDirEntry&], count)

@@ -1,6 +1,7 @@
 include "../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
 include "./common/string_util.elisa"
 include "./core/devtools/options.elisa"
+include "./core/devtools/layer_extra.elisa"
 include "./core/devtools/gcn/gcn.elisa"
 include "./core/devtools/widget/common.elisa"
 include "./core/devtools/widget/imgui_abi.elisa"
@@ -98,6 +99,42 @@ def devtools_widget_memory_and_frame_helpers_match_cpp_defaults() -> void:
         assert Devtools_Widget_FrameGraph_GetFrame(graph, 1).num == 1025
         Devtools_Widget_FrameGraph_UpdateStats(graph, 20.0)
         assert graph.frameRate == 50.0
+        assert Devtools_Widget_FrameGraph_DtFactor(60, 1.0 / 60.0) >= 0.99
+        assert Devtools_Widget_FrameGraph_BarWidth(0.5) == 3.0
+        high_height: f32 = Devtools_Widget_FrameGraph_BarHeight(0.25)
+        assert high_height > 0.0
+        assert high_height <= Devtools_Widget_FrameGraphHeight
+        assert Devtools_Widget_FrameGraph_ColorBand(1.0) == Devtools_Widget_FrameGraphColorBand.Blue
+        assert Devtools_Widget_FrameGraph_ColorBand(0.75) == Devtools_Widget_FrameGraphColorBand.GreenYellow
+        assert Devtools_Widget_FrameGraph_ColorBand(0.25) == Devtools_Widget_FrameGraphColorBand.YellowRed
+        assert streq(Devtools_Widget_SmallIntToStr(-1), "NA") == 1
+        assert streq(Devtools_Widget_SmallIntToStr(5), "05") == 1
+        assert streq(Devtools_Widget_SmallIntToStr(42), "42") == 1
+        assert streq(Devtools_Widget_QueueTypeLabel(Devtools_Widget_QueueTypeDcb), "dcb") == 1
+        assert streq(Devtools_Widget_QueueTypeLabel(Devtools_Widget_QueueTypeAcb), "acb") == 1
+
+        dump_view: mutable Devtools_Widget_FrameDumpViewer = Devtools_Widget_FrameDumpViewer_New()
+        Devtools_Widget_FrameDumpViewer_AddQueue(dump_view, Devtools_Widget_QueueTypeCcb, 1, 0, true)
+        Devtools_Widget_FrameDumpViewer_AddQueue(dump_view, Devtools_Widget_QueueTypeDcb, 0, 0, true)
+        Devtools_Widget_FrameDumpViewer_AddQueue(dump_view, Devtools_Widget_QueueTypeAcb, 1, 2, true)
+        assert dump_view.has_queue_type[Devtools_Widget_QueueTypeCcb.usize()]
+        assert dump_view.selected_cmd == 1
+        dump_view.selected_queue_type <- Devtools_Widget_QueueTypeCcb
+        dump_view.selected_submit_num <- -1
+        dump_view.selected_queue_num2 <- -1
+        assert Devtools_Widget_FrameDumpViewer_TrySelect(dump_view)
+        assert dump_view.selected_cmd == 0
+        assert dump_view.selected_submit_num == 1
+        assert streq(Devtools_Widget_FrameDumpViewer_SelectedQueueNum2Label(dump_view), "Buffer num") == 1
+        assert Devtools_Widget_FrameDumpViewer_SetQueueType(dump_view, Devtools_Widget_QueueTypeAcb)
+        assert streq(Devtools_Widget_FrameDumpViewer_SelectedQueueNum2Label(dump_view), "Queue num") == 1
+        submits: array[bool, 32] = Devtools_Widget_FrameDumpViewer_AvailableSubmits(dump_view)
+        assert submits[1]
+        assert Devtools_Widget_FrameDumpViewer_SelectSubmitNum(dump_view, 1)
+        queues2: array[bool, 32] = Devtools_Widget_FrameDumpViewer_AvailableQueueNum2(dump_view)
+        assert queues2[2]
+        assert Devtools_Widget_FrameDumpViewer_SelectQueueNum2(dump_view, 2)
+        assert dump_view.selected_queue_num2 == 2
 
 @test
 def devtools_widget_text_and_shader_helpers_keep_editor_state() -> void:
@@ -134,12 +171,43 @@ def devtools_widget_text_and_shader_helpers_keep_editor_state() -> void:
         Devtools_Widget_TextEditor_MoveTop(editor, false)
         assert editor.cursor_position.mLine == 0
         assert editor.cursor_position.mColumn == 0
+        Devtools_Widget_TextEditor_SetText(editor, "alpha beta\ngamma")
+        Devtools_Widget_TextEditor_SetCursorPosition(editor, Devtools_Widget_Coordinates(0, 8))
+        Devtools_Widget_TextEditor_MoveLeftWord(editor, false)
+        assert editor.cursor_position.mColumn == 6
+        Devtools_Widget_TextEditor_MoveRightWord(editor, false)
+        assert editor.cursor_position.mColumn == 10
+        Devtools_Widget_TextEditor_SetCursorPosition(editor, Devtools_Widget_Coordinates(0, 7))
+        Devtools_Widget_TextEditor_SelectWordUnderCursor(editor)
+        assert streq(Devtools_Widget_TextEditor_GetSelectedText(editor), "beta") == 1
 
         selection: mutable Devtools_Widget_ShaderSelection = Devtools_Widget_ShaderSelection_New(7)
         Devtools_Widget_ShaderSelection_ReloadShader(selection, "OpCapability Shader", "void main() {}")
         assert selection.index == 7
         assert selection.open
         assert streq(selection.isa_editor.language_name, "SPIR-V") == 1
+        assert selection.loaded_data
+        selection.is_patched <- true
+        Devtools_Widget_ShaderSelection_ApplyPatchedState(selection, "isa_a", "spv_a", "patch_bin_a", "patch_src_a")
+        assert streq(selection.isa_editor.text, "patch_bin_a") == 1
+        assert streq(selection.glsl_editor.text, "patch_src_a") == 1
+        assert not selection.glsl_editor.read_only
+        selection.is_patched <- false
+        Devtools_Widget_ShaderSelection_ApplyPatchedState(selection, "isa_b", "spv_b", "patch_bin_b", "")
+        assert streq(selection.isa_editor.text, "isa_b") == 1
+        assert streq(selection.glsl_editor.text, "spv_b") == 1
+        assert selection.glsl_editor.read_only
+        shader_list: mutable Devtools_Widget_ShaderList = zeroed
+        Devtools_Widget_ShaderList_OpenShader(shader_list, 7)
+        Devtools_Widget_ShaderList_OpenShader(shader_list, 7)
+        assert shader_list.open_shaders.count == 1
+        Devtools_Widget_ShaderList_OpenShader(shader_list, 9)
+        assert Devtools_Widget_ShaderList_FindOpenShader(shader_list, 9) == 1
+        shader_list.open_shaders[0].open <- false
+        removed_count: usize = Devtools_Widget_ShaderList_PruneClosedShaders(shader_list)
+        assert removed_count == 1
+        assert shader_list.open_shaders.count == 1
+        assert shader_list.open_shaders[0].index == 9
 
         popup: mutable Devtools_Widget_RegPopup = Devtools_Widget_RegPopup_New()
         Devtools_Widget_RegPopup_SetColorData(popup, "Batch 3", 0x12340000, 2)
@@ -212,3 +280,9 @@ def devtools_widget_module_and_cmd_config_helpers_are_elisa_owned() -> void:
         Devtools_Widget_CmdList_AddBatch(viewer, batch)
         assert viewer.events.count == 1
         assert streq(Devtools_Widget_CmdList_EventTypeLabel(viewer.events[0]), "draw") == 1
+        assert streq(Devtools_Widget_CmdList_QueueName(3), "ASC") == 1
+        assert streq(Devtools_Widget_CmdList_QueueName(254), "ASC") == 1
+        assert streq(Devtools_Widget_CmdList_QueueName(255), "GFX") == 1
+        assert not Devtools_Widget_CmdList_IsStateBatch(batch)
+        state_batch: Devtools_Widget_BatchInfo = Devtools_Widget_BatchInfo(2, "", 16, 24, 0, 0xff, false)
+        assert Devtools_Widget_CmdList_IsStateBatch(state_batch)

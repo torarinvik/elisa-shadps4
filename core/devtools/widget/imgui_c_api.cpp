@@ -4,6 +4,9 @@
 #include "imgui_c_api.h"
 
 #include <imgui.h>
+#include <imgui_internal.h>
+
+#include "imgui/imgui_std.h"
 
 extern "C" {
 
@@ -227,6 +230,88 @@ const char* elisa_imgui_get_clipboard_text() {
 
 void elisa_imgui_set_clipboard_text(const char* text) {
     ImGui::SetClipboardText(text);
+}
+
+float elisa_imgui_get_time() {
+    return static_cast<float>(ImGui::GetTime());
+}
+
+bool elisa_imgui_current_window_skip_items() {
+    ImGuiWindow* window = ImGui::GetCurrentWindow();
+    return window != nullptr && window->SkipItems;
+}
+
+ElisaImGuiVec2 elisa_imgui_get_current_window_size() {
+    ImGuiWindow* window = ImGui::GetCurrentWindow();
+    if (window == nullptr) {
+        return ElisaImGuiVec2{0.0f, 0.0f};
+    }
+    return ElisaImGuiVec2{window->Size.x, window->Size.y};
+}
+
+ElisaImGuiVec2 elisa_imgui_get_current_window_pos() {
+    ImGuiWindow* window = ImGui::GetCurrentWindow();
+    if (window == nullptr) {
+        return ElisaImGuiVec2{0.0f, 0.0f};
+    }
+    return ElisaImGuiVec2{window->Pos.x, window->Pos.y};
+}
+
+static ImFont* GetIndexedFont(int font_index) {
+    ImGuiIO& io = ImGui::GetIO();
+    if (font_index >= 0 && font_index < io.Fonts->Fonts.Size) {
+        return io.Fonts->Fonts[font_index];
+    }
+    return io.FontDefault ? io.FontDefault : ImGui::GetFont();
+}
+
+float elisa_imgui_font_size(int font_index) {
+    ImFont* font = GetIndexedFont(font_index);
+    return font != nullptr ? font->FontSize : 0.0f;
+}
+
+ElisaImGuiVec2 elisa_imgui_font_calc_text_size(int font_index, float font_size, const char* text) {
+    ImFont* font = GetIndexedFont(font_index);
+    if (font == nullptr || text == nullptr) {
+        return ElisaImGuiVec2{0.0f, 0.0f};
+    }
+    const ImVec2 size = font->CalcTextSizeA(font_size, FLT_MAX, 0.0f, text, nullptr, nullptr);
+    return ElisaImGuiVec2{size.x, size.y};
+}
+
+float elisa_imgui_font_glyph_advance(int font_index, uint32_t codepoint, float scale) {
+    ImFont* font = GetIndexedFont(font_index);
+    if (font == nullptr) {
+        return 0.0f;
+    }
+    const ImFontGlyph* glyph = font->FindGlyph(static_cast<ImWchar>(codepoint));
+    const float advance = glyph != nullptr ? glyph->AdvanceX : font->FallbackAdvanceX;
+    return advance * scale;
+}
+
+void elisa_imgui_window_draw_text_font(int font_index, float font_size, float x, float y, uint32_t color,
+                                       const char* text) {
+    ImGuiWindow* window = ImGui::GetCurrentWindow();
+    ImFont* font = GetIndexedFont(font_index);
+    if (window == nullptr || font == nullptr || text == nullptr) {
+        return;
+    }
+    window->DrawList->AddText(font, font_size, ImVec2{x, y}, color, text);
+}
+
+void elisa_imgui_window_draw_text_char(int font_index, float font_size, float x, float y,
+                                       uint32_t color, uint32_t codepoint) {
+    ImGuiWindow* window = ImGui::GetCurrentWindow();
+    ImFont* font = GetIndexedFont(font_index);
+    if (window == nullptr || font == nullptr) {
+        return;
+    }
+    char buffer[8]{};
+    int len = ImTextCharToUtf8(buffer, static_cast<unsigned int>(codepoint));
+    if (len <= 0) {
+        return;
+    }
+    window->DrawList->AddText(font, font_size, ImVec2{x, y}, color, buffer, buffer + len);
 }
 
 } // extern "C"

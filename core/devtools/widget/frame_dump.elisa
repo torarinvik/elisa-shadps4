@@ -7,8 +7,18 @@ struct Devtools_Widget_FrameDumpViewer:
     selected_submit_num: mutable i32
     selected_queue_num2: mutable i32
     selected_cmd: mutable i32
+    queue_count: mutable usize
+    queue_types: mutable array[int, 64]
+    queue_submit_nums: mutable array[i32, 64]
+    queue_num2s: mutable array[i32, 64]
+    queue_has_data: mutable array[bool, 64]
+    has_queue_type: mutable array[bool, 3]
     filter: mutable Devtools_Widget_CmdListFilter
     is_open: mutable bool
+
+const Devtools_Widget_QueueTypeDcb: int = 0
+const Devtools_Widget_QueueTypeCcb: int = 1
+const Devtools_Widget_QueueTypeAcb: int = 2
 
 global mutable Devtools_Widget_FrameDumpViewerNextId: int = 0
 
@@ -16,26 +26,116 @@ def Devtools_Widget_FrameDumpViewer_New() -> Devtools_Widget_FrameDumpViewer:
     out: mutable Devtools_Widget_FrameDumpViewer = zeroed
     out.id <- Devtools_Widget_FrameDumpViewerNextId
     Devtools_Widget_FrameDumpViewerNextId <- Devtools_Widget_FrameDumpViewerNextId + 1
+    out.selected_queue_type <- Devtools_Widget_QueueTypeDcb
+    out.selected_submit_num <- 0
+    out.selected_queue_num2 <- 0
     out.selected_cmd <- -1
     out.is_open <- true
     return out
 
+def Devtools_Widget_QueueTypeLabel(queue_type: int) -> static u8&:
+    if queue_type == Devtools_Widget_QueueTypeDcb:
+        return "dcb"
+    if queue_type == Devtools_Widget_QueueTypeCcb:
+        return "ccb"
+    if queue_type == Devtools_Widget_QueueTypeAcb:
+        return "acb"
+    return "unknown"
+
 def Devtools_Widget_SmallIntToStr(value: i32) -> static u8&:
     if value < 0:
-        return "--"
-    if value < 10:
-        can Memory.Allocate, Abort.Panic:
-            out: mutable heap u8& = string_alloc(2)
-            out[0] <- '0' + value.u8()
-            out[1] <- 0
-            return out.cast[static u8&]
+        return "NA"
+    if value > 99:
+        return "99"
     can Memory.Allocate, Abort.Panic:
         out2: mutable heap u8& = string_alloc(3)
         out2[0] <- '0' + ((value / 10) % 10).u8()
         out2[1] <- '0' + (value % 10).u8()
         out2[2] <- 0
         return out2.cast[static u8&]
-    return "--"
+    return "NA"
+
+def Devtools_Widget_FrameDumpViewer_AddQueue(viewer: mutable Devtools_Widget_FrameDumpViewer&, queue_type: int, submit_num: i32, queue_num2: i32, has_data: bool) -> void:
+    if viewer.queue_count >= 64:
+        return
+    index: usize = viewer.queue_count
+    viewer.queue_types[index] <- queue_type
+    viewer.queue_submit_nums[index] <- submit_num
+    viewer.queue_num2s[index] <- queue_num2
+    viewer.queue_has_data[index] <- has_data
+    if queue_type >= 0 and queue_type < 3 and has_data:
+        viewer.has_queue_type[queue_type.usize()] <- true
+    if queue_type == Devtools_Widget_QueueTypeDcb and submit_num == 0 and queue_num2 == 0:
+        viewer.selected_cmd <- index.i32()
+    viewer.queue_count <- viewer.queue_count + 1
+
+def Devtools_Widget_FrameDumpViewer_TrySelect(viewer: mutable Devtools_Widget_FrameDumpViewer&) -> bool:
+    i: mutable usize = 0
+    while i < viewer.queue_count:
+        if viewer.queue_has_data[i] and viewer.queue_types[i] == viewer.selected_queue_type:
+            submit_matches: bool = viewer.selected_submit_num == -1 or viewer.queue_submit_nums[i] == viewer.selected_submit_num
+            queue_matches: bool = viewer.selected_queue_num2 == -1 or viewer.queue_num2s[i] == viewer.selected_queue_num2
+            if submit_matches and queue_matches:
+                viewer.selected_cmd <- i.i32()
+                viewer.selected_submit_num <- viewer.queue_submit_nums[i]
+                viewer.selected_queue_num2 <- viewer.queue_num2s[i]
+                return true
+        i <- i + 1
+    return false
+
+def Devtools_Widget_FrameDumpViewer_SelectedQueueNum2Label(viewer: Devtools_Widget_FrameDumpViewer&) -> static u8&:
+    if viewer.selected_queue_type == Devtools_Widget_QueueTypeAcb:
+        return "Queue num"
+    return "Buffer num"
+
+def Devtools_Widget_FrameDumpViewer_SetQueueType(viewer: mutable Devtools_Widget_FrameDumpViewer&, queue_type: int) -> bool:
+    if queue_type < 0 or queue_type >= 3:
+        return false
+    if not viewer.has_queue_type[queue_type.usize()]:
+        return false
+    viewer.selected_queue_type <- queue_type
+    viewer.selected_cmd <- -1
+    viewer.selected_submit_num <- -1
+    viewer.selected_queue_num2 <- -1
+    _ = Devtools_Widget_FrameDumpViewer_TrySelect(viewer)
+    return true
+
+def Devtools_Widget_FrameDumpViewer_AvailableSubmits(viewer: Devtools_Widget_FrameDumpViewer&) -> array[bool, 32]:
+    out: mutable array[bool, 32] = zeroed
+    i: mutable usize = 0
+    while i < viewer.queue_count:
+        if viewer.queue_has_data[i] and viewer.queue_types[i] == viewer.selected_queue_type:
+            submit_num: i32 = viewer.queue_submit_nums[i]
+            if submit_num >= 0 and submit_num < 32:
+                out[submit_num.usize()] <- true
+        i <- i + 1
+    return out
+
+def Devtools_Widget_FrameDumpViewer_AvailableQueueNum2(viewer: Devtools_Widget_FrameDumpViewer&) -> array[bool, 32]:
+    out: mutable array[bool, 32] = zeroed
+    i: mutable usize = 0
+    while i < viewer.queue_count:
+        if viewer.queue_has_data[i] and viewer.queue_types[i] == viewer.selected_queue_type and viewer.queue_submit_nums[i] == viewer.selected_submit_num:
+            queue_num2: i32 = viewer.queue_num2s[i]
+            if queue_num2 >= 0 and queue_num2 < 32:
+                out[queue_num2.usize()] <- true
+        i <- i + 1
+    return out
+
+def Devtools_Widget_FrameDumpViewer_SelectSubmitNum(viewer: mutable Devtools_Widget_FrameDumpViewer&, submit_num: i32) -> bool:
+    if submit_num < -1 or submit_num >= 32:
+        return false
+    viewer.selected_submit_num <- submit_num
+    viewer.selected_queue_num2 <- -1
+    viewer.selected_cmd <- -1
+    return Devtools_Widget_FrameDumpViewer_TrySelect(viewer)
+
+def Devtools_Widget_FrameDumpViewer_SelectQueueNum2(viewer: mutable Devtools_Widget_FrameDumpViewer&, queue_num2: i32) -> bool:
+    if queue_num2 < -1 or queue_num2 >= 32:
+        return false
+    viewer.selected_queue_num2 <- queue_num2
+    viewer.selected_cmd <- -1
+    return Devtools_Widget_FrameDumpViewer_TrySelect(viewer)
 
 def Devtools_Widget_FrameDumpViewer_Draw(viewer: mutable Devtools_Widget_FrameDumpViewer&) -> void:
     if not viewer.is_open:

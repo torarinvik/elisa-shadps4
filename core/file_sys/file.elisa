@@ -1,0 +1,124 @@
+# SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+struct FileHandle:
+    opened: mutable bool
+    offset: mutable s64
+    size: mutable s64
+    file: mutable void&?
+    path: mutable static u8&
+    access_mode: mutable s32
+
+def FileHandle_new() -> FileHandle:
+    return FileHandle(false, 0, 0, null, "", 0)
+
+def FileHandle_AccessModeToIo(access_mode: s32) -> FileAccessMode:
+    if (access_mode & 0x3) == 0:
+        return FileAccessMode.Read
+    if (access_mode & 0x3) == 1:
+        return FileAccessMode.Write
+    return FileAccessMode.ReadWrite
+
+def FileHandle_Open(self: mutable FileHandle&, path: static u8&, access_mode: s32) -> s32:
+    if self.file != null:
+        io_close(self.file.cast[void&])
+        self.file <- null
+    io_mode: FileAccessMode = FileHandle_AccessModeToIo(access_mode)
+    opened: void&? = io_open(path, io_mode, FileType.BinaryFile, FileShareFlag.ShareReadWrite)
+    if opened == null:
+        self.opened <- false
+        return ORBIS_KERNEL_ERROR_EBADF.i32()
+    self.file <- opened
+    self.opened <- true
+    self.offset <- 0
+    self.size <- io_get_size(opened.cast[void&]).i64()
+    self.path <- path
+    self.access_mode <- access_mode
+    return 0
+
+def FileHandle_Read(self: mutable FileHandle&, buf: mutable void&?, nbytes: usize) -> s64:
+    if not self.opened or self.file == null:
+        return ORBIS_KERNEL_ERROR_EBADF.i64()
+    if buf == null:
+        return 0
+    if not io_seek(self.file.cast[void&], self.offset, SeekOrigin.SetOrigin):
+        return ORBIS_KERNEL_ERROR_EINVAL.i64()
+    read_count: usize = io_read(self.file.cast[void&], buf.cast[mutable void&], 1, nbytes)
+    self.offset <- self.offset + read_count.i64()
+    return read_count.i64()
+
+def FileHandle_Pread(self: mutable FileHandle&, buf: mutable void&?, nbytes: usize, offset: s64) -> s64:
+    if not self.opened or self.file == null:
+        return ORBIS_KERNEL_ERROR_EBADF.i64()
+    if offset < 0:
+        return ORBIS_KERNEL_ERROR_EINVAL.i64()
+    if buf == null:
+        return 0
+    if not io_seek(self.file.cast[void&], offset, SeekOrigin.SetOrigin):
+        return ORBIS_KERNEL_ERROR_EINVAL.i64()
+    return io_read(self.file.cast[void&], buf.cast[mutable void&], 1, nbytes).i64()
+
+def FileHandle_Write(self: mutable FileHandle&, buf: void&?, nbytes: usize) -> s64:
+    if not self.opened or self.file == null:
+        return ORBIS_KERNEL_ERROR_EBADF.i64()
+    if buf == null:
+        return 0
+    if not io_seek(self.file.cast[void&], self.offset, SeekOrigin.SetOrigin):
+        return ORBIS_KERNEL_ERROR_EINVAL.i64()
+    written: usize = io_write(self.file.cast[void&], buf.cast[void&], 1, nbytes)
+    self.offset <- self.offset + written.i64()
+    if self.offset > self.size:
+        self.size <- self.offset
+    return written.i64()
+
+def FileHandle_Pwrite(self: mutable FileHandle&, buf: void&?, nbytes: usize, offset: s64) -> s64:
+    if not self.opened or self.file == null:
+        return ORBIS_KERNEL_ERROR_EBADF.i64()
+    if offset < 0:
+        return ORBIS_KERNEL_ERROR_EINVAL.i64()
+    if buf == null:
+        return 0
+    if not io_seek(self.file.cast[void&], offset, SeekOrigin.SetOrigin):
+        return ORBIS_KERNEL_ERROR_EINVAL.i64()
+    written: usize = io_write(self.file.cast[void&], buf.cast[void&], 1, nbytes)
+    end_pos: s64 = offset + written.i64()
+    if end_pos > self.size:
+        self.size <- end_pos
+    return written.i64()
+
+def FileHandle_SetSize(self: mutable FileHandle&, size: s64) -> void:
+    if self.file != null and size >= 0:
+        _ = io_set_size(self.file.cast[void&], size.u64())
+    self.size <- size
+    if self.offset > size:
+        self.offset <- size
+
+def FileHandle_Flush(self: mutable FileHandle&) -> void:
+    if self.file != null:
+        _ = io_flush(self.file.cast[void&])
+        _ = io_commit(self.file.cast[void&])
+
+def FileHandle_Lseek(self: mutable FileHandle&, offset: s64, whence: s32) -> s64:
+    if not self.opened:
+        return ORBIS_KERNEL_ERROR_EBADF.i64()
+    next_offset: mutable s64 = self.offset
+    if whence == 0:
+        next_offset <- offset
+    elif whence == 1:
+        next_offset <- self.offset + offset
+    elif whence == 2:
+        next_offset <- self.size + offset
+    else:
+        return ORBIS_KERNEL_ERROR_EINVAL.i64()
+    if next_offset < 0:
+        return ORBIS_KERNEL_ERROR_EINVAL.i64()
+    self.offset <- next_offset
+    return self.offset
+
+def FileHandle_Unlink(self: mutable FileHandle&) -> void:
+    if self.file != null:
+        io_close(self.file.cast[void&])
+        self.file <- null
+    if self.path != "":
+        io_unlink(self.path)
+    self.opened <- false

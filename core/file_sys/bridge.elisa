@@ -1,0 +1,132 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+struct ElisaFsDirEntry:
+    name: mutable static u8&
+    is_file: mutable u8
+    fileno: mutable u64
+    dtype: mutable u8
+
+const ELISA_DTYPE_UNKNOWN: u8 = 0
+const ELISA_DTYPE_FILE: u8 = 8
+const ELISA_DTYPE_DIR: u8 = 4
+
+static if PLATFORM_WINDOWS:
+    const WIN_FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10
+    const WIN_INVALID_HANDLE_VALUE: uintptr = 0xffffffffffffffff.uintptr()
+    struct Win32FindDataA:
+        dwFileAttributes: mutable u32
+        ftCreationTime_dwLowDateTime: mutable u32
+        ftCreationTime_dwHighDateTime: mutable u32
+        ftLastAccessTime_dwLowDateTime: mutable u32
+        ftLastAccessTime_dwHighDateTime: mutable u32
+        ftLastWriteTime_dwLowDateTime: mutable u32
+        ftLastWriteTime_dwHighDateTime: mutable u32
+        nFileSizeHigh: mutable u32
+        nFileSizeLow: mutable u32
+        dwReserved0: mutable u32
+        dwReserved1: mutable u32
+        cFileName: mutable u8[260]
+        cAlternateFileName: mutable u8[14]
+    extern FindFirstFileA(lpFileName: static u8&, lpFindFileData: mutable Win32FindDataA&) -> void&?
+    extern FindNextFileA(hFindFile: void&, lpFindFileData: mutable Win32FindDataA&) -> int
+    extern FindClose(hFindFile: void&) -> int
+
+static if not PLATFORM_WINDOWS:
+    extern opendir(path: static u8&) -> mutable void&?
+    extern readdir(dirp: mutable void&) -> mutable void&?
+    extern closedir(dirp: mutable void&) -> int
+
+def elisa_filesys_get_host_path_default(guest_path: static u8&) -> static u8&:
+    return guest_path
+
+def ElisaFs_CopyCString(src: static u8&) -> static u8&:
+    can Memory.Allocate, Abort.Panic:
+        return concat2("", src)
+    return src
+
+def ElisaFs_ParseDirentName(entry_bits: mutable void&) -> static u8&:
+    raw: u8& = entry_bits.cast[u8&]
+    static if PLATFORM_APPLE:
+        return raw[21].ref[static u8&]
+    static else:
+        return raw[19].ref[static u8&]
+
+def ElisaFs_ParseDirentType(entry_bits: mutable void&) -> u8:
+    raw: u8& = entry_bits.cast[u8&]
+    static if PLATFORM_APPLE:
+        return raw[20]
+    static else:
+        return raw[18]
+
+def ElisaFs_ParseDirentFileno(entry_bits: mutable void&) -> u64:
+    raw: u8& = entry_bits.cast[u8&]
+    out: mutable u64 = 0
+    for i in 0..<8:
+        out <- out | (raw[i].u64() << (i * 8))
+    return out
+
+def ElisaFs_WinNameToString(data: Win32FindDataA&) -> static u8&:
+    name_ptr: static u8& = data.cFileName[0].ref[static u8&]
+    return ElisaFs_CopyCString(name_ptr)
+
+def ElisaFs_FillRowFromWinFind(data: Win32FindDataA&, row: mutable ElisaFsDirEntry&) -> void:
+    is_dir: bool = (data.dwFileAttributes & WIN_FILE_ATTRIBUTE_DIRECTORY) != 0
+    row.name <- ElisaFs_WinNameToString(data)
+    row.is_file <- 0.u8() if is_dir else 1.u8()
+    row.dtype <- ELISA_DTYPE_DIR if is_dir else ELISA_DTYPE_FILE
+    row.fileno <- 0
+
+def elisa_filesys_iterate_directory(guest_directory: static u8&, rows: mutable ElisaFsDirEntry&, capacity: usize) -> usize:
+    if capacity == 0:
+        return 0
+    static if PLATFORM_WINDOWS:
+        pattern: static u8& = guest_directory
+        can Memory.Allocate, Abort.Panic:
+            if runtime_strlen(guest_directory) > 0 and guest_directory[runtime_strlen(guest_directory) - 1] != '/' and guest_directory[runtime_strlen(guest_directory) - 1] != '\\':
+                pattern <- concat2(guest_directory, "\\*")
+            else:
+                pattern <- concat2(guest_directory, "*")
+        find_data: mutable Win32FindDataA = zeroed
+        handle_bits: mutable void&? = FindFirstFileA(pattern, find_data)
+        if handle_bits == null:
+            return 0
+        handle: mutable void& = handle_bits
+        if handle.cast[uintptr] == WIN_INVALID_HANDLE_VALUE:
+            return 0
+        count: mutable usize = 0
+        continue_scan: mutable bool = true
+        while continue_scan and count < capacity:
+            row: mutable ElisaFsDirEntry& = rows[count].ref[mutable ElisaFsDirEntry&]
+            ElisaFs_FillRowFromWinFind(find_data, row)
+            if streq(row.name, ".") != 1 and streq(row.name, "..") != 1:
+                count <- count + 1
+            if count < capacity:
+                continue_scan <- FindNextFileA(handle, find_data) != 0
+            else:
+                continue_scan <- false
+        _ = FindClose(handle)
+        return count
+    dir_handle: mutable void&? = opendir(guest_directory)
+    if dir_handle == null:
+        return 0
+    dirp: mutable void& = dir_handle
+    count: mutable usize = 0
+    keep_reading: mutable bool = true
+    while keep_reading and count < capacity:
+        entry: mutable void&? = readdir(dirp)
+        if entry == null:
+            keep_reading <- false
+        else:
+            entry_bits: mutable void& = entry
+            name: static u8& = ElisaFs_ParseDirentName(entry_bits)
+            if streq(name, ".") != 1 and streq(name, "..") != 1:
+                row: mutable ElisaFsDirEntry& = rows[count].ref[mutable ElisaFsDirEntry&]
+                dtype: u8 = ElisaFs_ParseDirentType(entry_bits)
+                row.name <- ElisaFs_CopyCString(name)
+                row.dtype <- dtype
+                row.fileno <- ElisaFs_ParseDirentFileno(entry_bits)
+                row.is_file <- 1.u8() if dtype == ELISA_DTYPE_FILE else 0.u8()
+                count <- count + 1
+    _ = closedir(dirp)
+    return count

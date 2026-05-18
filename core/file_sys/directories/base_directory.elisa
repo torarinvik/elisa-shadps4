@@ -1,0 +1,135 @@
+# SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+global mutable Directory_FilenoPool: u32 = 10
+const ORBIS_DIRENT_ALIGN: usize = 8
+const ORBIS_DIRENT_BASE_SIZE: usize = 24
+
+def Directory_NextFileno() -> u32:
+    Directory_FilenoPool <- Directory_FilenoPool + 1
+    return Directory_FilenoPool
+
+struct BaseDirectory:
+    file_offset: mutable s64
+    directory_size: mutable u64
+    dirent_cache_bin: mutable darray[u8]
+
+def BaseDirectory_new() -> BaseDirectory:
+    return BaseDirectory(0, 0, [])
+
+def BaseDirectory_read(self: mutable BaseDirectory&, buf: mutable void&?, nbytes: u64) -> s64:
+    _ = self
+    _ = buf
+    _ = nbytes
+    return ORBIS_KERNEL_ERROR_EBADF.i64()
+
+def BaseDirectory_readv(self: mutable BaseDirectory&, iov: OrbisKernelIovec&?, iovcnt: s32) -> s64:
+    if iov == null:
+        return 0
+    bytes_read: mutable s64 = 0
+    items: OrbisKernelIovec& = iov
+    for i in 0..<iovcnt:
+        result: s64 = BaseDirectory_read(self, items[i].iov_base.cast[mutable void&?], items[i].iov_len)
+        if result < 0:
+            return result
+        bytes_read <- bytes_read + result
+    return bytes_read
+
+def BaseDirectory_preadv(self: mutable BaseDirectory&, iov: OrbisKernelIovec&?, iovcnt: s32, offset: s64) -> s64:
+    old_file_pointer: s64 = self.file_offset
+    self.file_offset <- offset
+    bytes_read: s64 = BaseDirectory_readv(self, iov, iovcnt)
+    self.file_offset <- old_file_pointer
+    return bytes_read
+
+def BaseDirectory_write(self: mutable BaseDirectory&, buf: void&?, nbytes: u64) -> s64:
+    _ = self
+    _ = buf
+    _ = nbytes
+    return ORBIS_KERNEL_ERROR_EBADF.i64()
+
+def BaseDirectory_writev(self: mutable BaseDirectory&, iov: OrbisKernelIovec&?, iovcnt: s32) -> s64:
+    _ = self
+    _ = iov
+    _ = iovcnt
+    return ORBIS_KERNEL_ERROR_EBADF.i64()
+
+def BaseDirectory_pwritev(self: mutable BaseDirectory&, iov: OrbisKernelIovec&?, iovcnt: s32, offset: s64) -> s64:
+    _ = self
+    _ = iov
+    _ = iovcnt
+    _ = offset
+    return ORBIS_KERNEL_ERROR_EBADF.i64()
+
+def BaseDirectory_lseek(self: mutable BaseDirectory&, offset: s64, whence: s32) -> s64:
+    file_offset_new: mutable s64 = self.file_offset
+    if whence == 0:
+        file_offset_new <- offset
+    elif whence == 1:
+        file_offset_new <- self.file_offset + offset
+    elif whence == 2:
+        file_offset_new <- self.directory_size.i64() + offset
+    if file_offset_new < 0:
+        return ORBIS_KERNEL_ERROR_EINVAL.i64()
+    self.file_offset <- file_offset_new
+    return self.file_offset
+
+def BaseDirectory_fstat(self: mutable BaseDirectory&, stat: mutable OrbisKernelStat&?) -> s32:
+    _ = self
+    _ = stat
+    return ORBIS_KERNEL_ERROR_EBADF.i32()
+
+def BaseDirectory_getdents(self: mutable BaseDirectory&, buf: mutable void&?, nbytes: u64, basep: mutable s64&?) -> s64:
+    _ = self
+    _ = buf
+    _ = nbytes
+    _ = basep
+    return ORBIS_KERNEL_ERROR_EBADF.i64()
+
+def DirentAlign(n: usize) -> usize:
+    return ((n + ORBIS_DIRENT_ALIGN - 1) / ORBIS_DIRENT_ALIGN) * ORBIS_DIRENT_ALIGN
+
+def DirentPushU8(out: mutable darray[u8]&, value: u8) -> void:
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            out.push(value)
+
+def DirentPushU16LE(out: mutable darray[u8]&, value: u16) -> void:
+    DirentPushU8(out, (value & 0xff).u8())
+    DirentPushU8(out, ((value >> 8) & 0xff).u8())
+
+def DirentPushU32LE(out: mutable darray[u8]&, value: u32) -> void:
+    for i in 0..<4:
+        DirentPushU8(out, ((value >> (i * 8)) & 0xff).u8())
+
+def DirentPushU64LE(out: mutable darray[u8]&, value: u64) -> void:
+    for i in 0..<8:
+        DirentPushU8(out, ((value >> (i * 8)) & 0xff).u8())
+
+def DirentReclen(name: static u8&) -> usize:
+    name_len: usize = runtime_strlen(name)
+    return DirentAlign(ORBIS_DIRENT_BASE_SIZE + name_len + 1)
+
+def DirentEmit(out: mutable darray[u8]&, entry: ElisaFsDirEntry&, index: usize) -> void:
+    name: static u8& = entry.name if entry.name != "" else "?"
+    name_len: usize = runtime_strlen(name)
+    rec_len: usize = DirentReclen(name)
+    fileno: u32 = entry.fileno.u32() if entry.fileno != 0 else Directory_NextFileno()
+    DirentPushU32LE(out, fileno)
+    DirentPushU16LE(out, rec_len.u16())
+    DirentPushU8(out, entry.dtype if entry.dtype != ELISA_DTYPE_UNKNOWN else (ELISA_DTYPE_FILE if entry.is_file != 0 else ELISA_DTYPE_DIR))
+    DirentPushU8(out, name_len.u8())
+    DirentPushU64LE(out, (index + 1).u64())
+    for i in 0..<name_len:
+        DirentPushU8(out, name[i])
+    DirentPushU8(out, 0)
+    pad: usize = rec_len - ORBIS_DIRENT_BASE_SIZE - name_len - 1
+    for i in 0..<pad:
+        DirentPushU8(out, 0)
+
+def BaseDirectory_RebuildCacheFromEntries(self: mutable BaseDirectory&, entries: ElisaFsDirEntry&, count: usize) -> void:
+    self.dirent_cache_bin.count <- 0
+    for i in 0..<count:
+        DirentEmit(self.dirent_cache_bin, entries[i], i)
+    self.directory_size <- self.dirent_cache_bin.count.u64()

@@ -1,0 +1,158 @@
+# SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+enum FsFileType:
+    Regular
+    Directory
+    Device
+    Socket
+    Epoll
+    Resolver
+    Equeue
+
+struct MntPair:
+    host_path: mutable static u8&
+    mount: mutable static u8&
+    read_only: mutable bool
+
+struct MntPoints:
+    pairs: mutable darray[MntPair]
+
+global mutable MntPoints_IgnoreGamePatches: bool = false
+
+def MntPoints_new() -> MntPoints:
+    return MntPoints([])
+
+def RemoveTrailingSlashes(path: static u8&) -> static u8&:
+    len: mutable usize = runtime_strlen(path)
+    while len > 0 and path[len - 1] == '/':
+        len <- len - 1
+    can Memory.Allocate, Abort.Panic:
+        return string_substr(path, 0, len)
+    return path
+
+def NormalizePath(path: static u8&) -> static u8&:
+    if path == "":
+        return "/"
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            out: mutable darray[u8] = []
+            prev_slash: mutable bool = false
+            for i in 0..<runtime_strlen(path):
+                c: u8 = path[i]
+                if c == '\\':
+                    c <- '/'
+                if c == '/':
+                    if prev_slash:
+                        pass
+                    else:
+                        out.push('/')
+                        prev_slash <- true
+                else:
+                    out.push(c)
+                    prev_slash <- false
+            if out.count == 0:
+                out.push('/'.u8())
+            out.push(0)
+            return out[0].ref[static u8&]
+    return path
+
+def MntPoints_Mount(self: mutable MntPoints&, host_folder: static u8&, guest_folder: static u8&, read_only: bool = false) -> void:
+    guest_folder_sanitized: static u8& = RemoveTrailingSlashes(NormalizePath(guest_folder))
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            self.pairs.push(MntPair(host_folder, guest_folder_sanitized, read_only))
+
+def MntPoints_Unmount(self: mutable MntPoints&, host_folder: static u8&, guest_folder: static u8&) -> void:
+    _ = host_folder
+    guest_folder_sanitized: static u8& = RemoveTrailingSlashes(NormalizePath(guest_folder))
+    write_i: mutable usize = 0
+    for i in 0..<self.pairs.count:
+        if streq(self.pairs[i].mount, guest_folder_sanitized) != 1:
+            if write_i != i:
+                self.pairs[write_i] <- self.pairs[i]
+            write_i <- write_i + 1
+    self.pairs.count <- write_i
+
+def MntPoints_UnmountAll(self: mutable MntPoints&) -> void:
+    self.pairs.count <- 0
+
+def MntPoints_GetHostPath(self: MntPoints&, guest_path: static u8&, is_read_only: mutable bool&? = null) -> static u8&:
+    normalized_guest: static u8& = NormalizePath(guest_path)
+    guest_len: usize = runtime_strlen(normalized_guest)
+    best_index: mutable s64 = -1
+    best_len: mutable usize = 0
+    for i in 0..<self.pairs.count:
+        pair: MntPair = self.pairs[i]
+        mount_len: usize = runtime_strlen(pair.mount)
+        if mount_len <= guest_len and mount_len >= best_len:
+            if string_slice_eq(normalized_guest, 0, mount_len, pair.mount) == 1:
+                if guest_len == mount_len or normalized_guest[mount_len] == '/':
+                    best_index <- i.i64()
+                    best_len <- mount_len
+    if best_index >= 0:
+        match_pair: MntPair = self.pairs[best_index.usize()]
+        if is_read_only != null:
+            is_read_only <- match_pair.read_only
+        suffix: mutable static u8& = ""
+        if guest_len > best_len:
+            can Memory.Allocate, Abort.Panic:
+                suffix <- string_substr(normalized_guest, best_len, guest_len - best_len)
+        can Memory.Allocate, Abort.Panic:
+            return concat2(match_pair.host_path, suffix)
+    return elisa_filesys_get_host_path_default(normalized_guest)
+
+struct FsFile:
+    is_opened: mutable bool
+    kind: mutable FsFileType
+    host_name: mutable static u8&
+    guest_name: mutable static u8&
+    directory: mutable void&?
+    device: mutable void&?
+
+def FsFile_new() -> FsFile:
+    return FsFile(false, FsFileType.Regular, "", "", null, null)
+
+struct HandleTable:
+    files: mutable darray[FsFile]
+
+def HandleTable_new() -> HandleTable:
+    return HandleTable([])
+
+def HandleTable_CreateHandle(self: mutable HandleTable) -> s32:
+    for i in 0..<self.files.count:
+        if not self.files[i].is_opened:
+            self.files[i] <- FsFile_new()
+            return i.i32()
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            self.files.push(FsFile_new())
+    return (self.files.count - 1).i32()
+
+def HandleTable_DeleteHandle(self: mutable HandleTable&, d: s32) -> void:
+    if d < 0 or d >= self.files.count.i32():
+        return
+    self.files[d.usize()].is_opened <- false
+
+def HandleTable_GetFile(self: mutable HandleTable&, d: s32) -> mutable FsFile&?:
+    if d < 0 or d >= self.files.count.i32():
+        return null
+    return self.files[d.usize()].ref[mutable FsFile&]
+
+def HandleTable_CreateStdHandles(self: mutable HandleTable) -> void:
+    for i in 0..<3:
+        fd: s32 = HandleTable_CreateHandle(self)
+        file: mutable FsFile&? = HandleTable_GetFile(self, fd)
+        if file != null:
+            f: mutable FsFile& = file
+            f.is_opened <- true
+            f.kind <- FsFileType.Device
+            if i == 0:
+                f.guest_name <- "/dev/stdin"
+            elif i == 1:
+                f.guest_name <- "/dev/stdout"
+            else:
+                f.guest_name <- "/dev/stderr"

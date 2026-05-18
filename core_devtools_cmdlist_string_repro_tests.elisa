@@ -1,0 +1,54 @@
+include "../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "./common/string_util.elisa"
+
+def Devtools_CmdListRepro_U32ToDecimal(value: u32) -> static u8&:
+    can Memory.Allocate, Abort.Panic:
+        digits: mutable u32 = 1
+        n: mutable u32 = value
+        while n >= 10:
+            n <- n / 10
+            digits <- digits + 1
+        out: mutable heap u8& = string_alloc(digits.usize() + 1)
+        cursor: mutable int = digits.int() - 1
+        x: mutable u32 = value
+        while cursor >= 0:
+            out[cursor.usize()] <- '0' + (x % 10).u8()
+            x <- x / 10
+            cursor <- cursor - 1
+        out[digits.usize()] <- 0
+        return out.cast[static u8&]
+    return "0"
+
+def Devtools_CmdListRepro_FormatAddress(value: usize, digits: int) -> static u8&:
+    width: usize = digits.usize()
+    out: mutable heap u8& = string_alloc(width + 1)
+    for i in 0..<width:
+        shift: usize = (width - 1 - i) * 4
+        nybble: u8 = ((value >> shift) & 0xf).u8()
+        out[i] <- ('0' + nybble) if nybble < 10 else ('A' + (nybble - 10))
+    out[width] <- 0
+    return out.cast[static u8&]
+
+def Devtools_CmdListRepro_DynamicHeader(vqid: int, cmdb_addr: uintptr, batch_id: u32, marker: static u8&) -> static u8&:
+    can Memory.Allocate, Abort.Panic:
+        queue: static u8& = "GFX" if vqid > 254 else "ASC"
+        builder: mutable heap StringBuilder& = string_builder_new(queue)
+        builder <- string_builder_append(builder, "[")
+        builder <- string_builder_append(builder, Devtools_CmdListRepro_U32ToDecimal(vqid.u32()))
+        builder <- string_builder_append(builder, "] ")
+        builder <- string_builder_append(builder, Devtools_CmdListRepro_FormatAddress(cmdb_addr.usize(), 8))
+        builder <- string_builder_append(builder, ": batch-")
+        builder <- string_builder_append(builder, Devtools_CmdListRepro_U32ToDecimal(batch_id))
+        if runtime_strlen(marker) > 0:
+            builder <- string_builder_append(builder, " | ")
+            builder <- string_builder_append(builder, marker)
+        return string_builder_finish(builder).cast[static u8&]
+    return ""
+
+@test
+def devtools_cmd_list_dynamic_string_repro_does_not_crash() -> void:
+    can Abort.Panic, Memory.Allocate:
+        marker: static u8& = "marker_text"
+        for i in 0..<20000:
+            label: static u8& = Devtools_CmdListRepro_DynamicHeader((i % 260).int(), (0x1000 + i).uintptr(), i.u32(), marker)
+            assert runtime_strlen(label) > 0

@@ -58,6 +58,30 @@ def Devtools_Widget_CmdList_EventTypeLabel(event: Devtools_Widget_GPUEvent) -> s
         return "packet"
     return "unknown"
 
+def Devtools_Widget_CmdList_QueueName(vqid: int) -> static u8&:
+    if vqid > 254:
+        return "GFX"
+    return "ASC"
+
+def Devtools_Widget_CmdList_IsStateBatch(batch: Devtools_Widget_BatchInfo) -> bool:
+    return batch.type == 0xff
+
+def Devtools_Widget_CmdList_BatchHeader(cmdb_addr: uintptr, batch: Devtools_Widget_BatchInfo) -> static u8&:
+    if Devtools_Widget_CmdList_IsStateBatch(batch):
+        return "state batch"
+    can Memory.Allocate, Abort.Panic:
+        op_name: static u8& = Devtools_Gcn_GetOpCodeName(batch.type)
+        builder: mutable heap StringBuilder& = string_builder_new(Devtools_Widget_MemoryEditor_FormatAddress((cmdb_addr + batch.start_addr.uintptr()).usize(), 8, true))
+        builder <- string_builder_append(builder, ": batch-")
+        builder <- string_builder_append(builder, Devtools_Widget_RegPopup_U32ToDecimal(batch.id))
+        builder <- string_builder_append(builder, " ")
+        builder <- string_builder_append(builder, op_name)
+        if runtime_strlen(batch.marker) > 0:
+            builder <- string_builder_append(builder, " | ")
+            builder <- string_builder_append(builder, batch.marker)
+        return string_builder_finish(builder).cast[static u8&]
+    return ""
+
 def Devtools_Widget_CmdList_New(base_addr: uintptr, name: static u8&) -> Devtools_Widget_CmdListViewer:
     out: mutable Devtools_Widget_CmdListViewer = zeroed
     out.base_addr <- base_addr
@@ -88,6 +112,7 @@ def Devtools_Widget_CmdList_Draw(viewer: mutable Devtools_Widget_CmdListViewer&,
             elisa_imgui_text_unformatted("Batches")
         else:
             elisa_imgui_text_unformatted("Command buffer")
+        elisa_imgui_text_unformatted(Devtools_Widget_CmdList_QueueName(viewer.vqid))
         if runtime_strlen(filter.shader_name) > 0:
             elisa_imgui_text_unformatted(filter.shader_name)
         if elisa_imgui_begin_table("CmdListEvents", 4, ElisaImGuiTableFlags_Borders | ElisaImGuiTableFlags_RowBg | ElisaImGuiTableFlags_Resizable):
@@ -99,9 +124,10 @@ def Devtools_Widget_CmdList_Draw(viewer: mutable Devtools_Widget_CmdListViewer&,
             for i in 0..<viewer.events.count:
                 event: Devtools_Widget_GPUEvent = viewer.events[i]
                 if event.kind == Devtools_Widget_GPUEventKind.BatchInfo:
+                    header: static u8& = Devtools_Widget_CmdList_BatchHeader(viewer.cmdb_addr, event.batch_info)
                     elisa_imgui_table_next_row()
                     elisa_imgui_table_set_column_index(0)
-                    elisa_imgui_text_unformatted("batch")
+                    elisa_imgui_text_unformatted(header)
                     elisa_imgui_table_set_column_index(1)
                     elisa_imgui_text_unformatted(event.batch_info.marker)
                     elisa_imgui_table_set_column_index(2)

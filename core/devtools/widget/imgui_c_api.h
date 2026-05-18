@@ -76,6 +76,17 @@ bool elisa_imgui_begin_tooltip(void);
 void elisa_imgui_end_tooltip(void);
 const char* elisa_imgui_get_clipboard_text(void);
 void elisa_imgui_set_clipboard_text(const char* text);
+float elisa_imgui_get_time(void);
+bool elisa_imgui_current_window_skip_items(void);
+ElisaImGuiVec2 elisa_imgui_get_current_window_size(void);
+ElisaImGuiVec2 elisa_imgui_get_current_window_pos(void);
+float elisa_imgui_font_size(int font_index);
+ElisaImGuiVec2 elisa_imgui_font_calc_text_size(int font_index, float font_size, const char* text);
+float elisa_imgui_font_glyph_advance(int font_index, uint32_t codepoint, float scale);
+void elisa_imgui_window_draw_text_font(int font_index, float font_size, float x, float y,
+                                       uint32_t color, const char* text);
+void elisa_imgui_window_draw_text_char(int font_index, float font_size, float x, float y,
+                                       uint32_t color, uint32_t codepoint);
 
 #ifdef __cplusplus
 }
