@@ -1,0 +1,130 @@
+# SPDX-FileCopyrightText: Copyright 2025-2026 shadLauncher4 Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+const NPBIND_MAGIC: u32 = 0xD294A018
+const NPBIND_HEADER_SIZE: usize = 0x80
+const NPBIND_BODY_PADDING: usize = 0x98
+const NPBIND_DIGEST_SIZE: usize = 20
+
+struct NpBindHeader:
+    magic: mutable u32
+    version: mutable u32
+    file_size: mutable u64
+    entry_size: mutable u64
+    num_entries: mutable u64
+
+struct NpBindEntryRaw:
+    entry_type: mutable u16
+    size: mutable u16
+    data: mutable darray[u8]
+
+struct NpBindBody:
+    npcommid: mutable NpBindEntryRaw
+    trophy: mutable NpBindEntryRaw
+    unk1: mutable NpBindEntryRaw
+    unk2: mutable NpBindEntryRaw
+
+struct NpBindFile:
+    header: mutable NpBindHeader
+    bodies: mutable darray[NpBindBody]
+    digest: mutable darray[u8]
+    valid: mutable bool
+
+def NpBindHeader_empty() -> NpBindHeader:
+    return NpBindHeader(0, 0, 0, 0, 0)
+
+def NpBindEntryRaw_empty() -> NpBindEntryRaw:
+    return NpBindEntryRaw(0, 0, [])
+
+def NpBindBody_empty() -> NpBindBody:
+    return NpBindBody(NpBindEntryRaw_empty(), NpBindEntryRaw_empty(), NpBindEntryRaw_empty(), NpBindEntryRaw_empty())
+
+def NpBindFile_empty() -> NpBindFile:
+    return NpBindFile(NpBindHeader_empty(), [], [], false)
+
+def NpBind_ReadHeader(reader: mutable FileFormatReader&) -> NpBindHeader:
+    header: NpBindHeader = NpBindHeader(
+        ff_read_u32_be(reader),
+        ff_read_u32_be(reader),
+        ff_read_u64_be(reader),
+        ff_read_u64_be(reader),
+        ff_read_u64_be(reader)
+    )
+    _ = ff_skip(reader, 0x60)
+    return header
+
+def NpBind_ReadEntry(reader: mutable FileFormatReader&) -> NpBindEntryRaw:
+    if not ff_can_read(reader, 4):
+        return NpBindEntryRaw_empty()
+    entry_type: u16 = ff_read_u16_be(reader)
+    size: u16 = ff_read_u16_be(reader)
+    if not ff_can_read(reader, size.usize()):
+        return NpBindEntryRaw(entry_type, size, [])
+    return NpBindEntryRaw(entry_type, size, ff_read_bytes(reader, size.usize()))
+
+def NpBind_Parse(data: darray[u8]) -> NpBindFile:
+    if data.count < NPBIND_HEADER_SIZE:
+        return NpBindFile_empty()
+
+    reader: mutable FileFormatReader = FileFormatReader_new(data)
+    header: NpBindHeader = NpBind_ReadHeader(reader)
+    if header.magic != NPBIND_MAGIC:
+        return NpBindFile(header, [], [], false)
+
+    bodies: mutable darray[NpBindBody] = []
+    valid: mutable bool = true
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        i: mutable u64 = 0
+        while i < header.num_entries and valid:
+            if not ff_can_read(reader, 16):
+                valid <- false
+            else:
+                body: NpBindBody = NpBindBody(
+                    NpBind_ReadEntry(reader),
+                    NpBind_ReadEntry(reader),
+                    NpBind_ReadEntry(reader),
+                    NpBind_ReadEntry(reader)
+                )
+                if body.npcommid.data.count != body.npcommid.size.usize() or body.trophy.data.count != body.trophy.size.usize() or body.unk1.data.count != body.unk1.size.usize() or body.unk2.data.count != body.unk2.size.usize():
+                    valid <- false
+                else:
+                    in owner:
+                        bodies.push(body)
+                    if reader.offset + NPBIND_BODY_PADDING <= data.count:
+                        reader.offset <- reader.offset + NPBIND_BODY_PADDING
+                    else:
+                        reader.offset <- data.count
+            i <- i + 1
+
+    digest: mutable darray[u8] = []
+    if data.count >= NPBIND_DIGEST_SIZE:
+        digest_reader: mutable FileFormatReader = FileFormatReader_new(data)
+        digest_reader.offset <- data.count - NPBIND_DIGEST_SIZE
+        digest <- ff_read_bytes(digest_reader, NPBIND_DIGEST_SIZE)
+
+    return NpBindFile(header, bodies, digest, valid)
+
+def NpBind_Load(path: static u8&) -> NpBindFile:
+    data: darray[u8] = ff_file_read_all(path)
+    if data.count == 0:
+        return NpBindFile_empty()
+    return NpBind_Parse(data)
+
+def NpBind_IsValid(file: NpBindFile&) -> bool:
+    return file.valid and file.header.magic == NPBIND_MAGIC
+
+def NpBind_BodyCount(file: NpBindFile&) -> u64:
+    return file.bodies.count.u64()
+
+def NpBind_GetNpCommId(file: NpBindFile&, index: usize) -> static u8&:
+    if index >= file.bodies.count:
+        return ""
+    body: NpBindBody = file.bodies[index]
+    out: mutable heap u8& = zeroed
+    can Memory.Allocate, Abort.Panic:
+        out <- string_alloc(body.npcommid.data.count + 1)
+    for i in 0..<body.npcommid.data.count:
+        out[i] <- body.npcommid.data[i]
+    out[body.npcommid.data.count] <- 0
+    return out.cast[static u8&]

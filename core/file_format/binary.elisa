@@ -1,0 +1,186 @@
+# SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+struct FileFormatReader:
+    data: mutable darray[u8]
+    offset: mutable usize
+
+def FileFormatReader_new(data: darray[u8]) -> FileFormatReader:
+    return FileFormatReader(data, 0)
+
+def ff_remaining(reader: FileFormatReader&) -> usize:
+    if reader.offset >= reader.data.count:
+        return 0
+    return reader.data.count - reader.offset
+
+def ff_can_read(reader: FileFormatReader&, size: usize) -> bool:
+    return reader.offset + size <= reader.data.count
+
+def ff_read_u8(reader: mutable FileFormatReader&) -> u8:
+    if not ff_can_read(reader, 1):
+        return 0
+    out: u8 = reader.data[reader.offset]
+    reader.offset <- reader.offset + 1
+    return out
+
+def ff_read_u16_le(reader: mutable FileFormatReader&) -> u16:
+    b0: u16 = ff_read_u8(reader).u16()
+    b1: u16 = ff_read_u8(reader).u16()
+    return b0 | (b1 << 8)
+
+def ff_read_u16_be(reader: mutable FileFormatReader&) -> u16:
+    b0: u16 = ff_read_u8(reader).u16()
+    b1: u16 = ff_read_u8(reader).u16()
+    return (b0 << 8) | b1
+
+def ff_read_u32_le(reader: mutable FileFormatReader&) -> u32:
+    b0: u32 = ff_read_u8(reader).u32()
+    b1: u32 = ff_read_u8(reader).u32()
+    b2: u32 = ff_read_u8(reader).u32()
+    b3: u32 = ff_read_u8(reader).u32()
+    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+
+def ff_read_u32_be(reader: mutable FileFormatReader&) -> u32:
+    b0: u32 = ff_read_u8(reader).u32()
+    b1: u32 = ff_read_u8(reader).u32()
+    b2: u32 = ff_read_u8(reader).u32()
+    b3: u32 = ff_read_u8(reader).u32()
+    return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+
+def ff_read_u64_le(reader: mutable FileFormatReader&) -> u64:
+    lo: u64 = ff_read_u32_le(reader).u64()
+    hi: u64 = ff_read_u32_le(reader).u64()
+    return lo | (hi << 32)
+
+def ff_read_u64_be(reader: mutable FileFormatReader&) -> u64:
+    hi: u64 = ff_read_u32_be(reader).u64()
+    lo: u64 = ff_read_u32_be(reader).u64()
+    return (hi << 32) | lo
+
+def ff_skip(reader: mutable FileFormatReader&, size: usize) -> bool:
+    if not ff_can_read(reader, size):
+        reader.offset <- reader.data.count
+        return false
+    reader.offset <- reader.offset + size
+    return true
+
+def ff_read_bytes(reader: mutable FileFormatReader&, size: usize) -> darray[u8]:
+    out: mutable darray[u8] = []
+    if not ff_can_read(reader, size):
+        return out
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        for i in 0..<size:
+            in owner:
+                out.push(reader.data[reader.offset + i])
+    reader.offset <- reader.offset + size
+    return out
+
+def ff_read_cstr_at(data: darray[u8], offset: usize) -> static u8&:
+    if offset >= data.count:
+        return ""
+    len: mutable usize = 0
+    while offset + len < data.count and data[offset + len] != 0:
+        len <- len + 1
+    out: mutable heap u8& = zeroed
+    can Memory.Allocate, Abort.Panic:
+        out <- string_alloc(len + 1)
+    for i in 0..<len:
+        out[i] <- data[offset + i]
+    out[len] <- 0
+    return out.cast[static u8&]
+
+def ff_push_u8(out: mutable darray[u8]&, value: u8) -> void:
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            out.push(value)
+
+def ff_push_u16_le(out: mutable darray[u8]&, value: u16) -> void:
+    ff_push_u8(out, (value & 0xFF).u8())
+    ff_push_u8(out, ((value >> 8) & 0xFF).u8())
+
+def ff_push_u16_be(out: mutable darray[u8]&, value: u16) -> void:
+    ff_push_u8(out, ((value >> 8) & 0xFF).u8())
+    ff_push_u8(out, (value & 0xFF).u8())
+
+def ff_push_u32_le(out: mutable darray[u8]&, value: u32) -> void:
+    ff_push_u8(out, (value & 0xFF).u8())
+    ff_push_u8(out, ((value >> 8) & 0xFF).u8())
+    ff_push_u8(out, ((value >> 16) & 0xFF).u8())
+    ff_push_u8(out, ((value >> 24) & 0xFF).u8())
+
+def ff_push_u32_be(out: mutable darray[u8]&, value: u32) -> void:
+    ff_push_u8(out, ((value >> 24) & 0xFF).u8())
+    ff_push_u8(out, ((value >> 16) & 0xFF).u8())
+    ff_push_u8(out, ((value >> 8) & 0xFF).u8())
+    ff_push_u8(out, (value & 0xFF).u8())
+
+def ff_push_bytes(out: mutable darray[u8]&, bytes: darray[u8]) -> void:
+    for i in 0..<bytes.count:
+        ff_push_u8(out, bytes[i])
+
+def ff_pad_to(out: mutable darray[u8]&, alignment: usize) -> void:
+    while out.count % alignment != 0:
+        ff_push_u8(out, 0)
+
+def ff_file_read_all(path: static u8&) -> darray[u8]:
+    out: mutable darray[u8] = []
+    file: mutable IOFile = IOFile_opened(path, FileAccessMode.Read)
+    if not IOFile_IsOpen(file):
+        return out
+    size: usize = IOFile_GetSize(file).usize()
+    if size == 0:
+        IOFile_Close(file)
+        return out
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        for i in 0..<size:
+            in owner:
+                out.push(0)
+    _ = IOFile_ReadSpan(file, out[0].ref[mutable u8&], size)
+    IOFile_Close(file)
+    return out
+
+def ff_file_write_all(path: static u8&, data: darray[u8]) -> bool:
+    file: mutable IOFile = IOFile_opened(path, FileAccessMode.Create)
+    if not IOFile_IsOpen(file):
+        return false
+    written: mutable usize = 0
+    if data.count != 0:
+        written <- IOFile_WriteSpan(file, data[0].ref[u8&], data.count)
+    _ = IOFile_Flush(file)
+    IOFile_Close(file)
+    return written == data.count
+
+def ff_string_ends_with(value: static u8&, suffix: static u8&) -> bool:
+    value_len: usize = runtime_strlen(value)
+    suffix_len: usize = runtime_strlen(suffix)
+    if value_len < suffix_len:
+        return false
+    return string_slice_eq(value, (value_len - suffix_len).i64(), value_len.i64(), suffix) == 1
+
+def ff_string_replace_first_4(value: static u8&, from: static u8&, replacement: static u8&) -> static u8&:
+    len: usize = runtime_strlen(value)
+    if runtime_strlen(from) != 4 or runtime_strlen(replacement) != 3:
+        return value
+    out: mutable heap u8& = zeroed
+    can Memory.Allocate, Abort.Panic:
+        out <- string_alloc(len + 1)
+    replaced: mutable bool = false
+    i: mutable usize = 0
+    cursor: mutable usize = 0
+    while i < len:
+        if not replaced and i + 4 <= len and string_slice_eq(value, i.i64(), (i + 4).i64(), from) == 1:
+            out[cursor] <- replacement[0]
+            out[cursor + 1] <- replacement[1]
+            out[cursor + 2] <- replacement[2]
+            cursor <- cursor + 3
+            i <- i + 4
+            replaced <- true
+        else:
+            out[cursor] <- value[i]
+            cursor <- cursor + 1
+            i <- i + 1
+    out[cursor] <- 0
+    return out.cast[static u8&]

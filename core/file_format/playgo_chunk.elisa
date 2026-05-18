@@ -1,0 +1,164 @@
+# SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+const PLAYGO_MAGIC: u32 = 0x6F676C70
+const PLAYGO_HEADER_SIZE: usize = 0x100
+const PLAYGO_CHUNK_ATTR_ENTRY_SIZE: usize = 0x20
+const PLAYGO_MCHUNK_ATTR_ENTRY_SIZE: usize = 0x10
+
+struct PlaygoRange:
+    offset: mutable u32
+    length: mutable u32
+
+struct PlaygoHeader:
+    magic: mutable u32
+    version_major: mutable u16
+    version_minor: mutable u16
+    image_count: mutable u16
+    chunk_count: mutable u16
+    mchunk_count: mutable u16
+    scenario_count: mutable u16
+    file_size: mutable u32
+    default_scenario_id: mutable u16
+    attrib: mutable u16
+    sdk_version: mutable u32
+    disc_count: mutable u16
+    layer_bmp: mutable u16
+    content_id: mutable static u8&
+    chunk_attrs: mutable PlaygoRange
+    chunk_mchunks: mutable PlaygoRange
+    chunk_labels: mutable PlaygoRange
+    mchunk_attrs: mutable PlaygoRange
+
+struct PlaygoChunkAttrEntry:
+    flag: mutable u8
+    image_disc_layer_no: mutable u8
+    req_locus: mutable u8
+    mchunk_count: mutable u16
+    language_mask: mutable u64
+    mchunks_offset: mutable u32
+    label_offset: mutable u32
+
+struct PlaygoMchunkAttrEntry:
+    offset: mutable u64
+    image_no: mutable u64
+    size: mutable u64
+
+struct PlaygoChunk:
+    req_locus: mutable u64
+    language_mask: mutable u64
+    total_size: mutable u64
+    label_name: mutable static u8&
+
+struct PlaygoFile:
+    header: mutable PlaygoHeader
+    chunks: mutable darray[PlaygoChunk]
+    valid: mutable bool
+
+def PlaygoRange_empty() -> PlaygoRange:
+    return PlaygoRange(0, 0)
+
+def PlaygoHeader_empty() -> PlaygoHeader:
+    return PlaygoHeader(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "", PlaygoRange_empty(), PlaygoRange_empty(), PlaygoRange_empty(), PlaygoRange_empty())
+
+def PlaygoFile_empty() -> PlaygoFile:
+    return PlaygoFile(PlaygoHeader_empty(), [], false)
+
+def Playgo_ReadRange(reader: mutable FileFormatReader&) -> PlaygoRange:
+    return PlaygoRange(ff_read_u32_le(reader), ff_read_u32_le(reader))
+
+def Playgo_ReadHeader(data: darray[u8]) -> PlaygoHeader:
+    reader: mutable FileFormatReader = FileFormatReader_new(data)
+    header: PlaygoHeader = PlaygoHeader_empty()
+    header.magic <- ff_read_u32_le(reader)
+    header.version_major <- ff_read_u16_le(reader)
+    header.version_minor <- ff_read_u16_le(reader)
+    header.image_count <- ff_read_u16_le(reader)
+    header.chunk_count <- ff_read_u16_le(reader)
+    header.mchunk_count <- ff_read_u16_le(reader)
+    header.scenario_count <- ff_read_u16_le(reader)
+    header.file_size <- ff_read_u32_le(reader)
+    header.default_scenario_id <- ff_read_u16_le(reader)
+    header.attrib <- ff_read_u16_le(reader)
+    header.sdk_version <- ff_read_u32_le(reader)
+    header.disc_count <- ff_read_u16_le(reader)
+    header.layer_bmp <- ff_read_u16_le(reader)
+    _ = ff_skip(reader, 32)
+    header.content_id <- ff_read_cstr_at(data, reader.offset)
+    _ = ff_skip(reader, 128)
+    header.chunk_attrs <- Playgo_ReadRange(reader)
+    header.chunk_mchunks <- Playgo_ReadRange(reader)
+    header.chunk_labels <- Playgo_ReadRange(reader)
+    header.mchunk_attrs <- Playgo_ReadRange(reader)
+    return header
+
+def Playgo_ReadChunkAttr(data: darray[u8], offset: usize) -> PlaygoChunkAttrEntry:
+    reader: mutable FileFormatReader = FileFormatReader_new(data)
+    reader.offset <- offset
+    flag: u8 = ff_read_u8(reader)
+    image_disc_layer_no: u8 = ff_read_u8(reader)
+    req_locus: u8 = ff_read_u8(reader)
+    _ = ff_skip(reader, 11)
+    mchunk_count: u16 = ff_read_u16_le(reader)
+    language_mask: u64 = ff_read_u64_le(reader)
+    mchunks_offset: u32 = ff_read_u32_le(reader)
+    label_offset: u32 = ff_read_u32_le(reader)
+    return PlaygoChunkAttrEntry(flag, image_disc_layer_no, req_locus, mchunk_count, language_mask, mchunks_offset, label_offset)
+
+def Playgo_ReadMchunkAttr(data: darray[u8], offset: usize) -> PlaygoMchunkAttrEntry:
+    reader: mutable FileFormatReader = FileFormatReader_new(data)
+    reader.offset <- offset
+    loc_raw: u64 = ff_read_u64_le(reader)
+    size_raw: u64 = ff_read_u64_le(reader)
+    return PlaygoMchunkAttrEntry(loc_raw & 0xFFFFFFFFFFFF, (loc_raw >> 56) & 0xF, size_raw & 0xFFFFFFFFFFFF)
+
+def Playgo_Slice(data: darray[u8], range: PlaygoRange) -> darray[u8]:
+    reader: mutable FileFormatReader = FileFormatReader_new(data)
+    if range.offset.usize() > data.count:
+        return []
+    reader.offset <- range.offset.usize()
+    return ff_read_bytes(reader, range.length.usize())
+
+def Playgo_Parse(data: darray[u8]) -> PlaygoFile:
+    if data.count < PLAYGO_HEADER_SIZE:
+        return PlaygoFile_empty()
+    header: PlaygoHeader = Playgo_ReadHeader(data)
+    if header.magic != PLAYGO_MAGIC:
+        return PlaygoFile(header, [], false)
+
+    chunk_attrs_data: darray[u8] = Playgo_Slice(data, header.chunk_attrs)
+    chunk_mchunks_data: darray[u8] = Playgo_Slice(data, header.chunk_mchunks)
+    chunk_labels_data: darray[u8] = Playgo_Slice(data, header.chunk_labels)
+    mchunk_attrs_data: darray[u8] = Playgo_Slice(data, header.mchunk_attrs)
+
+    chunks: mutable darray[PlaygoChunk] = []
+    valid: mutable bool = true
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        i: mutable u16 = 0
+        while i < header.chunk_count and valid:
+            attr_offset: usize = i.usize() * PLAYGO_CHUNK_ATTR_ENTRY_SIZE
+            if attr_offset + PLAYGO_CHUNK_ATTR_ENTRY_SIZE > chunk_attrs_data.count:
+                valid <- false
+            else:
+                attr: PlaygoChunkAttrEntry = Playgo_ReadChunkAttr(chunk_attrs_data, attr_offset)
+                total_size: mutable u64 = 0
+                for j in 0..<attr.mchunk_count:
+                    mchunk_index_reader: mutable FileFormatReader = FileFormatReader_new(chunk_mchunks_data)
+                    mchunk_index_reader.offset <- attr.mchunks_offset.usize() + (j.usize() * 2)
+                    mchunk_id: u16 = ff_read_u16_le(mchunk_index_reader)
+                    mchunk_attr_offset: usize = mchunk_id.usize() * PLAYGO_MCHUNK_ATTR_ENTRY_SIZE
+                    if mchunk_attr_offset + PLAYGO_MCHUNK_ATTR_ENTRY_SIZE <= mchunk_attrs_data.count:
+                        mchunk: PlaygoMchunkAttrEntry = Playgo_ReadMchunkAttr(mchunk_attrs_data, mchunk_attr_offset)
+                        total_size <- total_size + mchunk.size
+                label: static u8& = ff_read_cstr_at(chunk_labels_data, attr.label_offset.usize())
+                in owner:
+                    chunks.push(PlaygoChunk(attr.req_locus.u64(), attr.language_mask, total_size, label))
+            i <- i + 1
+    return PlaygoFile(header, chunks, valid)
+
+def Playgo_Open(path: static u8&) -> PlaygoFile:
+    data: darray[u8] = ff_file_read_all(path)
+    if data.count == 0:
+        return PlaygoFile_empty()
+    return Playgo_Parse(data)

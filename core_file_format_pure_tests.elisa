@@ -1,0 +1,197 @@
+include "../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "./common/arch.elisa"
+include "./common/logging/log.elisa"
+include "./common/string_util.elisa"
+include "./common/io_file.elisa"
+include "./common/path_util.elisa"
+include "./common/key_manager.elisa"
+include "./common/aes.elisa"
+include "./core/file_format/file_format.elisa"
+
+def test_push_zeroes(out: mutable darray[u8]&, count: usize) -> void:
+    for i in 0..<count:
+        ff_push_u8(out, 0)
+
+def test_push_cstr(out: mutable darray[u8]&, value: static u8&) -> void:
+    for i in 0..<runtime_strlen(value):
+        ff_push_u8(out, value[i])
+    ff_push_u8(out, 0)
+
+@test
+def file_format_psf_parses_text_and_integer_entries() -> void:
+    can Abort.Panic, Memory.Allocate:
+        bytes: mutable darray[u8] = []
+        ff_push_u32_be(bytes, PSF_MAGIC)
+        ff_push_u32_le(bytes, PSF_VERSION_1_1)
+        ff_push_u32_le(bytes, 0x34)
+        ff_push_u32_le(bytes, 0x43)
+        ff_push_u32_le(bytes, 2)
+        ff_push_u16_le(bytes, 0)
+        ff_push_u16_be(bytes, PSF_ENTRY_FMT_TEXT)
+        ff_push_u32_le(bytes, 5)
+        ff_push_u32_le(bytes, 12)
+        ff_push_u32_le(bytes, 0)
+        ff_push_u16_le(bytes, 9)
+        ff_push_u16_be(bytes, PSF_ENTRY_FMT_INTEGER)
+        ff_push_u32_le(bytes, 4)
+        ff_push_u32_le(bytes, 4)
+        ff_push_u32_le(bytes, 12)
+        test_push_cstr(bytes, "TITLE_ID")
+        test_push_cstr(bytes, "COUNT")
+        test_push_cstr(bytes, "ABCD")
+        test_push_zeroes(bytes, 7)
+        ff_push_u32_le(bytes, 42)
+
+        psf: PsfFile = Psf_Parse(bytes)
+        assert psf.valid
+        assert psf.entries.count == 2
+        assert string_slice_eq(Psf_GetString(psf, "TITLE_ID"), 0, 4, "ABCD") == 1
+        assert Psf_GetInteger(psf, "COUNT") == 42
+
+@test
+def file_format_psf_encodes_and_roundtrips_entries() -> void:
+    can Abort.Panic, Memory.Allocate:
+        psf: mutable PsfFile = PsfFile_empty()
+        Psf_AddString(psf, "TITLE_ID", "ABCD")
+        Psf_AddInteger(psf, "COUNT", 42)
+        encoded: darray[u8] = Psf_Encode(psf)
+        parsed: PsfFile = Psf_Parse(encoded)
+        assert parsed.valid
+        assert parsed.entries.count == 2
+        assert string_slice_eq(Psf_GetString(parsed, "TITLE_ID"), 0, 4, "ABCD") == 1
+        assert Psf_GetInteger(parsed, "COUNT") == 42
+
+@test
+def file_format_trp_parses_header_and_entries() -> void:
+    can Abort.Panic, Memory.Allocate:
+        bytes: mutable darray[u8] = []
+        ff_push_u32_be(bytes, TRP_MAGIC)
+        ff_push_u32_be(bytes, 1)
+        ff_push_u32_be(bytes, 0)
+        ff_push_u32_be(bytes, 0x100)
+        ff_push_u32_be(bytes, 1)
+        ff_push_u32_be(bytes, TRP_ENTRY_SIZE.u32())
+        ff_push_u32_be(bytes, 0)
+        test_push_zeroes(bytes, 20)
+        ff_push_u32_be(bytes, 0)
+        test_push_zeroes(bytes, 44)
+        test_push_cstr(bytes, "ICON0.PNG")
+        test_push_zeroes(bytes, 32 - runtime_strlen("ICON0.PNG") - 1)
+        ff_push_u32_be(bytes, 0)
+        ff_push_u32_be(bytes, 0x80)
+        ff_push_u32_be(bytes, 0)
+        ff_push_u32_be(bytes, 0x20)
+        ff_push_u32_be(bytes, TRP_ENTRY_FLAG_PNG)
+        test_push_zeroes(bytes, 12)
+
+        trp: TrpFile = Trp_Parse(bytes)
+        assert trp.valid
+        assert trp.header.entry_num == 1
+        assert trp.entries.count == 1
+        assert Trp_IsPngEntry(trp.entries[0])
+        assert string_slice_eq(trp.entries[0].entry_name, 0, runtime_strlen("ICON0.PNG"), "ICON0.PNG") == 1
+
+@test
+def file_format_trp_aes_cbc_roundtrips_block_data() -> void:
+    can Abort.Panic, Memory.Allocate:
+        key: mutable darray[u8] = []
+        iv: mutable darray[u8] = []
+        plaintext: mutable darray[u8] = []
+        for i in 0..<16:
+            ff_push_u8(key, (i + 1).u8())
+            ff_push_u8(iv, (0x20 + i).u8())
+            ff_push_u8(plaintext, (0x40 + i).u8())
+
+        encrypted: darray[u8] = Trp_AesCbcEncrypt(key, iv, plaintext)
+        decrypted: darray[u8] = Trp_AesCbcDecrypt(key, iv, encrypted)
+
+        assert encrypted.count == plaintext.count
+        assert decrypted.count == plaintext.count
+        for i in 0..<plaintext.count:
+            assert decrypted[i] == plaintext[i]
+
+@test
+def file_format_npbind_parses_body_and_npcommid() -> void:
+    can Abort.Panic, Memory.Allocate:
+        bytes: mutable darray[u8] = []
+        ff_push_u32_be(bytes, NPBIND_MAGIC)
+        ff_push_u32_be(bytes, 1)
+        ff_push_u32_be(bytes, 0)
+        ff_push_u32_be(bytes, 0x200)
+        ff_push_u32_be(bytes, 0)
+        ff_push_u32_be(bytes, 0)
+        ff_push_u32_be(bytes, 0)
+        ff_push_u32_be(bytes, 1)
+        test_push_zeroes(bytes, 0x60)
+        ff_push_u16_be(bytes, 0x10)
+        ff_push_u16_be(bytes, 12)
+        for i in 0..<12:
+            ff_push_u8(bytes, "NPWR00001_00"[i])
+        ff_push_u16_be(bytes, 0x11)
+        ff_push_u16_be(bytes, 1)
+        ff_push_u8(bytes, 7)
+        ff_push_u16_be(bytes, 0x12)
+        ff_push_u16_be(bytes, 1)
+        ff_push_u8(bytes, 8)
+        ff_push_u16_be(bytes, 0x13)
+        ff_push_u16_be(bytes, 1)
+        ff_push_u8(bytes, 9)
+        test_push_zeroes(bytes, 20)
+
+        npbind: NpBindFile = NpBind_Parse(bytes)
+        assert NpBind_IsValid(npbind)
+        assert NpBind_BodyCount(npbind) == 1
+        assert string_slice_eq(NpBind_GetNpCommId(npbind, 0), 0, runtime_strlen("NPWR00001_00"), "NPWR00001_00") == 1
+
+@test
+def file_format_playgo_parses_chunk_size_and_label() -> void:
+    can Abort.Panic, Memory.Allocate:
+        bytes: mutable darray[u8] = []
+        ff_push_u32_le(bytes, PLAYGO_MAGIC)
+        ff_push_u16_le(bytes, 1)
+        ff_push_u16_le(bytes, 0)
+        ff_push_u16_le(bytes, 1)
+        ff_push_u16_le(bytes, 1)
+        ff_push_u16_le(bytes, 1)
+        ff_push_u16_le(bytes, 0)
+        ff_push_u32_le(bytes, 0x200)
+        ff_push_u16_le(bytes, 0)
+        ff_push_u16_le(bytes, 0)
+        ff_push_u32_le(bytes, 0)
+        ff_push_u16_le(bytes, 1)
+        ff_push_u16_le(bytes, 0)
+        test_push_zeroes(bytes, 32)
+        test_push_cstr(bytes, "CONTENT")
+        test_push_zeroes(bytes, 128 - runtime_strlen("CONTENT") - 1)
+        ff_push_u32_le(bytes, 0x100)
+        ff_push_u32_le(bytes, 0x20)
+        ff_push_u32_le(bytes, 0x120)
+        ff_push_u32_le(bytes, 2)
+        ff_push_u32_le(bytes, 0x122)
+        ff_push_u32_le(bytes, 6)
+        ff_push_u32_le(bytes, 0x129)
+        ff_push_u32_le(bytes, 0x10)
+        test_push_zeroes(bytes, 0x100 - bytes.count)
+        ff_push_u8(bytes, 0)
+        ff_push_u8(bytes, 0)
+        ff_push_u8(bytes, 5)
+        test_push_zeroes(bytes, 11)
+        ff_push_u16_le(bytes, 1)
+        ff_push_u32_le(bytes, 0x34)
+        ff_push_u32_le(bytes, 0x12)
+        ff_push_u32_le(bytes, 0)
+        ff_push_u32_le(bytes, 0)
+        ff_push_u16_le(bytes, 0)
+        test_push_cstr(bytes, "base")
+        test_push_zeroes(bytes, 2)
+        ff_push_u32_le(bytes, 0)
+        ff_push_u32_le(bytes, 0)
+        ff_push_u32_le(bytes, 0x40)
+        ff_push_u32_le(bytes, 0)
+
+        playgo: PlaygoFile = Playgo_Parse(bytes)
+        assert playgo.valid
+        assert playgo.chunks.count == 1
+        assert playgo.chunks[0].req_locus == 5
+        assert playgo.chunks[0].total_size == 0x40
+        assert string_slice_eq(playgo.chunks[0].label_name, 0, runtime_strlen("base"), "base") == 1

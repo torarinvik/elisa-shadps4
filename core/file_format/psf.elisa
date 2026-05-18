@@ -1,0 +1,248 @@
+# SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+const PSF_MAGIC: u32 = 0x00505346
+const PSF_VERSION_1_1: u32 = 0x00000101
+const PSF_VERSION_1_0: u32 = 0x00000100
+const PSF_HEADER_SIZE: usize = 0x14
+const PSF_RAW_ENTRY_SIZE: usize = 0x10
+const PSF_ENTRY_FMT_BINARY: u16 = 0x0004
+const PSF_ENTRY_FMT_TEXT: u16 = 0x0204
+const PSF_ENTRY_FMT_INTEGER: u16 = 0x0404
+
+struct PsfHeader:
+    magic: mutable u32
+    version: mutable u32
+    key_table_offset: mutable u32
+    data_table_offset: mutable u32
+    index_table_entries: mutable u32
+
+struct PsfRawEntry:
+    key_offset: mutable u16
+    param_fmt: mutable u16
+    param_len: mutable u32
+    param_max_len: mutable u32
+    data_offset: mutable u32
+
+struct PsfEntry:
+    key: mutable static u8&
+    param_fmt: mutable u16
+    max_len: mutable u32
+    binary_value: mutable darray[u8]
+    string_value: mutable static u8&
+    integer_value: mutable i32
+
+struct PsfFile:
+    header: mutable PsfHeader
+    entries: mutable darray[PsfEntry]
+    valid: mutable bool
+
+def PsfHeader_empty() -> PsfHeader:
+    return PsfHeader(0, 0, 0, 0, 0)
+
+def PsfFile_empty() -> PsfFile:
+    return PsfFile(PsfHeader_empty(), [], false)
+
+def PsfEntry_binary(key: static u8&, value: darray[u8], max_len: u32) -> PsfEntry:
+    return PsfEntry(key, PSF_ENTRY_FMT_BINARY, max_len, value, "", 0)
+
+def PsfEntry_string(key: static u8&, value: static u8&, max_len: u32) -> PsfEntry:
+    return PsfEntry(key, PSF_ENTRY_FMT_TEXT, max_len, [], value, 0)
+
+def PsfEntry_integer(key: static u8&, value: i32) -> PsfEntry:
+    return PsfEntry(key, PSF_ENTRY_FMT_INTEGER, 4, [], "", value)
+
+def Psf_GetKnownMaxSize(key: static u8&, fallback: u32) -> u32:
+    if string_slice_eq(key, 0, runtime_strlen("ACCOUNT_ID"), "ACCOUNT_ID") == 1:
+        return 8
+    if string_slice_eq(key, 0, runtime_strlen("CATEGORY"), "CATEGORY") == 1:
+        return 4
+    if string_slice_eq(key, 0, runtime_strlen("DETAIL"), "DETAIL") == 1:
+        return 1024
+    if string_slice_eq(key, 0, runtime_strlen("FORMAT"), "FORMAT") == 1:
+        return 4
+    if string_slice_eq(key, 0, runtime_strlen("MAINTITLE"), "MAINTITLE") == 1:
+        return 128
+    if string_slice_eq(key, 0, runtime_strlen("PARAMS"), "PARAMS") == 1:
+        return 1024
+    if string_slice_eq(key, 0, runtime_strlen("SAVEDATA_BLOCKS"), "SAVEDATA_BLOCKS") == 1:
+        return 8
+    if string_slice_eq(key, 0, runtime_strlen("SAVEDATA_DIRECTORY"), "SAVEDATA_DIRECTORY") == 1:
+        return 32
+    if string_slice_eq(key, 0, runtime_strlen("SUBTITLE"), "SUBTITLE") == 1:
+        return 128
+    if string_slice_eq(key, 0, runtime_strlen("TITLE_ID"), "TITLE_ID") == 1:
+        return 12
+    return fallback
+
+def Psf_ReadHeader(reader: mutable FileFormatReader&) -> PsfHeader:
+    return PsfHeader(ff_read_u32_be(reader), ff_read_u32_le(reader), ff_read_u32_le(reader), ff_read_u32_le(reader), ff_read_u32_le(reader))
+
+def Psf_ReadRawEntry(reader: mutable FileFormatReader&) -> PsfRawEntry:
+    return PsfRawEntry(ff_read_u16_le(reader), ff_read_u16_be(reader), ff_read_u32_le(reader), ff_read_u32_le(reader), ff_read_u32_le(reader))
+
+def Psf_Parse(data: darray[u8]) -> PsfFile:
+    if data.count < PSF_HEADER_SIZE:
+        return PsfFile_empty()
+    reader: mutable FileFormatReader = FileFormatReader_new(data)
+    header: PsfHeader = Psf_ReadHeader(reader)
+    if header.magic != PSF_MAGIC:
+        return PsfFile(header, [], false)
+    if header.version != PSF_VERSION_1_1 and header.version != PSF_VERSION_1_0:
+        return PsfFile(header, [], false)
+
+    entries: mutable darray[PsfEntry] = []
+    valid: mutable bool = true
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        i: mutable u32 = 0
+        while i < header.index_table_entries and valid:
+            raw_offset: usize = PSF_HEADER_SIZE + i.usize() * PSF_RAW_ENTRY_SIZE
+            if raw_offset + PSF_RAW_ENTRY_SIZE > data.count:
+                valid <- false
+            else:
+                raw_reader: mutable FileFormatReader = FileFormatReader_new(data)
+                raw_reader.offset <- raw_offset
+                raw: PsfRawEntry = Psf_ReadRawEntry(raw_reader)
+                key: static u8& = ff_read_cstr_at(data, header.key_table_offset.usize() + raw.key_offset.usize())
+                data_offset: usize = header.data_table_offset.usize() + raw.data_offset.usize()
+                value_reader: mutable FileFormatReader = FileFormatReader_new(data)
+                value_reader.offset <- data_offset
+                if raw.param_fmt == PSF_ENTRY_FMT_BINARY:
+                    in owner:
+                        entries.push(PsfEntry_binary(key, ff_read_bytes(value_reader, raw.param_len.usize()), raw.param_max_len))
+                elif raw.param_fmt == PSF_ENTRY_FMT_TEXT:
+                    in owner:
+                        entries.push(PsfEntry_string(key, ff_read_cstr_at(data, data_offset), raw.param_max_len))
+                elif raw.param_fmt == PSF_ENTRY_FMT_INTEGER:
+                    in owner:
+                        entries.push(PsfEntry_integer(key, ff_read_u32_le(value_reader).i32()))
+                else:
+                    valid <- false
+            i <- i + 1
+    return PsfFile(header, entries, valid)
+
+def Psf_Open(path: static u8&) -> PsfFile:
+    data: darray[u8] = ff_file_read_all(path)
+    if data.count == 0:
+        return PsfFile_empty()
+    return Psf_Parse(data)
+
+def Psf_FindEntry(file: PsfFile&, key: static u8&) -> usize:
+    key_len: usize = runtime_strlen(key)
+    for i in 0..<file.entries.count:
+        entry: PsfEntry = file.entries[i]
+        if runtime_strlen(entry.key) == key_len and string_slice_eq(entry.key, 0, key_len, key) == 1:
+            return i
+    return file.entries.count
+
+def Psf_GetString(file: PsfFile&, key: static u8&) -> static u8&:
+    index: usize = Psf_FindEntry(file, key)
+    if index >= file.entries.count:
+        return ""
+    entry: PsfEntry = file.entries[index]
+    if entry.param_fmt != PSF_ENTRY_FMT_TEXT:
+        return ""
+    return entry.string_value
+
+def Psf_GetInteger(file: PsfFile&, key: static u8&) -> i32:
+    index: usize = Psf_FindEntry(file, key)
+    if index >= file.entries.count:
+        return 0
+    entry: PsfEntry = file.entries[index]
+    if entry.param_fmt != PSF_ENTRY_FMT_INTEGER:
+        return 0
+    return entry.integer_value
+
+def Psf_AddEntry(file: mutable PsfFile&, entry: PsfEntry, update: bool) -> void:
+    index: usize = Psf_FindEntry(file, entry.key)
+    if index < file.entries.count:
+        if update:
+            file.entries[index] <- entry
+        return
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            file.entries.push(entry)
+
+def Psf_AddString(file: mutable PsfFile&, key: static u8&, value: static u8&, update: bool = false) -> void:
+    max_len: u32 = Psf_GetKnownMaxSize(key, (runtime_strlen(value) + 1).u32())
+    Psf_AddEntry(file, PsfEntry_string(key, value, max_len), update)
+
+def Psf_AddInteger(file: mutable PsfFile&, key: static u8&, value: i32, update: bool = false) -> void:
+    Psf_AddEntry(file, PsfEntry_integer(key, value), update)
+
+def Psf_AddBinary(file: mutable PsfFile&, key: static u8&, value: darray[u8], update: bool = false) -> void:
+    max_len: u32 = Psf_GetKnownMaxSize(key, value.count.u32())
+    Psf_AddEntry(file, PsfEntry_binary(key, value, max_len), update)
+
+def Psf_Encode(file: PsfFile&) -> darray[u8]:
+    out: mutable darray[u8] = []
+    ff_push_u32_be(out, PSF_MAGIC)
+    ff_push_u32_le(out, PSF_VERSION_1_1)
+    ff_push_u32_le(out, 0)
+    ff_push_u32_le(out, 0)
+    ff_push_u32_le(out, file.entries.count.u32())
+    for i in 0..<file.entries.count:
+        for j in 0..<PSF_RAW_ENTRY_SIZE:
+            ff_push_u8(out, 0)
+
+    key_table_offset: u32 = out.count.u32()
+    for i in 0..<file.entries.count:
+        entry: PsfEntry = file.entries[i]
+        key_offset: u16 = (out.count.u32() - key_table_offset).u16()
+        raw_pos: usize = PSF_HEADER_SIZE + i * PSF_RAW_ENTRY_SIZE
+        out[raw_pos] <- (key_offset & 0xFF).u8()
+        out[raw_pos + 1] <- ((key_offset >> 8) & 0xFF).u8()
+        out[raw_pos + 2] <- ((entry.param_fmt >> 8) & 0xFF).u8()
+        out[raw_pos + 3] <- (entry.param_fmt & 0xFF).u8()
+        for j in 0..<runtime_strlen(entry.key):
+            ff_push_u8(out, entry.key[j])
+        ff_push_u8(out, 0)
+
+    data_table_offset: u32 = out.count.u32()
+    out[8] <- (key_table_offset & 0xFF).u8()
+    out[9] <- ((key_table_offset >> 8) & 0xFF).u8()
+    out[10] <- ((key_table_offset >> 16) & 0xFF).u8()
+    out[11] <- ((key_table_offset >> 24) & 0xFF).u8()
+    out[12] <- (data_table_offset & 0xFF).u8()
+    out[13] <- ((data_table_offset >> 8) & 0xFF).u8()
+    out[14] <- ((data_table_offset >> 16) & 0xFF).u8()
+    out[15] <- ((data_table_offset >> 24) & 0xFF).u8()
+
+    for i in 0..<file.entries.count:
+        ff_pad_to(out, 4)
+        entry: PsfEntry = file.entries[i]
+        raw_pos: usize = PSF_HEADER_SIZE + i * PSF_RAW_ENTRY_SIZE
+        data_offset: u32 = out.count.u32() - data_table_offset
+        param_len: mutable u32 = 0
+        if entry.param_fmt == PSF_ENTRY_FMT_BINARY:
+            param_len <- entry.binary_value.count.u32()
+            ff_push_bytes(out, entry.binary_value)
+        elif entry.param_fmt == PSF_ENTRY_FMT_TEXT:
+            param_len <- (runtime_strlen(entry.string_value) + 1).u32()
+            for j in 0..<runtime_strlen(entry.string_value):
+                ff_push_u8(out, entry.string_value[j])
+            ff_push_u8(out, 0)
+        elif entry.param_fmt == PSF_ENTRY_FMT_INTEGER:
+            param_len <- 4
+            ff_push_u32_le(out, entry.integer_value.u32())
+        out[raw_pos + 4] <- (param_len & 0xFF).u8()
+        out[raw_pos + 5] <- ((param_len >> 8) & 0xFF).u8()
+        out[raw_pos + 6] <- ((param_len >> 16) & 0xFF).u8()
+        out[raw_pos + 7] <- ((param_len >> 24) & 0xFF).u8()
+        out[raw_pos + 8] <- (entry.max_len & 0xFF).u8()
+        out[raw_pos + 9] <- ((entry.max_len >> 8) & 0xFF).u8()
+        out[raw_pos + 10] <- ((entry.max_len >> 16) & 0xFF).u8()
+        out[raw_pos + 11] <- ((entry.max_len >> 24) & 0xFF).u8()
+        out[raw_pos + 12] <- (data_offset & 0xFF).u8()
+        out[raw_pos + 13] <- ((data_offset >> 8) & 0xFF).u8()
+        out[raw_pos + 14] <- ((data_offset >> 16) & 0xFF).u8()
+        out[raw_pos + 15] <- ((data_offset >> 24) & 0xFF).u8()
+        while param_len < entry.max_len:
+            ff_push_u8(out, 0)
+            param_len <- param_len + 1
+    return out
+
+def Psf_EncodeToFile(file: PsfFile&, path: static u8&) -> bool:
+    return ff_file_write_all(path, Psf_Encode(file))

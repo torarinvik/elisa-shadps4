@@ -1,0 +1,243 @@
+# SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+const TRP_MAGIC: u32 = 0xDCA24D00
+const TRP_HEADER_SIZE: usize = 0x60
+const TRP_ENTRY_SIZE: usize = 0x40
+const TRP_DIGEST_SIZE: usize = 20
+const TRP_ENTRY_FLAG_PNG: u32 = 0
+const TRP_ENTRY_FLAG_ENCRYPTED_XML: u32 = 3
+
+struct TrpHeader:
+    magic: mutable u32
+    version: mutable u32
+    file_size: mutable u64
+    entry_num: mutable u32
+    entry_size: mutable u32
+    dev_flag: mutable u32
+    digest: mutable darray[u8]
+    key_index: mutable u32
+
+struct TrpEntry:
+    entry_name: mutable static u8&
+    entry_pos: mutable u64
+    entry_len: mutable u64
+    flag: mutable u32
+
+struct TrpFile:
+    header: mutable TrpHeader
+    entries: mutable darray[TrpEntry]
+    valid: mutable bool
+
+def TrpHeader_empty() -> TrpHeader:
+    return TrpHeader(0, 0, 0, 0, 0, 0, [], 0)
+
+def TrpFile_empty() -> TrpFile:
+    return TrpFile(TrpHeader_empty(), [], false)
+
+def Trp_ReadHeader(reader: mutable FileFormatReader&) -> TrpHeader:
+    header: TrpHeader = TrpHeader(
+        ff_read_u32_be(reader),
+        ff_read_u32_be(reader),
+        ff_read_u64_be(reader),
+        ff_read_u32_be(reader),
+        ff_read_u32_be(reader),
+        ff_read_u32_be(reader),
+        ff_read_bytes(reader, TRP_DIGEST_SIZE),
+        ff_read_u32_be(reader)
+    )
+    _ = ff_skip(reader, 44)
+    return header
+
+def Trp_ReadEntry(reader: mutable FileFormatReader&) -> TrpEntry:
+    name_offset: usize = reader.offset
+    _ = ff_skip(reader, 32)
+    entry: TrpEntry = TrpEntry(
+        ff_read_cstr_at(reader.data, name_offset),
+        ff_read_u64_be(reader),
+        ff_read_u64_be(reader),
+        ff_read_u32_be(reader)
+    )
+    _ = ff_skip(reader, 12)
+    return entry
+
+def Trp_Parse(data: darray[u8]) -> TrpFile:
+    if data.count < TRP_HEADER_SIZE:
+        return TrpFile_empty()
+    reader: mutable FileFormatReader = FileFormatReader_new(data)
+    header: TrpHeader = Trp_ReadHeader(reader)
+    if header.magic != TRP_MAGIC:
+        return TrpFile(header, [], false)
+
+    entries: mutable darray[TrpEntry] = []
+    valid: mutable bool = true
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        i: mutable u32 = 0
+        while i < header.entry_num and valid:
+            if not ff_can_read(reader, header.entry_size.usize()):
+                valid <- false
+            else:
+                entry_start: usize = reader.offset
+                entry: TrpEntry = Trp_ReadEntry(reader)
+                in owner:
+                    entries.push(entry)
+                reader.offset <- entry_start + header.entry_size.usize()
+            i <- i + 1
+    return TrpFile(header, entries, valid)
+
+def Trp_IsPngEntry(entry: TrpEntry&) -> bool:
+    return entry.flag == TRP_ENTRY_FLAG_PNG
+
+def Trp_IsEncryptedXmlEntry(entry: TrpEntry&) -> bool:
+    return entry.flag == TRP_ENTRY_FLAG_ENCRYPTED_XML
+
+def Trp_RemoveXmlPadding(bytes: darray[u8]) -> darray[u8]:
+    out: mutable darray[u8] = []
+    end: mutable usize = bytes.count
+    found: mutable bool = false
+    while end > 0 and not found:
+        if bytes[end - 1] == '>':
+            found <- true
+        else:
+            end <- end - 1
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        for i in 0..<end:
+            in owner:
+                out.push(bytes[i])
+    return out
+
+def Trp_StringLess(left: static u8&, right: static u8&) -> bool:
+    return strcmp(left, right) < 0
+
+def Trp_SelectFile(trophy_path: static u8&, index: int) -> static u8&:
+    if not fs_exists(trophy_path) or not fs_is_directory(trophy_path):
+        return ""
+    trp_files: mutable darray[static u8&] = []
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        for entry in fs_directory_entries(trophy_path):
+            if ff_string_ends_with(entry, ".trp"):
+                in owner:
+                    trp_files.push(entry)
+        if trp_files.count > 1:
+            i: mutable usize = 1
+            while i < trp_files.count:
+                j: mutable usize = i
+                while j > 0 and Trp_StringLess(trp_files[j], trp_files[j - 1]):
+                    tmp: static u8& = trp_files[j - 1]
+                    trp_files[j - 1] <- trp_files[j]
+                    trp_files[j] <- tmp
+                    j <- j - 1
+                i <- i + 1
+    if index < 0 or index.usize() >= trp_files.count:
+        return ""
+    return trp_files[index.usize()]
+
+def Trp_ReadEntryData(data: darray[u8], entry: TrpEntry&) -> darray[u8]:
+    reader: mutable FileFormatReader = FileFormatReader_new(data)
+    if entry.entry_pos.usize() > data.count:
+        return []
+    reader.offset <- entry.entry_pos.usize()
+    return ff_read_bytes(reader, entry.entry_len.usize())
+
+def Trp_NpCommIdIsValid(np_comm_id: static u8&) -> bool:
+    return runtime_strlen(np_comm_id) >= 12 and np_comm_id[0] == 'N' and np_comm_id[1] == 'P'
+
+def Trp_DecryptEfsm(trophy_key: darray[u8], np_comm_id: static u8&, efsm_iv: darray[u8], ciphertext: darray[u8]) -> darray[u8]:
+    if trophy_key.count != 16 or efsm_iv.count != 16:
+        return []
+
+    npcommid_block: mutable darray[u8] = []
+    zero_iv: mutable darray[u8] = []
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        for i in 0..<16:
+            in owner:
+                zero_iv.push(0)
+                if i < runtime_strlen(np_comm_id):
+                    npcommid_block.push(np_comm_id[i])
+                else:
+                    npcommid_block.push(0)
+
+    trp_key: darray[u8] = Trp_AesCbcEncrypt(trophy_key, zero_iv, npcommid_block)
+    return Trp_AesCbcDecrypt(trp_key, efsm_iv, ciphertext)
+
+def Trp_AesCbcEncrypt(key: darray[u8], iv: darray[u8], plaintext: darray[u8]) -> darray[u8]:
+    out: mutable darray[u8] = []
+    if key.count != 16 or iv.count != 16 or plaintext.count % 16 != 0:
+        return out
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        for i in 0..<plaintext.count:
+            in owner:
+                out.push(0)
+    if plaintext.count != 0:
+        AesCbcEncrypt(key[0].ref[u8&], key.count, iv[0].ref[u8&], plaintext[0].ref[u8&], plaintext.count, out[0].ref[mutable u8&])
+    return out
+
+def Trp_AesCbcDecrypt(key: darray[u8], iv: darray[u8], ciphertext: darray[u8]) -> darray[u8]:
+    out: mutable darray[u8] = []
+    if key.count != 16 or iv.count != 16 or ciphertext.count % 16 != 0:
+        return out
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        for i in 0..<ciphertext.count:
+            in owner:
+                out.push(0)
+    if ciphertext.count != 0:
+        AesCbcDecrypt(key[0].ref[u8&], key.count, iv[0].ref[u8&], ciphertext[0].ref[u8&], ciphertext.count, out[0].ref[mutable u8&])
+    return out
+
+def Trp_ProcessPngEntry(data: darray[u8], entry: TrpEntry&, output_path: static u8&) -> bool:
+    icon: darray[u8] = Trp_ReadEntryData(data, entry)
+    if icon.count != entry.entry_len.usize():
+        return false
+    icons_dir: static u8& = fs_join(output_path, "Icons")
+    fs_create_directory(icons_dir)
+    return ff_file_write_all(fs_join(icons_dir, entry.entry_name), icon)
+
+def Trp_ProcessEncryptedXmlEntry(data: darray[u8], entry: TrpEntry&, output_path: static u8&, user_key: darray[u8], np_comm_id: static u8&) -> bool:
+    if entry.entry_len <= 16:
+        return false
+    entry_data: darray[u8] = Trp_ReadEntryData(data, entry)
+    if entry_data.count != entry.entry_len.usize():
+        return false
+    iv_reader: mutable FileFormatReader = FileFormatReader_new(entry_data)
+    efsm_iv: darray[u8] = ff_read_bytes(iv_reader, 16)
+    ciphertext: darray[u8] = ff_read_bytes(iv_reader, entry_data.count - 16)
+    xml: darray[u8] = Trp_RemoveXmlPadding(Trp_DecryptEfsm(user_key, np_comm_id, efsm_iv, ciphertext))
+    xml_dir: static u8& = fs_join(output_path, "Xml")
+    fs_create_directory(xml_dir)
+    xml_name: static u8& = ff_string_replace_first_4(entry.entry_name, "ESFM", "XML")
+    return ff_file_write_all(fs_join(xml_dir, xml_name), xml)
+
+def Trp_Extract(trophy_path: static u8&, index: int, np_comm_id: static u8&, output_path: static u8&) -> bool:
+    trp_path: static u8& = Trp_SelectFile(trophy_path, index)
+    if runtime_strlen(trp_path) == 0:
+        return false
+    data: darray[u8] = ff_file_read_all(trp_path)
+    trp: TrpFile = Trp_Parse(data)
+    if not trp.valid:
+        return false
+
+    keys: heap KeyManager& = KeyManager_GetInstance()
+    user_key: darray[u8] = keys.keys.TrophyKeySet.ReleaseTrophyKey
+    if user_key.count != 16:
+        return false
+
+    success: mutable bool = true
+    fs_create_directory(output_path)
+    for i in 0..<trp.entries.count:
+        entry: TrpEntry = trp.entries[i]
+        if Trp_IsPngEntry(entry):
+            if not Trp_ProcessPngEntry(data, entry, output_path):
+                success <- false
+        elif Trp_IsEncryptedXmlEntry(entry):
+            if Trp_NpCommIdIsValid(np_comm_id):
+                if not Trp_ProcessEncryptedXmlEntry(data, entry, output_path, user_key, np_comm_id):
+                    success <- false
+            else:
+                success <- false
+    return success
