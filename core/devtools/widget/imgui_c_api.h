@@ -23,6 +23,9 @@ typedef struct ElisaImGuiVec4 {
 } ElisaImGuiVec4;
 
 void elisa_imgui_set_next_window_size(float x, float y, int cond);
+void elisa_imgui_set_window_pos(float x, float y);
+void elisa_imgui_set_window_size(float x, float y);
+ElisaImGuiVec2 elisa_imgui_get_window_pos(void);
 bool elisa_imgui_begin(const char* name, bool* open, int flags);
 void elisa_imgui_end(void);
 bool elisa_imgui_begin_child(const char* id, float x, float y, bool border, int flags);
@@ -77,4 +80,3 @@ void elisa_imgui_set_clipboard_text(const char* text);
 #ifdef __cplusplus
 }
 #endif
-

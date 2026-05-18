@@ -11,6 +11,19 @@ void elisa_imgui_set_next_window_size(float x, float y, int cond) {
     ImGui::SetNextWindowSize(ImVec2{x, y}, static_cast<ImGuiCond>(cond));
 }
 
+void elisa_imgui_set_window_pos(float x, float y) {
+    ImGui::SetWindowPos(ImVec2{x, y});
+}
+
+void elisa_imgui_set_window_size(float x, float y) {
+    ImGui::SetWindowSize(ImVec2{x, y});
+}
+
+ElisaImGuiVec2 elisa_imgui_get_window_pos() {
+    const ImVec2 value = ImGui::GetWindowPos();
+    return ElisaImGuiVec2{value.x, value.y};
+}
+
 bool elisa_imgui_begin(const char* name, bool* open, int flags) {
     return ImGui::Begin(name, open, static_cast<ImGuiWindowFlags>(flags));
 }
@@ -217,4 +230,3 @@ void elisa_imgui_set_clipboard_text(const char* text) {
 }
 
 } // extern "C"
-

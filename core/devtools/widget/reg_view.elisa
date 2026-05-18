@@ -10,10 +10,17 @@ struct Devtools_Widget_ShaderCache:
 struct Devtools_Widget_RegView:
     id: mutable int
     title: mutable static u8&
+    window_name: mutable static u8&
+    user_data_window_name: mutable static u8&
+    regs_window_name: mutable static u8&
+    disassembly_window_name: mutable static u8&
     batch_id: mutable u32
+    stage_enable_mask: mutable u32
+    is_compute: mutable bool
     selected_shader: mutable int
     default_reg_popup: mutable Devtools_Widget_RegPopup
     last_selected_cb: mutable int
+    last_pos: mutable ElisaImGuiVec2
     show_registers: mutable bool
     show_user_data: mutable bool
     show_disassembly: mutable bool
@@ -27,6 +34,13 @@ def Devtools_Widget_RegView_New() -> Devtools_Widget_RegView:
     out.id <- Devtools_Widget_RegViewNextId
     Devtools_Widget_RegViewNextId <- Devtools_Widget_RegViewNextId + 1
     out.batch_id <- 0xffffffff
+    out.stage_enable_mask <- 0
+    out.is_compute <- false
+    out.title <- ""
+    out.window_name <- Devtools_Widget_RegView_MakeWindowName("", out.id)
+    out.user_data_window_name <- Devtools_Widget_RegView_MakeChildWindowName("User data", out.id)
+    out.regs_window_name <- Devtools_Widget_RegView_MakeChildWindowName("Regs", out.id)
+    out.disassembly_window_name <- Devtools_Widget_RegView_MakeChildWindowName("Disassembly", out.id)
     out.selected_shader <- -1
     out.last_selected_cb <- -1
     out.show_registers <- true
@@ -35,21 +49,150 @@ def Devtools_Widget_RegView_New() -> Devtools_Widget_RegView:
     out.default_reg_popup <- Devtools_Widget_RegPopup_New()
     return out
 
+def Devtools_Widget_RegView_MakeTitle(base_title: static u8&, batch_id: u32) -> static u8&:
+    can Memory.Allocate, Abort.Panic:
+        builder: mutable heap StringBuilder& = string_builder_new(base_title)
+        builder <- string_builder_append(builder, "/Batch ")
+        builder <- string_builder_append(builder, Devtools_Widget_RegPopup_U32ToDecimal(batch_id))
+        return string_builder_finish(builder).cast[static u8&]
+    return base_title
+
+def Devtools_Widget_RegView_MakeWindowName(title: static u8&, id: int) -> static u8&:
+    can Memory.Allocate, Abort.Panic:
+        builder: mutable heap StringBuilder& = string_builder_new(title)
+        builder <- string_builder_append(builder, "###reg_dump_")
+        builder <- string_builder_append(builder, Devtools_Widget_RegPopup_IntToDecimal(id))
+        return string_builder_finish(builder).cast[static u8&]
+    return title
+
+def Devtools_Widget_RegView_MakeChildWindowName(label: static u8&, id: int) -> static u8&:
+    can Memory.Allocate, Abort.Panic:
+        builder: mutable heap StringBuilder& = string_builder_new(label)
+        builder <- string_builder_append(builder, "###reg_dump_")
+        builder <- string_builder_append(builder, Devtools_Widget_RegPopup_IntToDecimal(id))
+        builder <- string_builder_append(builder, "/")
+        builder <- string_builder_append(builder, label)
+        return string_builder_finish(builder).cast[static u8&]
+    return label
+
+def Devtools_Widget_RegView_RefreshWindowNames(view: mutable Devtools_Widget_RegView&) -> void can[Memory.Allocate, Abort.Panic]:
+    view.window_name <- Devtools_Widget_RegView_MakeWindowName(view.title, view.id)
+    view.user_data_window_name <- Devtools_Widget_RegView_MakeChildWindowName("User data", view.id)
+    view.regs_window_name <- Devtools_Widget_RegView_MakeChildWindowName("Regs", view.id)
+    view.disassembly_window_name <- Devtools_Widget_RegView_MakeChildWindowName("Disassembly", view.id)
+
+def Devtools_Widget_RegView_StageName(stage_id: int) -> static u8&:
+    if stage_id == 0:
+        return "vs"
+    if stage_id == 1:
+        return "ps"
+    if stage_id == 2:
+        return "gs"
+    if stage_id == 3:
+        return "es"
+    if stage_id == 4:
+        return "hs"
+    if stage_id == 5:
+        return "ls"
+    if stage_id == -2:
+        return "cs"
+    return "_"
+
+def Devtools_Widget_RegView_IsShaderStageEnabled(stage_mask: u32, stage_id: int) -> bool:
+    if stage_id == 0:
+        return true
+    if stage_id == 1:
+        return true
+    if stage_id == 2:
+        return ((stage_mask >> 5) & 0x1) != 0
+    if stage_id == 3:
+        return ((stage_mask >> 3) & 0x3) != 0
+    if stage_id == 4:
+        return ((stage_mask >> 2) & 0x1) != 0
+    if stage_id == 5:
+        return (stage_mask & 0x3) != 0
+    return false
+
+def Devtools_Widget_RegView_FirstEnabledShader(stage_mask: u32) -> int:
+    i: mutable int = 0
+    while i < 6:
+        if Devtools_Widget_RegView_IsShaderStageEnabled(stage_mask, i):
+            return i
+        i <- i + 1
+    return -1
+
+def Devtools_Widget_RegView_SetGraphicsStageMask(view: mutable Devtools_Widget_RegView&, stage_mask: u32) -> void:
+    view.is_compute <- false
+    view.stage_enable_mask <- stage_mask
+    if view.selected_shader >= 0 and not Devtools_Widget_RegView_IsShaderStageEnabled(stage_mask, view.selected_shader):
+        view.selected_shader <- -1
+
 def Devtools_Widget_RegView_SetData(view: mutable Devtools_Widget_RegView&, base_title: static u8&, batch_id: u32) -> void:
-    view.title <- base_title
+    can Memory.Allocate, Abort.Panic:
+        view.title <- Devtools_Widget_RegView_MakeTitle(base_title, batch_id)
+        Devtools_Widget_RegView_RefreshWindowNames(view)
     view.batch_id <- batch_id
     view.open <- true
+    view.last_selected_cb <- -1
+    view.default_reg_popup.open <- false
+    view.is_compute <- false
 
 def Devtools_Widget_RegView_SelectShader(view: mutable Devtools_Widget_RegView&, shader_id: int) -> void:
-    view.selected_shader <- shader_id
+    if shader_id == -2:
+        view.selected_shader <- shader_id
+        return
+    if Devtools_Widget_RegView_IsShaderStageEnabled(view.stage_enable_mask, shader_id):
+        view.selected_shader <- shader_id
 
-def Devtools_Widget_RegView_SetPos(view: mutable Devtools_Widget_RegView&) -> void:
-    view.moved <- true
+def Devtools_Widget_RegView_SetComputeData(view: mutable Devtools_Widget_RegView&, base_title: static u8&, batch_id: u32) -> void:
+    Devtools_Widget_RegView_SetData(view, base_title, batch_id)
+    view.is_compute <- true
+    view.selected_shader <- -2
+
+def Devtools_Widget_RegView_CurrentShaderName(view: Devtools_Widget_RegView&) -> static u8&:
+    if view.is_compute:
+        return Devtools_Widget_RegView_StageName(-2)
+    return Devtools_Widget_RegView_StageName(view.selected_shader)
+
+def Devtools_Widget_RegView_DrawStageButtons(view: mutable Devtools_Widget_RegView&) -> void:
+    if view.is_compute:
+        return
+    i: mutable int = 0
+    first: mutable bool = true
+    while i < 6:
+        if Devtools_Widget_RegView_IsShaderStageEnabled(view.stage_enable_mask, i):
+            if not first:
+                elisa_imgui_same_line(0.0, -1.0)
+            label: static u8& = Devtools_Widget_RegView_StageName(i)
+            if elisa_imgui_button(label):
+                Devtools_Widget_RegView_SelectShader(view, i)
+            first <- false
+        i <- i + 1
+
+def Devtools_Widget_RegView_SetPos(view: mutable Devtools_Widget_RegView&, pos: ElisaImGuiVec2) -> void:
+    if runtime_strlen(view.window_name) == 0:
+        can Memory.Allocate, Abort.Panic:
+            Devtools_Widget_RegView_RefreshWindowNames(view)
+    if elisa_imgui_begin(view.window_name, view.open.ref[mutable bool&], ElisaImGuiWindowFlags_MenuBar):
+        elisa_imgui_set_window_pos(pos.x, pos.y)
+        view.last_pos <- elisa_imgui_get_window_pos()
+        view.moved <- false
+    elisa_imgui_end()
 
 def Devtools_Widget_RegView_Draw(view: mutable Devtools_Widget_RegView&) -> void:
     if not view.open:
         return
-    if elisa_imgui_begin(view.title, view.open.ref[mutable bool&], 0):
+    if runtime_strlen(view.window_name) == 0:
+        can Memory.Allocate, Abort.Panic:
+            Devtools_Widget_RegView_RefreshWindowNames(view)
+    if elisa_imgui_begin(view.window_name, view.open.ref[mutable bool&], ElisaImGuiWindowFlags_MenuBar):
+        pos: ElisaImGuiVec2 = elisa_imgui_get_window_pos()
+        if pos.x != view.last_pos.x or pos.y != view.last_pos.y:
+            view.moved <- true
+        elisa_imgui_text_unformatted("Shader: ")
+        elisa_imgui_same_line(0.0, -1.0)
+        elisa_imgui_text_unformatted(Devtools_Widget_RegView_CurrentShaderName(view))
+        Devtools_Widget_RegView_DrawStageButtons(view)
         _ = elisa_imgui_checkbox("Registers", view.show_registers.ref[mutable bool&])
         elisa_imgui_same_line(0.0, -1.0)
         _ = elisa_imgui_checkbox("User data", view.show_user_data.ref[mutable bool&])

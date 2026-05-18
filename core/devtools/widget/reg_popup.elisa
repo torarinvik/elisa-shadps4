@@ -6,15 +6,77 @@ enum Devtools_Widget_RegPopupDataType:
     Color
     Depth
 
+struct Devtools_Widget_ColorBufferSnapshot:
+    base_address: mutable u32
+    pitch_tile_max: mutable u32
+    pitch_fmask_tile_max: mutable u32
+    slice_tile_max: mutable u32
+    view_slice_start: mutable u32
+    view_slice_max: mutable u32
+    info_raw: mutable u32
+    attrib_raw: mutable u32
+    cmask_base_address: mutable u32
+    fmask_base_address: mutable u32
+    fmask_slice_tile_max: mutable u32
+    clear_word0: mutable u32
+    clear_word1: mutable u32
+    info_linear_general: mutable bool
+    attrib_num_fragments_log2: mutable u32
+    info_format: mutable u32
+    info_number_type: mutable u32
+    tile_mode_index: mutable u32
+
+struct Devtools_Widget_DepthBufferSnapshot:
+    z_info_format: mutable u32
+    z_info_num_samples: mutable u32
+    z_info_tile_split: mutable u32
+    z_info_tile_mode_index: mutable u32
+    z_info_decompress_on_n_zplanes: mutable u32
+    z_info_allow_expclear: mutable u32
+    z_info_read_size: mutable u32
+    z_info_tile_surface_enable: mutable u32
+    z_info_clear_disallowed: mutable u32
+    z_info_zrange_precision: mutable u32
+    stencil_info_format: mutable u32
+    z_read_base: mutable u32
+    stencil_read_base: mutable u32
+    z_write_base: mutable u32
+    stencil_write_base: mutable u32
+    depth_size_pitch_tile_max: mutable u32
+    depth_size_height_tile_max: mutable u32
+    depth_slice_tile_max: mutable u32
+
+struct Devtools_Widget_DepthControlSnapshot:
+    stencil_enable: mutable u32
+    depth_enable: mutable u32
+    depth_write_enable: mutable u32
+    depth_bounds_enable: mutable u32
+    depth_func: mutable u32
+    backface_enable: mutable u32
+    stencil_ref_func: mutable u32
+    stencil_bf_func: mutable u32
+    enable_color_writes_on_depth_fail: mutable u32
+    disable_color_writes_on_depth_pass: mutable u32
+
 struct Devtools_Widget_RegPopup:
     id: mutable int
     title: mutable static u8&
+    window_name: mutable static u8&
     type: mutable Devtools_Widget_RegPopupDataType
     open: mutable bool
     moved: mutable bool
+    last_pos: mutable ElisaImGuiVec2
+    flags: mutable int
     cb_id: mutable u32
     color_base: mutable u64
     depth_base: mutable u64
+    color: mutable Devtools_Widget_ColorBufferSnapshot
+    depth_buffer: mutable Devtools_Widget_DepthBufferSnapshot
+    depth_control: mutable Devtools_Widget_DepthControlSnapshot
+
+const Devtools_Widget_RegPopupColorRowCount: usize = 24
+const Devtools_Widget_RegPopupDepthBufferRowCount: usize = 25
+const Devtools_Widget_RegPopupDepthControlRowCount: usize = 10
 
 global mutable Devtools_Widget_RegPopupNextId: int = 0
 
@@ -23,31 +85,472 @@ def Devtools_Widget_RegPopup_New() -> Devtools_Widget_RegPopup:
     out.id <- Devtools_Widget_RegPopupNextId
     Devtools_Widget_RegPopupNextId <- Devtools_Widget_RegPopupNextId + 1
     out.title <- ""
+    out.window_name <- ""
     out.type <- Devtools_Widget_RegPopupDataType.None
+    out.flags <- ElisaImGuiWindowFlags_NoSavedSettings
     return out
 
+def Devtools_Widget_RegPopup_U32ToDecimal(value: u32) -> static u8&:
+    can Memory.Allocate, Abort.Panic:
+        digits: mutable u32 = 1
+        n: mutable u32 = value
+        while n >= 10:
+            n <- n / 10
+            digits <- digits + 1
+        out: mutable heap u8& = string_alloc(digits.usize() + 1)
+        cursor: mutable int = digits.int() - 1
+        x: mutable u32 = value
+        while cursor >= 0:
+            out[cursor.usize()] <- '0' + (x % 10).u8()
+            x <- x / 10
+            cursor <- cursor - 1
+        out[digits.usize()] <- 0
+        return out.cast[static u8&]
+    return "0"
+
+def Devtools_Widget_RegPopup_IntToDecimal(value: int) -> static u8&:
+    if value < 0:
+        can Memory.Allocate, Abort.Panic:
+            builder: mutable heap StringBuilder& = string_builder_new("-")
+            builder <- string_builder_append(builder, Devtools_Widget_RegPopup_U32ToDecimal((-value).u32()))
+            return string_builder_finish(builder).cast[static u8&]
+    return Devtools_Widget_RegPopup_U32ToDecimal(value.u32())
+
+def Devtools_Widget_RegPopup_MakeColorTitle(base_title: static u8&, cb_id: u32) -> static u8&:
+    can Memory.Allocate, Abort.Panic:
+        builder: mutable heap StringBuilder& = string_builder_new(base_title)
+        builder <- string_builder_append(builder, "/CB #")
+        builder <- string_builder_append(builder, Devtools_Widget_RegPopup_U32ToDecimal(cb_id))
+        return string_builder_finish(builder).cast[static u8&]
+    return base_title
+
+def Devtools_Widget_RegPopup_MakeDepthTitle(base_title: static u8&) -> static u8&:
+    can Memory.Allocate, Abort.Panic:
+        builder: mutable heap StringBuilder& = string_builder_new(base_title)
+        builder <- string_builder_append(builder, "/Depth")
+        return string_builder_finish(builder).cast[static u8&]
+    return base_title
+
+def Devtools_Widget_RegPopup_MakeWindowName(title: static u8&, id: int) -> static u8&:
+    can Memory.Allocate, Abort.Panic:
+        builder: mutable heap StringBuilder& = string_builder_new(title)
+        builder <- string_builder_append(builder, "###reg_popup_")
+        builder <- string_builder_append(builder, Devtools_Widget_RegPopup_IntToDecimal(id))
+        return string_builder_finish(builder).cast[static u8&]
+    return title
+
+def Devtools_Widget_RegPopup_RefreshWindowName(popup: mutable Devtools_Widget_RegPopup&) -> void can[Memory.Allocate, Abort.Panic]:
+    popup.window_name <- Devtools_Widget_RegPopup_MakeWindowName(popup.title, popup.id)
+
 def Devtools_Widget_RegPopup_SetColorData(popup: mutable Devtools_Widget_RegPopup&, base_title: static u8&, color_base: u64, cb_id: u32) -> void:
-    popup.title <- base_title
+    can Memory.Allocate, Abort.Panic:
+        popup.title <- Devtools_Widget_RegPopup_MakeColorTitle(base_title, cb_id)
+        Devtools_Widget_RegPopup_RefreshWindowName(popup)
     popup.type <- Devtools_Widget_RegPopupDataType.Color
     popup.color_base <- color_base
     popup.cb_id <- cb_id
+    popup.color.base_address <- (color_base >> 8).u32()
     popup.open <- true
 
 def Devtools_Widget_RegPopup_SetDepthData(popup: mutable Devtools_Widget_RegPopup&, base_title: static u8&, depth_base: u64) -> void:
-    popup.title <- base_title
+    can Memory.Allocate, Abort.Panic:
+        popup.title <- Devtools_Widget_RegPopup_MakeDepthTitle(base_title)
+        Devtools_Widget_RegPopup_RefreshWindowName(popup)
     popup.type <- Devtools_Widget_RegPopupDataType.Depth
     popup.depth_base <- depth_base
+    popup.depth_buffer.z_read_base <- (depth_base >> 8).u32()
     popup.open <- true
 
-def Devtools_Widget_RegPopup_SetPos(popup: mutable Devtools_Widget_RegPopup&) -> void:
-    popup.moved <- true
+def Devtools_Widget_RegPopup_SetPos(popup: mutable Devtools_Widget_RegPopup&, pos: ElisaImGuiVec2, auto_resize: bool) -> void:
+    if runtime_strlen(popup.window_name) == 0:
+        can Memory.Allocate, Abort.Panic:
+            Devtools_Widget_RegPopup_RefreshWindowName(popup)
+    if elisa_imgui_begin(popup.window_name, popup.open.ref[mutable bool&], popup.flags):
+        elisa_imgui_set_window_pos(pos.x, pos.y)
+        if auto_resize:
+            if popup.type == Devtools_Widget_RegPopupDataType.Color:
+                elisa_imgui_set_window_size(365.0, 520.0)
+            elif popup.type == Devtools_Widget_RegPopupDataType.Depth:
+                elisa_imgui_set_window_size(404.0, 543.0)
+        popup.last_pos <- elisa_imgui_get_window_pos()
+        popup.moved <- false
+    elisa_imgui_end()
+
+def Devtools_Widget_RegPopup_DrawValueRow(label: static u8&, value: static u8&) -> void:
+    elisa_imgui_table_next_row()
+    elisa_imgui_table_set_column_index(0)
+    elisa_imgui_text_unformatted(label)
+    elisa_imgui_table_set_column_index(1)
+    elisa_imgui_text_unformatted(value)
+
+def Devtools_Widget_RegPopup_HexU32(value: u32) -> static u8&:
+    return Devtools_Widget_MemoryEditor_FormatAddress(value.usize(), 1, true)
+
+def Devtools_Widget_RegPopup_HexU64(value: u64) -> static u8&:
+    return Devtools_Widget_MemoryEditor_FormatAddress(value.usize(), 1, true)
+
+def Devtools_Widget_ColorBufferSnapshot_Pitch(buffer: Devtools_Widget_ColorBufferSnapshot&) -> u32:
+    return (buffer.pitch_tile_max + 1) << 3
+
+def Devtools_Widget_ColorBufferSnapshot_Height(buffer: Devtools_Widget_ColorBufferSnapshot&) -> u32:
+    pitch: u32 = Devtools_Widget_ColorBufferSnapshot_Pitch(buffer)
+    if pitch == 0:
+        return 0
+    return ((buffer.slice_tile_max + 1) * 64) / pitch
+
+def Devtools_Widget_ColorBufferSnapshot_Address(buffer: Devtools_Widget_ColorBufferSnapshot&) -> u64:
+    address: mutable u64 = buffer.base_address.u64() << 8
+    if buffer.info_linear_general:
+        address <- address | (buffer.view_slice_start & 0xff).u64()
+    return address
+
+def Devtools_Widget_ColorBufferSnapshot_CmaskAddress(buffer: Devtools_Widget_ColorBufferSnapshot&) -> u64:
+    return buffer.cmask_base_address.u64() << 8
+
+def Devtools_Widget_ColorBufferSnapshot_FmaskAddress(buffer: Devtools_Widget_ColorBufferSnapshot&) -> u64:
+    return buffer.fmask_base_address.u64() << 8
+
+def Devtools_Widget_ColorBufferSnapshot_NumSamples(buffer: Devtools_Widget_ColorBufferSnapshot&) -> u32:
+    return 1.u32() << buffer.attrib_num_fragments_log2
+
+def Devtools_Widget_ColorBufferSnapshot_NumSlices(buffer: Devtools_Widget_ColorBufferSnapshot&) -> u32:
+    return buffer.view_slice_max + 1
+
+def Devtools_Widget_ColorBufferSnapshot_GetColorSliceSize(buffer: Devtools_Widget_ColorBufferSnapshot&) -> u32:
+    # Full C++ uses NumBitsPerBlock(DataFormat). Keep one dword per element until
+    # the AmdGpu pixel-format tables are ported into Elisa.
+    return (buffer.slice_tile_max + 1) * 64 * Devtools_Widget_ColorBufferSnapshot_NumSamples(buffer) * 4
+
+def Devtools_Widget_ColorBufferSnapshot_GetTileMode(buffer: Devtools_Widget_ColorBufferSnapshot&) -> u32:
+    if buffer.info_linear_general:
+        return 8
+    return buffer.tile_mode_index
+
+def Devtools_Widget_ColorBufferSnapshot_IsTiled(buffer: Devtools_Widget_ColorBufferSnapshot&) -> bool:
+    mode: u32 = Devtools_Widget_ColorBufferSnapshot_GetTileMode(buffer)
+    return mode != 7 and mode != 8
+
+def Devtools_Widget_DepthBufferSnapshot_Pitch(buffer: Devtools_Widget_DepthBufferSnapshot&) -> u32:
+    return (buffer.depth_size_pitch_tile_max + 1) << 3
+
+def Devtools_Widget_DepthBufferSnapshot_Height(buffer: Devtools_Widget_DepthBufferSnapshot&) -> u32:
+    return (buffer.depth_size_height_tile_max + 1) << 3
+
+def Devtools_Widget_DepthBufferSnapshot_DepthAddress(buffer: Devtools_Widget_DepthBufferSnapshot&) -> u64:
+    return buffer.z_read_base.u64() << 8
+
+def Devtools_Widget_DepthBufferSnapshot_StencilAddress(buffer: Devtools_Widget_DepthBufferSnapshot&) -> u64:
+    return buffer.stencil_read_base.u64() << 8
+
+def Devtools_Widget_DepthBufferSnapshot_NumSamples(buffer: Devtools_Widget_DepthBufferSnapshot&) -> u32:
+    return 1.u32() << buffer.z_info_num_samples
+
+def Devtools_Widget_DepthBufferSnapshot_NumBits(buffer: Devtools_Widget_DepthBufferSnapshot&) -> u32:
+    if buffer.z_info_format == 3:
+        return 32
+    return 16
+
+def Devtools_Widget_DepthBufferSnapshot_GetDepthSliceSize(buffer: Devtools_Widget_DepthBufferSnapshot&) -> u32:
+    bytes_per_element: u32 = Devtools_Widget_DepthBufferSnapshot_NumBits(buffer) >> 3
+    return (buffer.depth_slice_tile_max + 1) * 64 * bytes_per_element * Devtools_Widget_DepthBufferSnapshot_NumSamples(buffer)
+
+def Devtools_Widget_RegPopup_ColorRowLabel(index: usize) -> static u8&:
+    if index == 0:
+        return "BASE_ADDR"
+    if index == 1:
+        return "PITCH.TILE_MAX"
+    if index == 2:
+        return "PITCH.FMASK_TILE_MAX"
+    if index == 3:
+        return "SLICE.TILE_MAX"
+    if index == 4:
+        return "VIEW.SLICE_START"
+    if index == 5:
+        return "VIEW.SLICE_MAX"
+    if index == 6:
+        return "Color0Info"
+    if index == 7:
+        return "Color0Attrib"
+    if index == 8:
+        return "CMASK_BASE_EXT"
+    if index == 9:
+        return "FMASK_BASE_EXT"
+    if index == 10:
+        return "FMASK_SLICE.TILE_MAX"
+    if index == 11:
+        return "CLEAR_WORD0"
+    if index == 12:
+        return "CLEAR_WORD1"
+    if index == 13:
+        return "Pitch()"
+    if index == 14:
+        return "Height()"
+    if index == 15:
+        return "Address()"
+    if index == 16:
+        return "CmaskAddress"
+    if index == 17:
+        return "FmaskAddress"
+    if index == 18:
+        return "NumSamples()"
+    if index == 19:
+        return "NumSlices()"
+    if index == 20:
+        return "GetColorSliceSize()"
+    if index == 21:
+        return "GetTileMode()"
+    if index == 22:
+        return "IsTiled()"
+    if index == 23:
+        return "NumFormat()"
+    return ""
+
+def Devtools_Widget_RegPopup_DepthBufferRowLabel(index: usize) -> static u8&:
+    if index == 0:
+        return "Z_INFO.FORMAT"
+    if index == 1:
+        return "Z_INFO.NUM_SAMPLES"
+    if index == 2:
+        return "Z_INFO.TILE_SPLIT"
+    if index == 3:
+        return "Z_INFO.TILE_MODE_INDEX"
+    if index == 4:
+        return "Z_INFO.DECOMPRESS_ON_N_ZPLANES"
+    if index == 5:
+        return "Z_INFO.ALLOW_EXPCLEAR"
+    if index == 6:
+        return "Z_INFO.READ_SIZE"
+    if index == 7:
+        return "Z_INFO.TILE_SURFACE_ENABLE"
+    if index == 8:
+        return "Z_INFO.CLEAR_DISALLOWED"
+    if index == 9:
+        return "Z_INFO.ZRANGE_PRECISION"
+    if index == 10:
+        return "STENCIL_INFO.FORMAT"
+    if index == 11:
+        return "Z_READ_BASE"
+    if index == 12:
+        return "STENCIL_READ_BASE"
+    if index == 13:
+        return "Z_WRITE_BASE"
+    if index == 14:
+        return "STENCIL_WRITE_BASE"
+    if index == 15:
+        return "DEPTH_SIZE.PITCH_TILE_MAX"
+    if index == 16:
+        return "DEPTH_SIZE.HEIGHT_TILE_MAX"
+    if index == 17:
+        return "DEPTH_SLICE.TILE_MAX"
+    if index == 18:
+        return "Pitch()"
+    if index == 19:
+        return "Height()"
+    if index == 20:
+        return "DepthAddress()"
+    if index == 21:
+        return "StencilAddress()"
+    if index == 22:
+        return "NumSamples()"
+    if index == 23:
+        return "NumBits()"
+    if index == 24:
+        return "GetDepthSliceSize()"
+    return ""
+
+def Devtools_Widget_RegPopup_DepthControlRowLabel(index: usize) -> static u8&:
+    if index == 0:
+        return "STENCIL_ENABLE"
+    if index == 1:
+        return "DEPTH_ENABLE"
+    if index == 2:
+        return "DEPTH_WRITE_ENABLE"
+    if index == 3:
+        return "DEPTH_BOUNDS_ENABLE"
+    if index == 4:
+        return "DEPTH_FUNC"
+    if index == 5:
+        return "BACKFACE_ENABLE"
+    if index == 6:
+        return "STENCIL_FUNC"
+    if index == 7:
+        return "STENCIL_FUNC_BF"
+    if index == 8:
+        return "ENABLE_COLOR_WRITES_ON_DEPTH_FAIL"
+    if index == 9:
+        return "DISABLE_COLOR_WRITES_ON_DEPTH_PASS"
+    return ""
+
+def Devtools_Widget_RegPopup_ColorRowValue(popup: Devtools_Widget_RegPopup&, index: usize) -> static u8&:
+    if index == 0:
+        return Devtools_Widget_RegPopup_HexU32(popup.color.base_address)
+    if index == 1:
+        return Devtools_Widget_RegPopup_HexU32(popup.color.pitch_tile_max)
+    if index == 2:
+        return Devtools_Widget_RegPopup_HexU32(popup.color.pitch_fmask_tile_max)
+    if index == 3:
+        return Devtools_Widget_RegPopup_HexU32(popup.color.slice_tile_max)
+    if index == 4:
+        return Devtools_Widget_RegPopup_HexU32(popup.color.view_slice_start)
+    if index == 5:
+        return Devtools_Widget_RegPopup_HexU32(popup.color.view_slice_max)
+    if index == 8:
+        return Devtools_Widget_RegPopup_HexU32(popup.color.cmask_base_address)
+    if index == 9:
+        return Devtools_Widget_RegPopup_HexU32(popup.color.fmask_base_address)
+    if index == 10:
+        return Devtools_Widget_RegPopup_HexU32(popup.color.fmask_slice_tile_max)
+    if index == 11:
+        return Devtools_Widget_RegPopup_HexU32(popup.color.clear_word0)
+    if index == 12:
+        return Devtools_Widget_RegPopup_HexU32(popup.color.clear_word1)
+    if index == 13:
+        return Devtools_Widget_RegPopup_HexU32(Devtools_Widget_ColorBufferSnapshot_Pitch(popup.color))
+    if index == 14:
+        return Devtools_Widget_RegPopup_HexU32(Devtools_Widget_ColorBufferSnapshot_Height(popup.color))
+    if index == 15:
+        return Devtools_Widget_RegPopup_HexU64(Devtools_Widget_ColorBufferSnapshot_Address(popup.color))
+    if index == 16:
+        return Devtools_Widget_RegPopup_HexU64(Devtools_Widget_ColorBufferSnapshot_CmaskAddress(popup.color))
+    if index == 17:
+        return Devtools_Widget_RegPopup_HexU64(Devtools_Widget_ColorBufferSnapshot_FmaskAddress(popup.color))
+    if index == 18:
+        return Devtools_Widget_RegPopup_HexU32(Devtools_Widget_ColorBufferSnapshot_NumSamples(popup.color))
+    if index == 19:
+        return Devtools_Widget_RegPopup_HexU32(Devtools_Widget_ColorBufferSnapshot_NumSlices(popup.color))
+    if index == 20:
+        return Devtools_Widget_RegPopup_HexU32(Devtools_Widget_ColorBufferSnapshot_GetColorSliceSize(popup.color))
+    if index == 21:
+        return Devtools_Widget_RegPopup_HexU32(Devtools_Widget_ColorBufferSnapshot_GetTileMode(popup.color))
+    if index == 22:
+        if Devtools_Widget_ColorBufferSnapshot_IsTiled(popup.color):
+            return "1"
+        return "0"
+    if index == 23:
+        return Devtools_Widget_RegPopup_HexU32(popup.color.info_number_type)
+    return "0"
+
+def Devtools_Widget_RegPopup_DepthBufferRowValue(popup: Devtools_Widget_RegPopup&, index: usize) -> static u8&:
+    if index == 0:
+        return Devtools_Widget_RegPopup_HexU32(popup.depth_buffer.z_info_format)
+    if index == 1:
+        return Devtools_Widget_RegPopup_HexU32(popup.depth_buffer.z_info_num_samples)
+    if index == 2:
+        return Devtools_Widget_RegPopup_HexU32(popup.depth_buffer.z_info_tile_split)
+    if index == 3:
+        return Devtools_Widget_RegPopup_HexU32(popup.depth_buffer.z_info_tile_mode_index)
+    if index == 4:
+        return Devtools_Widget_RegPopup_HexU32(popup.depth_buffer.z_info_decompress_on_n_zplanes)
+    if index == 5:
+        return Devtools_Widget_RegPopup_HexU32(popup.depth_buffer.z_info_allow_expclear)
+    if index == 6:
+        return Devtools_Widget_RegPopup_HexU32(popup.depth_buffer.z_info_read_size)
+    if index == 7:
+        return Devtools_Widget_RegPopup_HexU32(popup.depth_buffer.z_info_tile_surface_enable)
+    if index == 8:
+        return Devtools_Widget_RegPopup_HexU32(popup.depth_buffer.z_info_clear_disallowed)
+    if index == 9:
+        return Devtools_Widget_RegPopup_HexU32(popup.depth_buffer.z_info_zrange_precision)
+    if index == 10:
+        return Devtools_Widget_RegPopup_HexU32(popup.depth_buffer.stencil_info_format)
+    if index == 11:
+        return Devtools_Widget_RegPopup_HexU32(popup.depth_buffer.z_read_base)
+    if index == 12:
+        return Devtools_Widget_RegPopup_HexU32(popup.depth_buffer.stencil_read_base)
+    if index == 13:
+        return Devtools_Widget_RegPopup_HexU32(popup.depth_buffer.z_write_base)
+    if index == 14:
+        return Devtools_Widget_RegPopup_HexU32(popup.depth_buffer.stencil_write_base)
+    if index == 15:
+        return Devtools_Widget_RegPopup_HexU32(popup.depth_buffer.depth_size_pitch_tile_max)
+    if index == 16:
+        return Devtools_Widget_RegPopup_HexU32(popup.depth_buffer.depth_size_height_tile_max)
+    if index == 17:
+        return Devtools_Widget_RegPopup_HexU32(popup.depth_buffer.depth_slice_tile_max)
+    if index == 18:
+        return Devtools_Widget_RegPopup_HexU32(Devtools_Widget_DepthBufferSnapshot_Pitch(popup.depth_buffer))
+    if index == 19:
+        return Devtools_Widget_RegPopup_HexU32(Devtools_Widget_DepthBufferSnapshot_Height(popup.depth_buffer))
+    if index == 20:
+        return Devtools_Widget_RegPopup_HexU64(Devtools_Widget_DepthBufferSnapshot_DepthAddress(popup.depth_buffer))
+    if index == 21:
+        return Devtools_Widget_RegPopup_HexU64(Devtools_Widget_DepthBufferSnapshot_StencilAddress(popup.depth_buffer))
+    if index == 22:
+        return Devtools_Widget_RegPopup_HexU32(Devtools_Widget_DepthBufferSnapshot_NumSamples(popup.depth_buffer))
+    if index == 23:
+        return Devtools_Widget_RegPopup_HexU32(Devtools_Widget_DepthBufferSnapshot_NumBits(popup.depth_buffer))
+    if index == 24:
+        return Devtools_Widget_RegPopup_HexU32(Devtools_Widget_DepthBufferSnapshot_GetDepthSliceSize(popup.depth_buffer))
+    return "0"
+
+def Devtools_Widget_RegPopup_DepthControlRowValue(popup: Devtools_Widget_RegPopup&, index: usize) -> static u8&:
+    if index == 0:
+        return Devtools_Widget_RegPopup_HexU32(popup.depth_control.stencil_enable)
+    if index == 1:
+        return Devtools_Widget_RegPopup_HexU32(popup.depth_control.depth_enable)
+    if index == 2:
+        return Devtools_Widget_RegPopup_HexU32(popup.depth_control.depth_write_enable)
+    if index == 3:
+        return Devtools_Widget_RegPopup_HexU32(popup.depth_control.depth_bounds_enable)
+    if index == 4:
+        return Devtools_Widget_RegPopup_HexU32(popup.depth_control.depth_func)
+    if index == 5:
+        return Devtools_Widget_RegPopup_HexU32(popup.depth_control.backface_enable)
+    if index == 6:
+        return Devtools_Widget_RegPopup_HexU32(popup.depth_control.stencil_ref_func)
+    if index == 7:
+        return Devtools_Widget_RegPopup_HexU32(popup.depth_control.stencil_bf_func)
+    if index == 8:
+        return Devtools_Widget_RegPopup_HexU32(popup.depth_control.enable_color_writes_on_depth_fail)
+    if index == 9:
+        return Devtools_Widget_RegPopup_HexU32(popup.depth_control.disable_color_writes_on_depth_pass)
+    return "0"
+
+def Devtools_Widget_RegPopup_DrawColorRows(popup: Devtools_Widget_RegPopup&) -> void:
+    i: mutable usize = 0
+    while i < Devtools_Widget_RegPopupColorRowCount:
+        label: static u8& = Devtools_Widget_RegPopup_ColorRowLabel(i)
+        if runtime_strlen(label) > 0:
+            Devtools_Widget_RegPopup_DrawValueRow(label, Devtools_Widget_RegPopup_ColorRowValue(popup, i))
+        i <- i + 1
+
+def Devtools_Widget_RegPopup_DrawDepthBufferRows(popup: Devtools_Widget_RegPopup&) -> void:
+    i: mutable usize = 0
+    while i < Devtools_Widget_RegPopupDepthBufferRowCount:
+        label: static u8& = Devtools_Widget_RegPopup_DepthBufferRowLabel(i)
+        if runtime_strlen(label) > 0:
+            Devtools_Widget_RegPopup_DrawValueRow(label, Devtools_Widget_RegPopup_DepthBufferRowValue(popup, i))
+        i <- i + 1
+
+def Devtools_Widget_RegPopup_DrawDepthControlRows(popup: Devtools_Widget_RegPopup&) -> void:
+    i: mutable usize = 0
+    while i < Devtools_Widget_RegPopupDepthControlRowCount:
+        label: static u8& = Devtools_Widget_RegPopup_DepthControlRowLabel(i)
+        if runtime_strlen(label) > 0:
+            Devtools_Widget_RegPopup_DrawValueRow(label, Devtools_Widget_RegPopup_DepthControlRowValue(popup, i))
+        i <- i + 1
 
 def Devtools_Widget_RegPopup_Draw(popup: mutable Devtools_Widget_RegPopup&) -> void:
     if not popup.open:
         return
-    if elisa_imgui_begin(popup.title, popup.open.ref[mutable bool&], 0):
+    if runtime_strlen(popup.window_name) == 0:
+        can Memory.Allocate, Abort.Panic:
+            Devtools_Widget_RegPopup_RefreshWindowName(popup)
+    if elisa_imgui_begin(popup.window_name, popup.open.ref[mutable bool&], popup.flags):
+        pos: ElisaImGuiVec2 = elisa_imgui_get_window_pos()
+        if pos.x != popup.last_pos.x or pos.y != popup.last_pos.y:
+            popup.moved <- true
         if popup.type == Devtools_Widget_RegPopupDataType.Color:
-            elisa_imgui_text_unformatted("Color buffer")
+            if elisa_imgui_begin_table("COLOR_BUFFER", 2, ElisaImGuiTableFlags_Borders):
+                Devtools_Widget_RegPopup_DrawColorRows(popup)
+                elisa_imgui_end_table()
         elif popup.type == Devtools_Widget_RegPopupDataType.Depth:
-            elisa_imgui_text_unformatted("Depth buffer")
+            elisa_imgui_separator_text("Depth buffer")
+            if elisa_imgui_begin_table("DEPTH_BUFFER", 2, ElisaImGuiTableFlags_Borders):
+                Devtools_Widget_RegPopup_DrawDepthBufferRows(popup)
+                elisa_imgui_end_table()
+            elisa_imgui_separator_text("Depth control")
+            if elisa_imgui_begin_table("DEPTH_CONTROL", 2, ElisaImGuiTableFlags_Borders):
+                Devtools_Widget_RegPopup_DrawDepthControlRows(popup)
+                elisa_imgui_end_table()
     elisa_imgui_end()

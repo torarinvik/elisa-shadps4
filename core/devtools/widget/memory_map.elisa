@@ -7,6 +7,32 @@ struct Devtools_Widget_MemoryMapEntry:
     prot: mutable u32
     name: mutable static u8&
 
+struct Devtools_Widget_MemoryMapSnapshotRow:
+    base: mutable u64
+    size: mutable u64
+    prot: mutable u32
+    kind: mutable u32
+    pooled: mutable int
+    exec: mutable int
+    type_name: mutable static u8&
+    prot_name: mutable static u8&
+    name: mutable static u8&
+
+const Devtools_Widget_MemoryProtCpuRead: u32 = 1
+const Devtools_Widget_MemoryProtCpuWrite: u32 = 2
+const Devtools_Widget_MemoryProtCpuExec: u32 = 4
+const Devtools_Widget_MemoryMapMaxRows: usize = 512
+
+# Temporary project-owned C++ bridge:
+# The live memory map currently needs a C ABI snapshot shim because upstream
+# MemoryMapViewer reads Core::Memory::vma_map/dmem_map through friendship.
+# That is not an allowed external dependency boundary like ImGui. It is a
+# documented cheat so the widget can be wired while Core::Memory is still C++.
+# Once Core::Memory/MemoryManager is ported to Elisa, remove that C API and
+# iterate the Elisa-owned memory maps directly from this file.
+extern elisa_devtools_memory_map_snapshot_vma(rows: mutable Devtools_Widget_MemoryMapSnapshotRow&, capacity: usize) -> usize
+extern elisa_devtools_memory_map_snapshot_dmem(rows: mutable Devtools_Widget_MemoryMapSnapshotRow&, capacity: usize) -> usize
+
 struct Devtools_Widget_MemoryMapViewer:
     showing_vma: mutable bool
     open: mutable bool
@@ -21,17 +47,85 @@ def Devtools_Widget_MemoryMapEntry_Size(entry: Devtools_Widget_MemoryMapEntry) -
         return 0
     return entry.end - entry.base
 
+def Devtools_Widget_MemoryMapEntry_IsExecutable(entry: Devtools_Widget_MemoryMapEntry) -> bool:
+    return (entry.prot & Devtools_Widget_MemoryProtCpuExec) != 0
+
+def Devtools_Widget_MemoryMapEntry_ProtLabel(entry: Devtools_Widget_MemoryMapEntry) -> static u8&:
+    can Memory.Allocate, Abort.Panic:
+        out: mutable heap u8& = string_alloc(4)
+        out[0] <- 'R' if (entry.prot & Devtools_Widget_MemoryProtCpuRead) != 0 else '-'
+        out[1] <- 'W' if (entry.prot & Devtools_Widget_MemoryProtCpuWrite) != 0 else '-'
+        out[2] <- 'X' if Devtools_Widget_MemoryMapEntry_IsExecutable(entry) else '-'
+        out[3] <- 0
+        return out.cast[static u8&]
+    return "---"
+
+def Devtools_Widget_MemoryMap_RowText(row: Devtools_Widget_MemoryMapSnapshotRow&, which: int) -> static u8&:
+    if which == 0:
+        return Devtools_Widget_MemoryEditor_FormatAddress(row.base.usize(), 8, true)
+    if which == 1:
+        return Devtools_Widget_MemoryEditor_FormatAddress(row.size.usize(), 8, true)
+    if which == 2:
+        return row.type_name
+    if which == 3:
+        return row.prot_name
+    if which == 4:
+        return "X" if row.exec != 0 else ""
+    return row.name
+
+def Devtools_Widget_MemoryMap_DrawVmaRows(rows: mutable Devtools_Widget_MemoryMapSnapshotRow&, count: usize) -> void:
+    for i in 0..<count:
+        row: Devtools_Widget_MemoryMapSnapshotRow& = rows[i].ref[Devtools_Widget_MemoryMapSnapshotRow&]
+        elisa_imgui_table_next_row()
+        for column in 0..<6:
+            elisa_imgui_table_set_column_index(column)
+            elisa_imgui_text_unformatted(Devtools_Widget_MemoryMap_RowText(row, column.int()))
+
+def Devtools_Widget_MemoryMap_DrawDmemRows(rows: mutable Devtools_Widget_MemoryMapSnapshotRow&, count: usize) -> void:
+    for i in 0..<count:
+        row: Devtools_Widget_MemoryMapSnapshotRow& = rows[i].ref[Devtools_Widget_MemoryMapSnapshotRow&]
+        elisa_imgui_table_next_row()
+        elisa_imgui_table_set_column_index(0)
+        elisa_imgui_text_unformatted(Devtools_Widget_MemoryMap_RowText(row, 0))
+        elisa_imgui_table_set_column_index(1)
+        elisa_imgui_text_unformatted(Devtools_Widget_MemoryMap_RowText(row, 1))
+        elisa_imgui_table_set_column_index(2)
+        elisa_imgui_text_unformatted(Devtools_Widget_MemoryMap_RowText(row, 2))
+        elisa_imgui_table_set_column_index(3)
+        elisa_imgui_text_unformatted("1" if row.pooled != 0 else "0")
+
 def Devtools_Widget_MemoryMapViewer_Draw(viewer: mutable Devtools_Widget_MemoryMapViewer&) -> void:
     if not viewer.open:
         return
-    elisa_imgui_set_next_window_size(550.0, 600.0, ElisaImGuiCond_FirstUseEver)
-    if elisa_imgui_begin("Memory Map", viewer.open.ref[mutable bool&], 0):
-        _ = elisa_imgui_checkbox("Show VMAs", viewer.showing_vma.ref[mutable bool&])
-        if elisa_imgui_begin_table("MemoryMapTable", 4, ElisaImGuiTableFlags_Borders | ElisaImGuiTableFlags_RowBg | ElisaImGuiTableFlags_Resizable):
-            elisa_imgui_table_setup_column("Base", 0, 0.0)
-            elisa_imgui_table_setup_column("End", 0, 0.0)
-            elisa_imgui_table_setup_column("Prot", 0, 0.0)
-            elisa_imgui_table_setup_column("Name", 0, 0.0)
-            elisa_imgui_table_headers_row()
-            elisa_imgui_end_table()
+    rows: mutable array[Devtools_Widget_MemoryMapSnapshotRow, 512] = zeroed
+    count: mutable usize = 0
+    elisa_imgui_set_next_window_size(600.0, 500.0, ElisaImGuiCond_FirstUseEver)
+    if elisa_imgui_begin("Memory map", viewer.open.ref[mutable bool&], 0):
+        if elisa_imgui_button("VMem"):
+            viewer.showing_vma <- true
+        elisa_imgui_same_line(0.0, -1.0)
+        if elisa_imgui_button("DMem"):
+            viewer.showing_vma <- false
+        if viewer.showing_vma:
+            count <- elisa_devtools_memory_map_snapshot_vma(rows[0].ref[mutable Devtools_Widget_MemoryMapSnapshotRow&], Devtools_Widget_MemoryMapMaxRows)
+            if elisa_imgui_begin_table("memory_view_table", 6, ElisaImGuiTableFlags_RowBg | ElisaImGuiTableFlags_Resizable):
+                elisa_imgui_table_setup_column("Address", 0, 0.0)
+                elisa_imgui_table_setup_column("Size", 0, 0.0)
+                elisa_imgui_table_setup_column("Type", 0, 0.0)
+                elisa_imgui_table_setup_column("Prot", 0, 0.0)
+                elisa_imgui_table_setup_column("Is Exec", 0, 0.0)
+                elisa_imgui_table_setup_column("Name", 0, 0.0)
+                elisa_imgui_table_headers_row()
+                Devtools_Widget_MemoryMap_DrawVmaRows(rows[0].ref[mutable Devtools_Widget_MemoryMapSnapshotRow&], count)
+                elisa_imgui_end_table()
+        else:
+            count <- elisa_devtools_memory_map_snapshot_dmem(rows[0].ref[mutable Devtools_Widget_MemoryMapSnapshotRow&], Devtools_Widget_MemoryMapMaxRows)
+            if elisa_imgui_begin_table("memory_view_table", 4, ElisaImGuiTableFlags_RowBg | ElisaImGuiTableFlags_Resizable):
+                elisa_imgui_table_setup_column("Address", 0, 0.0)
+                elisa_imgui_table_setup_column("Size", 0, 0.0)
+                elisa_imgui_table_setup_column("Type", 0, 0.0)
+                elisa_imgui_table_setup_column("Pooled", 0, 0.0)
+                elisa_imgui_table_headers_row()
+                Devtools_Widget_MemoryMap_DrawDmemRows(rows[0].ref[mutable Devtools_Widget_MemoryMapSnapshotRow&], count)
+                elisa_imgui_end_table()
     elisa_imgui_end()

@@ -74,7 +74,27 @@ def Devtools_Widget_MemoryEditor_CalcAddrDigits(editor: Devtools_Widget_MemoryEd
         n <- n >> 4
     return digits
 
-def Devtools_Widget_MemoryEditor_ReadByte(mem: static u8&, off: usize) -> u8:
+def Devtools_Widget_MemoryEditor_CalcSizes(editor: Devtools_Widget_MemoryEditor&, mem_size: usize, base_display_addr: usize) -> Devtools_Widget_MemoryEditorSizes:
+    out: mutable Devtools_Widget_MemoryEditorSizes = zeroed
+    out.AddrDigitsCount <- Devtools_Widget_MemoryEditor_CalcAddrDigits(editor, mem_size, base_display_addr)
+    out.LineHeight <- 16.0
+    out.GlyphWidth <- 8.0
+    out.HexCellWidth <- (out.GlyphWidth * 2.5).int().f32()
+    out.SpacingBetweenMidCols <- (out.HexCellWidth * 0.25).int().f32()
+    out.PosHexStart <- (out.AddrDigitsCount + 2).f32() * out.GlyphWidth
+    out.PosHexEnd <- out.PosHexStart + out.HexCellWidth * editor.Cols.f32()
+    out.PosAsciiStart <- out.PosHexEnd
+    out.PosAsciiEnd <- out.PosHexEnd
+    if editor.OptShowAscii:
+        out.PosAsciiStart <- out.PosHexEnd + out.GlyphWidth
+        if editor.OptMidColsCount > 0:
+            groups: int = (editor.Cols + editor.OptMidColsCount - 1) / editor.OptMidColsCount
+            out.PosAsciiStart <- out.PosAsciiStart + groups.f32() * out.SpacingBetweenMidCols
+        out.PosAsciiEnd <- out.PosAsciiStart + editor.Cols.f32() * out.GlyphWidth
+    out.WindowWidth <- out.PosAsciiEnd + 24.0 + out.GlyphWidth
+    return out
+
+def Devtools_Widget_MemoryEditor_ReadByte(mem: u8&, off: usize) -> u8:
     return mem[off]
 
 def Devtools_Widget_MemoryEditor_WriteByte(mem: mutable u8&, off: usize, value: u8, read_only: bool) -> void:
@@ -110,17 +130,122 @@ def Devtools_Widget_MemoryEditor_WriteHexByte(mem: mutable u8&, off: usize, text
 def Devtools_Widget_MemoryEditor_IsPrintableAscii(value: u8) -> bool:
     return value >= 32 and value < 127
 
+def Devtools_Widget_MemoryEditor_HexChar(value: u8, uppercase: bool) -> u8:
+    if value < 10:
+        return '0' + value
+    return ('A' if uppercase else 'a') + (value - 10)
+
+def Devtools_Widget_MemoryEditor_FormatByte(value: u8, uppercase: bool) -> static u8&:
+    out: mutable heap u8& = string_alloc(3)
+    out[0] <- Devtools_Widget_MemoryEditor_HexChar((value >> 4) & 0xf, uppercase)
+    out[1] <- Devtools_Widget_MemoryEditor_HexChar(value & 0xf, uppercase)
+    out[2] <- 0
+    return out.cast[static u8&]
+
+def Devtools_Widget_MemoryEditor_FormatAddress(value: usize, digits: int, uppercase: bool) -> static u8&:
+    width: usize = digits.usize()
+    out: mutable heap u8& = string_alloc(width + 1)
+    for i in 0..<width:
+        shift: usize = (width - 1 - i) * 4
+        out[i] <- Devtools_Widget_MemoryEditor_HexChar(((value >> shift) & 0xf).u8(), uppercase)
+    out[width] <- 0
+    return out.cast[static u8&]
+
+def Devtools_Widget_MemoryEditor_FormatHexIIByte(value: u8, uppercase: bool, grey_zeroes: bool) -> static u8&:
+    if Devtools_Widget_MemoryEditor_IsPrintableAscii(value):
+        out: mutable heap u8& = string_alloc(3)
+        out[0] <- '.'
+        out[1] <- value
+        out[2] <- 0
+        return out.cast[static u8&]
+    if value == 0:
+        return "  "
+    if value == 0xff and grey_zeroes:
+        return "##"
+    return Devtools_Widget_MemoryEditor_FormatByte(value, uppercase)
+
+def Devtools_Widget_MemoryEditor_RowHex(editor: Devtools_Widget_MemoryEditor&, mem: u8&, mem_size: usize, row: usize) -> static u8&:
+    can Memory.Allocate, Abort.Panic:
+        builder: mutable heap StringBuilder& = string_builder_new("")
+        start: usize = row * editor.Cols.usize()
+        limit: mutable usize = editor.Cols.usize()
+        if start + limit > mem_size:
+            limit <- mem_size - start
+        for n in 0..<limit:
+            addr: usize = start + n
+            if n > 0:
+                builder <- string_builder_append(builder, " ")
+            if editor.OptShowHexII:
+                builder <- string_builder_append(builder, Devtools_Widget_MemoryEditor_FormatHexIIByte(mem[addr], editor.OptUpperCaseHex, editor.OptGreyOutZeroes))
+            else:
+                builder <- string_builder_append(builder, Devtools_Widget_MemoryEditor_FormatByte(mem[addr], editor.OptUpperCaseHex))
+        return string_builder_finish(builder).cast[static u8&]
+    return ""
+
+def Devtools_Widget_MemoryEditor_RowAscii(editor: Devtools_Widget_MemoryEditor&, mem: u8&, mem_size: usize, row: usize) -> static u8&:
+    out: mutable heap u8& = string_alloc(editor.Cols.usize() + 1)
+    start: usize = row * editor.Cols.usize()
+    written: mutable usize = 0
+    limit: mutable usize = editor.Cols.usize()
+    if start + limit > mem_size:
+        limit <- mem_size - start
+    for n in 0..<limit:
+        addr: usize = start + n
+        value: u8 = mem[addr]
+        out[written] <- value if Devtools_Widget_MemoryEditor_IsPrintableAscii(value) else '.'
+        written <- written + 1
+    out[written] <- 0
+    return out.cast[static u8&]
+
+def Devtools_Widget_MemoryEditor_DataTypeGetDesc(data_type: int) -> static u8&:
+    if data_type == 0:
+        return "Int8"
+    if data_type == 1:
+        return "Uint8"
+    if data_type == 2:
+        return "Int16"
+    if data_type == 3:
+        return "Uint16"
+    if data_type == 4:
+        return "Int32"
+    if data_type == 5:
+        return "Uint32"
+    if data_type == 6:
+        return "Int64"
+    if data_type == 7:
+        return "Uint64"
+    if data_type == 8:
+        return "Float"
+    if data_type == 9:
+        return "Double"
+    return "Unknown"
+
+def Devtools_Widget_MemoryEditor_DataTypeGetSize(data_type: int) -> usize:
+    if data_type == 0 or data_type == 1:
+        return 1
+    if data_type == 2 or data_type == 3:
+        return 2
+    if data_type == 4 or data_type == 5 or data_type == 8:
+        return 4
+    if data_type == 6 or data_type == 7 or data_type == 9:
+        return 8
+    return 0
+
 def Devtools_Widget_MemoryEditor_DrawWindow(editor: mutable Devtools_Widget_MemoryEditor&, title: static u8&, mem: mutable u8&, mem_size: usize, base_display_addr: usize) -> void:
-    digits: int = Devtools_Widget_MemoryEditor_CalcAddrDigits(editor, mem_size, base_display_addr)
-    width: f32 = (digits.f32() + (editor.Cols * 3).f32() + 4.0) * 8.0
-    elisa_imgui_set_next_window_size(width, width * 0.60, ElisaImGuiCond_FirstUseEver)
+    sizes: Devtools_Widget_MemoryEditorSizes = Devtools_Widget_MemoryEditor_CalcSizes(editor, mem_size, base_display_addr)
+    elisa_imgui_set_next_window_size(sizes.WindowWidth, sizes.WindowWidth * 0.60, ElisaImGuiCond_FirstUseEver)
     if elisa_imgui_begin(title, editor.Open.ref[mutable bool&], 0):
         Devtools_Widget_MemoryEditor_DrawContents(editor, mem, mem_size, base_display_addr)
     elisa_imgui_end()
 
 def Devtools_Widget_MemoryEditor_DrawContents(editor: mutable Devtools_Widget_MemoryEditor&, mem: mutable u8&, mem_size: usize, base_display_addr: usize) -> void:
-    _ = mem
-    _ = base_display_addr
+    if editor.Cols < 1:
+        editor.Cols <- 1
+    sizes: Devtools_Widget_MemoryEditorSizes = Devtools_Widget_MemoryEditor_CalcSizes(editor, mem_size, base_display_addr)
+    if editor.DataEditingAddr >= mem_size:
+        editor.DataEditingAddr <- 18446744073709551615.usize()
+    if editor.DataPreviewAddr >= mem_size:
+        editor.DataPreviewAddr <- 18446744073709551615.usize()
     if editor.OptShowOptions:
         if elisa_imgui_button("Options"):
             elisa_imgui_open_popup("OptionsPopup")
@@ -138,13 +263,12 @@ def Devtools_Widget_MemoryEditor_DrawContents(editor: mutable Devtools_Widget_Me
         elisa_imgui_table_headers_row()
         rows: usize = (mem_size + editor.Cols.usize() - 1) / editor.Cols.usize()
         for row in 0..<rows:
-            _ = row
             elisa_imgui_table_next_row()
             elisa_imgui_table_set_column_index(0)
-            elisa_imgui_text_unformatted("addr")
+            elisa_imgui_text_unformatted(Devtools_Widget_MemoryEditor_FormatAddress(base_display_addr + row * editor.Cols.usize(), sizes.AddrDigitsCount, editor.OptUpperCaseHex))
             elisa_imgui_table_set_column_index(1)
-            elisa_imgui_text_unformatted("bytes")
+            elisa_imgui_text_unformatted(Devtools_Widget_MemoryEditor_RowHex(editor, mem.cast[u8&], mem_size, row))
             elisa_imgui_table_set_column_index(2)
             if editor.OptShowAscii:
-                elisa_imgui_text_unformatted("ascii")
+                elisa_imgui_text_unformatted(Devtools_Widget_MemoryEditor_RowAscii(editor, mem.cast[u8&], mem_size, row))
         elisa_imgui_end_table()

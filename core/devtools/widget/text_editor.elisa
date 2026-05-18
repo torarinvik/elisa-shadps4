@@ -77,6 +77,14 @@ def Devtools_Widget_TextEditor_SetReadOnly(editor: mutable Devtools_Widget_TextE
 def Devtools_Widget_TextEditor_SetColorizerEnable(editor: mutable Devtools_Widget_TextEditor&, value: bool) -> void:
     editor.colorizer_enabled <- value
 
+def Devtools_Widget_TextEditor_SetTabSize(editor: mutable Devtools_Widget_TextEditor&, value: int) -> void:
+    if value < 0:
+        editor.tab_size <- 0
+    elif value > 32:
+        editor.tab_size <- 32
+    else:
+        editor.tab_size <- value
+
 def Devtools_Widget_TextEditor_SetLanguageGLSL(editor: mutable Devtools_Widget_TextEditor&) -> void:
     editor.language_name <- "GLSL"
 
@@ -171,15 +179,24 @@ def Devtools_Widget_TextEditor_SetCursorPosition(editor: mutable Devtools_Widget
 def Devtools_Widget_TextEditor_InsertText(editor: mutable Devtools_Widget_TextEditor&, value: static u8&) -> void can[Memory.Allocate, Abort.Panic]:
     if editor.read_only:
         return
+    if Devtools_Widget_TextEditor_HasSelection(editor):
+        Devtools_Widget_TextEditor_DeleteSelection(editor)
+    insert_at: usize = Devtools_Widget_TextEditor_CoordinatesToOffset(editor, editor.cursor_position)
     old_len: usize = runtime_strlen(editor.text)
     add_len: usize = runtime_strlen(value)
     out: mutable heap u8& = string_alloc(old_len + add_len + 1)
-    for i in 0..<old_len:
+    for i in 0..<insert_at:
         out[i] <- editor.text[i]
     for j in 0..<add_len:
-        out[old_len + j] <- value[j]
+        out[insert_at + j] <- value[j]
+    for k in insert_at..<old_len:
+        out[add_len + k] <- editor.text[k]
     out[old_len + add_len] <- 0
     Devtools_Widget_TextEditor_SetText(editor, out.cast[static u8&])
+    new_offset: usize = insert_at + add_len
+    editor.cursor_position <- Devtools_Widget_TextEditor_OffsetToCoordinates(editor, new_offset)
+    editor.selection_start <- editor.cursor_position
+    editor.selection_end <- editor.cursor_position
 
 def Devtools_Widget_TextEditor_SelectAll(editor: mutable Devtools_Widget_TextEditor&) -> void:
     editor.selection_start <- Devtools_Widget_Coordinates(0, 0)
@@ -189,6 +206,21 @@ def Devtools_Widget_TextEditor_SetSelection(editor: mutable Devtools_Widget_Text
     editor.selection_start <- start
     editor.selection_end <- end
     editor.cursor_position <- end
+
+def Devtools_Widget_TextEditor_OffsetToCoordinates(editor: Devtools_Widget_TextEditor&, offset: usize) -> Devtools_Widget_Coordinates:
+    len: usize = runtime_strlen(editor.text)
+    capped: mutable usize = offset
+    if capped > len:
+        capped <- len
+    line: mutable int = 0
+    column: mutable int = 0
+    for i in 0..<capped:
+        if editor.text[i] == '\n':
+            line <- line + 1
+            column <- 0
+        else:
+            column <- column + 1
+    return Devtools_Widget_Coordinates(line, column)
 
 def Devtools_Widget_TextEditor_DeleteSelection(editor: mutable Devtools_Widget_TextEditor&) -> void can[Memory.Allocate, Abort.Panic]:
     if editor.read_only or not Devtools_Widget_TextEditor_HasSelection(editor):
@@ -209,6 +241,163 @@ def Devtools_Widget_TextEditor_DeleteSelection(editor: mutable Devtools_Widget_T
     editor.cursor_position <- start
     editor.selection_start <- start
     editor.selection_end <- start
+
+def Devtools_Widget_TextEditor_MoveLeft(editor: mutable Devtools_Widget_TextEditor&, amount: int, select: bool) -> void:
+    old: Devtools_Widget_Coordinates = editor.cursor_position
+    offset: mutable usize = Devtools_Widget_TextEditor_CoordinatesToOffset(editor, editor.cursor_position)
+    steps: mutable int = amount
+    while steps > 0 and offset > 0:
+        offset <- offset - 1
+        steps <- steps - 1
+    editor.cursor_position <- Devtools_Widget_TextEditor_OffsetToCoordinates(editor, offset)
+    if select:
+        editor.selection_start <- old
+        editor.selection_end <- editor.cursor_position
+    else:
+        editor.selection_start <- editor.cursor_position
+        editor.selection_end <- editor.cursor_position
+
+def Devtools_Widget_TextEditor_MoveRight(editor: mutable Devtools_Widget_TextEditor&, amount: int, select: bool) -> void:
+    old: Devtools_Widget_Coordinates = editor.cursor_position
+    len: usize = runtime_strlen(editor.text)
+    offset: mutable usize = Devtools_Widget_TextEditor_CoordinatesToOffset(editor, editor.cursor_position)
+    steps: mutable int = amount
+    while steps > 0 and offset < len:
+        offset <- offset + 1
+        steps <- steps - 1
+    editor.cursor_position <- Devtools_Widget_TextEditor_OffsetToCoordinates(editor, offset)
+    if select:
+        editor.selection_start <- old
+        editor.selection_end <- editor.cursor_position
+    else:
+        editor.selection_start <- editor.cursor_position
+        editor.selection_end <- editor.cursor_position
+
+def Devtools_Widget_TextEditor_MoveUp(editor: mutable Devtools_Widget_TextEditor&, amount: int, select: bool) -> void:
+    old: Devtools_Widget_Coordinates = editor.cursor_position
+    line: mutable int = editor.cursor_position.mLine - amount
+    if line < 0:
+        line <- 0
+    col: mutable int = editor.cursor_position.mColumn
+    line_len: int = (Devtools_Widget_TextEditor_LineEndOffset(editor, line) - Devtools_Widget_TextEditor_LineStartOffset(editor, line)).int()
+    if col > line_len:
+        col <- line_len
+    editor.cursor_position <- Devtools_Widget_Coordinates(line, col)
+    if select:
+        editor.selection_start <- old
+        editor.selection_end <- editor.cursor_position
+    else:
+        editor.selection_start <- editor.cursor_position
+        editor.selection_end <- editor.cursor_position
+
+def Devtools_Widget_TextEditor_MoveDown(editor: mutable Devtools_Widget_TextEditor&, amount: int, select: bool) -> void:
+    old: Devtools_Widget_Coordinates = editor.cursor_position
+    max_line: int = Devtools_Widget_TextEditor_GetTotalLines(editor) - 1
+    line: mutable int = editor.cursor_position.mLine + amount
+    if line > max_line:
+        line <- max_line
+    col: mutable int = editor.cursor_position.mColumn
+    line_len: int = (Devtools_Widget_TextEditor_LineEndOffset(editor, line) - Devtools_Widget_TextEditor_LineStartOffset(editor, line)).int()
+    if col > line_len:
+        col <- line_len
+    editor.cursor_position <- Devtools_Widget_Coordinates(line, col)
+    if select:
+        editor.selection_start <- old
+        editor.selection_end <- editor.cursor_position
+    else:
+        editor.selection_start <- editor.cursor_position
+        editor.selection_end <- editor.cursor_position
+
+def Devtools_Widget_TextEditor_MoveHome(editor: mutable Devtools_Widget_TextEditor&, select: bool) -> void:
+    old: Devtools_Widget_Coordinates = editor.cursor_position
+    editor.cursor_position <- Devtools_Widget_Coordinates(editor.cursor_position.mLine, 0)
+    if select:
+        editor.selection_start <- old
+        editor.selection_end <- editor.cursor_position
+    else:
+        editor.selection_start <- editor.cursor_position
+        editor.selection_end <- editor.cursor_position
+
+def Devtools_Widget_TextEditor_MoveEnd(editor: mutable Devtools_Widget_TextEditor&, select: bool) -> void:
+    old: Devtools_Widget_Coordinates = editor.cursor_position
+    line_end: usize = Devtools_Widget_TextEditor_LineEndOffset(editor, editor.cursor_position.mLine)
+    line_start: usize = Devtools_Widget_TextEditor_LineStartOffset(editor, editor.cursor_position.mLine)
+    editor.cursor_position <- Devtools_Widget_Coordinates(editor.cursor_position.mLine, (line_end - line_start).int())
+    if select:
+        editor.selection_start <- old
+        editor.selection_end <- editor.cursor_position
+    else:
+        editor.selection_start <- editor.cursor_position
+        editor.selection_end <- editor.cursor_position
+
+def Devtools_Widget_TextEditor_MoveTop(editor: mutable Devtools_Widget_TextEditor&, select: bool) -> void:
+    old: Devtools_Widget_Coordinates = editor.cursor_position
+    editor.cursor_position <- Devtools_Widget_Coordinates(0, 0)
+    if select:
+        editor.selection_start <- old
+        editor.selection_end <- editor.cursor_position
+    else:
+        editor.selection_start <- editor.cursor_position
+        editor.selection_end <- editor.cursor_position
+
+def Devtools_Widget_TextEditor_MoveBottom(editor: mutable Devtools_Widget_TextEditor&, select: bool) -> void:
+    old: Devtools_Widget_Coordinates = editor.cursor_position
+    last_line: int = Devtools_Widget_TextEditor_GetTotalLines(editor) - 1
+    line_end: usize = Devtools_Widget_TextEditor_LineEndOffset(editor, last_line)
+    line_start: usize = Devtools_Widget_TextEditor_LineStartOffset(editor, last_line)
+    editor.cursor_position <- Devtools_Widget_Coordinates(last_line, (line_end - line_start).int())
+    if select:
+        editor.selection_start <- old
+        editor.selection_end <- editor.cursor_position
+    else:
+        editor.selection_start <- editor.cursor_position
+        editor.selection_end <- editor.cursor_position
+
+def Devtools_Widget_TextEditor_Delete(editor: mutable Devtools_Widget_TextEditor&) -> void can[Memory.Allocate, Abort.Panic]:
+    if editor.read_only:
+        return
+    if Devtools_Widget_TextEditor_HasSelection(editor):
+        Devtools_Widget_TextEditor_DeleteSelection(editor)
+        return
+    start: usize = Devtools_Widget_TextEditor_CoordinatesToOffset(editor, editor.cursor_position)
+    if start >= runtime_strlen(editor.text):
+        return
+    editor.selection_start <- editor.cursor_position
+    editor.selection_end <- Devtools_Widget_TextEditor_OffsetToCoordinates(editor, start + 1)
+    Devtools_Widget_TextEditor_DeleteSelection(editor)
+
+def Devtools_Widget_TextEditor_Backspace(editor: mutable Devtools_Widget_TextEditor&) -> void can[Memory.Allocate, Abort.Panic]:
+    if editor.read_only:
+        return
+    if Devtools_Widget_TextEditor_HasSelection(editor):
+        Devtools_Widget_TextEditor_DeleteSelection(editor)
+        return
+    end: usize = Devtools_Widget_TextEditor_CoordinatesToOffset(editor, editor.cursor_position)
+    if end == 0:
+        return
+    editor.selection_start <- Devtools_Widget_TextEditor_OffsetToCoordinates(editor, end - 1)
+    editor.selection_end <- editor.cursor_position
+    Devtools_Widget_TextEditor_DeleteSelection(editor)
+
+def Devtools_Widget_TextEditor_Copy(editor: Devtools_Widget_TextEditor&) -> void:
+    if Devtools_Widget_TextEditor_HasSelection(editor):
+        elisa_imgui_set_clipboard_text(Devtools_Widget_TextEditor_GetSelectedText(editor))
+    else:
+        elisa_imgui_set_clipboard_text(Devtools_Widget_TextEditor_GetCurrentLineText(editor))
+
+def Devtools_Widget_TextEditor_Cut(editor: mutable Devtools_Widget_TextEditor&) -> void can[Memory.Allocate, Abort.Panic]:
+    if editor.read_only:
+        return
+    Devtools_Widget_TextEditor_Copy(editor)
+    if Devtools_Widget_TextEditor_HasSelection(editor):
+        Devtools_Widget_TextEditor_DeleteSelection(editor)
+
+def Devtools_Widget_TextEditor_Paste(editor: mutable Devtools_Widget_TextEditor&) -> void can[Memory.Allocate, Abort.Panic]:
+    if editor.read_only:
+        return
+    text: static u8& = elisa_imgui_get_clipboard_text()
+    if runtime_strlen(text) > 0:
+        Devtools_Widget_TextEditor_InsertText(editor, text)
 
 def Devtools_Widget_TextEditor_Render(editor: mutable Devtools_Widget_TextEditor&, title: static u8&) -> void:
     if elisa_imgui_begin_child(title, 0.0, 0.0, false, 0):

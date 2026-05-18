@@ -65,17 +65,33 @@ def devtools_options_parse_and_serialize_config_lines() -> void:
 
 @test
 def devtools_widget_memory_and_frame_helpers_match_cpp_defaults() -> void:
-    can Abort.Panic:
+    can Abort.Panic, Memory.Allocate:
         editor: mutable Devtools_Widget_MemoryEditor = Devtools_Widget_MemoryEditor_New()
         assert editor.Open
         assert editor.Cols == 16
         assert editor.OptShowAscii
         assert Devtools_Widget_MemoryEditor_CalcAddrDigits(editor, 0x1000, 0) == 3
+        sizes: Devtools_Widget_MemoryEditorSizes = Devtools_Widget_MemoryEditor_CalcSizes(editor, 0x1000, 0)
+        assert sizes.AddrDigitsCount == 3
+        assert sizes.PosAsciiEnd > sizes.PosAsciiStart
         Devtools_Widget_MemoryEditor_GotoAddrAndHighlight(editor, 4, 7)
         assert editor.GotoAddr == 4
         assert editor.HighlightMax == 7
         assert Devtools_Widget_MemoryEditor_ParseHexByte("7f") == 127
         assert Devtools_Widget_MemoryEditor_ParseHexByte("GG") == -1
+        bytes: mutable array[u8, 4] = [0x41, 0x00, 0xff, 0x7f]
+        editor.Cols <- 4
+        assert streq(Devtools_Widget_MemoryEditor_FormatAddress(0x2a, 4, true), "002A") == 1
+        assert streq(Devtools_Widget_MemoryEditor_RowHex(editor, bytes[0].ref[u8&], 4, 0), "41 00 FF 7F") == 1
+        assert streq(Devtools_Widget_MemoryEditor_RowAscii(editor, bytes[0].ref[u8&], 4, 0), "A...") == 1
+        editor.OptShowHexII <- true
+        assert streq(Devtools_Widget_MemoryEditor_RowHex(editor, bytes[0].ref[u8&], 4, 0), ".A    ## 7F") == 1
+        assert Devtools_Widget_MemoryEditor_DataTypeGetSize(9) == 8
+        assert streq(Devtools_Widget_MemoryEditor_DataTypeGetDesc(8), "Float") == 1
+        entry: Devtools_Widget_MemoryMapEntry = Devtools_Widget_MemoryMapEntry(0x1000, 0x1400, Devtools_Widget_MemoryProtCpuRead | Devtools_Widget_MemoryProtCpuExec, "code")
+        assert Devtools_Widget_MemoryMapEntry_Size(entry) == 0x400
+        assert Devtools_Widget_MemoryMapEntry_IsExecutable(entry)
+        assert streq(Devtools_Widget_MemoryMapEntry_ProtLabel(entry), "R-X") == 1
 
         graph: mutable Devtools_Widget_FrameGraph = Devtools_Widget_FrameGraph_New()
         Devtools_Widget_FrameGraph_AddFrame(graph, 1025, 0.016)
@@ -89,6 +105,7 @@ def devtools_widget_text_and_shader_helpers_keep_editor_state() -> void:
         editor: mutable Devtools_Widget_TextEditor = Devtools_Widget_TextEditor_New()
         Devtools_Widget_TextEditor_SetText(editor, "a\nb")
         assert Devtools_Widget_TextEditor_GetTotalLines(editor) == 2
+        Devtools_Widget_TextEditor_SetCursorPosition(editor, Devtools_Widget_Coordinates(1, 1))
         Devtools_Widget_TextEditor_InsertText(editor, "\nc")
         assert Devtools_Widget_TextEditor_GetTotalLines(editor) == 3
         Devtools_Widget_TextEditor_SelectAll(editor)
@@ -99,12 +116,78 @@ def devtools_widget_text_and_shader_helpers_keep_editor_state() -> void:
         assert streq(Devtools_Widget_TextEditor_GetCurrentLineText(editor), "b") == 1
         Devtools_Widget_TextEditor_DeleteSelection(editor)
         assert streq(Devtools_Widget_TextEditor_GetText(editor), "a\nc") == 1
+        Devtools_Widget_TextEditor_SetCursorPosition(editor, Devtools_Widget_Coordinates(0, 1))
+        Devtools_Widget_TextEditor_InsertText(editor, "X")
+        assert streq(Devtools_Widget_TextEditor_GetText(editor), "aX\nc") == 1
+        Devtools_Widget_TextEditor_Backspace(editor)
+        assert streq(Devtools_Widget_TextEditor_GetText(editor), "a\nc") == 1
+        Devtools_Widget_TextEditor_MoveEnd(editor, false)
+        Devtools_Widget_TextEditor_Delete(editor)
+        assert streq(Devtools_Widget_TextEditor_GetText(editor), "ac") == 1
+        Devtools_Widget_TextEditor_MoveHome(editor, false)
+        Devtools_Widget_TextEditor_MoveRight(editor, 1, true)
+        assert streq(Devtools_Widget_TextEditor_GetSelectedText(editor), "a") == 1
+        Devtools_Widget_TextEditor_SetTabSize(editor, 99)
+        assert editor.tab_size == 32
+        Devtools_Widget_TextEditor_MoveBottom(editor, false)
+        assert editor.cursor_position.mColumn == 2
+        Devtools_Widget_TextEditor_MoveTop(editor, false)
+        assert editor.cursor_position.mLine == 0
+        assert editor.cursor_position.mColumn == 0
 
         selection: mutable Devtools_Widget_ShaderSelection = Devtools_Widget_ShaderSelection_New(7)
         Devtools_Widget_ShaderSelection_ReloadShader(selection, "OpCapability Shader", "void main() {}")
         assert selection.index == 7
         assert selection.open
         assert streq(selection.isa_editor.language_name, "SPIR-V") == 1
+
+        popup: mutable Devtools_Widget_RegPopup = Devtools_Widget_RegPopup_New()
+        Devtools_Widget_RegPopup_SetColorData(popup, "Batch 3", 0x12340000, 2)
+        assert popup.type == Devtools_Widget_RegPopupDataType.Color
+        assert popup.open
+        assert streq(popup.title, "Batch 3/CB #2") == 1
+        assert Devtools_StringStartsWith(popup.window_name, "Batch 3/CB #2###reg_popup_")
+        assert Devtools_Widget_RegPopupColorRowCount == 24
+        assert streq(Devtools_Widget_RegPopup_ColorRowLabel(0), "BASE_ADDR") == 1
+        assert streq(Devtools_Widget_RegPopup_ColorRowLabel(6), "Color0Info") == 1
+        assert streq(Devtools_Widget_RegPopup_ColorRowLabel(23), "NumFormat()") == 1
+        assert Devtools_Widget_ColorBufferSnapshot_Address(popup.color) == 0x12340000
+        Devtools_Widget_RegPopup_SetDepthData(popup, "Batch 3", 0x56780000)
+        assert popup.type == Devtools_Widget_RegPopupDataType.Depth
+        assert streq(popup.title, "Batch 3/Depth") == 1
+        assert Devtools_Widget_RegPopupDepthBufferRowCount == 25
+        assert Devtools_Widget_RegPopupDepthControlRowCount == 10
+        assert streq(Devtools_Widget_RegPopup_DepthBufferRowLabel(20), "DepthAddress()") == 1
+        assert streq(Devtools_Widget_RegPopup_DepthControlRowLabel(9), "DISABLE_COLOR_WRITES_ON_DEPTH_PASS") == 1
+        assert Devtools_Widget_DepthBufferSnapshot_DepthAddress(popup.depth_buffer) == 0x56780000
+
+        reg_view: mutable Devtools_Widget_RegView = Devtools_Widget_RegView_New()
+        Devtools_Widget_RegView_SetData(reg_view, "Frame", 11)
+        assert reg_view.open
+        assert reg_view.batch_id == 11
+        assert streq(reg_view.title, "Frame/Batch 11") == 1
+        assert Devtools_StringStartsWith(reg_view.window_name, "Frame/Batch 11###reg_dump_")
+        assert Devtools_StringStartsWith(reg_view.user_data_window_name, "User data###reg_dump_")
+        assert streq(Devtools_Widget_RegView_StageName(0), "vs") == 1
+        assert streq(Devtools_Widget_RegView_StageName(5), "ls") == 1
+        assert streq(Devtools_Widget_RegView_StageName(-2), "cs") == 1
+        assert Devtools_Widget_RegView_FirstEnabledShader(0) == 0
+        assert Devtools_Widget_RegView_IsShaderStageEnabled(0, 0)
+        assert Devtools_Widget_RegView_IsShaderStageEnabled(0, 1)
+        assert not Devtools_Widget_RegView_IsShaderStageEnabled(0, 2)
+        Devtools_Widget_RegView_SetGraphicsStageMask(reg_view, 0x20)
+        assert Devtools_Widget_RegView_IsShaderStageEnabled(reg_view.stage_enable_mask, 2)
+        Devtools_Widget_RegView_SelectShader(reg_view, 2)
+        assert reg_view.selected_shader == 2
+        Devtools_Widget_RegView_SetGraphicsStageMask(reg_view, 0x4)
+        assert reg_view.selected_shader == -1
+        Devtools_Widget_RegView_SelectShader(reg_view, 2)
+        assert reg_view.selected_shader == -1
+        Devtools_Widget_RegView_SetComputeData(reg_view, "Frame", 12)
+        assert reg_view.selected_shader == -2
+        assert reg_view.last_selected_cb == -1
+        assert reg_view.is_compute
+        assert streq(Devtools_Widget_RegView_CurrentShaderName(reg_view), "cs") == 1
 
 @test
 def devtools_widget_module_and_cmd_config_helpers_are_elisa_owned() -> void:
@@ -116,14 +199,16 @@ def devtools_widget_module_and_cmd_config_helpers_are_elisa_owned() -> void:
         assert Devtools_Widget_ModuleCount() == before + 1
         assert Devtools_Widget_ModuleAt(before).is_sys_module
 
-        Devtools_Widget_CmdList_LoadConfig("cmd_list_group_batches=0")
-        Devtools_Widget_CmdList_LoadConfig("cmd_list_show_markers=1")
+        Devtools_Widget_CmdList_LoadConfig("group_batches=0")
+        Devtools_Widget_CmdList_LoadConfig("show_markers=1")
         assert not Devtools_Widget_CmdListGroupBatches
         assert Devtools_Widget_CmdListShowMarkers
         serialized: static u8& = Devtools_Widget_CmdList_SerializeConfig()
-        assert Devtools_StringStartsWith(serialized, "cmd_list_group_batches=0\n")
+        assert Devtools_StringStartsWith(serialized, "group_batches=0\n")
+        assert Devtools_Widget_CmdList_GetNextAddress(0x1000.uintptr(), 2, 3) == 0x1030.uintptr()
 
         viewer: mutable Devtools_Widget_CmdListViewer = Devtools_Widget_CmdList_New(0x1000.uintptr(), "test")
         batch: Devtools_Widget_BatchInfo = Devtools_Widget_BatchInfo(1, "marker", 0, 4, 0x1000, PM4ItOpcode_DrawIndex2, false)
         Devtools_Widget_CmdList_AddBatch(viewer, batch)
         assert viewer.events.count == 1
+        assert streq(Devtools_Widget_CmdList_EventTypeLabel(viewer.events[0]), "draw") == 1
