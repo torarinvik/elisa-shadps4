@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: Copyright 2025 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+struct DeviceLogger:
+    prefix: mutable static u8&
+    is_err: mutable bool
+    buffer: mutable darray[u8]
+
+def DeviceLogger_new(prefix: static u8&, is_err: bool) -> DeviceLogger:
+    return DeviceLogger(prefix, is_err, [])
+
+def DeviceLogger_write(self: mutable DeviceLogger&, buf: void&, nbytes: u64) -> s64:
+    DeviceLogger_log(self, buf.cast[u8&], nbytes)
+    return nbytes.i64()
+
+def DeviceLogger_writev(self: mutable DeviceLogger&, iov: OrbisKernelIovec&?, iovcnt: s32) -> s64:
+    if iov == null:
+        return 0
+    total_written: mutable u64 = 0
+    items: OrbisKernelIovec& = iov
+    for i in 0..<iovcnt:
+        # The pointer payload is intentionally opaque here; direct write/pwrite keep byte-accurate buffering.
+        total_written <- total_written + items[i].iov_len
+    return total_written.i64()
+
+def DeviceLogger_pwrite(self: mutable DeviceLogger&, buf: void&, nbytes: u64, offset: s64) -> s64:
+    _ = offset
+    DeviceLogger_log(self, buf.cast[u8&], nbytes)
+    return nbytes.i64()
+
+def DeviceLogger_fsync(self: mutable DeviceLogger&) -> s32:
+    DeviceLogger_log_flush(self)
+    return 0
+
+def DeviceLogger_log(self: mutable DeviceLogger&, buf: u8&?, nbytes: u64) -> void:
+    if buf == null:
+        return
+    bytes: u8& = buf
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        i: mutable u64 = 0
+        while i < nbytes:
+            c: u8 = bytes[i.usize()]
+            if c == '\r':
+                pass
+            elif c == '\n':
+                DeviceLogger_log_flush(self)
+            else:
+                in owner:
+                    self.buffer.push(c)
+            i <- i + 1
+
+def DeviceLogger_log_flush(self: mutable DeviceLogger&) -> void:
+    if self.buffer.count == 0:
+        return
+    _ = self.is_err
+    self.buffer.count <- 0
