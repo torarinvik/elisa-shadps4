@@ -21,9 +21,6 @@ global mutable install_dirs_enabled: darray[bool]
 global mutable settings_addon_install_dir: static u8&
 global mutable save_data_path: static u8&
 
-extern config_load_toml(path: static u8&, is_game_specific: bool) -> void
-extern config_save_toml(path: static u8&, is_game_specific: bool) -> void
-
 def config_get_string(key: static u8&, fallback: static u8&) -> static u8&:
     slot: mutable static u8&&? = arena_dict_get[static u8&, static u8&](config_values, key)
     if slot == null:
@@ -81,6 +78,196 @@ def config_set_f64(key: static u8&, value: f64, is_game_specific: bool) -> void:
 
 def setConfigMode(mode: ConfigMode) -> void:
     config_mode <- mode
+
+def config_skip_ws(text: static u8&, len: usize, i: usize) -> usize:
+    out: mutable usize = i
+    while out < len and (text[out] == ' ' or text[out] == '\t' or text[out] == '\r'):
+        out <- out + 1
+    return out
+
+def config_line_end(text: static u8&, len: usize, i: usize) -> usize:
+    out: mutable usize = i
+    while out < len and text[out] != '\n':
+        out <- out + 1
+    return out
+
+def config_slice(start: static u8&, first: usize, last: usize) -> static u8&:
+    out: mutable heap u8& = zeroed
+    can Memory.Allocate, Abort.Panic:
+        out <- string_alloc(last - first + 1)
+    for i in 0..<(last - first):
+        out[i] <- start[first + i]
+    out[last - first] <- 0
+    return out.cast[static u8&]
+
+def config_join_key(section: static u8&, key: static u8&) -> static u8&:
+    can Memory.Allocate, Abort.Panic:
+        builder: mutable heap StringBuilder& = string_builder_new(section)
+        builder <- string_builder_append(builder, ".")
+        builder <- string_builder_append(builder, key)
+        return string_builder_finish(builder).cast[static u8&]
+    return key
+
+def config_parse_int(value: static u8&) -> int:
+    len: usize = runtime_strlen(value)
+    i: mutable usize = 0
+    sign: mutable int = 1
+    if i < len and value[i] == '-':
+        sign <- -1
+        i <- i + 1
+    out: mutable int = 0
+    while i < len and value[i] >= '0' and value[i] <= '9':
+        out <- out * 10 + (value[i] - '0').int()
+        i <- i + 1
+    return out * sign
+
+def config_parse_f64(value: static u8&) -> f64:
+    len: usize = runtime_strlen(value)
+    i: mutable usize = 0
+    sign: mutable f64 = 1.0
+    if i < len and value[i] == '-':
+        sign <- -1.0
+        i <- i + 1
+    out: mutable f64 = 0.0
+    while i < len and value[i] >= '0' and value[i] <= '9':
+        out <- out * 10.0 + (value[i] - '0').f64()
+        i <- i + 1
+    if i < len and value[i] == '.':
+        i <- i + 1
+        scale: mutable f64 = 0.1
+        while i < len and value[i] >= '0' and value[i] <= '9':
+            out <- out + (value[i] - '0').f64() * scale
+            scale <- scale * 0.1
+            i <- i + 1
+    return out * sign
+
+def config_value_is_float(value: static u8&) -> bool:
+    len: usize = runtime_strlen(value)
+    for i in 0..<len:
+        if value[i] == '.':
+            return true
+    return false
+
+def config_apply_toml_value(full_key: static u8&, value: static u8&, is_game_specific: bool) -> void:
+    len: usize = runtime_strlen(value)
+    if len == 0:
+        return
+    if value[0] == '"':
+        end: mutable usize = 1
+        while end < len and value[end] != '"':
+            end <- end + 1
+        config_set_string(full_key, config_slice(value, 1, end), is_game_specific)
+    elif string_slice_eq(value, 0, 4, "true") == 1:
+        config_set_bool(full_key, true, is_game_specific)
+    elif string_slice_eq(value, 0, 5, "false") == 1:
+        config_set_bool(full_key, false, is_game_specific)
+    elif config_value_is_float(value):
+        config_set_f64(full_key, config_parse_f64(value), is_game_specific)
+    else:
+        parsed: int = config_parse_int(value)
+        config_set_int(full_key, parsed, is_game_specific)
+        if parsed >= 0:
+            config_set_u32(full_key, parsed.u32(), is_game_specific)
+
+def config_load_toml(path: static u8&, is_game_specific: bool) -> void:
+    if not fs_exists(path):
+        if not is_game_specific:
+            config_save_toml(path, false)
+        return
+    file: mutable IOFile = IOFile_opened(path, FileAccessMode.Read)
+    if not IOFile_IsOpen(file):
+        return
+    size: usize = IOFile_GetSize(file).usize()
+    text: static u8& = IOFile_ReadString(file, size)
+    IOFile_Close(file)
+
+    len: usize = runtime_strlen(text)
+    section: mutable static u8& = ""
+    i: mutable usize = 0
+    while i < len:
+        line_start: usize = config_skip_ws(text, len, i)
+        line_end: usize = config_line_end(text, len, line_start)
+        if line_start < line_end and text[line_start] == '[':
+            close: mutable usize = line_start + 1
+            while close < line_end and text[close] != ']':
+                close <- close + 1
+            if close < line_end:
+                section <- config_slice(text, line_start + 1, close)
+        elif line_start < line_end and text[line_start] != '#':
+            eq: mutable usize = line_start
+            while eq < line_end and text[eq] != '=':
+                eq <- eq + 1
+            if eq < line_end:
+                key_end: mutable usize = eq
+                while key_end > line_start and (text[key_end - 1] == ' ' or text[key_end - 1] == '\t'):
+                    key_end <- key_end - 1
+                value_start: usize = config_skip_ws(text, len, eq + 1)
+                value_end: mutable usize = line_end
+                while value_end > value_start and (text[value_end - 1] == ' ' or text[value_end - 1] == '\t' or text[value_end - 1] == '\r'):
+                    value_end <- value_end - 1
+                key: static u8& = config_slice(text, line_start, key_end)
+                full_key: static u8& = config_join_key(section, key)
+                config_apply_toml_value(full_key, config_slice(text, value_start, value_end), is_game_specific)
+        i <- line_end + 1
+
+def config_write_line(builder: mutable heap StringBuilder&, key: static u8&, value: static u8&, quote: bool) -> mutable heap StringBuilder&:
+    out: mutable heap StringBuilder& = string_builder_append(builder, key)
+    out <- string_builder_append(out, " = ")
+    if quote:
+        out <- string_builder_append(out, "\"")
+    out <- string_builder_append(out, value)
+    if quote:
+        out <- string_builder_append(out, "\"")
+    return string_builder_append(out, "\n")
+
+def config_write_int_line(builder: mutable heap StringBuilder&, key: static u8&, value: int) -> mutable heap StringBuilder&:
+    can Memory.Allocate, Console.Format, Abort.Panic:
+        return config_write_line(builder, key, int_to_string_scratch(value.i64()).cast[static u8&], false)
+    return builder
+
+def config_write_bool_line(builder: mutable heap StringBuilder&, key: static u8&, value: bool) -> mutable heap StringBuilder&:
+    return config_write_line(builder, key, "true" if value else "false", false)
+
+def config_save_toml(path: static u8&, is_game_specific: bool) -> void:
+    can Memory.Allocate, Abort.Panic:
+        builder: mutable heap StringBuilder& = string_builder_new("# shadPS4 configuration\n\n[General]\n")
+        builder <- config_write_int_line(builder, "volumeSlider", getVolumeSlider())
+        builder <- config_write_bool_line(builder, "Fullscreen", getIsFullscreen())
+        builder <- config_write_line(builder, "FullscreenMode", getFullscreenMode(), true)
+        builder <- config_write_line(builder, "userName", getUserName(), true)
+        builder <- config_write_bool_line(builder, "showSplash", showSplash())
+        builder <- config_write_bool_line(builder, "isTrophyPopupDisabled", getisTrophyPopupDisabled())
+        builder <- string_builder_append(builder, "\n[GPU]\n")
+        builder <- config_write_int_line(builder, "screenWidth", getWindowWidth().int())
+        builder <- config_write_int_line(builder, "screenHeight", getWindowHeight().int())
+        builder <- config_write_int_line(builder, "internalScreenWidth", getInternalScreenWidth().int())
+        builder <- config_write_int_line(builder, "internalScreenHeight", getInternalScreenHeight().int())
+        builder <- config_write_bool_line(builder, "nullGpu", nullGpu())
+        builder <- config_write_bool_line(builder, "copyGPUBuffers", copyGPUCmdBuffers())
+        builder <- config_write_bool_line(builder, "patchShaders", patchShaders())
+        builder <- config_write_int_line(builder, "vblankFrequency", vblankFreq().int())
+        builder <- config_write_line(builder, "presentMode", getPresentMode(), true)
+        builder <- string_builder_append(builder, "\n[Log]\n")
+        builder <- config_write_bool_line(builder, "enable", getLogEnable())
+        builder <- config_write_line(builder, "filter", getLogFilter(), true)
+        builder <- config_write_bool_line(builder, "append", isLogAppend())
+        builder <- string_builder_append(builder, "\n[Input]\n")
+        builder <- config_write_int_line(builder, "cursorState", getCursorState().int())
+        builder <- config_write_int_line(builder, "cursorHideTimeout", getCursorHideTimeout())
+        builder <- config_write_bool_line(builder, "useSpecialPad", getUseSpecialPad())
+        builder <- string_builder_append(builder, "\n[Audio]\n")
+        builder <- config_write_line(builder, "mainOutputDevice", getMainOutputDevice(), true)
+        builder <- config_write_line(builder, "padSpkOutputDevice", getPadSpkOutputDevice(), true)
+        builder <- config_write_line(builder, "micDevice", getMicDevice(), true)
+        builder <- string_builder_append(builder, "\n[Keys]\n")
+        builder <- config_write_line(builder, "TrophyKey", getTrophyKey(), true)
+        text: static u8& = string_builder_finish(builder).cast[static u8&]
+        file: mutable IOFile = IOFile_opened(path, FileAccessMode.Create)
+        if IOFile_IsOpen(file):
+            len: usize = runtime_strlen(text)
+            _ = IOFile_WriteSpan(file, text[0].ref[u8&], len)
+            _ = IOFile_Flush(file)
+            IOFile_Close(file)
 
 def load(path: static u8&, is_game_specific: bool = false) -> void:
     config_load_toml(path, is_game_specific)
