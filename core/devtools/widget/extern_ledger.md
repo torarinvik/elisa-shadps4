@@ -27,3 +27,12 @@ This ledger classifies C ABI boundaries used by `core/devtools/widget`.
 Completion rule: C++ shims may remain only for external libraries such as
 ImGui. Any bridge whose implementation depends on project-owned shadPS4 C++
 logic is temporary and must be tracked here until replaced by Elisa code.
+
+## Removal Checklist For Core::Memory Cheat Bridge
+
+- Port `Core::Memory` map ownership (`vma_map`, `dmem_map`, mutex lifecycle)
+  to Elisa-owned data structures.
+- Replace `elisa_devtools_memory_map_snapshot_vma/dmem` calls in
+  `memory_map.elisa` with direct Elisa iteration over the Elisa-owned maps.
+- Delete `core/devtools/widget/memory_map.cpp` + `memory_map.h` bridge files.
+- Keep only external-library shims (for example ImGui) after this removal.
