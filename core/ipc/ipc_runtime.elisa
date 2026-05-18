@@ -1,0 +1,81 @@
+# SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+const IPC_RUNTIME_LINE_MAX: usize = 4096
+
+struct IpcBinarySemaphore:
+    value: mutable atomic[i64]
+
+extern getchar() -> int effects[Console.Read]
+extern getenv(name: u8&) -> u8&?
+extern fflush(stream: void&) -> int effects[Console]
+
+def IpcBinarySemaphore_new(initial: i64 = 0) -> IpcBinarySemaphore:
+    out: mutable IpcBinarySemaphore = zeroed
+    out.value.value <- initial
+    return out
+
+def IpcBinarySemaphore_release(sem: mutable IpcBinarySemaphore&) -> void:
+    store(sem.value.ref[atomic[i64]&], 1, MemoryOrder.Release) can Atomics.Store
+
+def IpcBinarySemaphore_try_acquire(sem: mutable IpcBinarySemaphore&) -> bool:
+    return compare_exchange(sem.value.ref[atomic[i64]&], 1, 0, MemoryOrder.AcqRel, MemoryOrder.Acquire) can Atomics.CompareExchange
+
+def IpcBinarySemaphore_acquire(sem: mutable IpcBinarySemaphore&) -> void:
+    can Atomics.CompareExchange:
+        while not IpcBinarySemaphore_try_acquire(sem):
+            _ = AccurateSleep(1000000, null, false)
+
+def IpcBinarySemaphore_try_acquire_for(sem: mutable IpcBinarySemaphore&, timeout_ns: i64) -> bool:
+    can Atomics.CompareExchange:
+        deadline: i64 = high_resolution_now_ns() + timeout_ns
+        while high_resolution_now_ns() < deadline:
+            if IpcBinarySemaphore_try_acquire(sem):
+                return true
+            _ = AccurateSleep(1000000, null, false)
+        return IpcBinarySemaphore_try_acquire(sem)
+
+def IPC_RuntimeGetEnv(name: static u8&) -> static u8&:
+    value: u8&? = getenv(name.cast[u8&])
+    if value == null:
+        return ""
+    return value.cast[static u8&]
+
+def IPC_RuntimeWriteStderrLine(line: static u8&) -> void:
+    _ = fprintf(stderr, "%s\n", line) can Console
+    _ = fflush(stderr) can Console
+
+def IPC_RuntimeExit(code: int) -> void:
+    exit(code) can Abort.Exit
+
+def IPC_RuntimeReadLine() -> static u8&:
+    out: mutable heap u8& = zeroed
+    can Memory.Allocate, Abort.Panic, Console.Read:
+        out <- string_alloc(IPC_RUNTIME_LINE_MAX)
+        cursor: mutable usize = 0
+        done: mutable bool = false
+        while cursor + 1 < IPC_RUNTIME_LINE_MAX and not done:
+            ch: int = getchar()
+            if ch < 0:
+                done <- true
+            elif ch == 10:
+                done <- true
+            else:
+                out[cursor] <- ch.u8()
+                cursor <- cursor + 1
+        out[cursor] <- 0
+    return out.cast[static u8&]
+
+def IPC_RuntimeIsEscapedLine(line: static u8&) -> bool:
+    len: usize = runtime_strlen(line)
+    if len == 0:
+        return false
+    return line[len - 1] == '\\'.u8()
+
+def IPC_RuntimeReadProtocolString() -> static u8&:
+    line: mutable static u8& = IPC_RuntimeReadLine()
+    while IPC_RuntimeIsEscapedLine(line):
+        prefix: static u8& = string_substr(line, 0, runtime_strlen(line) - 1) can Memory.Allocate, Abort.Panic
+        next: static u8& = IPC_RuntimeReadLine()
+        line <- concat2(prefix, next) can Memory.Allocate, Abort.Panic
+    return line
