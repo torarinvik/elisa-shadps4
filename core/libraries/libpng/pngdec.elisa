@@ -16,6 +16,30 @@ const ORBIS_PNG_DEC_IMAGE_FLAG_TRNS_CHUNK_EXIST: u32 = 2
 const ORBIS_PNG_DEC_PIXEL_FORMAT_R8G8B8A8: u16 = 0
 const ORBIS_PNG_DEC_PIXEL_FORMAT_B8G8R8A8: u16 = 1
 
+const PNG_IMAGE_VERSION: u32 = 1
+const PNG_FORMAT_RGBA: u32 = 0x03
+const PNG_FORMAT_BGRA: u32 = 0x13
+
+struct PngImage layout c:
+    opaque: void&?
+    version: u32
+    width: u32
+    height: u32
+    format: u32
+    flags: u32
+    colormap_entries: u32
+    warning_or_error: u32
+    message: u8[64]
+
+@link_name(png_image_begin_read_from_memory)
+extern c_png_image_begin_read_from_memory(image: mutable PngImage&, memory: void&, size: usize) -> int
+
+@link_name(png_image_finish_read)
+extern c_png_image_finish_read(image: mutable PngImage&, background: void&?, buffer: mutable void&, row_stride: i32, colormap: mutable void&?) -> int
+
+@link_name(png_image_free)
+extern c_png_image_free(image: mutable PngImage&) -> void
+
 @fixed_layout
 struct OrbisPngDecParseParam:
     png_mem_addr: u8&?
@@ -437,6 +461,13 @@ def PngDec_ParseHeader(addr: u8&?, size: u32, info: mutable OrbisPngDecImageInfo
         return ORBIS_PNG_DEC_ERROR_INVALID_DATA
     if addr == null or size < 33:
         return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+    native_image: mutable PngImage = zeroed
+    native_image.version <- PNG_IMAGE_VERSION
+    native_buf: void& = (addr as void&)
+    if c_png_image_begin_read_from_memory(native_image.ref[mutable PngImage&], native_buf, size.usize()) == 0:
+        c_png_image_free(native_image.ref[mutable PngImage&])
+        return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+    c_png_image_free(native_image.ref[mutable PngImage&])
     p: u8& = addr
     ihdr_len: u32 = PngDec_ReadBe32(p, 8)
     if ihdr_len != 13:
@@ -1049,61 +1080,38 @@ def scePngDecDecode(handle: OrbisPngDecHandle, param: OrbisPngDecDecodeParam&?, 
     h: OrbisPngDecHandleInternal& = handle
     if parsed.image_width > h.max_image_width:
         return ORBIS_PNG_DEC_ERROR_INVALID_SIZE
-
-    src_channels: u32 = 0
-    if header.color_type == 0.u8():
-        src_channels <- 1
-    elif header.color_type == 2.u8():
-        src_channels <- 3
-    elif header.color_type == 3.u8():
-        src_channels <- 1
-    elif header.color_type == 4.u8():
-        src_channels <- 2
-    elif header.color_type == 6.u8():
-        src_channels <- 4
-    else:
-        return ORBIS_PNG_DEC_ERROR_UNSUPPORT_DATA
-    bits_per_px: u32 = src_channels * header.bit_depth.u32()
-    if bits_per_px == 0:
-        return ORBIS_PNG_DEC_ERROR_INVALID_DATA
-    # Fixed decode workspace for now; reject oversized images deterministically.
-    if header.interlace == 0.u8():
-        row_bits: u32 = parsed.image_width * bits_per_px
-        row_bytes: u32 = (row_bits + 7) / 8
-        need_raw: u32 = (row_bytes + 1) * parsed.image_height
-        if need_raw > 1048576:
-            return ORBIS_PNG_DEC_ERROR_INVALID_SIZE
-    elif header.interlace == 1.u8():
-        # Adam7 total filtered bytes upper-bounded by 2x linear payload for supported formats.
-        row_bits2: u32 = parsed.image_width * bits_per_px
-        row_bytes2: u32 = (row_bits2 + 7) / 8
-        need_raw2: u32 = (row_bytes2 + 1) * parsed.image_height
-        if need_raw2 > 524288:
-            return ORBIS_PNG_DEC_ERROR_INVALID_SIZE
-    else:
-        return ORBIS_PNG_DEC_ERROR_UNSUPPORT_DATA
-
-    png_ptr: u8& = (param.png_mem_addr as u8&)
-    ancillary: mutable PngDecAncillary = zeroed
-    palette_rgb: mutable u8[768] = zeroed
-    trns_alpha: mutable u8[256] = zeroed
-    anc_ret: int = PngDec_ParseAncillary(png_ptr, param.png_mem_size, ancillary.ref[mutable PngDecAncillary&], palette_rgb.ref[mutable u8&], 768, trns_alpha.ref[mutable u8&], 256)
-    if anc_ret != ORBIS_OK:
-        return anc_ret
-    idat: mutable u8[1048576] = zeroed
-    idat_size: int = PngDec_GatherIdat(png_ptr, param.png_mem_size, idat.ref[mutable u8&], 1048576)
-    if idat_size < 0:
-        return idat_size
-
-    raw: mutable u8[1048576] = zeroed
-    raw_size: int = PngDec_InflateStored(idat.ref[mutable u8&], idat_size.u32(), raw.ref[mutable u8&], 1048576)
-    if raw_size < 0:
-        return raw_size
-
     dst: mutable u8& = (param.image_mem_addr as mutable u8&)
-    decode_ret: int = PngDec_DecodeRows(header, ancillary, palette_rgb.ref[mutable u8&], trns_alpha.ref[mutable u8&], raw.ref[mutable u8&], raw_size.u32(), dst, param.image_mem_size, param.image_pitch, param.pixel_format, param.alpha_value)
-    if decode_ret != ORBIS_OK:
-        return decode_ret
+    dst_stride: u32 = param.image_pitch
+    if dst_stride == 0:
+        dst_stride <- parsed.image_width * 4
+    if parsed.image_height.u64() * dst_stride.u64() > param.image_mem_size.u64():
+        return ORBIS_PNG_DEC_ERROR_INVALID_SIZE
+
+    native_image: mutable PngImage = zeroed
+    native_image.version <- PNG_IMAGE_VERSION
+    if param.pixel_format == ORBIS_PNG_DEC_PIXEL_FORMAT_R8G8B8A8:
+        native_image.format <- PNG_FORMAT_RGBA
+    else:
+        native_image.format <- PNG_FORMAT_BGRA
+    png_mem: void& = (param.png_mem_addr as void&)
+    begin_ok: int = c_png_image_begin_read_from_memory(native_image.ref[mutable PngImage&], png_mem, param.png_mem_size.usize())
+    if begin_ok == 0:
+        c_png_image_free(native_image.ref[mutable PngImage&])
+        return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+    finish_ok: int = c_png_image_finish_read(native_image.ref[mutable PngImage&], null, dst as mutable void&, dst_stride.i32(), null)
+    c_png_image_free(native_image.ref[mutable PngImage&])
+    if finish_ok == 0:
+        return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+
+    if (parsed.image_flag & ORBIS_PNG_DEC_IMAGE_FLAG_TRNS_CHUNK_EXIST) == 0 and (parsed.color_space == ORBIS_PNG_DEC_COLOR_SPACE_GRAYSCALE or parsed.color_space == ORBIS_PNG_DEC_COLOR_SPACE_RGB or parsed.color_space == ORBIS_PNG_DEC_COLOR_SPACE_CLUT):
+        y: u32 = 0
+        while y < parsed.image_height:
+            x: u32 = 0
+            while x < parsed.image_width:
+                aoff: u32 = y * dst_stride + x * 4 + 3
+                dst[aoff.usize()] <- param.alpha_value.u8()
+                x <- x + 1
+            y <- y + 1
 
     if image_info != null:
         image_info.image_width <- parsed.image_width

@@ -50,6 +50,7 @@ global mutable avsrc_audio_duration_cache: u64[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_audio_start_time_cache: u64[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_last_video_out_ts: u64[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_last_audio_out_ts: u64[AVSRC_MAX_HANDLES] = zeroed
+global mutable avsrc_last_audio_size_bytes: u32[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_video_frame_interval_ms: u32[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_audio_frame_interval_ms: u32[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_video_q_head: int[AVSRC_MAX_HANDLES] = zeroed
@@ -213,6 +214,7 @@ def avsrc_init_handle(slot: int):
     avsrc_audio_start_time_cache[slot] <- 0
     avsrc_last_video_out_ts[slot] <- 0
     avsrc_last_audio_out_ts[slot] <- 0
+    avsrc_last_audio_size_bytes[slot] <- 0
     avsrc_video_frame_interval_ms[slot] <- 33
     avsrc_audio_frame_interval_ms[slot] <- 33
     avsrc_video_q_head[slot] <- 0
@@ -272,6 +274,7 @@ def avsrc_add_source(slot: int) -> bool:
     avsrc_audio_start_time_cache[slot] <- 0
     avsrc_last_video_out_ts[slot] <- 0
     avsrc_last_audio_out_ts[slot] <- 0
+    avsrc_last_audio_size_bytes[slot] <- 0
     avsrc_video_frame_interval_ms[slot] <- 33
     avsrc_audio_frame_interval_ms[slot] <- 33
     return true
@@ -743,6 +746,7 @@ def avsrc_stop(slot: int) -> bool:
     avsrc_pause_duration_ns[slot] <- 0
     avsrc_last_video_out_ts[slot] <- 0
     avsrc_last_audio_out_ts[slot] <- 0
+    avsrc_last_audio_size_bytes[slot] <- 0
     avsrc_video_frame_interval_ms[slot] <- 33
     avsrc_audio_frame_interval_ms[slot] <- 33
     avsrc_last_audio_ts[slot] <- 0
@@ -787,6 +791,7 @@ def avsrc_jump_to_time(slot: int, target_time: u64) -> bool:
     avsrc_last_audio_ts[slot] <- target_time
     avsrc_last_video_out_ts[slot] <- 0
     avsrc_last_audio_out_ts[slot] <- 0
+    avsrc_last_audio_size_bytes[slot] <- 0
     avsrc_video_q_head[slot] <- 0
     avsrc_video_q_tail[slot] <- 0
     avsrc_video_q_size[slot] <- 0
@@ -868,6 +873,18 @@ def avsrc_get_audio_data(slot: int, out_ts: mutable u64&) -> bool:
                 avsrc_audio_frame_interval_ms[slot] <- delta.u32()
         avsrc_last_audio_out_ts[slot] <- out_ts
         avsrc_last_audio_ts[slot] <- out_ts
+        channels: u32 = avsrc_audio_channels_cache[slot]
+        sample_rate: u32 = avsrc_audio_sample_rate_cache[slot]
+        interval_ms: u32 = avsrc_audio_frame_interval_ms[slot]
+        if interval_ms == 0:
+            interval_ms <- 33
+        if channels > 0 and sample_rate > 0:
+            samples_per_channel: mutable u32 = (sample_rate * interval_ms) / 1000
+            if samples_per_channel == 0:
+                samples_per_channel <- 1
+            avsrc_last_audio_size_bytes[slot] <- samples_per_channel * channels * 2
+        else:
+            avsrc_last_audio_size_bytes[slot] <- 0
         return true
     if avsrc_ffmpeg_enabled[slot]:
         _ = avsrc_fill_outputs(slot, avsrc_video_enabled[slot], true)
@@ -881,6 +898,18 @@ def avsrc_get_audio_data(slot: int, out_ts: mutable u64&) -> bool:
                     avsrc_audio_frame_interval_ms[slot] <- delta.u32()
             avsrc_last_audio_out_ts[slot] <- out_ts
             avsrc_last_audio_ts[slot] <- out_ts
+            channels: u32 = avsrc_audio_channels_cache[slot]
+            sample_rate: u32 = avsrc_audio_sample_rate_cache[slot]
+            interval_ms: u32 = avsrc_audio_frame_interval_ms[slot]
+            if interval_ms == 0:
+                interval_ms <- 33
+            if channels > 0 and sample_rate > 0:
+                samples_per_channel: mutable u32 = (sample_rate * interval_ms) / 1000
+                if samples_per_channel == 0:
+                    samples_per_channel <- 1
+                avsrc_last_audio_size_bytes[slot] <- samples_per_channel * channels * 2
+            else:
+                avsrc_last_audio_size_bytes[slot] <- 0
             return true
         return false
     avsrc_last_audio_ts[slot] <- avsrc_last_audio_ts[slot] + 33
@@ -972,3 +1001,6 @@ def avsrc_get_video_frame_interval_ms(slot: int) -> u32:
 
 def avsrc_get_audio_frame_interval_ms(slot: int) -> u32:
     return avsrc_audio_frame_interval_ms[slot]
+
+def avsrc_get_last_audio_size_bytes(slot: int) -> u32:
+    return avsrc_last_audio_size_bytes[slot]

@@ -10,6 +10,8 @@ include "../../../common/error.elisa"
 
 const ORBIS_NET_MAX_SOCKETS: usize = 64
 const ORBIS_NET_MAX_RESOLVERS: usize = 16
+const ORBIS_NET_MAX_EPOLL: usize = 32
+const ORBIS_NET_MAX_EPOLL_EVENTS: usize = 64
 const ORBIS_NET_RESOLVER_ASYNC: int = 1
 const ORBIS_NET_SEND_FLAGS: int = 0x40020000
 const ORBIS_NET_RECV_FLAGS: int = 0x40000000
@@ -17,6 +19,9 @@ const ORBIS_NET_AF_INET: int = 2
 const ORBIS_NET_AF_INET6: int = 28
 const NATIVE_AF_INET: int = 2
 const NATIVE_AF_INET6: int = 30
+const ORBIS_NET_EPOLL_CTL_ADD: int = 1
+const ORBIS_NET_EPOLL_CTL_MOD: int = 2
+const ORBIS_NET_EPOLL_CTL_DEL: int = 3
 
 struct OrbisNetSocketState:
     in_use: mutable bool
@@ -32,13 +37,21 @@ struct OrbisNetResolverState:
     flags: mutable int
     last_error: mutable int
 
+struct OrbisNetEpollState:
+    in_use: mutable bool
+    handle: mutable i64
+    count: mutable usize
+    ids: mutable array[i64, ORBIS_NET_MAX_EPOLL_EVENTS]
+
 global mutable g_net_initialized: bool = false
 global mutable g_net_last_error: int = ORBIS_OK
 global mutable g_net_next_socket_handle: i64 = 1
 global mutable g_net_next_resolver_handle: i64 = 1
 global mutable g_net_next_pool_handle: int = 1
+global mutable g_net_next_epoll_handle: i64 = 1
 global mutable g_net_sockets: array[OrbisNetSocketState, ORBIS_NET_MAX_SOCKETS] = zeroed
 global mutable g_net_resolvers: array[OrbisNetResolverState, ORBIS_NET_MAX_RESOLVERS] = zeroed
+global mutable g_net_epolls: array[OrbisNetEpollState, ORBIS_NET_MAX_EPOLL] = zeroed
 global mutable g_net_active_resolver: i64 = 0
 
 def sceNet_SetErr(err: int) -> void:
@@ -52,6 +65,10 @@ def sceNet_ResetState() -> void:
     idx = 0
     while idx < ORBIS_NET_MAX_RESOLVERS:
         g_net_resolvers[idx] <- zeroed
+        idx += 1
+    idx = 0
+    while idx < ORBIS_NET_MAX_EPOLL:
+        g_net_epolls[idx] <- zeroed
         idx += 1
     g_net_active_resolver <- 0
 
@@ -69,6 +86,23 @@ def sceNet_FindResolver(handle: i64) -> int:
     while idx < ORBIS_NET_MAX_RESOLVERS:
         slot: mutable OrbisNetResolverState& = g_net_resolvers[idx].ref[mutable OrbisNetResolverState&]
         if slot.in_use and slot.handle == handle:
+            return idx.int()
+        idx += 1
+    return -1
+
+def sceNet_FindEpoll(handle: i64) -> int:
+    idx: usize = 0
+    while idx < ORBIS_NET_MAX_EPOLL:
+        slot: mutable OrbisNetEpollState& = g_net_epolls[idx].ref[mutable OrbisNetEpollState&]
+        if slot.in_use and slot.handle == handle:
+            return idx.int()
+        idx += 1
+    return -1
+
+def sceNet_EpollFindId(epoll: mutable OrbisNetEpollState&, id: i64) -> int:
+    idx: usize = 0
+    while idx < epoll.count:
+        if epoll.ids[idx] == id:
             return idx.int()
         idx += 1
     return -1
@@ -573,21 +607,94 @@ def sceNetEpollAbort() -> int:
     LOG_ERROR("Lib_Net", "(STUBBED) called")
     return ORBIS_OK
 
-def sceNetEpollControl() -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
+def sceNetEpollControl(epollid: i64, op: int, id: i64, event: u8&?) -> int:
+    idx: int = sceNet_FindEpoll(epollid)
+    if idx < 0:
+        sceNet_SetErr(ORBIS_NET_EBADF)
+        return ORBIS_NET_ERROR_EBADF
+    epoll: mutable OrbisNetEpollState& = g_net_epolls[idx.usize()].ref[mutable OrbisNetEpollState&]
+    pos: int = sceNet_EpollFindId(epoll, id)
+    if op == ORBIS_NET_EPOLL_CTL_ADD:
+        if event == null:
+            sceNet_SetErr(ORBIS_NET_EINVAL)
+            return ORBIS_NET_ERROR_EINVAL
+        if pos >= 0:
+            sceNet_SetErr(ORBIS_NET_EEXIST)
+            return ORBIS_NET_ERROR_EEXIST
+        if sceNet_FindSocket(id) < 0 and sceNet_FindResolver(id) < 0:
+            sceNet_SetErr(ORBIS_NET_EBADF)
+            return ORBIS_NET_ERROR_EBADF
+        if epoll.count >= ORBIS_NET_MAX_EPOLL_EVENTS:
+            sceNet_SetErr(ORBIS_NET_ENFILE)
+            return ORBIS_NET_ERROR_ENFILE
+        epoll.ids[epoll.count] <- id
+        epoll.count <- epoll.count + 1
+        sceNet_SetErr(ORBIS_OK)
+        return ORBIS_OK
+    elif op == ORBIS_NET_EPOLL_CTL_MOD:
+        if event == null:
+            sceNet_SetErr(ORBIS_NET_EINVAL)
+            return ORBIS_NET_ERROR_EINVAL
+        if pos < 0:
+            sceNet_SetErr(ORBIS_NET_EBADF)
+            return ORBIS_NET_ERROR_EBADF
+        sceNet_SetErr(ORBIS_OK)
+        return ORBIS_OK
+    elif op == ORBIS_NET_EPOLL_CTL_DEL:
+        if event != null:
+            sceNet_SetErr(ORBIS_NET_EINVAL)
+            return ORBIS_NET_ERROR_EINVAL
+        if pos < 0:
+            sceNet_SetErr(ORBIS_NET_EBADF)
+            return ORBIS_NET_ERROR_EBADF
+        remove_at: usize = pos.usize()
+        while remove_at + 1 < epoll.count:
+            epoll.ids[remove_at] <- epoll.ids[remove_at + 1]
+            remove_at += 1
+        epoll.count <- epoll.count - 1
+        sceNet_SetErr(ORBIS_OK)
+        return ORBIS_OK
+    sceNet_SetErr(ORBIS_NET_EINVAL)
+    return ORBIS_NET_ERROR_EINVAL
+
+def sceNetEpollCreate(name: u8&?, flags: int) -> int:
+    if flags != 0:
+        sceNet_SetErr(ORBIS_NET_EINVAL)
+        return ORBIS_NET_ERROR_EINVAL
+    i: usize = 0
+    while i < ORBIS_NET_MAX_EPOLL:
+        slot: mutable OrbisNetEpollState& = g_net_epolls[i].ref[mutable OrbisNetEpollState&]
+        if not slot.in_use:
+            slot.in_use <- true
+            slot.handle <- g_net_next_epoll_handle
+            slot.count <- 0
+            g_net_next_epoll_handle <- g_net_next_epoll_handle + 1
+            _ = name
+            sceNet_SetErr(ORBIS_OK)
+            return slot.handle.int()
+        i += 1
+    sceNet_SetErr(ORBIS_NET_ENFILE)
+    return ORBIS_NET_ERROR_ENFILE
+
+def sceNetEpollDestroy(epollid: i64) -> int:
+    idx: int = sceNet_FindEpoll(epollid)
+    if idx < 0:
+        sceNet_SetErr(ORBIS_NET_EBADF)
+        return ORBIS_NET_ERROR_EBADF
+    g_net_epolls[idx.usize()] <- zeroed
+    sceNet_SetErr(ORBIS_OK)
     return ORBIS_OK
 
-def sceNetEpollCreate() -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
-    return ORBIS_OK
-
-def sceNetEpollDestroy() -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
-    return ORBIS_OK
-
-def sceNetEpollWait() -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
-    return ORBIS_OK
+def sceNetEpollWait(epollid: i64, events: u8&?, maxevents: int, timeout: int) -> int:
+    idx: int = sceNet_FindEpoll(epollid)
+    if idx < 0:
+        sceNet_SetErr(ORBIS_NET_EBADF)
+        return ORBIS_NET_ERROR_EBADF
+    _ = events
+    _ = maxevents
+    _ = timeout
+    sceNet_SetErr(ORBIS_OK)
+    return 0
 
 def sceNetErrnoLoc() -> int:
     return g_net_last_error
@@ -840,10 +947,9 @@ def sceNetMemoryFree() -> int:
 def sceNetNtohl(net32: u32) -> u32:
     return sceNetHtonl(net32)
 
-def sceNetNtohll(net64: u64) -> u64:
-    lo: u64 = sceNetNtohl((net64 & 0xffffffffu64).u32()).u64()
-    hi: u64 = sceNetNtohl((net64 >> 32).u32()).u64()
-    return (lo << 32) | hi
+def sceNetNtohll() -> int:
+    LOG_ERROR("Lib_Net", "(STUBBED) called")
+    return ORBIS_OK
 
 def sceNetNtohs(net16: u16) -> u16:
     return sceNetHtons(net16)
