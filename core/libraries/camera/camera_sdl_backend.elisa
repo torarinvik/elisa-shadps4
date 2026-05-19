@@ -1,0 +1,228 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+const SDL_PIXELFORMAT_RGBA8888: u32 = 0x16462004u
+const SDL_PIXELFORMAT_YUY2: u32 = 0x32595559u
+const SDL_COLORSPACE_SRGB: u32 = 0x120005a0u
+const SDL_COLORSPACE_JPEG: u32 = 0x220004c6u
+
+const CAMERA_FRAME_WIDTH: int = 1280
+const CAMERA_FRAME_HEIGHT: int = 800
+const CAMERA_FRAME_PIXEL_COUNT: usize = 1024000usize
+
+struct SDL_CameraSpec layout c:
+    format: mutable u32
+    colorspace: mutable u32
+    width: mutable int
+    height: mutable int
+    framerate_numerator: mutable int
+    framerate_denominator: mutable int
+
+struct SDL_Surface layout c:
+    flags: mutable u32
+    format: mutable u32
+    w: mutable int
+    h: mutable int
+    pitch: mutable int
+    pixels: mutable void&?
+    refcount: mutable int
+    reserved: mutable void&?
+
+@c_abi(c)
+extern SDL_GetCameras(count: mutable int&) -> mutable u32&?
+
+@c_abi(c)
+extern SDL_OpenCamera(instance_id: u32, spec: SDL_CameraSpec&?) -> mutable void&?
+
+@c_abi(c)
+extern SDL_GetCameraFormat(camera: void&?, spec: mutable SDL_CameraSpec&) -> bool
+
+@c_abi(c)
+extern SDL_GetCameraName(instance_id: u32) -> u8&?
+
+@c_abi(c)
+extern SDL_GetCurrentCameraDriver() -> u8&?
+
+@c_abi(c)
+extern SDL_AcquireCameraFrame(camera: void&?, timestampNS: mutable u64&) -> mutable SDL_Surface&?
+
+@c_abi(c)
+extern SDL_ReleaseCameraFrame(camera: void&?, frame: mutable SDL_Surface&?) -> void
+
+@c_abi(c)
+extern SDL_CloseCamera(camera: void&?) -> void
+
+@c_abi(c)
+extern SDL_DelayNS(ns: u64) -> void
+
+@c_abi(c)
+extern SDL_GetError() -> u8&?
+
+@c_abi(c)
+extern SDL_free(mem: mutable void&?) -> void
+
+global mutable g_camera_selected_device_index: int = 0
+global mutable g_camera_sdl_camera: mutable void&? = null
+global mutable g_camera_sdl_frame: mutable SDL_Surface&? = null
+global mutable g_camera_raw16_buffer0: array[u16, CAMERA_FRAME_PIXEL_COUNT] = zeroed
+global mutable g_camera_raw16_buffer1: array[u16, CAMERA_FRAME_PIXEL_COUNT] = zeroed
+global mutable g_camera_raw8_buffer0: array[u8, CAMERA_FRAME_PIXEL_COUNT] = zeroed
+global mutable g_camera_raw8_buffer1: array[u8, CAMERA_FRAME_PIXEL_COUNT] = zeroed
+
+def camera_backend_release_frame() -> void:
+    if g_camera_sdl_camera != null and g_camera_sdl_frame != null:
+        SDL_ReleaseCameraFrame(g_camera_sdl_camera, g_camera_sdl_frame)
+        g_camera_sdl_frame <- null
+
+def camera_backend_close() -> void:
+    camera_backend_release_frame()
+    if g_camera_sdl_camera != null:
+        SDL_CloseCamera(g_camera_sdl_camera)
+        g_camera_sdl_camera <- null
+    g_camera_started <- false
+    g_camera_frame_ready <- false
+
+def camera_backend_convert_rgba8888_to_raw16(src: mutable u8&, dst: mutable u16&) -> void:
+    y: mutable int = 0
+    while y < CAMERA_FRAME_HEIGHT:
+        x: mutable int = 0
+        while x < CAMERA_FRAME_WIDTH:
+            base: usize = (y.usize() * CAMERA_FRAME_WIDTH.usize() * 4usize) + (x.usize() * 4usize)
+            b: u16 = src[base + 1usize].u16() << 4
+            g: u16 = src[base + 2usize].u16() << 4
+            r: u16 = src[base + 3usize].u16() << 4
+            out_index: usize = (y.usize() * CAMERA_FRAME_WIDTH.usize()) + x.usize()
+            if (y & 1) == 0 and (x & 1) == 0:
+                dst[out_index] <- b
+            elif (y & 1) == 0 and (x & 1) != 0:
+                dst[out_index] <- g
+            elif (y & 1) != 0 and (x & 1) == 0:
+                dst[out_index] <- g
+            else:
+                dst[out_index] <- r
+            x <- x + 1
+        y <- y + 1
+
+def camera_backend_convert_rgba8888_to_raw8(src: mutable u8&, dst: mutable u8&) -> void:
+    y: mutable int = 0
+    while y < CAMERA_FRAME_HEIGHT:
+        x: mutable int = 0
+        while x < CAMERA_FRAME_WIDTH:
+            base: usize = (y.usize() * CAMERA_FRAME_WIDTH.usize() * 4usize) + (x.usize() * 4usize)
+            b: u8 = src[base + 1usize]
+            g: u8 = src[base + 2usize]
+            r: u8 = src[base + 3usize]
+            out_index: usize = (y.usize() * CAMERA_FRAME_WIDTH.usize()) + x.usize()
+            if (y & 1) == 0 and (x & 1) == 0:
+                dst[out_index] <- b
+            elif (y & 1) == 0 and (x & 1) != 0:
+                dst[out_index] <- g
+            elif (y & 1) != 0 and (x & 1) == 0:
+                dst[out_index] <- g
+            else:
+                dst[out_index] <- r
+            x <- x + 1
+        y <- y + 1
+
+def camera_backend_open_real() -> int:
+    count: mutable int = 0
+    devices: mutable u32&? = SDL_GetCameras(count.ref[mutable int&])
+    if devices == null:
+        return ORBIS_CAMERA_ERROR_FATAL
+    if count <= 0:
+        SDL_free(devices.cast[mutable void&])
+        return ORBIS_CAMERA_ERROR_NOT_CONNECTED
+
+    index: mutable int = g_camera_selected_device_index
+    if index < 0 or index >= count:
+        index <- 0
+    instance_id: u32 = devices[index.usize()]
+
+    spec: mutable SDL_CameraSpec = zeroed
+    if g_camera_output_config0.format.formatLevel0 == ORBIS_CAMERA_FORMAT_YUV422:
+        spec.format <- SDL_PIXELFORMAT_YUY2
+        spec.colorspace <- SDL_COLORSPACE_JPEG
+    else:
+        spec.format <- SDL_PIXELFORMAT_RGBA8888
+        spec.colorspace <- SDL_COLORSPACE_SRGB
+    spec.width <- CAMERA_FRAME_WIDTH
+    spec.height <- CAMERA_FRAME_HEIGHT
+    spec.framerate_numerator <- 60
+    spec.framerate_denominator <- 1
+
+    camera_backend_close()
+    g_camera_sdl_camera <- SDL_OpenCamera(instance_id, spec.ref[SDL_CameraSpec&])
+    SDL_free(devices.cast[mutable void&])
+    if g_camera_sdl_camera == null:
+        return ORBIS_CAMERA_ERROR_FATAL
+
+    _ = SDL_GetCurrentCameraDriver()
+    _ = SDL_GetCameraName(instance_id)
+    _ = SDL_GetCameraFormat(g_camera_sdl_camera, spec.ref[mutable SDL_CameraSpec&])
+
+    timestamp: mutable u64 = 0
+    frame: mutable SDL_Surface&? = SDL_AcquireCameraFrame(g_camera_sdl_camera, timestamp.ref[mutable u64&])
+    if frame != null:
+        SDL_ReleaseCameraFrame(g_camera_sdl_camera, frame)
+    else:
+        tries: mutable int = 0
+        while tries < 1000 and frame == null:
+            SDL_DelayNS(10u64)
+            frame <- SDL_AcquireCameraFrame(g_camera_sdl_camera, timestamp.ref[mutable u64&])
+            tries <- tries + 1
+        if frame != null:
+            SDL_ReleaseCameraFrame(g_camera_sdl_camera, frame)
+
+    g_camera_started <- true
+    g_camera_frame_ready <- false
+    return ORBIS_OK
+
+def camera_backend_acquire_frame(frame_data: mutable OrbisCameraFrameData&) -> int:
+    if g_camera_sdl_camera == null:
+        return ORBIS_CAMERA_ERROR_NOT_OPEN
+
+    camera_backend_release_frame()
+    timestamp: mutable u64 = 0
+    frame: mutable SDL_Surface&? = SDL_AcquireCameraFrame(g_camera_sdl_camera, timestamp.ref[mutable u64&])
+    if frame == null:
+        return ORBIS_CAMERA_ERROR_BUSY
+
+    g_camera_sdl_frame <- frame
+    pixels: mutable void&? = frame.pixels
+    if pixels == null:
+        camera_backend_release_frame()
+        return ORBIS_CAMERA_ERROR_BUSY
+    src_pixels: mutable u8& = pixels.cast[mutable u8&]
+    frame_data.status[0] <- 0
+    frame_data.status[1] <- 0
+    frame_data.meta.metaMode <- 0
+    frame_data.meta.format[0] <- g_camera_output_config0.format.formatLevel0
+    frame_data.meta.format[1] <- g_camera_output_config1.format.formatLevel0
+    frame_data.meta.timestamp[0] <- timestamp
+    frame_data.meta.timestamp[1] <- timestamp
+    frame_data.pFramePointerList[0] <- null
+    frame_data.pFramePointerList[1] <- null
+
+    if g_camera_output_config0.format.formatLevel0 == ORBIS_CAMERA_FORMAT_YUV422:
+        frame_data.pFramePointerList[0] <- pixels
+    elif g_camera_output_config0.format.formatLevel0 == ORBIS_CAMERA_FORMAT_RAW16:
+        camera_backend_convert_rgba8888_to_raw16(src_pixels, g_camera_raw16_buffer0[0].ref[mutable u16&])
+        frame_data.pFramePointerList[0] <- g_camera_raw16_buffer0[0].ref[mutable u16&].cast[mutable void&]
+    else:
+        camera_backend_convert_rgba8888_to_raw8(src_pixels, g_camera_raw8_buffer0[0].ref[mutable u8&])
+        frame_data.pFramePointerList[0] <- g_camera_raw8_buffer0[0].ref[mutable u8&].cast[mutable void&]
+
+    if g_camera_output_config1.format.formatLevel0 == ORBIS_CAMERA_FORMAT_YUV422:
+        frame_data.pFramePointerList[1] <- pixels
+    elif g_camera_output_config1.format.formatLevel0 == ORBIS_CAMERA_FORMAT_RAW16:
+        camera_backend_convert_rgba8888_to_raw16(src_pixels, g_camera_raw16_buffer1[0].ref[mutable u16&])
+        frame_data.pFramePointerList[1] <- g_camera_raw16_buffer1[0].ref[mutable u16&].cast[mutable void&]
+    else:
+        camera_backend_convert_rgba8888_to_raw8(src_pixels, g_camera_raw8_buffer1[0].ref[mutable u8&])
+        frame_data.pFramePointerList[1] <- g_camera_raw8_buffer1[0].ref[mutable u8&].cast[mutable void&]
+
+    g_camera_frame_ready <- false
+    return ORBIS_OK
+
+def camera_backend_is_attached() -> bool:
+    return g_camera_backend_connected or g_camera_sdl_camera != null
