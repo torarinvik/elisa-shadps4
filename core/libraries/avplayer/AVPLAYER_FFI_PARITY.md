@@ -79,6 +79,7 @@ Current validated prefix structs:
 - `Implemented`: stream-disable path now recomputes combined EOF immediately after per-stream clear operations
 - `Implemented`: add-source paths now reset queue state, stream metadata/timing caches, cadence markers, and playback time anchors before new source lifecycle begins
 - `Implemented`: add-source source-runtime baseline now also resets loop mode to false for deterministic per-source setup
+- `Implemented`: add-source source-runtime baseline now nulls decoder context pointers before next start-time decoder initialization
 - `Implemented`: `IsActive` and `CurrentTime` gating now follow the C++ source shape
 - `Partial`: no full demux/decode threads, packet queues, or converted frame pipeline
 - `Partial`: no guest buffer pool or frame-object lifetime model like C++

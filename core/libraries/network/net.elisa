@@ -5,6 +5,7 @@
 include "../error_codes.elisa"
 include "net_error.elisa"
 include "../../../common/logging/log.elisa"
+include "../../../common/error.elisa"
 
 const ORBIS_NET_MAX_SOCKETS: usize = 64
 const ORBIS_NET_MAX_RESOLVERS: usize = 16
@@ -63,6 +64,24 @@ extern c_getaddrinfo(node: u8&?, service: u8&?, hints: void&?, result: mutable v
 @link_name(freeaddrinfo)
 @c_abi(c)
 extern c_freeaddrinfo(result: void&?) -> void
+
+@c_bind("netdb.h", "struct addrinfo")
+struct NativeAddrInfo layout c:
+    ai_flags: mutable int
+    ai_family: mutable int
+    ai_socktype: mutable int
+    ai_protocol: mutable int
+    ai_addrlen: mutable u32
+    ai_canonname: mutable u8&?
+    ai_addr: mutable void&?
+    ai_next: mutable void&?
+
+@c_bind("netinet/in.h", "struct sockaddr_in")
+struct NativeSockaddrIn layout c:
+    sin_len: mutable u8
+    sin_family: mutable u8
+    sin_port: mutable u16
+    sin_addr: mutable u32
 
 struct OrbisNetSocketState:
     in_use: mutable bool
@@ -126,17 +145,29 @@ def sceNet_RequireInit() -> int:
 
 def sceNet_FfiIntResult(result: int, fallback: int) -> int:
     if result < 0:
-        sceNet_SetErr(fallback)
-        return fallback
+        mapped: int = sceNet_MapNativeErrno(fallback)
+        sceNet_SetErr(mapped)
+        return mapped
     sceNet_SetErr(ORBIS_OK)
     return result
 
 def sceNet_FfiSizeResult(result: isize, fallback: int) -> int:
     if result < 0:
-        sceNet_SetErr(fallback)
-        return fallback
+        mapped: int = sceNet_MapNativeErrno(fallback)
+        sceNet_SetErr(mapped)
+        return mapped
     sceNet_SetErr(ORBIS_OK)
     return result.int()
+
+def sceNet_MapNativeErrno(fallback: int) -> int:
+    err: int = posix_errno()
+    if err < 0:
+        err <- -err
+    if err == 0:
+        return fallback
+    if err > 255:
+        return fallback
+    return ORBIS_NET_ERROR_BASE | err
 
 def in6addr_any() -> int:
     LOG_ERROR("Lib_Net", "(STUBBED) called")
@@ -978,9 +1009,13 @@ def sceNetResolverStartNtoa(resolverid: i64, hostname: u8&?, addr: u8&?, timeout
         sceNet_SetErr(ORBIS_NET_ERROR_RESOLVER_ENOHOST)
         return ORBIS_NET_ERROR_RESOLVER_ENOHOST
     if native_result != null:
+        info: mutable NativeAddrInfo& = native_result.cast[mutable NativeAddrInfo&]
+        if addr != null and info.ai_addr != null:
+            sockaddr: mutable NativeSockaddrIn& = info.ai_addr.cast[mutable NativeSockaddrIn&]
+            out: mutable u32& = addr.cast[mutable u32&]
+            out <- sockaddr.sin_addr
         c_freeaddrinfo(native_result)
     slot.last_error <- ORBIS_OK
-    _ = addr
     _ = timeout
     _ = retry
     _ = flags
