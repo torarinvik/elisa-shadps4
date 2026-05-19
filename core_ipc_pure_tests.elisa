@@ -10,7 +10,7 @@ include "./core/ipc/ipc.elisa"
 
 @test
 def ipc_init_sets_enabled_and_emits_capabilities() -> void:
-    can Abort.Panic:
+    can Abort.Panic, Memory.Allocate, Atomics.Store, Console.Format:
         EmulatorState_ResetInstance()
         state: mutable IpcState = IpcState_new()
         lines: darray[static u8&] = IPC_Init(state, true)
@@ -24,7 +24,7 @@ def ipc_init_sets_enabled_and_emits_capabilities() -> void:
 
 @test
 def ipc_run_start_update_state() -> void:
-    can Abort.Panic:
+    can Abort.Panic, Memory.Allocate, Atomics.Store:
         state: mutable IpcState = IpcState_new()
         _ = IPC_ProcessCommand(state, "RUN", [])
         _ = IPC_ProcessCommand(state, "START", [])
@@ -33,7 +33,7 @@ def ipc_run_start_update_state() -> void:
 
 @test
 def ipc_send_restart_formats_protocol_lines() -> void:
-    can Abort.Panic, Memory.Allocate:
+    can Abort.Panic, Memory.Allocate, Console.Format:
         args: mutable darray[static u8&] = []
         owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
         in owner:
@@ -48,7 +48,7 @@ def ipc_send_restart_formats_protocol_lines() -> void:
 
 @test
 def ipc_unknown_command_reports_error_line() -> void:
-    can Abort.Panic:
+    can Abort.Panic, Memory.Allocate, Atomics.Store:
         state: mutable IpcState = IpcState_new()
         msg: static u8& = IPC_ProcessCommand(state, "MYSTERY_CMD", [])
         assert runtime_strlen(msg) > 0
@@ -56,7 +56,7 @@ def ipc_unknown_command_reports_error_line() -> void:
 
 @test
 def ipc_init_from_env_uses_true_flag() -> void:
-    can Abort.Panic:
+    can Abort.Panic, Memory.Allocate:
         state_false: mutable IpcState = IpcState_new()
         lines_false: darray[static u8&] = IPC_InitFromEnv(state_false, "false")
         assert not IPC_IsEnabled(state_false)
@@ -69,7 +69,7 @@ def ipc_init_from_env_uses_true_flag() -> void:
 
 @test
 def ipc_run_wait_times_out_after_5_seconds_when_run_missing() -> void:
-    can Abort.Panic:
+    can Abort.Panic, Memory.Allocate:
         state: mutable IpcState = IpcState_new()
         _ = IPC_Init(state, true)
         IPC_BeginRunWait(state, 1000, 5000)
@@ -81,7 +81,7 @@ def ipc_run_wait_times_out_after_5_seconds_when_run_missing() -> void:
 
 @test
 def ipc_run_wait_passes_when_run_arrives() -> void:
-    can Abort.Panic:
+    can Abort.Panic, Memory.Allocate, Atomics.Store:
         state: mutable IpcState = IpcState_new()
         _ = IPC_Init(state, true)
         IPC_BeginRunWait(state, 0, 5000)
@@ -92,7 +92,7 @@ def ipc_run_wait_passes_when_run_arrives() -> void:
 
 @test
 def ipc_process_lines_handles_multiple_commands_with_arity() -> void:
-    can Abort.Panic, Memory.Allocate:
+    can Abort.Panic, Memory.Allocate, Atomics.Store:
         state: mutable IpcState = IpcState_new()
         lines: mutable darray[static u8&] = []
         owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
@@ -107,3 +107,36 @@ def ipc_process_lines_handles_multiple_commands_with_arity() -> void:
         assert outputs.count == 0
         assert state.run_ready
         assert state.start_ready
+
+@test
+def ipc_parse_u64_supports_prefixed_bases() -> void:
+    assert IPC_ParseU64("42") == 42
+    assert IPC_ParseU64("0x2A") == 42
+    assert IPC_ParseU64("052") == 42
+    assert IPC_ParseU64("0b101010") == 42
+
+@test
+def ipc_process_lines_escaped_parts_follow_cpp_line_buffer_behavior() -> void:
+    can Abort.Panic, Memory.Allocate, Atomics.Store:
+        state: mutable IpcState = IpcState_new()
+        lines: mutable darray[static u8&] = []
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            lines.push("RUN\\")
+            lines.push("RUN")
+            lines.push("START\\")
+            lines.push("START")
+        outputs: darray[static u8&] = IPC_ProcessLines(state, lines)
+        assert outputs.count == 0
+        assert state.run_ready
+        assert state.start_ready
+
+@test
+def ipc_process_stream_frame_emits_close_reason_on_timeout() -> void:
+    can Abort.Panic, Memory.Allocate, Atomics.Store:
+        state: mutable IpcState = IpcState_new()
+        _ = IPC_Init(state, true)
+        IPC_BeginRunWait(state, 0, 5)
+        out: darray[static u8&] = IPC_ProcessStreamFrame(state, 5, [])
+        assert out.count == 1
+        assert string_slice_eq(out[0], 0, runtime_strlen("IPC: Failed to acquire run semaphore, closing process."), "IPC: Failed to acquire run semaphore, closing process.") == 1

@@ -2,17 +2,17 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 struct IpcState:
-    enabled: mutable bool
-    run_ready: mutable bool
-    start_ready: mutable bool
     run_wait_deadline_ms: mutable i64
-    should_close: mutable bool
     close_reason: mutable static u8&
     run_semaphore: mutable IpcBinarySemaphore
     start_semaphore: mutable IpcBinarySemaphore
+    enabled: mutable bool
+    run_ready: mutable bool
+    start_ready: mutable bool
+    should_close: mutable bool
 
 def IpcState_new() -> IpcState:
-    return IpcState(false, false, false, 0, false, "", IpcBinarySemaphore_new(0), IpcBinarySemaphore_new(0))
+    return IpcState(0, "", IpcBinarySemaphore_new(0), IpcBinarySemaphore_new(0), false, false, false, false)
 
 def IpcState_alloc() -> mutable heap IpcState&:
     can Memory.Allocate, Abort.Panic:
@@ -59,15 +59,17 @@ def IPC_Init(state: mutable IpcState&, enable_ipc: bool) -> darray[static u8&]:
     return out
 
 def IPC_InitFromEnv(state: mutable IpcState&, shadps4_enable_ipc: static u8&) -> darray[static u8&]:
-    enabled: bool = runtime_strlen(shadps4_enable_ipc) == runtime_strlen("true") and string_slice_eq(shadps4_enable_ipc, 0, runtime_strlen("true"), "true") == 1
-    return IPC_Init(state, enabled)
+    can Abort.Panic, Memory.Allocate:
+        enabled: bool = runtime_strlen(shadps4_enable_ipc) == runtime_strlen("true") and string_slice_eq(shadps4_enable_ipc, 0, runtime_strlen("true"), "true") == 1
+        return IPC_Init(state, enabled)
 
 def IPC_WaitForStart(state: mutable IpcState&) -> bool:
     return state.start_ready
 
 def IPC_WaitForStartBlocking(state: mutable IpcState&) -> void:
-    IpcBinarySemaphore_acquire(state.start_semaphore)
-    state.start_ready <- true
+    can Atomics.CompareExchange:
+        IpcBinarySemaphore_acquire(state.start_semaphore)
+        state.start_ready <- true
 
 def IPC_CanRun(state: IpcState&) -> bool:
     return state.run_ready
@@ -91,9 +93,9 @@ def IPC_CloseReason(state: IpcState&) -> static u8&:
     return state.close_reason
 
 def IPC_SendRestart(args: darray[static u8&]) -> darray[static u8&]:
-    out: mutable darray[static u8&] = []
-    arg_count: static u8& = int_to_string_scratch(args.count.i64()).cast[static u8&]
-    can Memory.Allocate, Abort.Panic:
+    can Abort.Panic, Console.Format, Memory.Allocate:
+        out: mutable darray[static u8&] = []
+        arg_count: static u8& = int_to_string_scratch(args.count.i64()).cast[static u8&]
         owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
         in owner:
             out.push(";RESTART")
@@ -101,7 +103,7 @@ def IPC_SendRestart(args: darray[static u8&]) -> darray[static u8&]:
         for i in 0..<args.count:
             in owner:
                 out.push(concat2(";", args[i]))
-    return out
+        return out
 
 def IPC_NextU64(args: darray[static u8&], index: mutable usize&) -> u64:
     if index >= args.count:
@@ -113,12 +115,37 @@ def IPC_NextU64(args: darray[static u8&], index: mutable usize&) -> u64:
 
 def IPC_ParseU64(value: static u8&) -> u64:
     len: usize = runtime_strlen(value)
+    if len == 0:
+        return 0
+    base: mutable u64 = 10
+    i: mutable usize = 0
+    if len >= 2 and value[0] == '0':
+        marker: u8 = value[1]
+        if marker == 'x' or marker == 'X':
+            base <- 16
+            i <- 2
+        elif marker == 'b' or marker == 'B':
+            base <- 2
+            i <- 2
+        else:
+            base <- 8
+            i <- 1
     out: mutable u64 = 0
-    for i in 0..<len:
+    while i < len:
         ch: u8 = value[i]
-        if ch < '0' or ch > '9':
+        digit: mutable u64 = 0
+        if ch >= '0' and ch <= '9':
+            digit <- (ch - '0').u64()
+        elif ch >= 'a' and ch <= 'f':
+            digit <- (ch - 'a').u64() + 10
+        elif ch >= 'A' and ch <= 'F':
+            digit <- (ch - 'A').u64() + 10
+        else:
             return out
-        out <- out * 10.u64() + (ch - '0').u64()
+        if digit >= base:
+            return out
+        out <- out * base + digit
+        i <- i + 1
     return out
 
 def IPC_NextStr(args: darray[static u8&], index: mutable usize&) -> static u8&:
@@ -130,79 +157,80 @@ def IPC_NextStr(args: darray[static u8&], index: mutable usize&) -> static u8&:
     return value
 
 def IPC_ProcessCommand(state: mutable IpcState&, cmd: static u8&, args: darray[static u8&]) -> static u8&:
-    if runtime_strlen(cmd) == 0:
-        return ""
-    index: mutable usize = 0
+    can Abort.Panic, Memory.Allocate, Atomics.Store:
+        if runtime_strlen(cmd) == 0:
+            return ""
+        index: mutable usize = 0
 
-    if string_slice_eq(cmd, 0, runtime_strlen("RUN"), "RUN") == 1:
-        state.run_ready <- true
-        IpcBinarySemaphore_release(state.run_semaphore)
-        return ""
-    if string_slice_eq(cmd, 0, runtime_strlen("START"), "START") == 1:
-        state.start_ready <- true
-        IpcBinarySemaphore_release(state.start_semaphore)
-        return ""
-    if string_slice_eq(cmd, 0, runtime_strlen("PATCH_MEMORY"), "PATCH_MEMORY") == 1:
-        entry: mutable IpcMemoryPatchInfo = IpcMemoryPatchInfo_new()
-        entry.gameSerial <- "*"
-        entry.modNameStr <- IPC_NextStr(args, index)
-        entry.offsetStr <- IPC_NextStr(args, index)
-        entry.valueStr <- IPC_NextStr(args, index)
-        entry.targetStr <- IPC_NextStr(args, index)
-        entry.sizeStr <- IPC_NextStr(args, index)
-        entry.isOffset <- IPC_NextU64(args, index) != 0
-        entry.littleEndian <- IPC_NextU64(args, index) != 0
-        entry.patchMask <- IPC_NextU64(args, index).int()
-        entry.maskOffset <- IPC_NextU64(args, index).int()
-        IPC_HookAddMemoryPatch(entry)
-        return ""
-    if string_slice_eq(cmd, 0, runtime_strlen("PAUSE"), "PAUSE") == 1:
-        IPC_HookPauseGuestThreads()
-        return ""
-    if string_slice_eq(cmd, 0, runtime_strlen("RESUME"), "RESUME") == 1:
-        IPC_HookResumeGuestThreads()
-        return ""
-    if string_slice_eq(cmd, 0, runtime_strlen("STOP"), "STOP") == 1:
-        IPC_HookQuit()
-        return ""
-    if string_slice_eq(cmd, 0, runtime_strlen("TOGGLE_FULLSCREEN"), "TOGGLE_FULLSCREEN") == 1:
-        IPC_HookToggleFullscreen()
-        return ""
-    if string_slice_eq(cmd, 0, runtime_strlen("ADJUST_VOLUME"), "ADJUST_VOLUME") == 1:
-        value: int = IPC_NextU64(args, index).int()
-        is_game_specific: bool = IPC_NextU64(args, index) != 0
-        IPC_HookSetVolumeSlider(value, is_game_specific)
-        IPC_HookAdjustVolume()
-        return ""
-    if string_slice_eq(cmd, 0, runtime_strlen("SET_FSR"), "SET_FSR") == 1:
-        IPC_HookSetFsrEnabled(IPC_NextU64(args, index) != 0)
-        return ""
-    if string_slice_eq(cmd, 0, runtime_strlen("SET_RCAS"), "SET_RCAS") == 1:
-        IPC_HookSetRcasEnabled(IPC_NextU64(args, index) != 0)
-        return ""
-    if string_slice_eq(cmd, 0, runtime_strlen("SET_RCAS_ATTENUATION"), "SET_RCAS_ATTENUATION") == 1:
-        IPC_HookSetRcasAttenuation(IPC_NextU64(args, index).int())
-        return ""
-    if string_slice_eq(cmd, 0, runtime_strlen("USB_LOAD_FIGURE"), "USB_LOAD_FIGURE") == 1:
-        IPC_HookLoadFigure(IPC_NextStr(args, index), IPC_NextU64(args, index).u8(), IPC_NextU64(args, index).u8())
-        return ""
-    if string_slice_eq(cmd, 0, runtime_strlen("USB_REMOVE_FIGURE"), "USB_REMOVE_FIGURE") == 1:
-        IPC_HookRemoveFigure(IPC_NextU64(args, index).u8(), IPC_NextU64(args, index).u8(), IPC_NextU64(args, index) != 0)
-        return ""
-    if string_slice_eq(cmd, 0, runtime_strlen("USB_MOVE_FIGURE"), "USB_MOVE_FIGURE") == 1:
-        IPC_HookMoveFigure(IPC_NextU64(args, index).u8(), IPC_NextU64(args, index).u8(), IPC_NextU64(args, index).u8(), IPC_NextU64(args, index).u8())
-        return ""
-    if string_slice_eq(cmd, 0, runtime_strlen("USB_TEMP_REMOVE_FIGURE"), "USB_TEMP_REMOVE_FIGURE") == 1:
-        IPC_HookTempRemoveFigure(IPC_NextU64(args, index).u8())
-        return ""
-    if string_slice_eq(cmd, 0, runtime_strlen("USB_CANCEL_REMOVE_FIGURE"), "USB_CANCEL_REMOVE_FIGURE") == 1:
-        IPC_HookCancelRemoveFigure(IPC_NextU64(args, index).u8())
-        return ""
-    if string_slice_eq(cmd, 0, runtime_strlen("RELOAD_INPUTS"), "RELOAD_INPUTS") == 1:
-        IPC_HookReloadInputs(IPC_NextStr(args, index))
-        return ""
+        if string_slice_eq(cmd, 0, runtime_strlen("RUN"), "RUN") == 1:
+            state.run_ready <- true
+            IpcBinarySemaphore_release(state.run_semaphore)
+            return ""
+        if string_slice_eq(cmd, 0, runtime_strlen("START"), "START") == 1:
+            state.start_ready <- true
+            IpcBinarySemaphore_release(state.start_semaphore)
+            return ""
+        if string_slice_eq(cmd, 0, runtime_strlen("PATCH_MEMORY"), "PATCH_MEMORY") == 1:
+            entry: mutable IpcMemoryPatchInfo = IpcMemoryPatchInfo_new()
+            entry.gameSerial <- "*"
+            entry.modNameStr <- IPC_NextStr(args, index)
+            entry.offsetStr <- IPC_NextStr(args, index)
+            entry.valueStr <- IPC_NextStr(args, index)
+            entry.targetStr <- IPC_NextStr(args, index)
+            entry.sizeStr <- IPC_NextStr(args, index)
+            entry.isOffset <- IPC_NextU64(args, index) != 0
+            entry.littleEndian <- IPC_NextU64(args, index) != 0
+            entry.patchMask <- IPC_NextU64(args, index).int()
+            entry.maskOffset <- IPC_NextU64(args, index).int()
+            IPC_HookAddMemoryPatch(entry)
+            return ""
+        if string_slice_eq(cmd, 0, runtime_strlen("PAUSE"), "PAUSE") == 1:
+            IPC_HookPauseGuestThreads()
+            return ""
+        if string_slice_eq(cmd, 0, runtime_strlen("RESUME"), "RESUME") == 1:
+            IPC_HookResumeGuestThreads()
+            return ""
+        if string_slice_eq(cmd, 0, runtime_strlen("STOP"), "STOP") == 1:
+            IPC_HookQuit()
+            return ""
+        if string_slice_eq(cmd, 0, runtime_strlen("TOGGLE_FULLSCREEN"), "TOGGLE_FULLSCREEN") == 1:
+            IPC_HookToggleFullscreen()
+            return ""
+        if string_slice_eq(cmd, 0, runtime_strlen("ADJUST_VOLUME"), "ADJUST_VOLUME") == 1:
+            value: int = IPC_NextU64(args, index).int()
+            is_game_specific: bool = IPC_NextU64(args, index) != 0
+            IPC_HookSetVolumeSlider(value, is_game_specific)
+            IPC_HookAdjustVolume()
+            return ""
+        if string_slice_eq(cmd, 0, runtime_strlen("SET_FSR"), "SET_FSR") == 1:
+            IPC_HookSetFsrEnabled(IPC_NextU64(args, index) != 0)
+            return ""
+        if string_slice_eq(cmd, 0, runtime_strlen("SET_RCAS"), "SET_RCAS") == 1:
+            IPC_HookSetRcasEnabled(IPC_NextU64(args, index) != 0)
+            return ""
+        if string_slice_eq(cmd, 0, runtime_strlen("SET_RCAS_ATTENUATION"), "SET_RCAS_ATTENUATION") == 1:
+            IPC_HookSetRcasAttenuation(IPC_NextU64(args, index).int())
+            return ""
+        if string_slice_eq(cmd, 0, runtime_strlen("USB_LOAD_FIGURE"), "USB_LOAD_FIGURE") == 1:
+            IPC_HookLoadFigure(IPC_NextStr(args, index), IPC_NextU64(args, index).u8(), IPC_NextU64(args, index).u8())
+            return ""
+        if string_slice_eq(cmd, 0, runtime_strlen("USB_REMOVE_FIGURE"), "USB_REMOVE_FIGURE") == 1:
+            IPC_HookRemoveFigure(IPC_NextU64(args, index).u8(), IPC_NextU64(args, index).u8(), IPC_NextU64(args, index) != 0)
+            return ""
+        if string_slice_eq(cmd, 0, runtime_strlen("USB_MOVE_FIGURE"), "USB_MOVE_FIGURE") == 1:
+            IPC_HookMoveFigure(IPC_NextU64(args, index).u8(), IPC_NextU64(args, index).u8(), IPC_NextU64(args, index).u8(), IPC_NextU64(args, index).u8())
+            return ""
+        if string_slice_eq(cmd, 0, runtime_strlen("USB_TEMP_REMOVE_FIGURE"), "USB_TEMP_REMOVE_FIGURE") == 1:
+            IPC_HookTempRemoveFigure(IPC_NextU64(args, index).u8())
+            return ""
+        if string_slice_eq(cmd, 0, runtime_strlen("USB_CANCEL_REMOVE_FIGURE"), "USB_CANCEL_REMOVE_FIGURE") == 1:
+            IPC_HookCancelRemoveFigure(IPC_NextU64(args, index).u8())
+            return ""
+        if string_slice_eq(cmd, 0, runtime_strlen("RELOAD_INPUTS"), "RELOAD_INPUTS") == 1:
+            IPC_HookReloadInputs(IPC_NextStr(args, index))
+            return ""
 
-    return concat2(";UNKNOWN CMD: ", cmd)
+        return concat2(";UNKNOWN CMD: ", cmd)
 
 def IPC_CommandArgCount(cmd: static u8&) -> usize:
     if string_slice_eq(cmd, 0, runtime_strlen("PATCH_MEMORY"), "PATCH_MEMORY") == 1:
@@ -236,40 +264,31 @@ def IPC_IsEscapedLine(line: static u8&) -> bool:
     return line[len - 1] == '\\'.u8()
 
 def IPC_MergeEscapedLineParts(parts: darray[static u8&], start_index: usize, consumed: mutable usize&) -> static u8&:
-    can Memory.Allocate, Abort.Panic:
-        merged: mutable static u8& = ""
-        i: mutable usize = 0
-        i <- start_index
-        while i < parts.count:
-            part: static u8& = parts[i]
-            if IPC_IsEscapedLine(part):
-                if runtime_strlen(part) > 0:
-                    merged <- concat2(merged, string_substr(part, 0, runtime_strlen(part) - 1))
-            else:
-                merged <- concat2(merged, part)
-                delta: usize = i - start_index
-                consumed <- delta + 1
-                return merged
+    i: mutable usize = start_index
+    while i < parts.count:
+        part: static u8& = parts[i]
+        if IPC_IsEscapedLine(part):
             i <- i + 1
-        consumed <- i - start_index
-        return merged
+        else:
+            consumed <- (i - start_index) + 1
+            return part
+    consumed <- i - start_index
     return ""
 
 def IPC_ProcessLines(state: mutable IpcState&, lines: darray[static u8&]) -> darray[static u8&]:
-    outputs: mutable darray[static u8&] = []
-    i: mutable usize = 0
-    while i < lines.count:
-        consumed_cmd: mutable usize = 0
-        cmd: static u8& = IPC_MergeEscapedLineParts(lines, i, consumed_cmd)
-        if consumed_cmd == 0:
-            consumed_cmd <- 1
-        i <- i + consumed_cmd
-        if runtime_strlen(cmd) != 0:
-            args: mutable darray[static u8&] = []
-            expected_args: usize = IPC_CommandArgCount(cmd)
-
-            if expected_args > 0 and i < lines.count:
-                can Memory.Allocate, Abort.Panic:
+    can Abort.Panic, Memory.Allocate, Atomics.Store:
+        outputs: mutable darray[static u8&] = []
+        i: mutable usize = 0
+        while i < lines.count:
+            consumed_cmd: mutable usize = 0
+            cmd: static u8& = IPC_MergeEscapedLineParts(lines, i, consumed_cmd)
+            if consumed_cmd == 0:
+                consumed_cmd <- 1
+            i <- i + consumed_cmd
+            if runtime_strlen(cmd) != 0:
+                args: mutable darray[static u8&] = []
+                expected_args: usize = IPC_CommandArgCount(cmd)
+                if expected_args > 0 and i < lines.count:
                     owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
                     pulled: mutable usize = 0
                     while pulled < expected_args and i < lines.count:
@@ -281,70 +300,73 @@ def IPC_ProcessLines(state: mutable IpcState&, lines: darray[static u8&]) -> dar
                         pulled <- pulled + 1
                         in owner:
                             args.push(arg)
-            out: static u8& = IPC_ProcessCommand(state, cmd, args)
-            if runtime_strlen(out) > 0:
-                can Memory.Allocate, Abort.Panic:
+                out: static u8& = IPC_ProcessCommand(state, cmd, args)
+                if runtime_strlen(out) > 0:
                     owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
                     in owner:
                         outputs.push(out)
-    return outputs
+        return outputs
 
 def IPC_ProcessStreamFrame(state: mutable IpcState&, now_ms: i64, lines: darray[static u8&]) -> darray[static u8&]:
-    if not IPC_UpdateRunWait(state, now_ms):
-        out: mutable darray[static u8&] = []
-        can Memory.Allocate, Abort.Panic:
+    can Abort.Panic, Memory.Allocate, Atomics.Store:
+        if not IPC_UpdateRunWait(state, now_ms):
+            out: mutable darray[static u8&] = []
             owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
             in owner:
                 out.push(IPC_CloseReason(state))
-        return out
-    return IPC_ProcessLines(state, lines)
+            return out
+        return IPC_ProcessLines(state, lines)
 
 def IPC_RuntimeEmitLines(lines: darray[static u8&]) -> void:
-    for i in 0..<lines.count:
-        IPC_RuntimeWriteStderrLine(lines[i])
+    can Console:
+        for i in 0..<lines.count:
+            IPC_RuntimeWriteStderrLine(lines[i])
 
 def IPC_RuntimeInit(state: mutable IpcState&) -> void:
-    lines: darray[static u8&] = IPC_InitFromEnv(state, IPC_RuntimeGetEnv("SHADPS4_ENABLE_IPC"))
-    if not state.enabled:
-        return
-    IPC_RuntimeEmitLines(lines)
-    if not IpcBinarySemaphore_try_acquire_for(state.run_semaphore, 5000000000):
-        IPC_RuntimeWriteStderrLine("IPC: Failed to acquire run semaphore, closing process.")
-        IPC_RuntimeExit(1)
+    can Abort.Panic, Memory.Allocate, Console, Console.Format, Atomics.CompareExchange, Abort.Exit:
+        lines: darray[static u8&] = IPC_InitFromEnv(state, IPC_RuntimeGetEnv("SHADPS4_ENABLE_IPC"))
+        if not state.enabled:
+            return
+        IPC_RuntimeEmitLines(lines)
+        if not IpcBinarySemaphore_try_acquire_for(state.run_semaphore, 5000000000):
+            IPC_RuntimeWriteStderrLine("IPC: Failed to acquire run semaphore, closing process.")
+            IPC_RuntimeExit(1)
 
 def IPC_RuntimeInitWithThread(state: mutable heap IpcState&) -> void:
-    lines: darray[static u8&] = IPC_InitFromEnv(state, IPC_RuntimeGetEnv("SHADPS4_ENABLE_IPC"))
-    if not state.enabled:
-        return
-    IPC_RuntimeStartInputThreadDetached(state)
-    IPC_RuntimeEmitLines(lines)
-    if not IpcBinarySemaphore_try_acquire_for(state.run_semaphore, 5000000000):
-        IPC_RuntimeWriteStderrLine("IPC: Failed to acquire run semaphore, closing process.")
-        IPC_RuntimeExit(1)
+    can Abort.Panic, Memory.Allocate, Console, Console.Format, Atomics.CompareExchange, Abort.Exit, Thread.Spawn, Thread.Detach:
+        lines: darray[static u8&] = IPC_InitFromEnv(state, IPC_RuntimeGetEnv("SHADPS4_ENABLE_IPC"))
+        if not state.enabled:
+            return
+        IPC_RuntimeStartInputThreadDetached(state)
+        IPC_RuntimeEmitLines(lines)
+        if not IpcBinarySemaphore_try_acquire_for(state.run_semaphore, 5000000000):
+            IPC_RuntimeWriteStderrLine("IPC: Failed to acquire run semaphore, closing process.")
+            IPC_RuntimeExit(1)
 
 def IPC_RuntimeInputLoop(state: mutable IpcState&) -> void:
-    while true:
-        cmd: static u8& = IPC_RuntimeReadProtocolString()
-        if runtime_strlen(cmd) != 0:
-            args: mutable darray[static u8&] = []
-            expected_args: usize = IPC_CommandArgCount(cmd)
-            if expected_args > 0:
-                can Memory.Allocate, Abort.Panic:
+    can Abort.Panic, Memory.Allocate, Console, Atomics.Store:
+        while true:
+            cmd: static u8& = IPC_RuntimeReadProtocolString()
+            if runtime_strlen(cmd) != 0:
+                args: mutable darray[static u8&] = []
+                expected_args: usize = IPC_CommandArgCount(cmd)
+                if expected_args > 0:
                     owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
                     for _ in 0..<expected_args:
                         in owner:
                             args.push(IPC_RuntimeReadProtocolString())
-            out: static u8& = IPC_ProcessCommand(state, cmd, args)
-            if runtime_strlen(out) > 0:
-                IPC_RuntimeWriteStderrLine(out)
+                out: static u8& = IPC_ProcessCommand(state, cmd, args)
+                if runtime_strlen(out) > 0:
+                    IPC_RuntimeWriteStderrLine(out)
 
 def IPC_RuntimeInputLoopThreadRaw(state_bits: void&?) -> void&?:
-    SetCurrentThreadName("IPC Read thread")
-    if state_bits == null:
-        return null
-    state: mutable heap IpcState& = state_bits.cast[mutable heap IpcState&]
-    IPC_RuntimeInputLoop(state)
-    return state_bits
+    can Abort.Panic, Memory.Allocate, Console, Atomics.Store:
+        SetCurrentThreadName("IPC Read thread")
+        if state_bits == null:
+            return null
+        state: mutable heap IpcState& = state_bits.cast[mutable heap IpcState&]
+        IPC_RuntimeInputLoop(state)
+        return state_bits
 
 def IPC_RuntimeStartInputThread(state: mutable heap IpcState&) -> Thread[void&?, Joinable]:
     return spawn_raw(IPC_RuntimeInputLoopThreadRaw.cast[void&], state.cast[void&]) can Thread.Spawn, Abort.Panic
