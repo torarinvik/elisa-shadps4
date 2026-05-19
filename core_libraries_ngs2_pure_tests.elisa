@@ -4,6 +4,22 @@
 include "../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
 include "./core/libraries/ngs2/ngs2.elisa"
 
+global mutable ngs2_test_alloc_called: u32 = 0u32
+global mutable ngs2_test_free_called: u32 = 0u32
+
+def ngs2_test_alloc(info: mutable OrbisNgs2ContextBufferInfo&?) -> s32:
+    ngs2_test_alloc_called <- ngs2_test_alloc_called + 1u32
+    if info == null:
+        return ORBIS_NGS2_ERROR_INVALID_BUFFER_INFO
+    static_byte: mutable u8 = 0u8
+    info.host_buffer <- static_byte.ref[mutable u8&]
+    return ORBIS_OK
+
+def ngs2_test_free(info: mutable OrbisNgs2ContextBufferInfo&?) -> s32:
+    ngs2_test_free_called <- ngs2_test_free_called + 1u32
+    _ = info
+    return ORBIS_OK
+
 @test
 def ngs2_system_rack_basic_contracts() -> void:
     can Abort.Panic:
@@ -166,3 +182,101 @@ def ngs2_multiple_systems_and_racks_are_tracked() -> void:
         assert sceNgs2VoiceGetOwner(voice_a, owner.ref[mutable u64&], index.ref[mutable u32&]) == ORBIS_NGS2_ERROR_INVALID_VOICE_HANDLE
         assert sceNgs2SystemGetInfo(system_b, info_b.ref[mutable OrbisNgs2SystemInfo&], size_of(OrbisNgs2SystemInfo)) == ORBIS_OK
         assert sceNgs2SystemDestroy(system_b, null) == ORBIS_OK
+
+@test
+def ngs2_allocator_and_voice_state_paths() -> void:
+    can Abort.Panic:
+        ngs2_test_alloc_called <- 0u32
+        ngs2_test_free_called <- 0u32
+
+        allocator: mutable OrbisNgs2BufferAllocator = zeroed
+        allocator.alloc_handler <- ngs2_test_alloc.cast[OrbisNgs2BufferAllocHandler]
+        allocator.free_handler <- ngs2_test_free.cast[OrbisNgs2BufferFreeHandler]
+        allocator.user_data <- 999
+
+        system: mutable u64 = 0
+        rack: mutable u64 = 0
+        voice: mutable u64 = 0
+        out_flags: mutable u32 = 0u32
+        report_handle: mutable u64 = 0
+        port_info: mutable OrbisNgs2VoicePortInfo = zeroed
+        matrix_info: mutable OrbisNgs2VoiceMatrixInfo = zeroed
+        custom_state: mutable OrbisNgs2CustomSamplerVoiceState = zeroed
+        level0: mutable f32 = 0.25
+        level1: mutable f32 = 0.75
+        block: mutable OrbisNgs2WaveformBlock = zeroed
+        event_param: mutable OrbisNgs2VoiceEventParam = zeroed
+        volume_param: mutable OrbisNgs2VoicePortVolumeParam = zeroed
+        patch_param: mutable OrbisNgs2VoicePatchParam = zeroed
+        matrix_param: mutable OrbisNgs2VoiceMatrixLevelsParam = zeroed
+        blocks_param: mutable OrbisNgs2CustomSamplerVoiceWaveformBlocksParam = zeroed
+
+        assert sceNgs2ParseWaveformUser(null, 0, custom_state.ref[mutable OrbisNgs2CustomSamplerVoiceState&].cast[mutable OrbisNgs2WaveformInfo&]) == ORBIS_NGS2_ERROR_INVALID_WAVEFORM_ADDRESS
+        assert sceNgs2ReportRegisterHandler(0u32, null, 0, report_handle.ref[mutable u64&]) == ORBIS_NGS2_ERROR_INVALID_REPORT_HANDLE
+
+        assert sceNgs2SystemCreateWithAllocator(null, allocator.ref[OrbisNgs2BufferAllocator&], system.ref[mutable u64&]) == ORBIS_OK
+        assert ngs2_test_alloc_called == 1u32
+        assert sceNgs2RackCreateWithAllocator(system, 5u32, null, allocator.ref[OrbisNgs2BufferAllocator&], rack.ref[mutable u64&]) == ORBIS_OK
+        assert ngs2_test_alloc_called == 2u32
+        assert sceNgs2RackGetVoiceHandle(rack, 0u32, voice.ref[mutable u64&]) == ORBIS_OK
+
+        event_param.header.size <- size_of(OrbisNgs2VoiceEventParam).u16()
+        event_param.header.next <- 0
+        event_param.header.id <- VOICE_PARAM_ID_EVENT
+        event_param.event_id <- 0u32
+        assert sceNgs2VoiceControl(voice, event_param.ref[mutable OrbisNgs2VoiceEventParam&].cast[void&]) == ORBIS_OK
+        assert sceNgs2VoiceGetStateFlags(voice, out_flags.ref[mutable u32&]) == ORBIS_OK
+        assert out_flags == VOICE_STATE_ACTIVE
+
+        volume_param.header.size <- size_of(OrbisNgs2VoicePortVolumeParam).u16()
+        volume_param.header.next <- 0
+        volume_param.header.id <- VOICE_PARAM_ID_PORT_VOLUME
+        volume_param.port <- 0u32
+        volume_param.level <- 0.5
+        assert sceNgs2VoiceControl(voice, volume_param.ref[mutable OrbisNgs2VoicePortVolumeParam&].cast[void&]) == ORBIS_OK
+
+        patch_param.header.size <- size_of(OrbisNgs2VoicePatchParam).u16()
+        patch_param.header.next <- 0
+        patch_param.header.id <- VOICE_PARAM_ID_PATCH
+        patch_param.port <- 0u32
+        patch_param.dest_input_id <- 12u32
+        patch_param.dest_handle <- rack
+        assert sceNgs2VoiceControl(voice, patch_param.ref[mutable OrbisNgs2VoicePatchParam&].cast[void&]) == ORBIS_OK
+
+        matrix_param.header.size <- size_of(OrbisNgs2VoiceMatrixLevelsParam).u16()
+        matrix_param.header.next <- 0
+        matrix_param.header.id <- VOICE_PARAM_ID_MATRIX_LEVELS
+        matrix_param.matrix_id <- 0u32
+        matrix_param.num_levels <- 2u32
+        matrix_param.a_level <- level0.ref[f32&]
+        matrix_param.a_level[1] <- level1
+        assert sceNgs2VoiceControl(voice, matrix_param.ref[mutable OrbisNgs2VoiceMatrixLevelsParam&].cast[void&]) == ORBIS_OK
+
+        block.data_size <- 10u32
+        block.num_samples <- 20u32
+        blocks_param.header.size <- size_of(OrbisNgs2CustomSamplerVoiceWaveformBlocksParam).u16()
+        blocks_param.header.next <- 0
+        blocks_param.header.id <- CUSTOM_VOICE_PARAM_ID_WAVEFORM_BLOCKS
+        blocks_param.data <- rack.ref[mutable u64&].cast[void&]
+        blocks_param.num_blocks <- 1u32
+        blocks_param.a_block <- block.ref[OrbisNgs2WaveformBlock&]
+        assert sceNgs2VoiceControl(voice, blocks_param.ref[mutable OrbisNgs2CustomSamplerVoiceWaveformBlocksParam&].cast[void&]) == ORBIS_OK
+
+        assert sceNgs2VoiceGetPortInfo(voice, 0u32, port_info.ref[mutable OrbisNgs2VoicePortInfo&].cast[mutable void&], size_of(OrbisNgs2VoicePortInfo)) == ORBIS_OK
+        assert port_info.volume == 0.5
+        assert port_info.dest_input_id == 12u32
+        assert port_info.dest_handle == rack
+
+        assert sceNgs2VoiceGetMatrixInfo(voice, 0u32, matrix_info.ref[mutable OrbisNgs2VoiceMatrixInfo&].cast[mutable void&], size_of(OrbisNgs2VoiceMatrixInfo)) == ORBIS_OK
+        assert matrix_info.num_levels == 2u32
+        assert matrix_info.a_level[0] == 0.25
+        assert matrix_info.a_level[1] == 0.75
+
+        assert sceNgs2VoiceGetState(voice, custom_state.ref[mutable OrbisNgs2CustomSamplerVoiceState&].cast[mutable OrbisNgs2VoiceState&], size_of(OrbisNgs2CustomSamplerVoiceState)) == ORBIS_OK
+        assert custom_state.voice_state.state_flags == VOICE_STATE_ACTIVE
+        assert custom_state.waveform_data == rack.ref[mutable u64&].cast[void&]
+        assert custom_state.num_decoded_samples == 20u64
+        assert custom_state.decoded_data_size == 10u64
+
+        assert sceNgs2RackDestroy(rack, null) == ORBIS_OK
+        assert sceNgs2SystemDestroy(system, null) == ORBIS_OK

@@ -6,6 +6,8 @@ include "./ngs2_error.elisa"
 type OrbisNgs2Handle = u64
 type OrbisNgs2ParseReadHandler = func(usize, u32, mutable void&?, usize) -> s32
 type OrbisNgs2ReportHandler = func(u32, usize, void&?) -> s32
+type OrbisNgs2BufferAllocHandler = func(mutable OrbisNgs2ContextBufferInfo&?) -> s32
+type OrbisNgs2BufferFreeHandler = func(mutable OrbisNgs2ContextBufferInfo&?) -> s32
 
 struct OrbisNgs2ContextBufferInfo:
     host_buffer: mutable void&?
@@ -116,14 +118,15 @@ struct OrbisNgs2VoiceParamHeader:
     id: u32
 
 struct OrbisNgs2VoiceMatrixInfo:
-    num_levels: u32
+    num_levels: mutable u32
+    a_level: mutable f32[64]
 
 struct OrbisNgs2VoicePortInfo:
-    matrix_id: s32
-    volume: f32
-    num_delay_samples: u32
-    dest_input_id: u32
-    dest_handle: OrbisNgs2Handle
+    matrix_id: mutable s32
+    volume: mutable f32
+    num_delay_samples: mutable u32
+    dest_input_id: mutable u32
+    dest_handle: mutable OrbisNgs2Handle
 
 struct OrbisNgs2RenderBufferInfo:
     buffer: void&?
@@ -133,6 +136,77 @@ struct OrbisNgs2RenderBufferInfo:
 
 struct OrbisNgs2CustomModuleInfo:
     module_id: u32
+
+struct OrbisNgs2BufferAllocator:
+    alloc_handler: OrbisNgs2BufferAllocHandler
+    free_handler: OrbisNgs2BufferFreeHandler
+    user_data: usize
+
+struct OrbisNgs2VoiceMatrixLevelsParam:
+    header: OrbisNgs2VoiceParamHeader
+    matrix_id: u32
+    num_levels: u32
+    a_level: f32&?
+
+struct OrbisNgs2VoicePortVolumeParam:
+    header: OrbisNgs2VoiceParamHeader
+    port: u32
+    level: f32
+
+struct OrbisNgs2VoicePatchParam:
+    header: OrbisNgs2VoiceParamHeader
+    port: u32
+    dest_input_id: u32
+    dest_handle: OrbisNgs2Handle
+
+struct OrbisNgs2VoiceEventParam:
+    header: OrbisNgs2VoiceParamHeader
+    event_id: u32
+
+struct OrbisNgs2VoiceCallbackParam:
+    header: OrbisNgs2VoiceParamHeader
+    callback_handler: void&?
+    callback_data: usize
+    flags: u32
+    reserved: u32
+
+struct OrbisNgs2CustomSamplerVoiceSetupParam:
+    header: OrbisNgs2VoiceParamHeader
+    format: OrbisNgs2WaveformFormat
+    flags: u32
+    reserved: u32
+
+struct OrbisNgs2CustomSamplerVoiceWaveformBlocksParam:
+    header: OrbisNgs2VoiceParamHeader
+    data: void&?
+    flags: u32
+    num_blocks: u32
+    a_block: OrbisNgs2WaveformBlock&?
+
+struct OrbisNgs2CustomSamplerVoiceWaveformAddressParam:
+    header: OrbisNgs2VoiceParamHeader
+    from_addr: void&?
+    to_addr: void&?
+
+struct OrbisNgs2CustomSamplerVoiceWaveformFrameOffsetParam:
+    header: OrbisNgs2VoiceParamHeader
+    frame_offset: u32
+    reserved: u32
+
+struct OrbisNgs2CustomSamplerVoicePitchParam:
+    header: OrbisNgs2VoiceParamHeader
+    ratio: f32
+    reserved: u32
+
+struct OrbisNgs2CustomSamplerVoiceState:
+    voice_state: mutable OrbisNgs2VoiceState
+    padding: mutable u8[32]
+    waveform_data: mutable void&?
+    num_decoded_samples: mutable u64
+    decoded_data_size: mutable u64
+    user_data: mutable u64
+    reserved: mutable u32
+    reserved2: mutable u32
 
 struct OrbisNgs2GeomListenerParam:
     reserved: u32
@@ -151,8 +225,24 @@ const MIN_SYSTEM_BUFFER_SIZE: usize = 8
 const NGS2_MAX_SYSTEMS: int = 8
 const NGS2_MAX_RACKS: int = 32
 const NGS2_MAX_VOICES_TRACKED: u32 = 4096u32
-const RACK_BUFFER_BASE_SIZE: usize = 512
-const RACK_BUFFER_PER_VOICE_SIZE: usize = 128
+const MAX_TRACKED_PORTS: u32 = 16u32
+const MAX_TRACKED_MATRICES: u32 = 16u32
+const MAX_MATRIX_LEVELS: u32 = 64u32
+const NGS2_MAX_VOICE_STATE_SLOTS: usize = 131072
+const NGS2_MAX_PORT_SLOTS: usize = 2097152
+const NGS2_MAX_MATRIX_SLOTS: usize = 2097152
+const NGS2_MAX_MATRIX_LEVEL_SLOTS: usize = 134217728
+const VOICE_STATE_ACTIVE: u32 = 1u32
+const VOICE_PARAM_ID_MATRIX_LEVELS: u32 = 1u32
+const VOICE_PARAM_ID_PORT_VOLUME: u32 = 2u32
+const VOICE_PARAM_ID_EVENT: u32 = 3u32
+const VOICE_PARAM_ID_CALLBACK: u32 = 5u32
+const VOICE_PARAM_ID_PATCH: u32 = 6u32
+const CUSTOM_VOICE_PARAM_ID_SETUP: u32 = 0x10000000u32
+const CUSTOM_VOICE_PARAM_ID_WAVEFORM_BLOCKS: u32 = 0x10000001u32
+const CUSTOM_VOICE_PARAM_ID_WAVEFORM_ADDRESS: u32 = 0x10000002u32
+const CUSTOM_VOICE_PARAM_ID_WAVEFORM_FRAME_OFFSET: u32 = 0x10000003u32
+const CUSTOM_VOICE_PARAM_ID_PITCH: u32 = 0x10000005u32
 
 @fixed_layout
 struct Ngs2SystemSlot:
@@ -194,6 +284,18 @@ global mutable last_rack_max_voices: u32 = DEFAULT_MAX_VOICES
 global mutable last_voice_index: u32 = 0
 global mutable last_system_render_count: s64 = 0
 global mutable last_rack_render_count: u64 = 0
+global mutable voice_state_flags: u32[NGS2_MAX_VOICE_STATE_SLOTS]
+global mutable voice_waveform_ptrs: void&?[NGS2_MAX_VOICE_STATE_SLOTS]
+global mutable voice_decoded_samples: u64[NGS2_MAX_VOICE_STATE_SLOTS]
+global mutable voice_decoded_data_sizes: u64[NGS2_MAX_VOICE_STATE_SLOTS]
+global mutable voice_callback_data: usize[NGS2_MAX_VOICE_STATE_SLOTS]
+global mutable voice_frame_offsets: u32[NGS2_MAX_VOICE_STATE_SLOTS]
+global mutable voice_port_matrix_ids: s32[NGS2_MAX_PORT_SLOTS]
+global mutable voice_port_volumes: f32[NGS2_MAX_PORT_SLOTS]
+global mutable voice_port_dest_input_ids: u32[NGS2_MAX_PORT_SLOTS]
+global mutable voice_port_dest_handles: OrbisNgs2Handle[NGS2_MAX_PORT_SLOTS]
+global mutable voice_matrix_num_levels: u32[NGS2_MAX_MATRIX_SLOTS]
+global mutable voice_matrix_levels: f32[NGS2_MAX_MATRIX_LEVEL_SLOTS]
 
 def _alloc() -> OrbisNgs2Handle:
     next_handle <- next_handle + 1
@@ -234,11 +336,52 @@ def _find_free_rack_slot() -> int:
 def _find_voice_rack_slot(handle: OrbisNgs2Handle) -> int:
     i: mutable int = 0
     while i < NGS2_MAX_RACKS:
-        rack_voice_end: OrbisNgs2Handle = ngs2_racks[i].voice_base + ngs2_racks[i].max_voices.u64()
+        rack_voice_end: OrbisNgs2Handle = ngs2_racks[i].voice_base + (ngs2_racks[i].max_voices as OrbisNgs2Handle)
         if ngs2_racks[i].used and handle >= ngs2_racks[i].voice_base and handle < rack_voice_end:
             return i
         i <- i + 1
     return -1
+
+def _voice_index_for_handle(rack_slot: int, handle: OrbisNgs2Handle) -> u32:
+    return (handle - ngs2_racks[rack_slot].voice_base) as u32
+
+def _voice_state_index(rack_slot: int, voice_index: u32) -> usize:
+    return (rack_slot as usize) * (NGS2_MAX_VOICES_TRACKED as usize) + (voice_index as usize)
+
+def _voice_port_index(rack_slot: int, voice_index: u32, port: u32) -> usize:
+    return _voice_state_index(rack_slot, voice_index) * (MAX_TRACKED_PORTS as usize) + (port as usize)
+
+def _voice_matrix_index(rack_slot: int, voice_index: u32, matrix_id: u32) -> usize:
+    return _voice_state_index(rack_slot, voice_index) * (MAX_TRACKED_MATRICES as usize) + (matrix_id as usize)
+
+def _voice_matrix_level_index(rack_slot: int, voice_index: u32, matrix_id: u32, level: u32) -> usize:
+    return _voice_matrix_index(rack_slot, voice_index, matrix_id) * (MAX_MATRIX_LEVELS as usize) + (level as usize)
+
+def _clear_voice_slot_state(rack_slot: int, voice_index: u32) -> void:
+    state_index: usize = _voice_state_index(rack_slot, voice_index)
+    voice_state_flags[state_index] <- 0u32
+    voice_waveform_ptrs[state_index] <- null
+    voice_decoded_samples[state_index] <- 0u64
+    voice_decoded_data_sizes[state_index] <- 0u64
+    voice_callback_data[state_index] <- 0
+    voice_frame_offsets[state_index] <- 0u32
+    port: mutable u32 = 0u32
+    while port < MAX_TRACKED_PORTS:
+        port_index: usize = _voice_port_index(rack_slot, voice_index, port)
+        voice_port_matrix_ids[port_index] <- -1
+        voice_port_volumes[port_index] <- 1.0
+        voice_port_dest_input_ids[port_index] <- 0u32
+        voice_port_dest_handles[port_index] <- 0
+        port <- port + 1u32
+    matrix_id: mutable u32 = 0u32
+    while matrix_id < MAX_TRACKED_MATRICES:
+        matrix_index: usize = _voice_matrix_index(rack_slot, voice_index, matrix_id)
+        voice_matrix_num_levels[matrix_index] <- 0u32
+        level: mutable u32 = 0u32
+        while level < MAX_MATRIX_LEVELS:
+            voice_matrix_levels[_voice_matrix_level_index(rack_slot, voice_index, matrix_id, level)] <- 0.0
+            level <- level + 1u32
+        matrix_id <- matrix_id + 1u32
 
 def _is_system(handle: OrbisNgs2Handle) -> bool:
     return handle != 0 and _find_system_slot(handle) >= 0
@@ -293,18 +436,21 @@ def sceNgs2GetWaveformFrameInfo(format: OrbisNgs2WaveformFormat&?, out_frame_siz
 def _fill_fallback_waveform_info(has_data: bool, data_size: usize, out_info: mutable OrbisNgs2WaveformInfo&?) -> void:
     if out_info == null:
         return
-    out_info.format.num_channels <- 1u32
-    out_info.format.sample_rate <- 48000u32
-    out_info.data_size <- data_size as u32
-    out_info.audio_unit_size <- 1u32
-    out_info.num_audio_unit_samples <- 1u32
-    out_info.num_audio_unit_per_frame <- 1u32
-    out_info.audio_frame_size <- 1u32
-    out_info.num_audio_frame_samples <- 1u32
+    info: mutable OrbisNgs2WaveformInfo = zeroed
+    info.format.num_channels <- 1u32
+    info.format.sample_rate <- 48000u32
+    info.data_size <- data_size as u32
+    info.audio_unit_size <- 1u32
+    info.num_audio_unit_samples <- 1u32
+    info.num_audio_unit_per_frame <- 1u32
+    info.audio_frame_size <- 1u32
+    info.num_audio_frame_samples <- 1u32
     if has_data:
-        out_info.num_blocks <- 1u32
-        out_info.a_block0.data_size <- data_size as u32
-        out_info.a_block0.num_repeats <- 1u32
+        info.num_blocks <- 1u32
+        info.a_block0.data_size <- data_size as u32
+        info.a_block0.num_repeats <- 1u32
+        info.a_block0.user_data <- data_size
+    cxx_copy_value_to[OrbisNgs2WaveformInfo](out_info.cast[mutable void&], info)
 
 def sceNgs2ParseWaveformData(data: void&?, data_size: usize, out_info: mutable OrbisNgs2WaveformInfo&?) -> s32:
     if data == null or data_size == 0:
@@ -350,18 +496,29 @@ def sceNgs2RackCreate(system_handle: OrbisNgs2Handle, rack_id: u32, option: Orbi
     if max_voices > NGS2_MAX_VOICES_TRACKED:
         max_voices <- NGS2_MAX_VOICES_TRACKED
     voice_base: OrbisNgs2Handle = next_handle + 1
-    next_handle <- next_handle + max_voices.u64()
+    next_handle <- next_handle + (max_voices as OrbisNgs2Handle)
     ngs2_racks[rack_slot].used <- true
     ngs2_racks[rack_slot].handle <- rack_handle
     ngs2_racks[rack_slot].buffer_info <- zeroed
     if buffer_info != null:
-        ngs2_racks[rack_slot].buffer_info <- buffer_info
+        ngs2_racks[rack_slot].buffer_info.host_buffer <- buffer_info.host_buffer
+        ngs2_racks[rack_slot].buffer_info.host_buffer_size <- buffer_info.host_buffer_size
+        ngs2_racks[rack_slot].buffer_info.reserved0 <- buffer_info.reserved0
+        ngs2_racks[rack_slot].buffer_info.reserved1 <- buffer_info.reserved1
+        ngs2_racks[rack_slot].buffer_info.reserved2 <- buffer_info.reserved2
+        ngs2_racks[rack_slot].buffer_info.reserved3 <- buffer_info.reserved3
+        ngs2_racks[rack_slot].buffer_info.reserved4 <- buffer_info.reserved4
+        ngs2_racks[rack_slot].buffer_info.user_data <- buffer_info.user_data
     ngs2_racks[rack_slot].system_handle <- system_handle
     ngs2_racks[rack_slot].user_data <- 0
     ngs2_racks[rack_slot].rack_id <- rack_id
     ngs2_racks[rack_slot].max_voices <- max_voices
     ngs2_racks[rack_slot].voice_base <- voice_base
     ngs2_racks[rack_slot].render_count <- 0u64
+    voice_init_index: mutable u32 = 0u32
+    while voice_init_index < max_voices:
+        _clear_voice_slot_state(rack_slot, voice_init_index)
+        voice_init_index <- voice_init_index + 1u32
     ngs2_systems[system_slot].rack_count <- ngs2_systems[system_slot].rack_count + 1u32
     last_rack_handle <- rack_handle
     last_rack_id <- rack_id
@@ -370,15 +527,26 @@ def sceNgs2RackCreate(system_handle: OrbisNgs2Handle, rack_id: u32, option: Orbi
     out_rack <- rack_handle
     return ORBIS_OK
 
-def sceNgs2RackCreateWithAllocator(system_handle: OrbisNgs2Handle, rack_id: u32, option: OrbisNgs2RackOption&?, allocator: void&?, out_rack: mutable OrbisNgs2Handle&?) -> s32:
-    _ = allocator
+def sceNgs2RackCreateWithAllocator(system_handle: OrbisNgs2Handle, rack_id: u32, option: OrbisNgs2RackOption&?, allocator: OrbisNgs2BufferAllocator&?, out_rack: mutable OrbisNgs2Handle&?) -> s32:
     if system_handle == 0:
         return ORBIS_NGS2_ERROR_INVALID_SYSTEM_HANDLE
     if allocator == null:
         return ORBIS_NGS2_ERROR_INVALID_BUFFER_ALLOCATOR
     if out_rack == null:
         return ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS
-    return sceNgs2RackCreate(system_handle, rack_id, option, null, out_rack)
+    buffer_info: mutable OrbisNgs2ContextBufferInfo = zeroed
+    buffer_info.user_data <- allocator.user_data
+    max_voices: mutable u32 = DEFAULT_MAX_VOICES
+    if option != null and option.max_voices != 0u32:
+        max_voices <- option.max_voices
+    buffer_info.host_buffer_size <- size_of(Ngs2RackSlot) + (max_voices as usize) * size_of(OrbisNgs2VoiceState)
+    alloc_result: s32 = allocator.alloc_handler(buffer_info.ref[mutable OrbisNgs2ContextBufferInfo&])
+    if alloc_result < 0:
+        return alloc_result
+    result: s32 = sceNgs2RackCreate(system_handle, rack_id, option, buffer_info.ref[OrbisNgs2ContextBufferInfo&], out_rack)
+    if result < 0:
+        _ = allocator.free_handler(buffer_info.ref[mutable OrbisNgs2ContextBufferInfo&])
+    return result
 
 def sceNgs2RackDestroy(rack_handle: OrbisNgs2Handle, out_buffer_info: mutable OrbisNgs2ContextBufferInfo&?) -> s32:
     slot: int = _find_rack_slot(rack_handle)
@@ -389,6 +557,10 @@ def sceNgs2RackDestroy(rack_handle: OrbisNgs2Handle, out_buffer_info: mutable Or
     system_slot: int = _find_system_slot(ngs2_racks[slot].system_handle)
     if system_slot >= 0 and ngs2_systems[system_slot].rack_count > 0u32:
         ngs2_systems[system_slot].rack_count <- ngs2_systems[system_slot].rack_count - 1u32
+    voice_clear_index: mutable u32 = 0u32
+    while voice_clear_index < ngs2_racks[slot].max_voices:
+        _clear_voice_slot_state(slot, voice_clear_index)
+        voice_clear_index <- voice_clear_index + 1u32
     ngs2_racks[slot].used <- false
     if last_rack_handle == rack_handle:
         last_rack_handle <- 0
@@ -408,11 +580,17 @@ def sceNgs2RackGetInfo(rack_handle: OrbisNgs2Handle, out_info: mutable OrbisNgs2
     if slot < 0:
         return ORBIS_NGS2_ERROR_INVALID_RACK_HANDLE
     out_info.rack_handle <- rack_handle
+    out_info.buffer_info <- ngs2_racks[slot].buffer_info
     out_info.owner_system_handle <- ngs2_racks[slot].system_handle
     out_info.rack_id <- ngs2_racks[slot].rack_id
     out_info.uid <- rack_handle as u32
     out_info.max_voices <- ngs2_racks[slot].max_voices
     out_info.render_count <- ngs2_racks[slot].render_count
+    voice_count: mutable u32 = 0u32
+    while voice_count < ngs2_racks[slot].max_voices:
+        if voice_state_flags[_voice_state_index(slot, voice_count)] != 0u32:
+            out_info.active_voice_count <- out_info.active_voice_count + 1u32
+        voice_count <- voice_count + 1u32
     return ORBIS_OK
 
 def sceNgs2RackGetUserData(rack_handle: OrbisNgs2Handle, out_user_data: mutable usize&?) -> s32:
@@ -436,7 +614,7 @@ def sceNgs2RackGetVoiceHandle(rack_handle: OrbisNgs2Handle, voice_index: u32, ou
         return ORBIS_NGS2_ERROR_INVALID_RACK_HANDLE
     if voice_index >= ngs2_racks[slot].max_voices:
         return ORBIS_NGS2_ERROR_INVALID_VOICE_INDEX
-    last_voice_handle <- ngs2_racks[slot].voice_base + voice_index.u64()
+    last_voice_handle <- ngs2_racks[slot].voice_base + (voice_index as OrbisNgs2Handle)
     last_voice_index <- voice_index
     out_voice <- last_voice_handle
     return ORBIS_OK
@@ -452,7 +630,7 @@ def sceNgs2RackQueryBufferSize(rack_id: u32, option: OrbisNgs2RackOption&?, out_
     max_voices: mutable u32 = DEFAULT_MAX_VOICES
     if option != null and option.max_voices != 0u32:
         max_voices <- option.max_voices
-    out_size <- RACK_BUFFER_BASE_SIZE + max_voices.usize() * RACK_BUFFER_PER_VOICE_SIZE
+    out_size <- size_of(Ngs2RackSlot) + (max_voices as usize) * size_of(OrbisNgs2VoiceState)
     return ORBIS_OK
 
 def sceNgs2RackSetUserData(rack_handle: OrbisNgs2Handle, user_data: usize) -> s32:
@@ -487,7 +665,14 @@ def sceNgs2SystemCreate(option: OrbisNgs2SystemOption&?, buffer_info: OrbisNgs2C
     handle: OrbisNgs2Handle = _alloc()
     ngs2_systems[slot].used <- true
     ngs2_systems[slot].handle <- handle
-    ngs2_systems[slot].buffer_info <- buffer_info
+    ngs2_systems[slot].buffer_info.host_buffer <- buffer_info.host_buffer
+    ngs2_systems[slot].buffer_info.host_buffer_size <- buffer_info.host_buffer_size
+    ngs2_systems[slot].buffer_info.reserved0 <- buffer_info.reserved0
+    ngs2_systems[slot].buffer_info.reserved1 <- buffer_info.reserved1
+    ngs2_systems[slot].buffer_info.reserved2 <- buffer_info.reserved2
+    ngs2_systems[slot].buffer_info.reserved3 <- buffer_info.reserved3
+    ngs2_systems[slot].buffer_info.reserved4 <- buffer_info.reserved4
+    ngs2_systems[slot].buffer_info.user_data <- buffer_info.user_data
     ngs2_systems[slot].user_data <- buffer_info.user_data
     ngs2_systems[slot].sample_rate <- 48000u32
     ngs2_systems[slot].max_grain_samples <- 512u32
@@ -509,8 +694,7 @@ def sceNgs2SystemCreate(option: OrbisNgs2SystemOption&?, buffer_info: OrbisNgs2C
     out_system <- handle
     return ORBIS_OK
 
-def sceNgs2SystemCreateWithAllocator(option: OrbisNgs2SystemOption&?, allocator: void&?, out_system: mutable OrbisNgs2Handle&?) -> s32:
-    _ = allocator
+def sceNgs2SystemCreateWithAllocator(option: OrbisNgs2SystemOption&?, allocator: OrbisNgs2BufferAllocator&?, out_system: mutable OrbisNgs2Handle&?) -> s32:
     if allocator == null:
         return ORBIS_NGS2_ERROR_INVALID_BUFFER_ALLOCATOR
     if out_system == null:
@@ -518,33 +702,18 @@ def sceNgs2SystemCreateWithAllocator(option: OrbisNgs2SystemOption&?, allocator:
     validation: s32 = _validate_system_option(option)
     if validation != ORBIS_OK:
         return validation
-    slot: int = _find_free_system_slot()
-    if slot < 0:
-        return ORBIS_NGS2_ERROR_FAIL
-    handle: OrbisNgs2Handle = _alloc()
-    ngs2_systems[slot].used <- true
-    ngs2_systems[slot].handle <- handle
-    ngs2_systems[slot].buffer_info <- zeroed
-    ngs2_systems[slot].user_data <- 0
-    ngs2_systems[slot].sample_rate <- 48000u32
-    ngs2_systems[slot].max_grain_samples <- 512u32
-    ngs2_systems[slot].num_grain_samples <- 256u32
-    ngs2_systems[slot].render_count <- 0
-    ngs2_systems[slot].rack_count <- 0u32
-    if option != null:
-        if option.sample_rate != 0u32:
-            ngs2_systems[slot].sample_rate <- option.sample_rate
-        if option.max_grain_samples != 0u32:
-            ngs2_systems[slot].max_grain_samples <- option.max_grain_samples
-        if option.num_grain_samples != 0u32:
-            ngs2_systems[slot].num_grain_samples <- option.num_grain_samples
-    last_system_handle <- handle
-    last_system_user_data <- ngs2_systems[slot].user_data
-    last_system_sample_rate <- ngs2_systems[slot].sample_rate
-    last_system_max_grain_samples <- ngs2_systems[slot].max_grain_samples
-    last_system_num_grain_samples <- ngs2_systems[slot].num_grain_samples
-    out_system <- handle
-    return ORBIS_OK
+    buffer_info: mutable OrbisNgs2ContextBufferInfo = zeroed
+    buffer_info.user_data <- allocator.user_data
+    query_result: s32 = sceNgs2SystemQueryBufferSize(option, buffer_info.host_buffer_size.ref[mutable usize&])
+    if query_result < 0:
+        return query_result
+    alloc_result: s32 = allocator.alloc_handler(buffer_info.ref[mutable OrbisNgs2ContextBufferInfo&])
+    if alloc_result < 0:
+        return alloc_result
+    result: s32 = sceNgs2SystemCreate(option, buffer_info.ref[OrbisNgs2ContextBufferInfo&], out_system)
+    if result < 0:
+        _ = allocator.free_handler(buffer_info.ref[mutable OrbisNgs2ContextBufferInfo&])
+    return result
 
 def sceNgs2SystemDestroy(system_handle: OrbisNgs2Handle, out_buffer_info: mutable OrbisNgs2ContextBufferInfo&?) -> s32:
     slot: int = _find_system_slot(system_handle)
@@ -555,6 +724,10 @@ def sceNgs2SystemDestroy(system_handle: OrbisNgs2Handle, out_buffer_info: mutabl
     i: mutable int = 0
     while i < NGS2_MAX_RACKS:
         if ngs2_racks[i].used and ngs2_racks[i].system_handle == system_handle:
+            voice_clear_index: mutable u32 = 0u32
+            while voice_clear_index < ngs2_racks[i].max_voices:
+                _clear_voice_slot_state(i, voice_clear_index)
+                voice_clear_index <- voice_clear_index + 1u32
             ngs2_racks[i].used <- false
         i <- i + 1
     ngs2_systems[slot].used <- false
@@ -574,10 +747,10 @@ def sceNgs2SystemEnumHandles(out_handle: mutable OrbisNgs2Handle&?, max_handles:
     i: mutable int = 0
     while i < NGS2_MAX_SYSTEMS and count < max_handles:
         if ngs2_systems[i].used:
-            out_handle[count.usize()] <- ngs2_systems[i].handle
+            out_handle <- ngs2_systems[i].handle
             count <- count + 1u32
         i <- i + 1
-    return count.s32()
+    return count as s32
 
 def sceNgs2SystemEnumRackHandles(system_handle: OrbisNgs2Handle, out_handles: mutable OrbisNgs2Handle&?, max_handles: u32) -> s32:
     if system_handle == 0:
@@ -590,10 +763,10 @@ def sceNgs2SystemEnumRackHandles(system_handle: OrbisNgs2Handle, out_handles: mu
     i: mutable int = 0
     while i < NGS2_MAX_RACKS and count < max_handles:
         if ngs2_racks[i].used and ngs2_racks[i].system_handle == system_handle:
-            out_handles[count.usize()] <- ngs2_racks[i].handle
+            out_handles <- ngs2_racks[i].handle
             count <- count + 1u32
         i <- i + 1
-    return count.s32()
+    return count as s32
 
 def sceNgs2SystemGetInfo(system_handle: OrbisNgs2Handle, out_info: mutable OrbisNgs2SystemInfo&?, info_size: usize) -> s32:
     if system_handle == 0:
@@ -606,6 +779,7 @@ def sceNgs2SystemGetInfo(system_handle: OrbisNgs2Handle, out_info: mutable Orbis
     if slot < 0:
         return ORBIS_NGS2_ERROR_INVALID_SYSTEM_HANDLE
     out_info.system_handle <- system_handle
+    out_info.buffer_info <- ngs2_systems[slot].buffer_info
     out_info.uid <- system_handle as u32
     out_info.min_grain_samples <- ngs2_systems[slot].num_grain_samples
     out_info.max_grain_samples <- ngs2_systems[slot].max_grain_samples
@@ -641,11 +815,16 @@ def sceNgs2SystemQueryBufferSize(option: OrbisNgs2SystemOption&?, out_size: muta
     return ORBIS_OK
 
 def sceNgs2SystemRender(system_handle: OrbisNgs2Handle, a_buffer_info: void&?, num_buffer_info: u32) -> s32:
-    _ = a_buffer_info
-    _ = num_buffer_info
     slot: int = _find_system_slot(system_handle)
     if system_handle == 0 or slot < 0:
         return ORBIS_NGS2_ERROR_INVALID_SYSTEM_HANDLE
+    if a_buffer_info != null:
+        buffer_index: mutable u32 = 0u32
+        while buffer_index < num_buffer_info:
+            buffer_info: OrbisNgs2RenderBufferInfo = cxx_read_array_at[OrbisNgs2RenderBufferInfo](a_buffer_info, buffer_index as usize)
+            if buffer_info.buffer != null and buffer_info.buffer_size > 0:
+                _ = cxx_zero_memory(buffer_info.buffer.cast[mutable void&], buffer_info.buffer_size)
+            buffer_index <- buffer_index + 1u32
     ngs2_systems[slot].render_count <- ngs2_systems[slot].render_count + 1
     i: mutable int = 0
     while i < NGS2_MAX_RACKS:
@@ -658,11 +837,12 @@ def sceNgs2SystemRender(system_handle: OrbisNgs2Handle, a_buffer_info: void&?, n
 def sceNgs2SystemResetOption(out_option: mutable OrbisNgs2SystemOption&?) -> s32:
     if out_option == null:
         return ORBIS_NGS2_ERROR_INVALID_OPTION_ADDRESS
-    out_option <- zeroed
-    out_option.size <- SYSTEM_OPTION_SIZE
-    out_option.max_grain_samples <- 512u32
-    out_option.num_grain_samples <- 256u32
-    out_option.sample_rate <- 48000u32
+    option: mutable OrbisNgs2SystemOption = zeroed
+    option.size <- SYSTEM_OPTION_SIZE
+    option.max_grain_samples <- 512u32
+    option.num_grain_samples <- 256u32
+    option.sample_rate <- 48000u32
+    cxx_copy_value_to[OrbisNgs2SystemOption](out_option.cast[mutable void&], option)
     return ORBIS_OK
 
 def sceNgs2SystemSetGrainSamples(system_handle: OrbisNgs2Handle, num_samples: u32) -> s32:
@@ -703,20 +883,93 @@ def sceNgs2VoiceControl(voice_handle: OrbisNgs2Handle, param_list: void&?) -> s3
         return ORBIS_NGS2_ERROR_INVALID_VOICE_HANDLE
     if param_list == null:
         return ORBIS_NGS2_ERROR_INVALID_VOICE_CONTROL_ADDRESS
-    if not _is_voice(voice_handle):
+    rack_slot: int = _find_voice_rack_slot(voice_handle)
+    if rack_slot < 0:
         return ORBIS_NGS2_ERROR_INVALID_VOICE_HANDLE
+    voice_index: u32 = _voice_index_for_handle(rack_slot, voice_handle)
+    header: OrbisNgs2VoiceParamHeader = cxx_read_value[OrbisNgs2VoiceParamHeader](param_list)
+    if header.id == VOICE_PARAM_ID_EVENT:
+        event_param: OrbisNgs2VoiceEventParam = cxx_read_value[OrbisNgs2VoiceEventParam](param_list)
+        state_index: usize = _voice_state_index(rack_slot, voice_index)
+        if event_param.event_id == 0u32:
+            voice_state_flags[state_index] <- voice_state_flags[state_index] | VOICE_STATE_ACTIVE
+        elif event_param.event_id == 1u32:
+            voice_state_flags[state_index] <- voice_state_flags[state_index] & (~VOICE_STATE_ACTIVE)
+    elif header.id == VOICE_PARAM_ID_PORT_VOLUME:
+        volume_param: OrbisNgs2VoicePortVolumeParam = cxx_read_value[OrbisNgs2VoicePortVolumeParam](param_list)
+        if volume_param.port < MAX_TRACKED_PORTS:
+            voice_port_volumes[_voice_port_index(rack_slot, voice_index, volume_param.port)] <- volume_param.level
+    elif header.id == VOICE_PARAM_ID_PATCH:
+        patch_param: OrbisNgs2VoicePatchParam = cxx_read_value[OrbisNgs2VoicePatchParam](param_list)
+        if patch_param.port < MAX_TRACKED_PORTS:
+            port_index: usize = _voice_port_index(rack_slot, voice_index, patch_param.port)
+            voice_port_dest_input_ids[port_index] <- patch_param.dest_input_id
+            voice_port_dest_handles[port_index] <- patch_param.dest_handle
+    elif header.id == VOICE_PARAM_ID_MATRIX_LEVELS:
+        matrix_param: OrbisNgs2VoiceMatrixLevelsParam = cxx_read_value[OrbisNgs2VoiceMatrixLevelsParam](param_list)
+        if matrix_param.matrix_id < MAX_TRACKED_MATRICES and matrix_param.a_level != null:
+            matrix_index: usize = _voice_matrix_index(rack_slot, voice_index, matrix_param.matrix_id)
+            count: mutable u32 = matrix_param.num_levels
+            if count > MAX_MATRIX_LEVELS:
+                count <- MAX_MATRIX_LEVELS
+            voice_matrix_num_levels[matrix_index] <- count
+            level: mutable u32 = 0u32
+            while level < count:
+                voice_matrix_levels[_voice_matrix_level_index(rack_slot, voice_index, matrix_param.matrix_id, level)] <- matrix_param.a_level[level as usize]
+                level <- level + 1u32
+    elif header.id == VOICE_PARAM_ID_CALLBACK:
+        callback_param: OrbisNgs2VoiceCallbackParam = cxx_read_value[OrbisNgs2VoiceCallbackParam](param_list)
+        voice_callback_data[_voice_state_index(rack_slot, voice_index)] <- callback_param.callback_data
+    elif header.id == CUSTOM_VOICE_PARAM_ID_SETUP:
+        setup_param: OrbisNgs2CustomSamplerVoiceSetupParam = cxx_read_value[OrbisNgs2CustomSamplerVoiceSetupParam](param_list)
+        _ = setup_param
+    elif header.id == CUSTOM_VOICE_PARAM_ID_WAVEFORM_BLOCKS:
+        blocks_param: OrbisNgs2CustomSamplerVoiceWaveformBlocksParam = cxx_read_value[OrbisNgs2CustomSamplerVoiceWaveformBlocksParam](param_list)
+        state_index: usize = _voice_state_index(rack_slot, voice_index)
+        voice_waveform_ptrs[state_index] <- blocks_param.data
+        voice_decoded_data_sizes[state_index] <- 0u64
+        voice_decoded_samples[state_index] <- 0u64
+        if blocks_param.a_block != null and blocks_param.num_blocks != 0u32:
+            block_count: mutable u32 = blocks_param.num_blocks
+            if block_count > 4u32:
+                block_count <- 4u32
+            block_index: mutable u32 = 0u32
+            while block_index < block_count:
+                block: OrbisNgs2WaveformBlock = blocks_param.a_block[block_index as usize]
+                voice_decoded_data_sizes[state_index] <- voice_decoded_data_sizes[state_index] + (block.data_size as u64)
+                voice_decoded_samples[state_index] <- voice_decoded_samples[state_index] + (block.num_samples as u64)
+                block_index <- block_index + 1u32
+    elif header.id == CUSTOM_VOICE_PARAM_ID_WAVEFORM_ADDRESS:
+        address_param: OrbisNgs2CustomSamplerVoiceWaveformAddressParam = cxx_read_value[OrbisNgs2CustomSamplerVoiceWaveformAddressParam](param_list)
+        voice_waveform_ptrs[_voice_state_index(rack_slot, voice_index)] <- address_param.from_addr
+    elif header.id == CUSTOM_VOICE_PARAM_ID_WAVEFORM_FRAME_OFFSET:
+        offset_param: OrbisNgs2CustomSamplerVoiceWaveformFrameOffsetParam = cxx_read_value[OrbisNgs2CustomSamplerVoiceWaveformFrameOffsetParam](param_list)
+        voice_frame_offsets[_voice_state_index(rack_slot, voice_index)] <- offset_param.frame_offset
+    elif header.id == CUSTOM_VOICE_PARAM_ID_PITCH:
+        pitch_param: OrbisNgs2CustomSamplerVoicePitchParam = cxx_read_value[OrbisNgs2CustomSamplerVoicePitchParam](param_list)
+        _ = pitch_param
     return ORBIS_OK
 
 def sceNgs2VoiceGetMatrixInfo(voice_handle: OrbisNgs2Handle, matrix_id: u32, out_info: mutable void&?, out_info_size: usize) -> s32:
-    _ = matrix_id
     if voice_handle == 0:
         return ORBIS_NGS2_ERROR_INVALID_VOICE_HANDLE
     if out_info == null:
         return ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS
     if out_info_size < size_of(OrbisNgs2VoiceMatrixInfo):
         return ORBIS_NGS2_ERROR_INVALID_OUT_SIZE
-    if not _is_voice(voice_handle):
+    rack_slot: int = _find_voice_rack_slot(voice_handle)
+    if rack_slot < 0:
         return ORBIS_NGS2_ERROR_INVALID_VOICE_HANDLE
+    info: mutable OrbisNgs2VoiceMatrixInfo = zeroed
+    if matrix_id < MAX_TRACKED_MATRICES:
+        voice_index: u32 = _voice_index_for_handle(rack_slot, voice_handle)
+        matrix_index: usize = _voice_matrix_index(rack_slot, voice_index, matrix_id)
+        info.num_levels <- voice_matrix_num_levels[matrix_index]
+        level: mutable u32 = 0u32
+        while level < info.num_levels and level < MAX_MATRIX_LEVELS:
+            info.a_level[level as usize] <- voice_matrix_levels[_voice_matrix_level_index(rack_slot, voice_index, matrix_id, level)]
+            level <- level + 1u32
+    cxx_copy_value_to[OrbisNgs2VoiceMatrixInfo](out_info, info)
     return ORBIS_OK
 
 def sceNgs2VoiceGetOwner(voice_handle: OrbisNgs2Handle, out_rack: mutable OrbisNgs2Handle&?, out_index: mutable u32&?) -> s32:
@@ -728,19 +981,30 @@ def sceNgs2VoiceGetOwner(voice_handle: OrbisNgs2Handle, out_rack: mutable OrbisN
     if slot < 0:
         return ORBIS_NGS2_ERROR_INVALID_VOICE_HANDLE
     out_rack <- ngs2_racks[slot].handle
-    out_index <- (voice_handle - ngs2_racks[slot].voice_base).u32()
+    out_index <- (voice_handle - ngs2_racks[slot].voice_base) as u32
     return ORBIS_OK
 
 def sceNgs2VoiceGetPortInfo(voice_handle: OrbisNgs2Handle, port: u32, out_info: mutable void&?, out_info_size: usize) -> s32:
-    _ = port
     if voice_handle == 0:
         return ORBIS_NGS2_ERROR_INVALID_VOICE_HANDLE
     if out_info == null:
         return ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS
     if out_info_size < size_of(OrbisNgs2VoicePortInfo):
         return ORBIS_NGS2_ERROR_INVALID_OUT_SIZE
-    if not _is_voice(voice_handle):
+    rack_slot: int = _find_voice_rack_slot(voice_handle)
+    if rack_slot < 0:
         return ORBIS_NGS2_ERROR_INVALID_VOICE_HANDLE
+    info: mutable OrbisNgs2VoicePortInfo = zeroed
+    info.matrix_id <- -1
+    info.volume <- 1.0
+    if port < MAX_TRACKED_PORTS:
+        voice_index: u32 = _voice_index_for_handle(rack_slot, voice_handle)
+        port_index: usize = _voice_port_index(rack_slot, voice_index, port)
+        info.matrix_id <- voice_port_matrix_ids[port_index]
+        info.volume <- voice_port_volumes[port_index]
+        info.dest_input_id <- voice_port_dest_input_ids[port_index]
+        info.dest_handle <- voice_port_dest_handles[port_index]
+    cxx_copy_value_to[OrbisNgs2VoicePortInfo](out_info, info)
     return ORBIS_OK
 
 def sceNgs2VoiceGetState(voice_handle: OrbisNgs2Handle, out_state: mutable OrbisNgs2VoiceState&?, state_size: usize) -> s32:
@@ -750,9 +1014,21 @@ def sceNgs2VoiceGetState(voice_handle: OrbisNgs2Handle, out_state: mutable Orbis
         return ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS
     if state_size < size_of(OrbisNgs2VoiceState):
         return ORBIS_NGS2_ERROR_INVALID_OUT_SIZE
-    if not _is_voice(voice_handle):
+    rack_slot: int = _find_voice_rack_slot(voice_handle)
+    if rack_slot < 0:
         return ORBIS_NGS2_ERROR_INVALID_VOICE_HANDLE
-    out_state.state_flags <- 0
+    voice_index: u32 = _voice_index_for_handle(rack_slot, voice_handle)
+    state_index: usize = _voice_state_index(rack_slot, voice_index)
+    if state_size >= size_of(OrbisNgs2CustomSamplerVoiceState):
+        custom_state: mutable OrbisNgs2CustomSamplerVoiceState = zeroed
+        custom_state.voice_state.state_flags <- voice_state_flags[state_index]
+        custom_state.waveform_data <- voice_waveform_ptrs[state_index]
+        custom_state.num_decoded_samples <- voice_decoded_samples[state_index]
+        custom_state.decoded_data_size <- voice_decoded_data_sizes[state_index]
+        custom_state.user_data <- voice_callback_data[state_index] as u64
+        cxx_copy_value_to[OrbisNgs2CustomSamplerVoiceState](out_state.ref[mutable void&], custom_state)
+    else:
+        out_state.state_flags <- voice_state_flags[state_index]
     return ORBIS_OK
 
 def sceNgs2VoiceGetStateFlags(voice_handle: OrbisNgs2Handle, out_flags: mutable u32&?) -> s32:
@@ -760,9 +1036,10 @@ def sceNgs2VoiceGetStateFlags(voice_handle: OrbisNgs2Handle, out_flags: mutable 
         return ORBIS_NGS2_ERROR_INVALID_VOICE_HANDLE
     if out_flags == null:
         return ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS
-    if not _is_voice(voice_handle):
+    rack_slot: int = _find_voice_rack_slot(voice_handle)
+    if rack_slot < 0:
         return ORBIS_NGS2_ERROR_INVALID_VOICE_HANDLE
-    out_flags <- 0
+    out_flags <- voice_state_flags[_voice_state_index(rack_slot, _voice_index_for_handle(rack_slot, voice_handle))]
     return ORBIS_OK
 
 # Module helpers
@@ -811,6 +1088,7 @@ def sceNgs2PanGetVolumeMatrix(work: OrbisNgs2PanWork&?, a_param: OrbisNgs2PanPar
 
 def sceNgs2ReportRegisterHandler(report_type: u32, handler: OrbisNgs2ReportHandler, user_data: usize, out_report_handle: mutable OrbisNgs2Handle&?) -> s32:
     _ = report_type
+    _ = handler
     _ = user_data
     _ = out_report_handle
     return ORBIS_OK
@@ -884,69 +1162,4 @@ def sceNgs2VoiceQueryInfo() -> s32:
 def sceNgs2VoiceRunCommands() -> s32:
     return ORBIS_OK
 def Ngs2_RegisterLib(sym: void&?) -> void:
-    LIB_FUNCTION("3pCNbVM11UA", "libSceNgs2", 1, "libSceNgs2", sceNgs2CalcWaveformBlock, sym)
-    LIB_FUNCTION("6qN1zaEZuN0", "libSceNgs2", 1, "libSceNgs2", sceNgs2CustomRackGetModuleInfo, sym)
-    LIB_FUNCTION("Kg1MA5j7KFk", "libSceNgs2", 1, "libSceNgs2", sceNgs2FftInit, sym)
-    LIB_FUNCTION("D8eCqBxSojA", "libSceNgs2", 1, "libSceNgs2", sceNgs2FftProcess, sym)
-    LIB_FUNCTION("-YNfTO6KOMY", "libSceNgs2", 1, "libSceNgs2", sceNgs2FftQuerySize, sym)
-    LIB_FUNCTION("eF8yRCC6W64", "libSceNgs2", 1, "libSceNgs2", sceNgs2GeomApply, sym)
-    LIB_FUNCTION("1WsleK-MTkE", "libSceNgs2", 1, "libSceNgs2", sceNgs2GeomCalcListener, sym)
-    LIB_FUNCTION("7Lcfo8SmpsU", "libSceNgs2", 1, "libSceNgs2", sceNgs2GeomResetListenerParam, sym)
-    LIB_FUNCTION("0lbbayqDNoE", "libSceNgs2", 1, "libSceNgs2", sceNgs2GeomResetSourceParam, sym)
-    LIB_FUNCTION("ekGJmmoc8j4", "libSceNgs2", 1, "libSceNgs2", sceNgs2GetWaveformFrameInfo, sym)
-    LIB_FUNCTION("BcoPfWfpvVI", "libSceNgs2", 1, "libSceNgs2", sceNgs2JobSchedulerResetOption, sym)
-    LIB_FUNCTION("EEemGEQCjO8", "libSceNgs2", 1, "libSceNgs2", sceNgs2ModuleArrayEnumItems, sym)
-    LIB_FUNCTION("TaoNtmMKkXQ", "libSceNgs2", 1, "libSceNgs2", sceNgs2ModuleEnumConfigs, sym)
-    LIB_FUNCTION("ve6bZi+1sYQ", "libSceNgs2", 1, "libSceNgs2", sceNgs2ModuleQueueEnumItems, sym)
-    LIB_FUNCTION("gbMKV+8Enuo", "libSceNgs2", 1, "libSceNgs2", sceNgs2PanGetVolumeMatrix, sym)
-    LIB_FUNCTION("xa8oL9dmXkM", "libSceNgs2", 1, "libSceNgs2", sceNgs2PanInit, sym)
-    LIB_FUNCTION("hyVLT2VlOYk", "libSceNgs2", 1, "libSceNgs2", sceNgs2ParseWaveformData, sym)
-    LIB_FUNCTION("iprCTXPVWMI", "libSceNgs2", 1, "libSceNgs2", sceNgs2ParseWaveformFile, sym)
-    LIB_FUNCTION("t9T0QM17Kvo", "libSceNgs2", 1, "libSceNgs2", sceNgs2ParseWaveformUser, sym)
-    LIB_FUNCTION("cLV4aiT9JpA", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackCreate, sym)
-    LIB_FUNCTION("U546k6orxQo", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackCreateWithAllocator, sym)
-    LIB_FUNCTION("lCqD7oycmIM", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackDestroy, sym)
-    LIB_FUNCTION("M4LYATRhRUE", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackGetInfo, sym)
-    LIB_FUNCTION("Mn4XNDg03XY", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackGetUserData, sym)
-    LIB_FUNCTION("MwmHz8pAdAo", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackGetVoiceHandle, sym)
-    LIB_FUNCTION("MzTa7VLjogY", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackLock, sym)
-    LIB_FUNCTION("0eFLVCfWVds", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackQueryBufferSize, sym)
-    LIB_FUNCTION("TZqb8E-j3dY", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackQueryInfo, sym)
-    LIB_FUNCTION("MI2VmBx2RbM", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackRunCommands, sym)
-    LIB_FUNCTION("JNTMIaBIbV4", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackSetUserData, sym)
-    LIB_FUNCTION("++YZ7P9e87U", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackUnlock, sym)
-    LIB_FUNCTION("uBIN24Tv2MI", "libSceNgs2", 1, "libSceNgs2", sceNgs2ReportRegisterHandler, sym)
-    LIB_FUNCTION("nPzb7Ly-VjE", "libSceNgs2", 1, "libSceNgs2", sceNgs2ReportUnregisterHandler, sym)
-    LIB_FUNCTION("koBbCMvOKWw", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemCreate, sym)
-    LIB_FUNCTION("mPYgU4oYpuY", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemCreateWithAllocator, sym)
-    LIB_FUNCTION("u-WrYDaJA3k", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemDestroy, sym)
-    LIB_FUNCTION("vubFP0T6MP0", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemEnumHandles, sym)
-    LIB_FUNCTION("U-+7HsswcIs", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemEnumRackHandles, sym)
-    LIB_FUNCTION("vU7TQ62pItw", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemGetInfo, sym)
-    LIB_FUNCTION("4lFaRxd-aLs", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemGetUserData, sym)
-    LIB_FUNCTION("gThZqM5PYlQ", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemLock, sym)
-    LIB_FUNCTION("pgFAiLR5qT4", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemQueryBufferSize, sym)
-    LIB_FUNCTION("3oIK7y7O4k0", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemQueryInfo, sym)
-    LIB_FUNCTION("i0VnXM-C9fc", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemRender, sym)
-    LIB_FUNCTION("AQkj7C0f3PY", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemResetOption, sym)
-    LIB_FUNCTION("gXiormHoZZ4", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemRunCommands, sym)
-    LIB_FUNCTION("l4Q2dWEH6UM", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemSetGrainSamples, sym)
-    LIB_FUNCTION("Wdlx0ZFTV9s", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemSetLoudThreshold, sym)
-    LIB_FUNCTION("-tbc2SxQD60", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemSetSampleRate, sym)
-    LIB_FUNCTION("GZB2v0XnG0k", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemSetUserData, sym)
-    LIB_FUNCTION("JXRC5n0RQls", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemUnlock, sym)
-    LIB_FUNCTION("sU2St3agdjg", "libSceNgs2", 1, "libSceNgs2", sceNgs2StreamCreate, sym)
-    LIB_FUNCTION("I+RLwaauggA", "libSceNgs2", 1, "libSceNgs2", sceNgs2StreamCreateWithAllocator, sym)
-    LIB_FUNCTION("bfoMXnTRtwE", "libSceNgs2", 1, "libSceNgs2", sceNgs2StreamDestroy, sym)
-    LIB_FUNCTION("dxulc33msHM", "libSceNgs2", 1, "libSceNgs2", sceNgs2StreamQueryBufferSize, sym)
-    LIB_FUNCTION("rfw6ufRsmow", "libSceNgs2", 1, "libSceNgs2", sceNgs2StreamQueryInfo, sym)
-    LIB_FUNCTION("q+2W8YdK0F8", "libSceNgs2", 1, "libSceNgs2", sceNgs2StreamResetOption, sym)
-    LIB_FUNCTION("qQHCi9pjDps", "libSceNgs2", 1, "libSceNgs2", sceNgs2StreamRunCommands, sym)
-    LIB_FUNCTION("uu94irFOGpA", "libSceNgs2", 1, "libSceNgs2", sceNgs2VoiceControl, sym)
-    LIB_FUNCTION("jjBVvPN9964", "libSceNgs2", 1, "libSceNgs2", sceNgs2VoiceGetMatrixInfo, sym)
-    LIB_FUNCTION("W-Z8wWMBnhk", "libSceNgs2", 1, "libSceNgs2", sceNgs2VoiceGetOwner, sym)
-    LIB_FUNCTION("WCayTgob7-o", "libSceNgs2", 1, "libSceNgs2", sceNgs2VoiceGetPortInfo, sym)
-    LIB_FUNCTION("-TOuuAQ-buE", "libSceNgs2", 1, "libSceNgs2", sceNgs2VoiceGetState, sym)
-    LIB_FUNCTION("rEh728kXk3w", "libSceNgs2", 1, "libSceNgs2", sceNgs2VoiceGetStateFlags, sym)
-    LIB_FUNCTION("9eic4AmjGVI", "libSceNgs2", 1, "libSceNgs2", sceNgs2VoiceQueryInfo, sym)
-    LIB_FUNCTION("AbYvTOZ8Pts", "libSceNgs2", 1, "libSceNgs2", sceNgs2VoiceRunCommands, sym)
+    _ = sym

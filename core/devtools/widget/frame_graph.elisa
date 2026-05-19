@@ -5,6 +5,7 @@ const Devtools_Widget_FrameBufferSize: u32 = 1024
 const Devtools_Widget_FrameGraphBarWidthMult: f32 = 1.4
 const Devtools_Widget_FrameGraphBarHeightMult: f32 = 1.25
 const Devtools_Widget_FrameGraphHeight: f32 = 50.0
+const Devtools_Widget_FrameGraphPaddingY: f32 = 3.0
 
 enum Devtools_Widget_FrameGraphColorBand:
     Blue
@@ -87,13 +88,58 @@ def Devtools_Widget_FrameGraph_ColorBand(dt_factor: f32) -> Devtools_Widget_Fram
         return Devtools_Widget_FrameGraphColorBand.GreenYellow
     return Devtools_Widget_FrameGraphColorBand.YellowRed
 
+def Devtools_Widget_FrameGraph_Color(dt_factor: f32) -> u32:
+    if dt_factor >= 0.95:
+        return elisa_imgui_color_convert_float4_to_u32(0.2, 0.2, 1.0, 1.0)
+    if dt_factor >= 0.5:
+        t: f32 = 1.0 - ((dt_factor - 0.5) * 2.0)
+        return elisa_imgui_color_convert_float4_to_u32(t, 1.0, 0.0, 1.0)
+    low_t: mutable f32 = dt_factor * 2.0
+    if low_t < 0.0:
+        low_t <- 0.0
+    if low_t > 1.0:
+        low_t <- 1.0
+    return elisa_imgui_color_convert_float4_to_u32(1.0, low_t, 0.0, 1.0)
+
+def Devtools_Widget_FrameGraph_DrawFrameGraph(graph: Devtools_Widget_FrameGraph&, current_frame: u32, target_hz: u32) -> void:
+    available: ElisaImGuiVec2 = elisa_imgui_get_content_region_avail()
+    full_width: mutable f32 = available.x
+    if full_width <= 0.0:
+        full_width <- 1.0
+    pos: ElisaImGuiVec2 = elisa_imgui_get_cursor_screen_pos()
+    final_pos_y: f32 = pos.y + Devtools_Widget_FrameGraphPaddingY + Devtools_Widget_FrameGraphHeight
+    bg_color: u32 = elisa_imgui_color_convert_float4_to_u32(0.2, 0.2, 0.2, 1.0)
+    elisa_imgui_window_draw_rect_filled(pos.x, pos.y, pos.x + full_width, final_pos_y + Devtools_Widget_FrameGraphPaddingY, bg_color, 0.0)
+    cur_pos_x: mutable f32 = pos.x + full_width
+    i: mutable u32 = 0
+    while i < Devtools_Widget_FrameBufferSize and cur_pos_x > pos.x:
+        frame_num: mutable u32 = 0
+        if i <= current_frame:
+            frame_num <- current_frame - i
+        else:
+            frame_num <- current_frame + Devtools_Widget_FrameBufferSize - (i - current_frame)
+        frame: Devtools_Widget_FrameInfo = Devtools_Widget_FrameGraph_GetFrame(graph, frame_num)
+        dt_factor: f32 = Devtools_Widget_FrameGraph_DtFactor(target_hz, frame.delta)
+        width: mutable f32 = Devtools_Widget_FrameGraph_BarWidth(dt_factor)
+        height: f32 = Devtools_Widget_FrameGraph_BarHeight(dt_factor)
+        if width <= 0.0:
+            width <- 1.0
+        if height > 0.0:
+            left: mutable f32 = cur_pos_x - width
+            if left < pos.x:
+                left <- pos.x
+            elisa_imgui_window_draw_rect_filled(left, final_pos_y - height, cur_pos_x, final_pos_y, Devtools_Widget_FrameGraph_Color(dt_factor), 0.0)
+        cur_pos_x <- cur_pos_x - width
+        i <- i + 1
+    elisa_imgui_dummy(full_width, Devtools_Widget_FrameGraphHeight + Devtools_Widget_FrameGraphPaddingY * 2.0)
+
 def Devtools_Widget_FrameGraph_Draw(graph: mutable Devtools_Widget_FrameGraph&) -> void:
     if not graph.is_open:
         return
     elisa_imgui_set_next_window_size(308.0, 270.0, ElisaImGuiCond_FirstUseEver)
     if elisa_imgui_begin("Video debug info", graph.is_open.ref[mutable bool&], 0):
         elisa_imgui_separator_text("Frame graph")
-        elisa_imgui_text_unformatted("Frame history")
+        Devtools_Widget_FrameGraph_DrawFrameGraph(graph, 0, 60)
         elisa_imgui_separator_text("Renderer info")
         elisa_imgui_text_unformatted("Frame time")
         elisa_imgui_text_unformatted("Presenter time")

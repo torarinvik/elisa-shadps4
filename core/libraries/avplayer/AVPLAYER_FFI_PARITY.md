@@ -73,6 +73,7 @@ Current validated prefix structs:
 - `Implemented`: FFmpeg decode path now exposes decoded video frame metadata candidates (`width`, `height`, `linesize[0]`, aspect numerator/denominator) and `GetVideoDataEx` prefers delivered aspect/pitch when available
 - `Implemented`: non-Ex `GetVideoData` now also prefers delivered decode aspect ratio (num/den) when available, reducing fallback-only aspect behavior
 - `Implemented`: `GetVideoDataEx` `video_full_range_flag` now reads from source-side delivered metadata cache (plumbed path ready for decode-fed color-range)
+- `Implemented`: source now initializes video full-range cache from FFmpeg stream `color_range` metadata (full-range when FFmpeg reports JPEG/full-range), and `GetVideoDataEx` consumes it
 - `Implemented`: source caches stream start-time/duration for active audio/video and frame getters now apply cached stream start-time offset to output timestamps
 - `Implemented`: start-time offset application now keys on `start_time` presence (not duration presence), improving streams with unknown/zero duration
 - `Implemented`: handle `CurrentTime` bookkeeping now updates from post-offset frame timestamps (internal time matches returned timeline)
