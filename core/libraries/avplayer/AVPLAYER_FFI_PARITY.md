@@ -67,6 +67,8 @@ Current validated prefix structs:
 - `Implemented`: source caches stream start-time/duration for active audio/video and frame getters now apply cached stream start-time offset to output timestamps
 - `Implemented`: `CurrentTime` now prefers media-clock timestamps (audio/video decoded output) before wall-clock fallback
 - `Implemented`: buffering state updates in frame getters are now source-readiness driven (`avsrc_has_frames`) instead of hardcoded booleans
+- `Implemented`: source readiness now treats demux packet queues as frame availability signals (not just decoded output queues)
+- `Implemented`: EOF signaling from frame getters is now unified across audio/video paths using source activity (`avsrc_is_active`)
 - `Implemented`: `IsActive` and `CurrentTime` gating now follow the C++ source shape
 - `Partial`: no full demux/decode threads, packet queues, or converted frame pipeline
 - `Partial`: no guest buffer pool or frame-object lifetime model like C++
@@ -81,6 +83,7 @@ Current validated prefix structs:
 - `Implemented`: per-handle FIFO event queue replaces single pending-event slot (preserves event ordering)
 - `Implemented`: EOF transition support extended through `STARTING`; buffering updates now ignore terminal/error states
 - `Implemented`: queue-full policy now prefers higher-priority events (`ERROR`/`EOF`) over low-priority events
+- `Implemented`: controller now processes events in bounded bursts per tick (FIFO drain up to cap) instead of single-event only
 - `Partial`: no dedicated controller thread or full C++ event queue semantics
 
 ### FFI layer (`avplayer_ffmpeg_ffi.elisa`)
