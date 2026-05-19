@@ -3,6 +3,7 @@
 
 #include "core/libraries/kernel/kernel.h"
 #include "core/libraries/network/net.h"
+#include "core/libraries/network/net_resolver.h"
 #include "core/libraries/network/sys_net.h"
 
 extern "C" {
@@ -83,6 +84,44 @@ s64 NetElisa_sys_recvmsg(int s, void* msg, int flags) {
 
 int NetElisa_sys_netabort(int s, int flags) {
     return Libraries::Net::sys_netabort(s, flags);
+}
+
+int NetElisa_epoll_create(const char* name, int flags) {
+    return Libraries::Net::sceNetEpollCreate(name, flags);
+}
+
+int NetElisa_epoll_destroy(int epollid) {
+    return Libraries::Net::sceNetEpollDestroy(epollid);
+}
+
+int NetElisa_epoll_control(int epollid, int op, int id, void* event) {
+    return Libraries::Net::sceNetEpollControl(
+        epollid, static_cast<Libraries::Net::OrbisNetEpollFlag>(op), id,
+        static_cast<Libraries::Net::OrbisNetEpollEvent*>(event));
+}
+
+int NetElisa_epoll_wait(int epollid, void* events, int maxevents, int timeout) {
+    return Libraries::Net::sceNetEpollWait(
+        epollid, static_cast<Libraries::Net::OrbisNetEpollEvent*>(events), maxevents, timeout);
+}
+
+int NetElisa_resolver_create(const char* name, int poolid, int flags) {
+    return Libraries::Net::sceNetResolverCreate(name, poolid, flags);
+}
+
+int NetElisa_resolver_destroy(int resolverid) {
+    return Libraries::Net::sceNetResolverDestroy(resolverid);
+}
+
+int NetElisa_resolver_get_error(int resolverid, int* status) {
+    return Libraries::Net::sceNetResolverGetError(resolverid, status);
+}
+
+int NetElisa_resolver_start_ntoa(int resolverid, const char* hostname, void* addr, int timeout,
+                                 int retry, int flags) {
+    return Libraries::Net::sceNetResolverStartNtoa(
+        resolverid, hostname, static_cast<Libraries::Net::OrbisNetInAddr*>(addr), timeout, retry,
+        flags);
 }
 
 } // extern "C"

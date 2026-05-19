@@ -100,6 +100,39 @@ struct AVPacketPublicPrefix layout c:
     size: i32
     stream_index: i32
 
+@c_bind_prefix("libavutil/frame.h", "AVFrame")
+struct AVFramePublicPrefix layout c:
+    av_class: void&?
+    data0: mutable u8&?
+    data1: mutable u8&?
+    data2: mutable u8&?
+    data3: mutable u8&?
+    data4: mutable u8&?
+    data5: mutable u8&?
+    data6: mutable u8&?
+    data7: mutable u8&?
+    linesize: i32[8]
+    extended_data: mutable u8&?
+    width: i32
+    height: i32
+    nb_samples: i32
+    format: i32
+    key_frame: i32
+    pict_type: i32
+    sample_aspect_ratio: AVRationalPublic
+    pts: i64
+    pkt_dts: i64
+    time_base: AVRationalPublic
+    quality: i32
+    opaque: void&?
+    repeat_pict: i32
+    interlaced_frame: i32
+    top_field_first: i32
+    palette_has_changed: i32
+    reordered_opaque: i64
+    sample_rate: i32
+    ch_layout: AVChannelLayoutPublicPrefix
+
 @c_abi(c)
 extern avformat_open_input(ps: mutable void&?&, url: i8&?, fmt: void&?, options: void&?) -> i32
 
@@ -492,8 +525,17 @@ def avplayer_ffmpeg_copy_stream_params_to_codec_ctx(handle: i32, stream_index: u
     return avcodec_parameters_to_context(codec_ctx, stream.codecpar.cast[void&?])
 
 def avplayer_ffmpeg_decode_next_ts(handle: i32, stream_index: u32, codec_ctx: void&?, out_ts: mutable u64&) -> i32:
+    out_dummy_audio_samples: mutable u32 = 0
+    out_dummy_audio_sample_rate: mutable u32 = 0
+    out_dummy_audio_channels: mutable u32 = 0
+    return avplayer_ffmpeg_decode_next_ts_ex(handle, stream_index, codec_ctx, out_ts, out_dummy_audio_samples, out_dummy_audio_sample_rate, out_dummy_audio_channels)
+
+def avplayer_ffmpeg_decode_next_ts_ex(handle: i32, stream_index: u32, codec_ctx: void&?, out_ts: mutable u64&, out_audio_samples: mutable u32&, out_audio_sample_rate: mutable u32&, out_audio_channels: mutable u32&) -> i32:
     if not avffmpeg_valid_handle(handle) or codec_ctx == null:
         return -1
+    out_audio_samples <- 0
+    out_audio_sample_rate <- 0
+    out_audio_channels <- 0
     ctx: AVFormatContextPublicPrefix&? = avffmpeg_contexts[avffmpeg_slot(handle)].cast[AVFormatContextPublicPrefix&?]
     if ctx == null or ctx[0].streams == null or stream_index >= ctx[0].nb_streams:
         return -1
@@ -530,6 +572,13 @@ def avplayer_ffmpeg_decode_next_ts(handle: i32, stream_index: u32, codec_ctx: vo
                 return -1
             drain_rc: i32 = avcodec_receive_frame(codec_ctx, frame)
             if drain_rc == 0:
+                decoded: AVFramePublicPrefix& = frame.ref[AVFramePublicPrefix&]
+                if decoded.nb_samples > 0:
+                    out_audio_samples <- decoded.nb_samples.u32()
+                if decoded.sample_rate > 0:
+                    out_audio_sample_rate <- decoded.sample_rate.u32()
+                if decoded.ch_layout.nb_channels > 0:
+                    out_audio_channels <- decoded.ch_layout.nb_channels.u32()
                 next_ts: u64 = avffmpeg_last_stream_ts[stream_slot] + 33
                 avffmpeg_last_stream_ts[stream_slot] <- next_ts
                 out_ts <- next_ts
@@ -554,6 +603,13 @@ def avplayer_ffmpeg_decode_next_ts(handle: i32, stream_index: u32, codec_ctx: vo
                 return -1
             recv_rc: i32 = avcodec_receive_frame(codec_ctx, frame)
             if recv_rc == 0:
+                decoded: AVFramePublicPrefix& = frame.ref[AVFramePublicPrefix&]
+                if decoded.nb_samples > 0:
+                    out_audio_samples <- decoded.nb_samples.u32()
+                if decoded.sample_rate > 0:
+                    out_audio_sample_rate <- decoded.sample_rate.u32()
+                if decoded.ch_layout.nb_channels > 0:
+                    out_audio_channels <- decoded.ch_layout.nb_channels.u32()
                 pkt_dts_u64: mutable u64 = 0
                 if local_dts > 0:
                     pkt_dts_u64 <- local_dts.u64()
