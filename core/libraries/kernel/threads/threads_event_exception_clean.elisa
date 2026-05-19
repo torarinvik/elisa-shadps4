@@ -61,6 +61,8 @@ def posix_pthread_cleanup_pop(execute: int) -> void:
 def sceKernelCreateEventFlag(ef: mutable int&, p_name: static u8&?, attr: u32, init_pattern: u64, p_opt_param: void&?) -> int:
     if p_name == null or p_opt_param != null:
         return ORBIS_KERNEL_ERROR_EINVAL
+    if attr > 0x22u32:
+        return ORBIS_KERNEL_ERROR_EINVAL
     i: mutable int = 0
     while i < 64:
         if not g_event_flags[i].used:
@@ -110,7 +112,14 @@ def sceKernelPollEventFlag(ef: int, bit_pattern: u64, wait_mode: u32, p_result_p
     if bit_pattern == 0u64:
         return ORBIS_KERNEL_ERROR_EINVAL
     bits: u64 = g_event_flags[ef].bits
-    and_mode: bool = (wait_mode and 0x0fu32) == 0x01u32
+    wait_mode_low: u32 = wait_mode and 0x0fu32
+    if wait_mode_low != 0x01u32 and wait_mode_low != 0x02u32:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    clear_mode_bits: u32 = wait_mode and 0xf0u32
+    if clear_mode_bits != 0x00u32 and clear_mode_bits != 0x10u32 and clear_mode_bits != 0x20u32:
+        return ORBIS_KERNEL_ERROR_EINVAL
+
+    and_mode: bool = wait_mode_low == 0x01u32
     ok: bool = false
     if and_mode:
         ok <- (bits and bit_pattern) == bit_pattern
@@ -119,9 +128,9 @@ def sceKernelPollEventFlag(ef: int, bit_pattern: u64, wait_mode: u32, p_result_p
     p_result_pat <- bits
     if not ok:
         return ORBIS_KERNEL_ERROR_EBUSY
-    if (wait_mode and 0x10u32) != 0u32:
+    if clear_mode_bits == 0x10u32:
         g_event_flags[ef].bits <- 0u64
-    if (wait_mode and 0x20u32) != 0u32:
+    if clear_mode_bits == 0x20u32:
         g_event_flags[ef].bits <- g_event_flags[ef].bits and (not bit_pattern)
     return ORBIS_OK
 

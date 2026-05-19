@@ -75,6 +75,8 @@ Current validated prefix structs:
 - `Implemented`: EOF signaling from frame getters is now unified across audio/video paths using source activity (`avsrc_is_active`)
 - `Implemented`: source activity (`IsActive`) now includes demux packet queues, preventing false-inactive states while decode work is buffered
 - `Implemented`: source activity queue checks are now filtered by enabled stream types (avoids stale-queue false-active states after stream mode changes)
+- `Implemented`: disabling a stream now clears that stream’s output/demux queues and per-stream timing/EOF markers immediately
+- `Implemented`: stream-disable path now recomputes combined EOF immediately after per-stream clear operations
 - `Implemented`: `IsActive` and `CurrentTime` gating now follow the C++ source shape
 - `Partial`: no full demux/decode threads, packet queues, or converted frame pipeline
 - `Partial`: no guest buffer pool or frame-object lifetime model like C++
@@ -90,6 +92,7 @@ Current validated prefix structs:
 - `Implemented`: EOF transition support extended through `STARTING`; buffering updates now ignore terminal/error states
 - `Implemented`: queue-full policy now prefers higher-priority events (`ERROR`/`EOF`) over low-priority events
 - `Implemented`: controller now processes events in bounded bursts per tick (FIFO drain up to cap) instead of single-event only
+- `Implemented`: controller queue now coalesces consecutive duplicate events/payloads to reduce redundant event churn
 - `Partial`: no dedicated controller thread or full C++ event queue semantics
 
 ### FFI layer (`avplayer_ffmpeg_ffi.elisa`)

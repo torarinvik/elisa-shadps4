@@ -1,0 +1,77 @@
+include "../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "./core/libraries/np/np_profile_dialog/np_profile_dialog.elisa"
+
+@test
+def np_profile_dialog_lifecycle_matches_cpp_contract() -> void:
+    can Abort.Panic:
+        np_profile_dialog_reset_for_tests()
+        assert sceNpProfileDialogInitialize() == ORBIS_COMMON_DIALOG_ERROR_NOT_SYSTEM_INITIALIZED
+
+        np_profile_dialog_set_common_dialog_initialized(true)
+        assert sceNpProfileDialogInitialize() == ORBIS_COMMON_DIALOG_ERROR_OK
+        assert sceNpProfileDialogInitialize() == ORBIS_COMMON_DIALOG_ERROR_ALREADY_INITIALIZED
+        assert sceNpProfileDialogGetStatus() == ORBIS_COMMON_DIALOG_STATUS_INITIALIZED
+
+        p: mutable OrbisNpProfileDialogParam = zeroed
+        p.mode <- ORBIS_NP_PROFILE_DIALOG_MODE_NORMAL
+        p.userId <- 1
+        p.targetOnlineId.data[0] <- 84u8
+        p.targetOnlineId.data[1] <- 111u8
+        p.targetOnlineId.data[2] <- 114u8
+
+        assert sceNpProfileDialogOpen(p.ref[mutable OrbisNpProfileDialogParam&]) == ORBIS_COMMON_DIALOG_ERROR_OK
+        assert sceNpProfileDialogGetStatus() == ORBIS_COMMON_DIALOG_STATUS_RUNNING
+        assert g_np_profile_dialog_state.hasAccountId == false
+        assert g_np_profile_dialog_state.userId == 1
+        assert g_np_profile_dialog_state.onlineId.data[0] == 84u8
+
+        early_result: mutable OrbisNpProfileDialogResult = zeroed
+        assert sceNpProfileDialogGetResult(early_result.ref[mutable OrbisNpProfileDialogResult&]) == ORBIS_COMMON_DIALOG_ERROR_NOT_FINISHED
+        assert sceNpProfileDialogClose() == ORBIS_COMMON_DIALOG_ERROR_OK
+        assert sceNpProfileDialogGetStatus() == ORBIS_COMMON_DIALOG_STATUS_FINISHED
+
+        result: mutable OrbisNpProfileDialogResult = zeroed
+        assert sceNpProfileDialogGetResult(result.ref[mutable OrbisNpProfileDialogResult&]) == ORBIS_COMMON_DIALOG_ERROR_OK
+        assert result.result == ORBIS_OK
+        assert result.userAction == ORBIS_COMMON_DIALOG_RESULT_OK
+
+        assert sceNpProfileDialogTerminate() == ORBIS_COMMON_DIALOG_ERROR_OK
+        assert sceNpProfileDialogTerminate() == ORBIS_COMMON_DIALOG_ERROR_NOT_INITIALIZED
+
+@test
+def np_profile_dialog_account_id_variant_tracks_state() -> void:
+    can Abort.Panic:
+        np_profile_dialog_reset_for_tests()
+        np_profile_dialog_set_common_dialog_initialized(true)
+        assert sceNpProfileDialogInitialize() == ORBIS_COMMON_DIALOG_ERROR_OK
+
+        p: mutable OrbisNpProfileDialogParamA = zeroed
+        p.mode <- ORBIS_NP_PROFILE_DIALOG_MODE_GRIEF_REPORT
+        p.userId <- 7
+        p.targetAccountId <- 0x12345678u64
+
+        assert sceNpProfileDialogOpenA(p.ref[mutable OrbisNpProfileDialogParamA&]) == ORBIS_COMMON_DIALOG_ERROR_OK
+        assert g_np_profile_dialog_state.hasAccountId == true
+        assert g_np_profile_dialog_state.accountId == 0x12345678u64
+        assert g_np_profile_dialog_state.mode == ORBIS_NP_PROFILE_DIALOG_MODE_GRIEF_REPORT
+        assert g_np_profile_dialog_state.userId == 7
+
+        assert sceNpProfileDialogTerminate() == ORBIS_COMMON_DIALOG_ERROR_OK
+
+@test
+def np_profile_dialog_rejects_invalid_null_and_state_edges() -> void:
+    can Abort.Panic:
+        np_profile_dialog_reset_for_tests()
+        assert sceNpProfileDialogOpen(null) == ORBIS_COMMON_DIALOG_ERROR_INVALID_STATE
+        assert sceNpProfileDialogClose() == ORBIS_COMMON_DIALOG_ERROR_NOT_INITIALIZED
+
+        np_profile_dialog_set_common_dialog_initialized(true)
+        assert sceNpProfileDialogInitialize() == ORBIS_COMMON_DIALOG_ERROR_OK
+        assert sceNpProfileDialogOpen(null) == ORBIS_COMMON_DIALOG_ERROR_ARG_NULL
+        assert sceNpProfileDialogClose() == ORBIS_COMMON_DIALOG_ERROR_NOT_RUNNING
+
+        p: mutable OrbisNpProfileDialogParam = zeroed
+        p.mode <- ORBIS_NP_PROFILE_DIALOG_MODE_FRIEND_REQUEST
+        assert sceNpProfileDialogOpen(p.ref[mutable OrbisNpProfileDialogParam&]) == ORBIS_COMMON_DIALOG_ERROR_OK
+        assert sceNpProfileDialogGetResult(null) == ORBIS_COMMON_DIALOG_ERROR_ARG_NULL
+

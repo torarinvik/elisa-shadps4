@@ -1,0 +1,192 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../../error_codes.elisa"
+include "../np_types.elisa"
+
+const ORBIS_COMMON_DIALOG_STATUS_NONE: u32 = 0
+const ORBIS_COMMON_DIALOG_STATUS_INITIALIZED: u32 = 1
+const ORBIS_COMMON_DIALOG_STATUS_RUNNING: u32 = 2
+const ORBIS_COMMON_DIALOG_STATUS_FINISHED: u32 = 3
+
+const ORBIS_COMMON_DIALOG_RESULT_OK: u32 = 0
+const ORBIS_COMMON_DIALOG_RESULT_USER_CANCELED: u32 = 1
+
+const ORBIS_COMMON_DIALOG_ERROR_OK: int = 0
+const ORBIS_COMMON_DIALOG_ERROR_NOT_SYSTEM_INITIALIZED: int = 0x80B80001
+const ORBIS_COMMON_DIALOG_ERROR_NOT_INITIALIZED: int = 0x80B80003
+const ORBIS_COMMON_DIALOG_ERROR_ALREADY_INITIALIZED: int = 0x80B80004
+const ORBIS_COMMON_DIALOG_ERROR_NOT_FINISHED: int = 0x80B80005
+const ORBIS_COMMON_DIALOG_ERROR_INVALID_STATE: int = 0x80B80006
+const ORBIS_COMMON_DIALOG_ERROR_BUSY: int = 0x80B80008
+const ORBIS_COMMON_DIALOG_ERROR_NOT_RUNNING: int = 0x80B8000B
+const ORBIS_COMMON_DIALOG_ERROR_ARG_NULL: int = 0x80B8000D
+
+const ORBIS_NP_PROFILE_DIALOG_MODE_INVALID: u32 = 0
+const ORBIS_NP_PROFILE_DIALOG_MODE_NORMAL: u32 = 1
+const ORBIS_NP_PROFILE_DIALOG_MODE_FRIEND_REQUEST: u32 = 2
+const ORBIS_NP_PROFILE_DIALOG_MODE_ADD_TO_BLOCK_LIST: u32 = 3
+const ORBIS_NP_PROFILE_DIALOG_MODE_GRIEF_REPORT: u32 = 4
+
+const ORBIS_NP_PROFILE_DIALOG_MENU_GRIEF_REPORT_ITEM_INVALID: s32 = 0x00000000
+const ORBIS_NP_PROFILE_DIALOG_MENU_GRIEF_REPORT_ITEM_ONLINE_ID: s32 = 0x00000001
+const ORBIS_NP_PROFILE_DIALOG_MENU_GRIEF_REPORT_ITEM_NAME: s32 = 0x00000002
+const ORBIS_NP_PROFILE_DIALOG_MENU_GRIEF_REPORT_ITEM_PICTURE: s32 = 0x00000004
+const ORBIS_NP_PROFILE_DIALOG_MENU_GRIEF_REPORT_ITEM_ABOUT_ME: s32 = 0x00000008
+
+struct CommonDialogBaseParam:
+    size: mutable usize
+    reserved: mutable u8[36]
+    magic: mutable u32
+
+struct OrbisNpProfileDialogParam:
+    baseParam: mutable CommonDialogBaseParam
+    size: mutable u64
+    mode: mutable u32
+    userId: mutable s32
+    targetOnlineId: mutable OrbisNpOnlineId
+    userData: mutable void&?
+    reserved: mutable u8[32]
+
+struct OrbisNpProfileGriefReportParam:
+    reportItem: mutable s32
+    reserved: mutable u8[28]
+
+struct OrbisNpProfileDialogParamA:
+    baseParam: mutable CommonDialogBaseParam
+    size: mutable u64
+    mode: mutable u32
+    userId: mutable s32
+    targetAccountId: mutable OrbisNpAccountId
+    reservedAlign: mutable s32
+    userData: mutable void&?
+    reserved: mutable u8[32]
+
+struct OrbisNpProfileDialogResult:
+    result: mutable s32
+    userAction: mutable u32
+    userData: mutable void&?
+    reserved: mutable u8[32]
+
+struct NpProfileDialogState:
+    onlineId: mutable OrbisNpOnlineId
+    accountId: mutable OrbisNpAccountId
+    hasAccountId: mutable bool
+    mode: mutable u32
+    userId: mutable s32
+
+global mutable g_np_profile_dialog_status: u32 = ORBIS_COMMON_DIALOG_STATUS_NONE
+global mutable g_np_profile_dialog_state: NpProfileDialogState = zeroed
+global mutable g_np_profile_dialog_result: OrbisNpProfileDialogResult = zeroed
+global mutable g_np_profile_common_dialog_initialized: bool = false
+global mutable g_np_profile_common_dialog_used: bool = false
+
+def np_profile_dialog_set_common_dialog_initialized(initialized: bool) -> void:
+    g_np_profile_common_dialog_initialized <- initialized
+
+def np_profile_dialog_reset_for_tests() -> void:
+    g_np_profile_dialog_status <- ORBIS_COMMON_DIALOG_STATUS_NONE
+    g_np_profile_dialog_state <- zeroed
+    g_np_profile_dialog_result <- zeroed
+    g_np_profile_common_dialog_initialized <- false
+    g_np_profile_common_dialog_used <- false
+
+def np_profile_dialog_finish(user_action: u32) -> void:
+    g_np_profile_dialog_result.result <- ORBIS_OK
+    g_np_profile_dialog_result.userAction <- user_action
+    g_np_profile_dialog_status <- ORBIS_COMMON_DIALOG_STATUS_FINISHED
+
+def sceNpProfileDialogInitialize() -> int:
+    if not g_np_profile_common_dialog_initialized:
+        return ORBIS_COMMON_DIALOG_ERROR_NOT_SYSTEM_INITIALIZED
+    if g_np_profile_dialog_status != ORBIS_COMMON_DIALOG_STATUS_NONE:
+        return ORBIS_COMMON_DIALOG_ERROR_ALREADY_INITIALIZED
+    if g_np_profile_common_dialog_used:
+        return ORBIS_COMMON_DIALOG_ERROR_BUSY
+
+    g_np_profile_dialog_status <- ORBIS_COMMON_DIALOG_STATUS_INITIALIZED
+    g_np_profile_common_dialog_used <- true
+    return ORBIS_COMMON_DIALOG_ERROR_OK
+
+def sceNpProfileDialogOpen(param: mutable OrbisNpProfileDialogParam&?) -> int:
+    if g_np_profile_dialog_status != ORBIS_COMMON_DIALOG_STATUS_INITIALIZED and g_np_profile_dialog_status != ORBIS_COMMON_DIALOG_STATUS_FINISHED:
+        return ORBIS_COMMON_DIALOG_ERROR_INVALID_STATE
+    if param == null:
+        return ORBIS_COMMON_DIALOG_ERROR_ARG_NULL
+
+    g_np_profile_dialog_state <- zeroed
+    g_np_profile_dialog_state.onlineId <- param.targetOnlineId
+    g_np_profile_dialog_state.hasAccountId <- false
+    g_np_profile_dialog_state.mode <- param.mode
+    g_np_profile_dialog_state.userId <- param.userId
+
+    g_np_profile_dialog_result <- zeroed
+    g_np_profile_dialog_result.userData <- param.userData
+    g_np_profile_dialog_status <- ORBIS_COMMON_DIALOG_STATUS_RUNNING
+    return ORBIS_COMMON_DIALOG_ERROR_OK
+
+def sceNpProfileDialogOpenA(param: mutable OrbisNpProfileDialogParamA&?) -> int:
+    if g_np_profile_dialog_status != ORBIS_COMMON_DIALOG_STATUS_INITIALIZED and g_np_profile_dialog_status != ORBIS_COMMON_DIALOG_STATUS_FINISHED:
+        return ORBIS_COMMON_DIALOG_ERROR_INVALID_STATE
+    if param == null:
+        return ORBIS_COMMON_DIALOG_ERROR_ARG_NULL
+
+    g_np_profile_dialog_state <- zeroed
+    g_np_profile_dialog_state.accountId <- param.targetAccountId
+    g_np_profile_dialog_state.hasAccountId <- true
+    g_np_profile_dialog_state.mode <- param.mode
+    g_np_profile_dialog_state.userId <- param.userId
+
+    g_np_profile_dialog_result <- zeroed
+    g_np_profile_dialog_result.userData <- param.userData
+    g_np_profile_dialog_status <- ORBIS_COMMON_DIALOG_STATUS_RUNNING
+    return ORBIS_COMMON_DIALOG_ERROR_OK
+
+def sceNpProfileDialogClose() -> int:
+    if g_np_profile_dialog_status == ORBIS_COMMON_DIALOG_STATUS_NONE:
+        return ORBIS_COMMON_DIALOG_ERROR_NOT_INITIALIZED
+    if g_np_profile_dialog_status != ORBIS_COMMON_DIALOG_STATUS_RUNNING:
+        return ORBIS_COMMON_DIALOG_ERROR_NOT_RUNNING
+
+    np_profile_dialog_finish(ORBIS_COMMON_DIALOG_RESULT_OK)
+    return ORBIS_COMMON_DIALOG_ERROR_OK
+
+def sceNpProfileDialogGetResult(result: mutable OrbisNpProfileDialogResult&?) -> int:
+    if g_np_profile_dialog_status == ORBIS_COMMON_DIALOG_STATUS_NONE:
+        return ORBIS_COMMON_DIALOG_ERROR_NOT_INITIALIZED
+    if result == null:
+        return ORBIS_COMMON_DIALOG_ERROR_ARG_NULL
+    if g_np_profile_dialog_status != ORBIS_COMMON_DIALOG_STATUS_FINISHED:
+        return ORBIS_COMMON_DIALOG_ERROR_NOT_FINISHED
+
+    result <- g_np_profile_dialog_result
+    return ORBIS_COMMON_DIALOG_ERROR_OK
+
+def sceNpProfileDialogGetStatus() -> u32:
+    return g_np_profile_dialog_status
+
+def sceNpProfileDialogUpdateStatus() -> u32:
+    return g_np_profile_dialog_status
+
+def sceNpProfileDialogTerminate() -> int:
+    if g_np_profile_dialog_status == ORBIS_COMMON_DIALOG_STATUS_RUNNING:
+        np_profile_dialog_finish(ORBIS_COMMON_DIALOG_RESULT_OK)
+    if g_np_profile_dialog_status == ORBIS_COMMON_DIALOG_STATUS_NONE:
+        return ORBIS_COMMON_DIALOG_ERROR_NOT_INITIALIZED
+
+    g_np_profile_dialog_status <- ORBIS_COMMON_DIALOG_STATUS_NONE
+    g_np_profile_common_dialog_used <- false
+    return ORBIS_COMMON_DIALOG_ERROR_OK
+
+def RegisterLib(sym: void&?) -> void:
+    _ = sym
+    LIB_FUNCTION("uj9Cz7Tk0cc", "libSceNpProfileDialogCompat", 1, "libSceNpProfileDialog", sceNpProfileDialogOpen)
+    LIB_FUNCTION("wkwjz0Xdo2A", "libSceNpProfileDialog", 1, "libSceNpProfileDialog", sceNpProfileDialogClose)
+    LIB_FUNCTION("8rhLl1-0W-o", "libSceNpProfileDialog", 1, "libSceNpProfileDialog", sceNpProfileDialogGetResult)
+    LIB_FUNCTION("3BqoiFOjSsk", "libSceNpProfileDialog", 1, "libSceNpProfileDialog", sceNpProfileDialogGetStatus)
+    LIB_FUNCTION("Lg+NCE6pTwQ", "libSceNpProfileDialog", 1, "libSceNpProfileDialog", sceNpProfileDialogInitialize)
+    LIB_FUNCTION("uj9Cz7Tk0cc", "libSceNpProfileDialog", 1, "libSceNpProfileDialog", sceNpProfileDialogOpen)
+    LIB_FUNCTION("nrQRlLKzdwE", "libSceNpProfileDialog", 1, "libSceNpProfileDialog", sceNpProfileDialogOpenA)
+    LIB_FUNCTION("0Sp9vJcB1-w", "libSceNpProfileDialog", 1, "libSceNpProfileDialog", sceNpProfileDialogTerminate)
+    LIB_FUNCTION("haVZE9FgKqE", "libSceNpProfileDialog", 1, "libSceNpProfileDialog", sceNpProfileDialogUpdateStatus)
+
