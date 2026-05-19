@@ -21,6 +21,7 @@ const AVPLAYER_EVENTS_STATE_BUFFERING: i32 = 0x05
 const AVPLAYER_EVENTS_WARNING_ID: i32 = 0x20
 const AVS_MAX_HANDLES: int = 64
 const AVS_EVENT_QUEUE_CAP: int = 16
+const AVS_EVENT_PROCESS_BURST_MAX: int = 8
 const AVS_EVENT_NONE: i32 = 0
 const AVS_EVENT_WARNING: i32 = 1
 const AVS_EVENT_ADD_SOURCE: i32 = 2
@@ -164,34 +165,34 @@ def avs_on_eof(slot: int):
     avs_event_q_push(slot, AVS_EVENT_EOF, 0)
 
 def avs_process_events(slot: int, source_find_stream_info_ok: bool):
-    evt: mutable i32 = AVS_EVENT_NONE
-    payload: mutable i32 = 0
-    if not avs_event_q_pop(slot, evt, payload):
-        return
-    if evt == AVS_EVENT_WARNING:
-        g_state_warning_last[slot] <- payload
-        g_state_event_last[slot] <- AVPLAYER_EVENTS_WARNING_ID
-        return
-    if evt == AVS_EVENT_ERROR:
-        g_state_warning_last[slot] <- payload
-        g_state_event_last[slot] <- AVPLAYER_EVENTS_WARNING_ID
-        _ = avs_set_state(slot, AV_STATE_ERROR)
-        return
-    if evt == AVS_EVENT_REVERT_STATE:
-        _ = avs_set_state(slot, g_state_previous[slot])
-        return
-    if evt == AVS_EVENT_EOF:
-        if g_state_current[slot] == AV_STATE_PLAY or g_state_current[slot] == AV_STATE_BUFFERING or g_state_current[slot] == AV_STATE_PAUSE or g_state_current[slot] == AV_STATE_STARTING:
-            _ = avs_set_state(slot, AV_STATE_END_OF_FILE)
-        return
-    if evt == AVS_EVENT_ADD_SOURCE:
-        if source_find_stream_info_ok:
-            _ = avs_set_state(slot, AV_STATE_READY)
-        else:
-            g_state_warning_last[slot] <- ORBIS_AVPLAYER_ERROR_NOT_SUPPORTED
+    processed: mutable int = 0
+    while processed < AVS_EVENT_PROCESS_BURST_MAX:
+        evt: mutable i32 = AVS_EVENT_NONE
+        payload: mutable i32 = 0
+        if not avs_event_q_pop(slot, evt, payload):
+            return
+        processed <- processed + 1
+        if evt == AVS_EVENT_WARNING:
+            g_state_warning_last[slot] <- payload
+            g_state_event_last[slot] <- AVPLAYER_EVENTS_WARNING_ID
+        elif evt == AVS_EVENT_ERROR:
+            g_state_warning_last[slot] <- payload
             g_state_event_last[slot] <- AVPLAYER_EVENTS_WARNING_ID
             _ = avs_set_state(slot, AV_STATE_ERROR)
-        return
+            return
+        elif evt == AVS_EVENT_REVERT_STATE:
+            _ = avs_set_state(slot, g_state_previous[slot])
+        elif evt == AVS_EVENT_EOF:
+            if g_state_current[slot] == AV_STATE_PLAY or g_state_current[slot] == AV_STATE_BUFFERING or g_state_current[slot] == AV_STATE_PAUSE or g_state_current[slot] == AV_STATE_STARTING:
+                _ = avs_set_state(slot, AV_STATE_END_OF_FILE)
+        elif evt == AVS_EVENT_ADD_SOURCE:
+            if source_find_stream_info_ok:
+                _ = avs_set_state(slot, AV_STATE_READY)
+            else:
+                g_state_warning_last[slot] <- ORBIS_AVPLAYER_ERROR_NOT_SUPPORTED
+                g_state_event_last[slot] <- AVPLAYER_EVENTS_WARNING_ID
+                _ = avs_set_state(slot, AV_STATE_ERROR)
+                return
 
 def avs_start(slot: int) -> bool:
     if not g_state_has_source[slot]:
