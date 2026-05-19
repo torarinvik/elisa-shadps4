@@ -15,6 +15,26 @@ const ORBIS_PNG_ENC_FILTER_TYPE_AVERAGE: u16 = 4
 const ORBIS_PNG_ENC_FILTER_TYPE_PAETH: u16 = 8
 const ORBIS_PNG_ENC_FILTER_TYPE_ALL: u16 = 15
 
+const PNG_IMAGE_VERSION: u32 = 1
+const PNG_FORMAT_RGB: u32 = 0x02
+const PNG_FORMAT_BGR: u32 = 0x12
+const PNG_FORMAT_RGBA: u32 = 0x03
+const PNG_FORMAT_BGRA: u32 = 0x13
+
+struct PngImage layout c:
+    opaque: void&?
+    version: u32
+    width: u32
+    height: u32
+    format: u32
+    flags: u32
+    colormap_entries: u32
+    warning_or_error: u32
+    message: u8[64]
+
+@link_name(png_image_write_to_memory)
+extern c_png_image_write_to_memory(image: mutable PngImage&, memory: mutable void&?, memory_bytes: mutable usize&, convert_to_8_bit: int, buffer: void&, row_stride: i32, colormap: void&?) -> int
+
 @fixed_layout
 struct OrbisPngEncCreateParam:
     this_size: u32
@@ -387,63 +407,83 @@ def scePngEncEncode(handle: OrbisPngEncHandle, param: OrbisPngEncEncodeParam&?, 
         return ORBIS_PNG_ENC_ERROR_INVALID_PARAM
     if param.filter_type > ORBIS_PNG_ENC_FILTER_TYPE_ALL:
         return ORBIS_PNG_ENC_ERROR_INVALID_PARAM
+    native_image: mutable PngImage = zeroed
+    native_image.version <- PNG_IMAGE_VERSION
+    native_image.width <- param.image_width
+    native_image.height <- param.image_height
 
-    needed: u32 = PngEnc_CalcPngSize(param.image_width, param.image_height, param.color_space)
-    if param.png_mem_size < needed:
+    src_opt: u8&? = param.image_mem_addr
+    if src_opt == null:
+        return ORBIS_PNG_ENC_ERROR_INVALID_ADDR
+    src: u8& = src_opt
+
+    output_opt: mutable u8&? = param.png_mem_addr
+    if output_opt == null:
+        return ORBIS_PNG_ENC_ERROR_INVALID_ADDR
+    output_buf: mutable u8& = output_opt
+
+    probe_bytes: usize = param.png_mem_size.usize()
+    image_arg: void& = src as void&
+    row_stride: i32 = param.image_pitch.i32()
+    scratch_rgb: mutable u8[1048576] = zeroed
+
+    if param.color_space == ORBIS_PNG_ENC_COLOR_SPACE_RGBA:
+        if param.pixel_format == ORBIS_PNG_ENC_PIXEL_FORMAT_B8G8R8A8:
+            native_image.format <- PNG_FORMAT_BGRA
+        else:
+            native_image.format <- PNG_FORMAT_RGBA
+    else:
+        row_bytes: u32 = PngEnc_RowBytes(param.image_width, param.color_space)
+        packed_size: u32 = row_bytes * param.image_height
+        if packed_size > 1048576:
+            if output_info != null:
+                output_info.data_size <- 0
+                output_info.processed_height <- 0
+            return ORBIS_PNG_ENC_ERROR_INVALID_SIZE
+        if param.pixel_format == ORBIS_PNG_ENC_PIXEL_FORMAT_B8G8R8A8:
+            native_image.format <- PNG_FORMAT_BGR
+        else:
+            native_image.format <- PNG_FORMAT_RGB
+        y: u32 = 0
+        while y < param.image_height:
+            src_row_off: u32 = y * param.image_pitch
+            dst_row_off: u32 = y * row_bytes
+            x: u32 = 0
+            while x < param.image_width:
+                s: u32 = src_row_off + x * 4
+                d: u32 = dst_row_off + x * 3
+                scratch_rgb[d.usize()] <- src[s.usize()]
+                scratch_rgb[(d + 1).usize()] <- src[(s + 1).usize()]
+                scratch_rgb[(d + 2).usize()] <- src[(s + 2).usize()]
+                x <- x + 1
+            y <- y + 1
+        image_arg <- scratch_rgb.ref[mutable u8&] as void&
+        row_stride <- row_bytes.i32()
+
+    probe_ok: int = c_png_image_write_to_memory(native_image.ref[mutable PngImage&], null, probe_bytes.ref[mutable usize&], 0, image_arg, row_stride, null)
+    if probe_ok == 0:
+        if output_info != null:
+            output_info.data_size <- 0
+            output_info.processed_height <- 0
+        return ORBIS_PNG_ENC_ERROR_FATAL
+    if probe_bytes > param.png_mem_size.usize():
         if output_info != null:
             output_info.data_size <- 0
             output_info.processed_height <- 0
         return ORBIS_PNG_ENC_ERROR_DATA_OVERFLOW
 
-    out: mutable u8& = (param.png_mem_addr as mutable u8&)
-
-    row_bytes: u32 = PngEnc_RowBytes(param.image_width, param.color_space)
-    raw_size: u32 = (row_bytes + 1) * param.image_height
-    raw: mutable u8[1048576] = zeroed
-    if raw_size > 1048576:
-        return ORBIS_PNG_ENC_ERROR_INVALID_SIZE
-    build_raw_ret: int = PngEnc_BuildRawRows(param, raw.ref[mutable u8&], raw_size)
-    if build_raw_ret != ORBIS_OK:
-        return build_raw_ret
-
-    zlib: mutable u8[1056768] = zeroed
-    zlib_written: int = PngEnc_BuildZlibStored(raw.ref[mutable u8&], raw_size, zlib.ref[mutable u8&], 1056768)
-    if zlib_written < 0:
-        return zlib_written
-
-    write_off: mutable u32 = 0
-    out[0] <- 137.u8()
-    out[1] <- 80.u8()
-    out[2] <- 78.u8()
-    out[3] <- 71.u8()
-    out[4] <- 13.u8()
-    out[5] <- 10.u8()
-    out[6] <- 26.u8()
-    out[7] <- 10.u8()
-    write_off <- 8
-
-    ihdr: mutable u8[13] = zeroed
-    PngEnc_WriteBe32(ihdr.ref[mutable u8&], 0, param.image_width)
-    PngEnc_WriteBe32(ihdr.ref[mutable u8&], 4, param.image_height)
-    ihdr[8] <- 8.u8()
-    ihdr_color: u8 = 2.u8()
-    if param.color_space == ORBIS_PNG_ENC_COLOR_SPACE_RGBA:
-        ihdr_color <- 6.u8()
-    ihdr[9] <- ihdr_color
-    ihdr[10] <- 0.u8()
-    ihdr[11] <- 0.u8()
-    ihdr[12] <- 0.u8()
-    PngEnc_WriteChunk(out, write_off.ref[mutable u32&], 73.u8(), 72.u8(), 68.u8(), 82.u8(), ihdr.ref[mutable u8&], 0, 13)
-
-    PngEnc_WriteChunk(out, write_off.ref[mutable u32&], 73.u8(), 68.u8(), 65.u8(), 84.u8(), zlib.ref[mutable u8&], 0, zlib_written.u32())
-
-    empty: mutable u8[1] = zeroed
-    PngEnc_WriteChunk(out, write_off.ref[mutable u32&], 73.u8(), 69.u8(), 78.u8(), 68.u8(), empty.ref[mutable u8&], 0, 0)
+    written_bytes: usize = param.png_mem_size.usize()
+    write_ok: int = c_png_image_write_to_memory(native_image.ref[mutable PngImage&], output_buf as mutable void&?, written_bytes.ref[mutable usize&], 0, image_arg, row_stride, null)
+    if write_ok == 0:
+        if output_info != null:
+            output_info.data_size <- 0
+            output_info.processed_height <- 0
+        return ORBIS_PNG_ENC_ERROR_FATAL
 
     if output_info != null:
-        output_info.data_size <- write_off
+        output_info.data_size <- written_bytes.u32()
         output_info.processed_height <- param.image_height
-    return write_off.i32()
+    return written_bytes.i32()
 
 def scePngEncQueryMemorySize(param: OrbisPngEncCreateParam&?) -> int:
     if param == null:

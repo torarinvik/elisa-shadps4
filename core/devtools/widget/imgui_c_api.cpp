@@ -10,8 +10,34 @@
 
 extern "C" {
 
+static ImDrawList* GetCurrentDrawList() {
+    ImGuiWindow* window = ImGui::GetCurrentWindow();
+    return window != nullptr ? window->DrawList : nullptr;
+}
+
+ElisaImGuiIOState elisa_imgui_get_io_state() {
+    const ImGuiIO& io = ImGui::GetIO();
+    return ElisaImGuiIOState{
+        ElisaImGuiVec2{io.DisplaySize.x, io.DisplaySize.y},
+        io.DeltaTime,
+        io.NavActive,
+    };
+}
+
+void elisa_imgui_set_next_window_pos(float x, float y, int cond) {
+    ImGui::SetNextWindowPos(ImVec2{x, y}, static_cast<ImGuiCond>(cond));
+}
+
 void elisa_imgui_set_next_window_size(float x, float y, int cond) {
     ImGui::SetNextWindowSize(ImVec2{x, y}, static_cast<ImGuiCond>(cond));
+}
+
+void elisa_imgui_set_next_window_collapsed(bool collapsed, int cond) {
+    ImGui::SetNextWindowCollapsed(collapsed, static_cast<ImGuiCond>(cond));
+}
+
+void elisa_imgui_set_next_window_focus() {
+    ImGui::SetNextWindowFocus();
 }
 
 void elisa_imgui_set_window_pos(float x, float y) {
@@ -142,12 +168,20 @@ void elisa_imgui_push_style_color_u32(int idx, uint32_t color) {
     ImGui::PushStyleColor(static_cast<ImGuiCol>(idx), color);
 }
 
+void elisa_imgui_push_style_color_vec4(int idx, float r, float g, float b, float a) {
+    ImGui::PushStyleColor(static_cast<ImGuiCol>(idx), ImVec4{r, g, b, a});
+}
+
 void elisa_imgui_pop_style_color(int count) {
     ImGui::PopStyleColor(count);
 }
 
 void elisa_imgui_push_style_var_vec2(int idx, float x, float y) {
     ImGui::PushStyleVar(static_cast<ImGuiStyleVar>(idx), ImVec2{x, y});
+}
+
+void elisa_imgui_push_style_var_float(int idx, float value) {
+    ImGui::PushStyleVar(static_cast<ImGuiStyleVar>(idx), value);
 }
 
 void elisa_imgui_pop_style_var(int count) {
@@ -176,12 +210,32 @@ ElisaImGuiVec2 elisa_imgui_get_cursor_screen_pos() {
     return ElisaImGuiVec2{value.x, value.y};
 }
 
+void elisa_imgui_set_cursor_pos(float x, float y) {
+    ImGui::SetCursorPos(ImVec2{x, y});
+}
+
 void elisa_imgui_set_cursor_pos_x(float x) {
     ImGui::SetCursorPosX(x);
 }
 
 void elisa_imgui_dummy(float x, float y) {
     ImGui::Dummy(ImVec2{x, y});
+}
+
+ElisaImGuiVec2 elisa_imgui_calc_text_size(const char* text) {
+    if (text == nullptr) {
+        return ElisaImGuiVec2{0.0f, 0.0f};
+    }
+    const ImVec2 value = ImGui::CalcTextSize(text);
+    return ElisaImGuiVec2{value.x, value.y};
+}
+
+bool elisa_imgui_button_sized(const char* label, float x, float y) {
+    return ImGui::Button(label, ImVec2{x, y});
+}
+
+void elisa_imgui_set_item_default_focus() {
+    ImGui::SetItemDefaultFocus();
 }
 
 bool elisa_imgui_is_item_hovered() {
@@ -301,17 +355,81 @@ void elisa_imgui_window_draw_text_font(int font_index, float font_size, float x,
 
 void elisa_imgui_window_draw_text_char(int font_index, float font_size, float x, float y,
                                        uint32_t color, uint32_t codepoint) {
-    ImGuiWindow* window = ImGui::GetCurrentWindow();
+    ImDrawList* draw_list = GetCurrentDrawList();
     ImFont* font = GetIndexedFont(font_index);
-    if (window == nullptr || font == nullptr) {
+    if (draw_list == nullptr || font == nullptr) {
         return;
     }
-    char buffer[8]{};
-    int len = ImTextCharToUtf8(buffer, static_cast<unsigned int>(codepoint));
-    if (len <= 0) {
+    char buffer[5]{};
+    const char* text = ImTextCharToUtf8(buffer, static_cast<unsigned int>(codepoint));
+    if (text == nullptr || text[0] == '\0') {
         return;
     }
-    window->DrawList->AddText(font, font_size, ImVec2{x, y}, color, buffer, buffer + len);
+    draw_list->AddText(font, font_size, ImVec2{x, y}, color, text);
+}
+
+uint32_t elisa_imgui_color_convert_float4_to_u32(float r, float g, float b, float a) {
+    return ImGui::ColorConvertFloat4ToU32(ImVec4{r, g, b, a});
+}
+
+void elisa_imgui_window_draw_rect_filled(float min_x, float min_y, float max_x, float max_y,
+                                         uint32_t color, float rounding) {
+    ImDrawList* draw_list = GetCurrentDrawList();
+    if (draw_list == nullptr) {
+        return;
+    }
+    draw_list->AddRectFilled(ImVec2{min_x, min_y}, ImVec2{max_x, max_y}, color, rounding);
+}
+
+void elisa_imgui_window_draw_rect_filled_multicolor(float min_x, float min_y, float max_x,
+                                                    float max_y, uint32_t col_upr_left,
+                                                    uint32_t col_upr_right,
+                                                    uint32_t col_bot_right,
+                                                    uint32_t col_bot_left) {
+    ImDrawList* draw_list = GetCurrentDrawList();
+    if (draw_list == nullptr) {
+        return;
+    }
+    draw_list->AddRectFilledMultiColor(ImVec2{min_x, min_y}, ImVec2{max_x, max_y},
+                                       col_upr_left, col_upr_right, col_bot_right,
+                                       col_bot_left);
+}
+
+void elisa_imgui_window_draw_rect(float min_x, float min_y, float max_x, float max_y,
+                                  uint32_t color, float rounding, float thickness) {
+    ImDrawList* draw_list = GetCurrentDrawList();
+    if (draw_list == nullptr) {
+        return;
+    }
+    draw_list->AddRect(ImVec2{min_x, min_y}, ImVec2{max_x, max_y}, color, rounding, 0,
+                       thickness);
+}
+
+void elisa_imgui_window_draw_circle_filled(float center_x, float center_y, float radius,
+                                           uint32_t color, int segments) {
+    ImDrawList* draw_list = GetCurrentDrawList();
+    if (draw_list == nullptr) {
+        return;
+    }
+    draw_list->AddCircleFilled(ImVec2{center_x, center_y}, radius, color, segments);
+}
+
+void elisa_imgui_window_draw_circle(float center_x, float center_y, float radius,
+                                    uint32_t color, int segments, float thickness) {
+    ImDrawList* draw_list = GetCurrentDrawList();
+    if (draw_list == nullptr) {
+        return;
+    }
+    draw_list->AddCircle(ImVec2{center_x, center_y}, radius, color, segments, thickness);
+}
+
+void elisa_imgui_window_draw_line(float a_x, float a_y, float b_x, float b_y, uint32_t color,
+                                  float thickness) {
+    ImDrawList* draw_list = GetCurrentDrawList();
+    if (draw_list == nullptr) {
+        return;
+    }
+    draw_list->AddLine(ImVec2{a_x, a_y}, ImVec2{b_x, b_y}, color, thickness);
 }
 
 } // extern "C"

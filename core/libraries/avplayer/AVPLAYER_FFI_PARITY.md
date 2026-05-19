@@ -66,6 +66,7 @@ Current validated prefix structs:
 - `Implemented`: frame getters now clear stream detail payloads before filling (prevents stale metadata leakage across calls)
 - `Implemented`: `AvPlayerFrameInfoEx` now uses a richer Ex-specific detail layout closer to the C++ public API, including video framerate/crop/pitch/bit-depth fields
 - `Implemented`: `GetVideoDataEx` now deterministically fills Ex-only video metadata defaults (framerate fallback, crop offsets, pitch, bit-depth, range flag) from current source/cadence state
+- `Implemented`: Ex-detail clear path now zeroes all reserved Ex payload bytes (`audio/video/subs`) to better mirror C++ union-style zero-initialization behavior
 - `Implemented`: source tracks delivered frame interval estimates; audio frame `size` now uses cadence-based estimate instead of constant zero
 - `Implemented`: source now caches delivered audio frame byte-size per output frame; API consumes delivered size first and only falls back to estimate when unavailable
 - `Implemented`: source caches stream start-time/duration for active audio/video and frame getters now apply cached stream start-time offset to output timestamps

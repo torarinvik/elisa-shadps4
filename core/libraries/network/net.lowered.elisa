@@ -308,65 +308,73 @@ const ORBIS_NET_ERROR_RESOLVER_ENORECORD: int = 0x804101e9
 
 const ORBIS_NET_ERROR_RESOLVER_EALIGNMENT: int = 0x804101ea
 
-@link_name(socket)
+@link_name(NetElisa_net_errno)
 @c_abi(c)
-extern c_socket(domain: int, socktype: int, protocol: int) -> int
+extern c_net_errno() -> int
 
-@link_name(bind)
+@link_name(NetElisa_sys_socketex)
+@c_abi(c)
+extern c_socketex(name: u8&?, domain: int, socktype: int, protocol: int) -> int
+
+@link_name(NetElisa_sys_bind)
 @c_abi(c)
 extern c_bind(fd: int, addr: u8&?, addrlen: u32) -> int
 
-@link_name(accept)
+@link_name(NetElisa_sys_accept)
 @c_abi(c)
 extern c_accept(fd: int, addr: u8&?, paddrlen: u32&?) -> int
 
-@link_name(connect)
+@link_name(NetElisa_sys_connect)
 @c_abi(c)
 extern c_connect(fd: int, addr: u8&?, addrlen: u32) -> int
 
-@link_name(getpeername)
+@link_name(NetElisa_sys_getpeername)
 @c_abi(c)
 extern c_getpeername(fd: int, addr: u8&?, paddrlen: u32&?) -> int
 
-@link_name(getsockname)
+@link_name(NetElisa_sys_getsockname)
 @c_abi(c)
 extern c_getsockname(fd: int, addr: u8&?, paddrlen: u32&?) -> int
 
-@link_name(getsockopt)
+@link_name(NetElisa_sys_getsockopt)
 @c_abi(c)
 extern c_getsockopt(fd: int, level: int, optname: int, optval: u8&?, optlen: u32&?) -> int
 
-@link_name(listen)
+@link_name(NetElisa_sys_listen)
 @c_abi(c)
 extern c_listen(fd: int, backlog: int) -> int
 
-@link_name(setsockopt)
+@link_name(NetElisa_sys_setsockopt)
 @c_abi(c)
 extern c_setsockopt(fd: int, level: int, optname: int, optval: u8&?, optlen: u32) -> int
 
-@link_name(sendto)
+@link_name(NetElisa_sys_sendto)
 @c_abi(c)
 extern c_sendto(fd: int, buf: u8&?, len: usize, flags: int, addr: u8&?, addrlen: u32) -> isize
 
-@link_name(sendmsg)
+@link_name(NetElisa_sys_sendmsg)
 @c_abi(c)
 extern c_sendmsg(fd: int, msg: u8&?, flags: int) -> isize
 
-@link_name(recvfrom)
+@link_name(NetElisa_sys_recvfrom)
 @c_abi(c)
 extern c_recvfrom(fd: int, buf: u8&?, len: usize, flags: int, addr: u8&?, paddrlen: u32&?) -> isize
 
-@link_name(recvmsg)
+@link_name(NetElisa_sys_recvmsg)
 @c_abi(c)
 extern c_recvmsg(fd: int, msg: u8&?, flags: int) -> isize
 
-@link_name(shutdown)
+@link_name(NetElisa_sys_shutdown)
 @c_abi(c)
 extern c_shutdown(fd: int, how: int) -> int
 
-@link_name(close)
+@link_name(NetElisa_sys_socketclose)
 @c_abi(c)
 extern c_close(fd: int) -> int
+
+@link_name(NetElisa_sys_netabort)
+@c_abi(c)
+extern c_netabort(fd: int, flags: int) -> int
 
 @link_name(inet_pton)
 @c_abi(c)
@@ -643,11 +651,16 @@ def sceNet_FfiSizeResult(result: isize, fallback: int) -> int:
     return result.int()
 
 def sceNet_MapNativeErrno(fallback: int) -> int:
-    err: int = posix_errno()
+    err: int = c_net_errno()
     if (err < 0):
         err <- (-err)
     if (err == 0):
         return fallback
+    if (err == ORBIS_NET_ENOTSOCK):
+        err <- ORBIS_NET_EBADF
+    else:
+        if (err == ORBIS_NET_ENETINTR):
+            err <- ORBIS_NET_EINTR
     if (err > 255):
         return fallback
     return (ORBIS_NET_ERROR_BASE | err)
@@ -1779,7 +1792,7 @@ def sceNetSocket(name: u8&?, family: int, type: int, protocol: int) -> i64:
     err: int = sceNet_RequireInit()
     if (err != ORBIS_OK):
         return ORBIS_NET_ERROR_ENOTINIT
-    native_fd: int = c_socket(family, type, protocol)
+    native_fd: int = c_socketex(name, family, type, protocol)
     if (native_fd < 0):
         sceNet_SetErr(ORBIS_NET_ERROR_EPROTONOSUPPORT)
         return ORBIS_NET_ERROR_EPROTONOSUPPORT
@@ -1808,9 +1821,8 @@ def sceNetSocketAbort(s: i64, flags: int) -> int:
     if (idx < 0):
         sceNet_SetErr(ORBIS_NET_ERROR_ENOTSOCK)
         return ORBIS_NET_ERROR_ENOTSOCK
-    _ = flags
-    sceNet_SetErr(ORBIS_NET_ERROR_EBADF)
-    return ORBIS_NET_ERROR_EBADF
+    result: int = c_netabort(s.int(), flags)
+    return sceNet_FfiIntResult(result, ORBIS_NET_ERROR_EBADF)
 
 def sceNetSocketClose(s: i64) -> int:
     if (not g_net_initialized):
