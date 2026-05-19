@@ -60,6 +60,7 @@ Current validated prefix structs:
 - `Implemented`: per-stream EOF tracking (video/audio) with combined source EOF derived from stream completion + queue emptiness
 - `Implemented`: centralized loop restart at demux stage (flush/reset queues + codec flush + FFmpeg restart)
 - `Implemented`: per-stream prefetch loop retries removed; loop handling now flows through centralized demux-stage restart
+- `Implemented`: bounded decode-driven output fill step before get-audio/get-video return paths
 - `Implemented`: `IsActive` and `CurrentTime` gating now follow the C++ source shape
 - `Partial`: no full demux/decode threads, packet queues, or converted frame pipeline
 - `Partial`: no guest buffer pool or frame-object lifetime model like C++

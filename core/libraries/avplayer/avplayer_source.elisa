@@ -9,6 +9,7 @@ const AVPLAYER_MAX_STREAMS: int = 8
 const AVSRC_MAX_HANDLES: int = 64
 const AVSRC_TS_QUEUE_CAP: int = 64
 const AVSRC_DEMUX_BURST_MAX: int = 8
+const AVSRC_OUTPUT_FILL_MAX: int = 8
 
 const AVPLAYER_STREAM_TYPE_VIDEO: u32 = 0
 const AVPLAYER_STREAM_TYPE_AUDIO: u32 = 1
@@ -37,6 +38,10 @@ global mutable avsrc_video_stream_index: i32[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_audio_stream_index: i32[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_video_codec_ctx: void&?[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_audio_codec_ctx: void&?[AVSRC_MAX_HANDLES] = zeroed
+global mutable avsrc_video_width_cache: u32[AVSRC_MAX_HANDLES] = zeroed
+global mutable avsrc_video_height_cache: u32[AVSRC_MAX_HANDLES] = zeroed
+global mutable avsrc_audio_channels_cache: u32[AVSRC_MAX_HANDLES] = zeroed
+global mutable avsrc_audio_sample_rate_cache: u32[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_video_q_head: int[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_video_q_tail: int[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_video_q_size: int[AVSRC_MAX_HANDLES] = zeroed
@@ -187,6 +192,10 @@ def avsrc_init_handle(slot: int):
     avsrc_audio_stream_index[slot] <- -1
     avsrc_video_codec_ctx[slot] <- null
     avsrc_audio_codec_ctx[slot] <- null
+    avsrc_video_width_cache[slot] <- 0
+    avsrc_video_height_cache[slot] <- 0
+    avsrc_audio_channels_cache[slot] <- 0
+    avsrc_audio_sample_rate_cache[slot] <- 0
     avsrc_video_q_head[slot] <- 0
     avsrc_video_q_tail[slot] <- 0
     avsrc_video_q_size[slot] <- 0
@@ -276,10 +285,14 @@ def avsrc_enable_stream(slot: int, stream_index: u32) -> bool:
     if typ == AVPLAYER_STREAM_TYPE_VIDEO:
         avsrc_video_enabled[slot] <- true
         avsrc_video_stream_index[slot] <- stream_index.i32()
+        avsrc_video_width_cache[slot] <- video_width
+        avsrc_video_height_cache[slot] <- video_height
         return true
     if typ == AVPLAYER_STREAM_TYPE_AUDIO:
         avsrc_audio_enabled[slot] <- true
         avsrc_audio_stream_index[slot] <- stream_index.i32()
+        avsrc_audio_channels_cache[slot] <- audio_channels
+        avsrc_audio_sample_rate_cache[slot] <- audio_sample_rate
         return true
     if typ == AVPLAYER_STREAM_TYPE_TIMED_TEXT:
         avsrc_timedtext_enabled[slot] <- true
@@ -301,10 +314,14 @@ def avsrc_disable_stream(slot: int, stream_index: u32) -> bool:
     if typ == AVPLAYER_STREAM_TYPE_VIDEO:
         avsrc_video_enabled[slot] <- false
         avsrc_video_stream_index[slot] <- -1
+        avsrc_video_width_cache[slot] <- 0
+        avsrc_video_height_cache[slot] <- 0
         return true
     if typ == AVPLAYER_STREAM_TYPE_AUDIO:
         avsrc_audio_enabled[slot] <- false
         avsrc_audio_stream_index[slot] <- -1
+        avsrc_audio_channels_cache[slot] <- 0
+        avsrc_audio_sample_rate_cache[slot] <- 0
         return true
     if typ == AVPLAYER_STREAM_TYPE_TIMED_TEXT:
         avsrc_timedtext_enabled[slot] <- false
@@ -470,6 +487,34 @@ def avsrc_demux_fill_once(slot: int) -> bool:
     if not progressed and avsrc_try_loop_restart(slot):
         progressed <- true
     return progressed
+
+def avsrc_fill_outputs(slot: int, want_video: bool, want_audio: bool) -> bool:
+    if not avsrc_ffmpeg_enabled[slot]:
+        return false
+    iter: mutable int = 0
+    any_progress: mutable bool = false
+    keep_filling: mutable bool = true
+    while iter < AVSRC_OUTPUT_FILL_MAX and keep_filling:
+        iter <- iter + 1
+        have_video: bool = (not want_video) or avsrc_video_q_size[slot] > 0
+        have_audio: bool = (not want_audio) or avsrc_audio_q_size[slot] > 0
+        if have_video and have_audio:
+            keep_filling <- false
+        progressed: mutable bool = false
+        if keep_filling and avsrc_demux_fill_once(slot):
+            progressed <- true
+            any_progress <- true
+        if keep_filling and want_video and avsrc_video_q_size[slot] == 0 and avsrc_prefetch_video(slot):
+            progressed <- true
+            any_progress <- true
+        if keep_filling and want_audio and avsrc_audio_q_size[slot] == 0 and avsrc_prefetch_audio(slot):
+            progressed <- true
+            any_progress <- true
+        if keep_filling and not progressed:
+            keep_filling <- false
+    have_video: bool = (not want_video) or avsrc_video_q_size[slot] > 0
+    have_audio: bool = (not want_audio) or avsrc_audio_q_size[slot] > 0
+    return (have_video and have_audio) or any_progress
 
 def avsrc_start(slot: int) -> bool:
     if not avsrc_has_source[slot]:
@@ -658,7 +703,7 @@ def avsrc_get_video_data(slot: int, out_ts: mutable u64&) -> bool:
     if not avsrc_has_source[slot] or not avsrc_started[slot] or avsrc_is_paused[slot] or not avsrc_video_enabled[slot]:
         return false
     if avsrc_video_q_size[slot] == 0 and avsrc_ffmpeg_enabled[slot]:
-        _ = avsrc_demux_fill_once(slot)
+        _ = avsrc_fill_outputs(slot, true, avsrc_audio_enabled[slot])
         if avsrc_video_q_size[slot] == 0 and not avsrc_prefetch_video(slot):
             return false
     candidate_ts: mutable u64 = 0
@@ -687,7 +732,7 @@ def avsrc_get_audio_data(slot: int, out_ts: mutable u64&) -> bool:
         avsrc_last_audio_ts[slot] <- out_ts
         return true
     if avsrc_ffmpeg_enabled[slot]:
-        _ = avsrc_demux_fill_once(slot)
+        _ = avsrc_fill_outputs(slot, avsrc_video_enabled[slot], true)
         if not avsrc_prefetch_audio(slot):
             return false
         if avsrc_audio_q_pop(slot, out_ts):
@@ -725,3 +770,15 @@ def avsrc_get_stream_language(slot: int, stream_index: u32) -> i8&?:
     if not avsrc_ffmpeg_enabled[slot]:
         return null
     return avplayer_ffmpeg_get_stream_language(avsrc_ffmpeg_handle[slot], stream_index)
+
+def avsrc_get_video_width(slot: int) -> u32:
+    return avsrc_video_width_cache[slot]
+
+def avsrc_get_video_height(slot: int) -> u32:
+    return avsrc_video_height_cache[slot]
+
+def avsrc_get_audio_channels(slot: int) -> u32:
+    return avsrc_audio_channels_cache[slot]
+
+def avsrc_get_audio_sample_rate(slot: int) -> u32:
+    return avsrc_audio_sample_rate_cache[slot]
