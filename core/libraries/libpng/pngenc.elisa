@@ -8,6 +8,11 @@ const ORBIS_PNG_ENC_COLOR_SPACE_RGB: u16 = 3
 const ORBIS_PNG_ENC_COLOR_SPACE_RGBA: u16 = 19
 const ORBIS_PNG_ENC_PIXEL_FORMAT_R8G8B8A8: u16 = 0
 const ORBIS_PNG_ENC_PIXEL_FORMAT_B8G8R8A8: u16 = 1
+const ORBIS_PNG_ENC_FILTER_TYPE_NONE: u16 = 0
+const ORBIS_PNG_ENC_FILTER_TYPE_SUB: u16 = 1
+const ORBIS_PNG_ENC_FILTER_TYPE_UP: u16 = 2
+const ORBIS_PNG_ENC_FILTER_TYPE_AVERAGE: u16 = 4
+const ORBIS_PNG_ENC_FILTER_TYPE_PAETH: u16 = 8
 const ORBIS_PNG_ENC_FILTER_TYPE_ALL: u16 = 15
 
 @fixed_layout
@@ -120,6 +125,77 @@ def PngEnc_WriteChunk(out: mutable u8&, write_off: mutable u32&, t0: u8, t1: u8,
     PngEnc_WriteBe32(out, write_off, crc)
     write_off <- write_off + 4
 
+def PngEnc_PaethPredictor(a: u8, b: u8, c: u8) -> u8:
+    ai: int = a.i32()
+    bi: int = b.i32()
+    ci: int = c.i32()
+    p: int = ai + bi - ci
+    pa: int = (p - ai).abs()
+    pb: int = (p - bi).abs()
+    pc: int = (p - ci).abs()
+    if pa <= pb and pa <= pc:
+        return a
+    if pb <= pc:
+        return b
+    return c
+
+def PngEnc_SelectFilterType(filter_type: u16) -> u8:
+    if filter_type == ORBIS_PNG_ENC_FILTER_TYPE_NONE:
+        return 0.u8()
+    if (filter_type & ORBIS_PNG_ENC_FILTER_TYPE_SUB) != 0:
+        return 1.u8()
+    if (filter_type & ORBIS_PNG_ENC_FILTER_TYPE_UP) != 0:
+        return 2.u8()
+    if (filter_type & ORBIS_PNG_ENC_FILTER_TYPE_AVERAGE) != 0:
+        return 3.u8()
+    if (filter_type & ORBIS_PNG_ENC_FILTER_TYPE_PAETH) != 0:
+        return 4.u8()
+    return 0.u8()
+
+def PngEnc_FilterRow(filter: u8, row: mutable u8&, prev: mutable u8&, out: mutable u8&, row_len: u32, bpp: u32) -> int:
+    i: u32 = 0
+    if filter == 0.u8():
+        while i < row_len:
+            out[i.usize()] <- row[i.usize()]
+            i <- i + 1
+        return ORBIS_OK
+    if filter == 1.u8():
+        while i < row_len:
+            left: u8 = 0.u8()
+            if i >= bpp:
+                left <- row[(i - bpp).usize()]
+            out[i.usize()] <- (row[i.usize()].u32() - left.u32()).u8()
+            i <- i + 1
+        return ORBIS_OK
+    if filter == 2.u8():
+        while i < row_len:
+            out[i.usize()] <- (row[i.usize()].u32() - prev[i.usize()].u32()).u8()
+            i <- i + 1
+        return ORBIS_OK
+    if filter == 3.u8():
+        while i < row_len:
+            left: u8 = 0.u8()
+            if i >= bpp:
+                left <- row[(i - bpp).usize()]
+            up: u8 = prev[i.usize()]
+            avg: u8 = ((left.u32() + up.u32()) / 2).u8()
+            out[i.usize()] <- (row[i.usize()].u32() - avg.u32()).u8()
+            i <- i + 1
+        return ORBIS_OK
+    if filter == 4.u8():
+        while i < row_len:
+            left: u8 = 0.u8()
+            up: u8 = prev[i.usize()]
+            up_left: u8 = 0.u8()
+            if i >= bpp:
+                left <- row[(i - bpp).usize()]
+                up_left <- prev[(i - bpp).usize()]
+            p: u8 = PngEnc_PaethPredictor(left, up, up_left)
+            out[i.usize()] <- (row[i.usize()].u32() - p.u32()).u8()
+            i <- i + 1
+        return ORBIS_OK
+    return ORBIS_PNG_ENC_ERROR_INVALID_PARAM
+
 def PngEnc_BuildRawRows(param: OrbisPngEncEncodeParam&, raw: mutable u8&, raw_size: u32) -> int:
     src_opt: u8&? = param.image_mem_addr
     if src_opt == null:
@@ -128,10 +204,19 @@ def PngEnc_BuildRawRows(param: OrbisPngEncEncodeParam&, raw: mutable u8&, raw_si
     row_bytes: u32 = PngEnc_RowBytes(param.image_width, param.color_space)
     if raw_size < (row_bytes + 1) * param.image_height:
         return ORBIS_PNG_ENC_ERROR_INVALID_SIZE
+    if row_bytes > 262144:
+        return ORBIS_PNG_ENC_ERROR_INVALID_SIZE
+    filter_method: u8 = PngEnc_SelectFilterType(param.filter_type)
+    row_buf: mutable u8[262144] = zeroed
+    prev_row: mutable u8[262144] = zeroed
+    filtered_row: mutable u8[262144] = zeroed
+    bpp: u32 = 3
+    if param.color_space == ORBIS_PNG_ENC_COLOR_SPACE_RGBA:
+        bpp <- 4
     y: u32 = 0
     while y < param.image_height:
         dst_row: u32 = y * (row_bytes + 1)
-        raw[dst_row.usize()] <- 0.u8()  # filter none
+        raw[dst_row.usize()] <- filter_method
         src_row: u32 = y * param.image_pitch
         x: u32 = 0
         dst_channels: u32 = 3
@@ -148,12 +233,21 @@ def PngEnc_BuildRawRows(param: OrbisPngEncEncodeParam&, raw: mutable u8&, raw_si
                 r <- src[(s + 2).usize()]
                 g <- src[(s + 1).usize()]
                 b <- src[s.usize()]
-            raw[d.usize()] <- r
-            raw[(d + 1).usize()] <- g
-            raw[(d + 2).usize()] <- b
+            row_buf[(x * dst_channels).usize()] <- r
+            row_buf[(x * dst_channels + 1).usize()] <- g
+            row_buf[(x * dst_channels + 2).usize()] <- b
             if param.color_space == ORBIS_PNG_ENC_COLOR_SPACE_RGBA:
-                raw[(d + 3).usize()] <- a
+                row_buf[(x * dst_channels + 3).usize()] <- a
             x <- x + 1
+        filter_ret: int = PngEnc_FilterRow(filter_method, row_buf.ref[mutable u8&], prev_row.ref[mutable u8&], filtered_row.ref[mutable u8&], row_bytes, bpp)
+        if filter_ret != ORBIS_OK:
+            return filter_ret
+        dst_data_off: u32 = dst_row + 1
+        i: u32 = 0
+        while i < row_bytes:
+            raw[(dst_data_off + i).usize()] <- filtered_row[i.usize()]
+            prev_row[i.usize()] <- row_buf[i.usize()]
+            i <- i + 1
         y <- y + 1
     return ORBIS_OK
 

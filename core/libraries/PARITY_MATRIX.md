@@ -24,6 +24,11 @@ Status values:
 - Init/init2/term contracts and reserved/buffer constraints: `Exact`
 - Multi-init/noinit handling and error paths: `Exact`
 
+## move
+- Init/open/close/term lifecycle contracts: `Exact`
+- Stubbed motion state and extension behavior (`sceMoveReadStateLatest`, `sceMoveReadStateRecent`, `sceMoveGetExtensionPortInfo`) returns: `Exact`
+- Error contracts for not-initialized and invalid arguments: `Exact`
+
 ## audio / audio3d / ajm
 - Existing parity suites currently passing for covered behavior: `Exact`
 - Functions intentionally returning success/no-op in the C++ surface remain mirrored: `Exact` (stub parity where applicable)
@@ -38,3 +43,4 @@ Status values:
 - `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_ajm_instance_tests.elisa`
 - `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_ajm_batch_tests.elisa`
 - `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_ajm_aac_tests.elisa`
+- `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_move_pure_tests.elisa`

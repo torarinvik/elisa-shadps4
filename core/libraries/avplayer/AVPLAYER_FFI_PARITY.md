@@ -64,6 +64,8 @@ Current validated prefix structs:
 - `Implemented`: source-side cached stream metadata (video dimensions, audio channel/sample rate) used by frame getters with stream-info fallback
 - `Implemented`: frame getters now clear stream detail payloads before filling (prevents stale metadata leakage across calls)
 - `Implemented`: source tracks delivered frame interval estimates; audio frame `size` now uses cadence-based estimate instead of constant zero
+- `Implemented`: source caches stream start-time/duration for active audio/video and frame getters now apply cached stream start-time offset to output timestamps
+- `Implemented`: `CurrentTime` now prefers media-clock timestamps (audio/video decoded output) before wall-clock fallback
 - `Implemented`: `IsActive` and `CurrentTime` gating now follow the C++ source shape
 - `Partial`: no full demux/decode threads, packet queues, or converted frame pipeline
 - `Partial`: no guest buffer pool or frame-object lifetime model like C++

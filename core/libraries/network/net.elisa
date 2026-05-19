@@ -3,7 +3,60 @@
 
 # Auto-generated Elisa stubs for /Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/elisa-shad-ps4-from-scratch/core/libraries/network/net.elisa
 include "../error_codes.elisa"
+include "net_error.elisa"
 include "../../../common/logging/log.elisa"
+
+const ORBIS_NET_MAX_SOCKETS: usize = 64
+const ORBIS_NET_MAX_RESOLVERS: usize = 16
+
+struct OrbisNetSocketState:
+    in_use: mutable bool
+    handle: mutable i64
+    connected: mutable bool
+    listening: mutable bool
+    shutdown_state: mutable int
+
+struct OrbisNetResolverState:
+    in_use: mutable bool
+    handle: mutable i64
+    last_error: mutable int
+
+global mutable g_net_initialized: bool = false
+global mutable g_net_last_error: int = ORBIS_OK
+global mutable g_net_next_socket_handle: i64 = 1
+global mutable g_net_next_resolver_handle: i64 = 1
+global mutable g_net_sockets: array[OrbisNetSocketState, ORBIS_NET_MAX_SOCKETS] = zeroed
+global mutable g_net_resolvers: array[OrbisNetResolverState, ORBIS_NET_MAX_RESOLVERS] = zeroed
+global mutable g_net_active_resolver: i64 = 0
+
+def sceNet_SetErr(err: int) -> void:
+    g_net_last_error <- err
+
+def sceNet_ResetState() -> void:
+    idx: usize = 0
+    while idx < ORBIS_NET_MAX_SOCKETS:
+        g_net_sockets[idx] <- zeroed
+        idx += 1
+    idx = 0
+    while idx < ORBIS_NET_MAX_RESOLVERS:
+        g_net_resolvers[idx] <- zeroed
+        idx += 1
+    g_net_active_resolver <- 0
+
+def sceNet_FindSocket(handle: i64) -> int:
+    idx: usize = 0
+    while idx < ORBIS_NET_MAX_SOCKETS:
+        slot: mutable OrbisNetSocketState& = g_net_sockets[idx].ref[mutable OrbisNetSocketState&]
+        if slot.in_use and slot.handle == handle:
+            return idx.int()
+        idx += 1
+    return -1
+
+def sceNet_RequireInit() -> int:
+    if not g_net_initialized:
+        sceNet_SetErr(ORBIS_NET_ERROR_ENOTINIT)
+        return ORBIS_NET_ERROR_ENOTINIT
+    return ORBIS_OK
 
 def in6addr_any() -> int:
     LOG_ERROR("Lib_Net", "(STUBBED) called")
@@ -38,8 +91,38 @@ def sce_net_in6addr_nodelocal_allnodes() -> int:
     return ORBIS_OK
 
 def sceNetAccept(s: i64, addr: u8&?, paddrlen: u8&?) -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
-    return ORBIS_OK
+    err: int = sceNet_RequireInit()
+    if err != ORBIS_OK:
+        return err
+    idx: int = sceNet_FindSocket(s)
+    if idx < 0:
+        sceNet_SetErr(ORBIS_NET_ERROR_ENOTSOCK)
+        return ORBIS_NET_ERROR_ENOTSOCK
+    listener: mutable OrbisNetSocketState& = g_net_sockets[idx.usize()].ref[mutable OrbisNetSocketState&]
+    if not listener.listening:
+        sceNet_SetErr(ORBIS_NET_ERROR_ENOTCONN)
+        return ORBIS_NET_ERROR_ENOTCONN
+    client_idx: int = -1
+    i: usize = 0
+    while i < ORBIS_NET_MAX_SOCKETS:
+        candidate: mutable OrbisNetSocketState& = g_net_sockets[i].ref[mutable OrbisNetSocketState&]
+        if not candidate.in_use:
+            candidate.in_use <- true
+            candidate.handle <- g_net_next_socket_handle
+            g_net_next_socket_handle <- g_net_next_socket_handle + 1
+            candidate.connected <- true
+            client_idx <- i.int()
+            break
+        i += 1
+    if client_idx < 0:
+        sceNet_SetErr(ORBIS_NET_ERROR_ENFILE)
+        return ORBIS_NET_ERROR_ENFILE
+    if paddrlen != null:
+        paddrlen <- 0
+    _ = addr
+    client: mutable OrbisNetSocketState& = g_net_sockets[client_idx.usize()].ref[mutable OrbisNetSocketState&]
+    sceNet_SetErr(ORBIS_OK)
+    return client.handle.int()
 
 def sceNetAddrConfig6GetInfo() -> int:
     LOG_ERROR("Lib_Net", "(STUBBED) called")
@@ -342,7 +425,19 @@ def sceNetConfigWlanSetDeviceConfig() -> int:
     return ORBIS_OK
 
 def sceNetConnect(s: i64, addr: u8&?, addrlen: int) -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
+    err: int = sceNet_RequireInit()
+    if err != ORBIS_OK:
+        return err
+    idx: int = sceNet_FindSocket(s)
+    if idx < 0:
+        sceNet_SetErr(ORBIS_NET_ERROR_ENOTSOCK)
+        return ORBIS_NET_ERROR_ENOTSOCK
+    slot: mutable OrbisNetSocketState& = g_net_sockets[idx.usize()].ref[mutable OrbisNetSocketState&]
+    slot.connected <- true
+    slot.listening <- false
+    _ = addr
+    _ = addrlen
+    sceNet_SetErr(ORBIS_OK)
     return ORBIS_OK
 
 def sceNetControl() -> int:
@@ -422,8 +517,7 @@ def sceNetEpollWait() -> int:
     return ORBIS_OK
 
 def sceNetErrnoLoc() -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
-    return ORBIS_OK
+    return g_net_last_error
 
 def sceNetEtherNtostr() -> int:
     LOG_ERROR("Lib_Net", "(STUBBED) called")
@@ -518,8 +612,7 @@ def sceNetGetsockname() -> int:
     return ORBIS_OK
 
 def sceNetGetsockopt() -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
-    return ORBIS_OK
+    return sceNet_RequireInit()
 
 def sceNetGetStatisticsInfo() -> int:
     LOG_ERROR("Lib_Net", "(STUBBED) called")
@@ -534,16 +627,14 @@ def sceNetGetSystemTime() -> int:
     return ORBIS_OK
 
 def sceNetHtonl() -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
-    return ORBIS_OK
+    return ORBIS_NET_ERROR_EINVAL
 
 def sceNetHtonll() -> int:
     LOG_ERROR("Lib_Net", "(STUBBED) called")
     return ORBIS_OK
 
 def sceNetHtons() -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
-    return ORBIS_OK
+    return ORBIS_NET_ERROR_EINVAL
 
 def sceNetInetNtop() -> int:
     LOG_ERROR("Lib_Net", "(STUBBED) called")
@@ -574,11 +665,15 @@ def sceNetInfoDumpStop() -> int:
     return ORBIS_OK
 
 def sceNetInit() -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
+    if g_net_initialized:
+        g_net_last_error <- ORBIS_OK
+        return ORBIS_OK
+    g_net_initialized <- true
+    sceNet_ResetState()
     return ORBIS_OK
 
 def sceNetInitParam() -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
+    sceNet_SetErr(ORBIS_OK)
     return ORBIS_OK
 
 def sceNetIoctl() -> int:
@@ -586,8 +681,7 @@ def sceNetIoctl() -> int:
     return ORBIS_OK
 
 def sceNetListen() -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
-    return ORBIS_OK
+    return sceNet_RequireInit()
 
 def sceNetMemoryAllocate() -> int:
     LOG_ERROR("Lib_Net", "(STUBBED) called")
@@ -598,20 +692,17 @@ def sceNetMemoryFree() -> int:
     return ORBIS_OK
 
 def sceNetNtohl() -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
-    return ORBIS_OK
+    return ORBIS_NET_ERROR_EINVAL
 
 def sceNetNtohll() -> int:
     LOG_ERROR("Lib_Net", "(STUBBED) called")
     return ORBIS_OK
 
 def sceNetNtohs() -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
-    return ORBIS_OK
+    return ORBIS_NET_ERROR_EINVAL
 
 def sceNetPoolCreate() -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
-    return ORBIS_OK
+    return sceNet_RequireInit()
 
 def sceNetPoolDestroy() -> int:
     LOG_ERROR("Lib_Net", "(STUBBED) called")
@@ -626,12 +717,10 @@ def sceNetPppoeStop() -> int:
     return ORBIS_OK
 
 def sceNetRecv() -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
-    return ORBIS_OK
+    return sceNet_RequireInit()
 
 def sceNetRecvfrom() -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
-    return ORBIS_OK
+    return sceNet_RequireInit()
 
 def sceNetRecvmsg() -> int:
     LOG_ERROR("Lib_Net", "(STUBBED) called")
@@ -658,15 +747,51 @@ def sceNetResolverConnectDestroy() -> int:
     return ORBIS_OK
 
 def sceNetResolverCreate() -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
-    return ORBIS_OK
+    err: int = sceNet_RequireInit()
+    if err != ORBIS_OK:
+        return -1
+    i: usize = 0
+    while i < ORBIS_NET_MAX_RESOLVERS:
+        slot: mutable OrbisNetResolverState& = g_net_resolvers[i].ref[mutable OrbisNetResolverState&]
+        if not slot.in_use:
+            slot.in_use <- true
+            slot.handle <- g_net_next_resolver_handle
+            slot.last_error <- ORBIS_OK
+            g_net_next_resolver_handle <- g_net_next_resolver_handle + 1
+            g_net_active_resolver <- slot.handle
+            sceNet_SetErr(ORBIS_OK)
+            return slot.handle.int()
+        i += 1
+    sceNet_SetErr(ORBIS_NET_ERROR_RESOLVER_EBUSY)
+    return -1
 
 def sceNetResolverDestroy() -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
-    return ORBIS_OK
+    if not g_net_initialized:
+        return ORBIS_NET_ERROR_ENOTINIT
+    if g_net_active_resolver == 0:
+        return ORBIS_NET_ERROR_RESOLVER_ENOTIMPLEMENTED
+    i: usize = 0
+    while i < ORBIS_NET_MAX_RESOLVERS:
+        slot: mutable OrbisNetResolverState& = g_net_resolvers[i].ref[mutable OrbisNetResolverState&]
+        if slot.in_use and slot.handle == g_net_active_resolver:
+            slot <- zeroed
+            g_net_active_resolver <- 0
+            return ORBIS_OK
+        i += 1
+    g_net_active_resolver <- 0
+    return ORBIS_NET_ERROR_RESOLVER_ENOTIMPLEMENTED
 
 def sceNetResolverGetError() -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
+    if g_net_active_resolver == 0:
+        return ORBIS_NET_ERROR_RESOLVER_ENOTIMPLEMENTED
+    i: usize = 0
+    while i < ORBIS_NET_MAX_RESOLVERS:
+        slot: mutable OrbisNetResolverState& = g_net_resolvers[i].ref[mutable OrbisNetResolverState&]
+        if slot.in_use and slot.handle == g_net_active_resolver:
+            if slot.last_error == ORBIS_OK:
+                slot.last_error <- ORBIS_NET_RESOLVER_ENOHOST
+            return slot.last_error
+        i += 1
     return ORBIS_OK
 
 def sceNetResolverStartAton() -> int:
@@ -678,7 +803,17 @@ def sceNetResolverStartAton6() -> int:
     return ORBIS_OK
 
 def sceNetResolverStartNtoa() -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
+    if not g_net_initialized:
+        return ORBIS_NET_ERROR_ENOTINIT
+    if g_net_active_resolver == 0:
+        return ORBIS_NET_ERROR_RESOLVER_EINTERNAL
+    i: usize = 0
+    while i < ORBIS_NET_MAX_RESOLVERS:
+        slot: mutable OrbisNetResolverState& = g_net_resolvers[i].ref[mutable OrbisNetResolverState&]
+        if slot.in_use and slot.handle == g_net_active_resolver:
+            slot.last_error <- ORBIS_NET_RESOLVER_ENOHOST
+            return ORBIS_OK
+        i += 1
     return ORBIS_OK
 
 def sceNetResolverStartNtoa6() -> int:
@@ -686,16 +821,14 @@ def sceNetResolverStartNtoa6() -> int:
     return ORBIS_OK
 
 def sceNetSend() -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
-    return ORBIS_OK
+    return sceNet_RequireInit()
 
 def sceNetSendmsg() -> int:
     LOG_ERROR("Lib_Net", "(STUBBED) called")
     return ORBIS_OK
 
 def sceNetSendto() -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
-    return ORBIS_OK
+    return sceNet_RequireInit()
 
 def sceNetSetDns6Info() -> int:
     LOG_ERROR("Lib_Net", "(STUBBED) called")
@@ -714,8 +847,7 @@ def sceNetSetDnsInfoToKernel() -> int:
     return ORBIS_OK
 
 def sceNetSetsockopt() -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
-    return ORBIS_OK
+    return sceNet_RequireInit()
 
 def sceNetShowIfconfig() -> int:
     LOG_ERROR("Lib_Net", "(STUBBED) called")
@@ -782,19 +914,43 @@ def sceNetShowRouteWithMemory() -> int:
     return ORBIS_OK
 
 def sceNetShutdown() -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
+    err: int = sceNet_RequireInit()
+    if err != ORBIS_OK:
+        return err
+    sceNet_SetErr(ORBIS_OK)
     return ORBIS_OK
 
 def sceNetSocket() -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
-    return ORBIS_OK
+    err: int = sceNet_RequireInit()
+    if err != ORBIS_OK:
+        return -1
+    i: usize = 0
+    while i < ORBIS_NET_MAX_SOCKETS:
+        slot: mutable OrbisNetSocketState& = g_net_sockets[i].ref[mutable OrbisNetSocketState&]
+        if not slot.in_use:
+            slot.in_use <- true
+            slot.handle <- g_net_next_socket_handle
+            slot.connected <- false
+            slot.listening <- false
+            slot.shutdown_state <- 0
+            g_net_next_socket_handle <- g_net_next_socket_handle + 1
+            sceNet_SetErr(ORBIS_OK)
+            return slot.handle.int()
+        i += 1
+    sceNet_SetErr(ORBIS_NET_ERROR_ENFILE)
+    return -1
 
 def sceNetSocketAbort() -> int:
     LOG_ERROR("Lib_Net", "(STUBBED) called")
     return ORBIS_OK
 
 def sceNetSocketClose() -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
+    if not g_net_initialized:
+        return ORBIS_NET_ERROR_ENOTINIT
+    i: usize = 0
+    while i < ORBIS_NET_MAX_SOCKETS:
+        g_net_sockets[i] <- zeroed
+        i += 1
     return ORBIS_OK
 
 def sceNetSyncCreate() -> int:
@@ -822,7 +978,10 @@ def sceNetSysctl() -> int:
     return ORBIS_OK
 
 def sceNetTerm() -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
+    if not g_net_initialized:
+        return ORBIS_NET_ERROR_ENOTINIT
+    sceNet_ResetState()
+    g_net_initialized <- false
     return ORBIS_OK
 
 def sceNetThreadCreate() -> int:
@@ -1068,4 +1227,3 @@ def RegisterLib(sym: void&?) -> void:
     LIB_FUNCTION("JK1oZe4UysY", "libSceNetDebug", 1, "libSceNet", sceNetEmulationGet)
     LIB_FUNCTION("pfn3Fha1ydc", "libSceNetDebug", 1, "libSceNet", sceNetEmulationSet)
 ;
-

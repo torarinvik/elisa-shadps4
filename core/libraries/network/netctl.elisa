@@ -3,7 +3,38 @@
 
 # Auto-generated Elisa stubs for /Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/elisa-shad-ps4-from-scratch/core/libraries/network/netctl.elisa
 include "../error_codes.elisa"
+include "net_ctl_codes.elisa"
 include "../../../common/logging/log.elisa"
+
+const ORBIS_NETCTL_MAX_CALLBACKS: usize = 8
+
+struct OrbisNetCtlCallbackState:
+    in_use: mutable bool
+    id: mutable u8
+    callback_func: mutable i64
+    callback_arg: mutable u8&?
+
+global mutable g_netctl_initialized: bool = false
+global mutable g_netctl_state: i32 = ORBIS_NET_CTL_STATE_DISCONNECTED
+global mutable g_netctl_callback_count: i32 = 0
+global mutable g_netctl_next_callback_id: u8 = 1
+global mutable g_netctl_callbacks: array[OrbisNetCtlCallbackState, ORBIS_NETCTL_MAX_CALLBACKS] = zeroed
+
+def _NetCtl_ResetCallbacks() -> void:
+    i: usize = 0
+    while i < ORBIS_NETCTL_MAX_CALLBACKS:
+        g_netctl_callbacks[i] <- zeroed
+        i += 1
+    g_netctl_callback_count <- 0
+    g_netctl_next_callback_id <- 1
+
+def _NetCtl_SetUninitializedError(err: int) -> int:
+    if not g_netctl_initialized:
+        return ORBIS_NET_CTL_ERROR_NETWORK_DISABLED
+    return ORBIS_OK
+
+def _NetCtl_GetCallbackSlot(idx: usize) -> OrbisNetCtlCallbackState&:
+    return g_netctl_callbacks[idx].ref[mutable OrbisNetCtlCallbackState&]
 
 def sceNetBweCheckCallbackIpcInt() -> int:
     LOG_ERROR("Lib_NetCtl", "(STUBBED) called")
@@ -82,7 +113,18 @@ def sceNetCtlGetIfStat() -> int:
     return ORBIS_OK
 
 def sceNetCtlGetInfo(code: int, info: u8&?) -> int:
-    LOG_ERROR("Lib_NetCtl", "(STUBBED) called")
+    if not g_netctl_initialized:
+        return ORBIS_NET_CTL_ERROR_NETWORK_DISABLED
+    if info == null:
+        return ORBIS_NET_CTL_ERROR_INVALID_ADDR
+    if code == ORBIS_NET_CTL_EVENT_TYPE_DISCONNECTED:
+        info <- ORBIS_NET_CTL_STATE_DISCONNECTED.u8()
+    elif code == ORBIS_SCE_NET_CTL_EVENT_TYPE_DISCONNECT_REQ_FINISHED:
+        info <- ORBIS_NET_CTL_STATE_IPOBTAINING.u8()
+    elif code == ORBIS_NET_CTL_EVENT_TYPE_IPOBTAINED:
+        info <- ORBIS_NET_CTL_STATE_IPOBTAINED.u8()
+    else:
+        info <- g_netctl_state.u8()
     return ORBIS_OK
 
 def sceNetCtlGetInfoIpcInt() -> int:
@@ -102,7 +144,14 @@ def sceNetCtlGetNatInfoIpcInt() -> int:
     return ORBIS_OK
 
 def sceNetCtlGetResult(eventType: int, errorCode: u8&?) -> int:
-    LOG_ERROR("Lib_NetCtl", "(STUBBED) called")
+    if not g_netctl_initialized:
+        return ORBIS_NET_CTL_ERROR_NETWORK_DISABLED
+    if errorCode == null:
+        return ORBIS_NET_CTL_ERROR_INVALID_ADDR
+    if eventType <= 0:
+        errorCode <- 0
+        return ORBIS_NET_CTL_ERROR_INVALID_ID
+    errorCode <- 0
     return ORBIS_OK
 
 def sceNetCtlGetResultIpcInt() -> int:
@@ -118,7 +167,11 @@ def sceNetCtlGetScanInfoBssidIpcInt() -> int:
     return ORBIS_OK
 
 def sceNetCtlGetState(state: u8&?) -> int:
-    LOG_ERROR("Lib_NetCtl", "(STUBBED) called")
+    if not g_netctl_initialized:
+        return ORBIS_NET_CTL_ERROR_NETWORK_DISABLED
+    if state == null:
+        return ORBIS_NET_CTL_ERROR_INVALID_ADDR
+    state <- g_netctl_state.u8()
     return ORBIS_OK
 
 def sceNetCtlGetState2IpcInt() -> int:
@@ -138,12 +191,38 @@ def sceNetCtlGetWifiType() -> int:
     return ORBIS_OK
 
 def sceNetCtlInit() -> int:
-    LOG_ERROR("Lib_NetCtl", "(STUBBED) called")
+    if g_netctl_initialized:
+        return ORBIS_OK
+    g_netctl_initialized <- true
+    g_netctl_state <- ORBIS_NET_CTL_STATE_DISCONNECTED
+    _NetCtl_ResetCallbacks()
     return ORBIS_OK
 
 def sceNetCtlRegisterCallback(func: i64, arg: u8&?, cid: u8&?) -> int:
-    LOG_ERROR("Lib_NetCtl", "(STUBBED) called")
-    return ORBIS_OK
+    if not g_netctl_initialized:
+        return ORBIS_NET_CTL_ERROR_NOT_CONNECTED
+    if func == 0:
+        return ORBIS_NET_CTL_ERROR_INVALID_ID
+    if cid == null:
+        return ORBIS_NET_CTL_ERROR_INVALID_ADDR
+    if g_netctl_callback_count >= ORBIS_NETCTL_MAX_CALLBACKS.int():
+        return ORBIS_NET_CTL_ERROR_CALLBACK_MAX
+    i: usize = 0
+    while i < ORBIS_NETCTL_MAX_CALLBACKS:
+        slot: mutable OrbisNetCtlCallbackState& = g_netctl_callbacks[i].ref[mutable OrbisNetCtlCallbackState&]
+        if not slot.in_use:
+            slot.in_use <- true
+            slot.id <- g_netctl_next_callback_id
+            slot.callback_func <- func
+            slot.callback_arg <- arg
+            cid <- g_netctl_next_callback_id
+            g_netctl_next_callback_id <- g_netctl_next_callback_id + 1
+            if g_netctl_next_callback_id == 0:
+                g_netctl_next_callback_id <- 1
+            g_netctl_callback_count <- g_netctl_callback_count + 1
+            return ORBIS_OK
+        i += 1
+    return ORBIS_NET_CTL_ERROR_CALLBACK_MAX
 
 def sceNetCtlRegisterCallbackIpcInt() -> int:
     LOG_ERROR("Lib_NetCtl", "(STUBBED) called")
@@ -154,11 +233,17 @@ def sceNetCtlScanIpcInt() -> int:
     return ORBIS_OK
 
 def sceNetCtlTerm() -> int:
-    LOG_ERROR("Lib_NetCtl", "(STUBBED) called")
+    if not g_netctl_initialized:
+        return ORBIS_NET_CTL_ERROR_NETWORK_DISABLED
+    g_netctl_initialized <- false
+    g_netctl_state <- ORBIS_NET_CTL_STATE_DISCONNECTED
+    _NetCtl_ResetCallbacks()
     return ORBIS_OK
 
 def sceNetCtlUnregisterCallback() -> int:
-    LOG_ERROR("Lib_NetCtl", "(STUBBED) called")
+    if not g_netctl_initialized:
+        return ORBIS_NET_CTL_ERROR_NOT_CONNECTED
+    _NetCtl_ResetCallbacks()
     return ORBIS_OK
 
 def Func_D8DCB6973537A3DC() -> int:
@@ -308,4 +393,3 @@ def NetCtl_RegisterLib(sym: void&?) -> void:
     LIB_FUNCTION("HMvaHoZWsn8", "libSceNetCtlApIpcInt", 1, "libSceNetCtl", sceNetCtlApRpStartConf)
     LIB_FUNCTION("6uvAl4RlEyk", "libSceNetCtlApIpcInt", 1, "libSceNetCtl", sceNetCtlApRpStop)
 ;
-
