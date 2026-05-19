@@ -147,6 +147,8 @@ struct OrbisNgs2PanParam:
     reserved: u32
 
 const DEFAULT_MAX_VOICES: u32 = 64
+const SYSTEM_OPTION_SIZE: usize = 64
+const MIN_SYSTEM_BUFFER_SIZE: usize = 8
 
 global mutable next_handle: OrbisNgs2Handle = 0x100000
 global mutable last_system_handle: OrbisNgs2Handle = 0
@@ -179,6 +181,22 @@ def _is_voice(handle: OrbisNgs2Handle) -> bool:
     if last_rack_handle == 0:
         return false
     return handle > last_rack_handle and handle <= last_rack_handle + (last_rack_max_voices as OrbisNgs2Handle)
+
+def _valid_sample_rate(sample_rate: u32) -> bool:
+    return sample_rate == 11025u32 or sample_rate == 12000u32 or sample_rate == 22050u32 or sample_rate == 24000u32 or sample_rate == 44100u32 or sample_rate == 48000u32 or sample_rate == 88200u32 or sample_rate == 96000u32 or sample_rate == 176400u32 or sample_rate == 192000u32
+
+def _validate_system_option(option: OrbisNgs2SystemOption&?) -> s32:
+    if option == null:
+        return ORBIS_OK
+    if option.size != SYSTEM_OPTION_SIZE:
+        return ORBIS_NGS2_ERROR_INVALID_OPTION_SIZE
+    if option.max_grain_samples < 64u32 or option.max_grain_samples > 1024u32 or (option.max_grain_samples & 63u32) != 0u32:
+        return ORBIS_NGS2_ERROR_INVALID_MAX_GRAIN_SAMPLES
+    if option.num_grain_samples < 64u32 or option.num_grain_samples > 1024u32 or (option.num_grain_samples & 63u32) != 0u32:
+        return ORBIS_NGS2_ERROR_INVALID_NUM_GRAIN_SAMPLES
+    if not _valid_sample_rate(option.sample_rate):
+        return ORBIS_NGS2_ERROR_INVALID_SAMPLE_RATE
+    return ORBIS_OK
 
 def sceNgs2CalcWaveformBlock(format: OrbisNgs2WaveformFormat&?, sample_pos: u32, num_samples: u32, out_block: mutable OrbisNgs2WaveformBlock&?) -> s32:
     _ = sample_pos
@@ -356,11 +374,17 @@ def sceNgs2RackUnlock(rack_handle: OrbisNgs2Handle) -> s32:
 
 # System
 def sceNgs2SystemCreate(option: OrbisNgs2SystemOption&?, buffer_info: OrbisNgs2ContextBufferInfo&?, out_system: mutable OrbisNgs2Handle&?) -> s32:
-    _ = buffer_info
     if buffer_info == null:
         return ORBIS_NGS2_ERROR_INVALID_BUFFER_INFO
     if out_system == null:
         return ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS
+    validation: s32 = _validate_system_option(option)
+    if validation != ORBIS_OK:
+        return validation
+    if buffer_info.host_buffer == null:
+        return ORBIS_NGS2_ERROR_INVALID_BUFFER_ADDRESS
+    if buffer_info.host_buffer_size < MIN_SYSTEM_BUFFER_SIZE:
+        return ORBIS_NGS2_ERROR_INVALID_BUFFER_SIZE
     last_system_handle <- _alloc()
     last_system_user_data <- buffer_info.user_data
     last_system_sample_rate <- 48000u32
@@ -377,12 +401,14 @@ def sceNgs2SystemCreate(option: OrbisNgs2SystemOption&?, buffer_info: OrbisNgs2C
     return ORBIS_OK
 
 def sceNgs2SystemCreateWithAllocator(option: OrbisNgs2SystemOption&?, allocator: void&?, out_system: mutable OrbisNgs2Handle&?) -> s32:
-    _ = option
     _ = allocator
     if allocator == null:
         return ORBIS_NGS2_ERROR_INVALID_BUFFER_ALLOCATOR
     if out_system == null:
         return ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS
+    validation: s32 = _validate_system_option(option)
+    if validation != ORBIS_OK:
+        return validation
     last_system_handle <- _alloc()
     last_system_user_data <- 0
     last_system_sample_rate <- 48000u32
@@ -466,10 +492,12 @@ def sceNgs2SystemLock(system_handle: OrbisNgs2Handle) -> s32:
     return ORBIS_OK
 
 def sceNgs2SystemQueryBufferSize(option: OrbisNgs2SystemOption&?, out_size: mutable usize&?) -> s32:
-    _ = option
     if out_size == null:
         return ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS
-    out_size <- 0
+    validation: s32 = _validate_system_option(option)
+    if validation != ORBIS_OK:
+        return validation
+    out_size <- MIN_SYSTEM_BUFFER_SIZE
     return ORBIS_OK
 
 def sceNgs2SystemRender(system_handle: OrbisNgs2Handle, a_buffer_info: void&?, num_buffer_info: u32) -> s32:

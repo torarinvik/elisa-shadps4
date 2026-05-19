@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 include "./avplayer_ffmpeg_ffi.elisa"
+include "./avplayer_error.elisa"
 
 extern high_resolution_now_ns() -> i64
 
@@ -34,6 +35,7 @@ global mutable avsrc_pause_time_ns: i64[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_pause_duration_ns: i64[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_ffmpeg_handle: i32[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_ffmpeg_enabled: bool[AVSRC_MAX_HANDLES] = zeroed
+global mutable avsrc_pending_warning: i32[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_video_stream_index: i32[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_audio_stream_index: i32[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_video_codec_ctx: void&?[AVSRC_MAX_HANDLES] = zeroed
@@ -196,6 +198,7 @@ def avsrc_init_handle(slot: int):
     avsrc_pause_duration_ns[slot] <- 0
     avsrc_ffmpeg_handle[slot] <- 0
     avsrc_ffmpeg_enabled[slot] <- false
+    avsrc_pending_warning[slot] <- 0
     avsrc_video_stream_index[slot] <- -1
     avsrc_audio_stream_index[slot] <- -1
     avsrc_video_codec_ctx[slot] <- null
@@ -461,6 +464,7 @@ def avsrc_try_loop_restart(slot: int) -> bool:
     avsrc_audio_pkt_q_head[slot] <- 0
     avsrc_audio_pkt_q_tail[slot] <- 0
     avsrc_audio_pkt_q_size[slot] <- 0
+    avsrc_pending_warning[slot] <- ORBIS_AVPLAYER_ERROR_WAR_LOOPING_BACK
     return true
 
 def avsrc_has_frames(slot: int, num_frames: u32) -> bool:
@@ -917,6 +921,14 @@ def avsrc_should_signal_eof(slot: int) -> bool:
         return false
     avsrc_refresh_eof(slot)
     return avsrc_is_eof[slot] and not avsrc_is_looping[slot]
+
+def avsrc_consume_warning(slot: int, out_warning: mutable i32&) -> bool:
+    warning_id: i32 = avsrc_pending_warning[slot]
+    if warning_id == 0:
+        return false
+    avsrc_pending_warning[slot] <- 0
+    out_warning <- warning_id
+    return true
 
 def avsrc_get_video_stream_index(slot: int) -> i32:
     return avsrc_video_stream_index[slot]

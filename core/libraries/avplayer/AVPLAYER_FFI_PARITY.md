@@ -60,6 +60,7 @@ Current validated prefix structs:
 - `Implemented`: per-stream EOF tracking (video/audio) with combined source EOF derived from stream completion + queue emptiness
 - `Implemented`: centralized loop restart at demux stage (flush/reset queues + codec flush + FFmpeg restart)
 - `Implemented`: per-stream prefetch loop retries removed; loop handling now flows through centralized demux-stage restart
+- `Implemented`: loop restart now surfaces `ORBIS_AVPLAYER_ERROR_WAR_LOOPING_BACK` through the controller warning path, matching the C++ observable warning behavior
 - `Implemented`: bounded decode-driven output fill step before get-audio/get-video return paths
 - `Implemented`: source-side cached stream metadata (video dimensions, audio channel/sample rate) used by frame getters with stream-info fallback
 - `Implemented`: frame getters now clear stream detail payloads before filling (prevents stale metadata leakage across calls)

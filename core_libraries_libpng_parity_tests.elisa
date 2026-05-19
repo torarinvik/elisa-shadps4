@@ -1390,6 +1390,211 @@ def png_16bit_strip_to_8_parity_smoke() -> void:
             px <- px + 1
         assert found_colorful
         assert scePngDecDelete(handle) == ORBIS_OK
+
+@test
+def pngdec_enforces_max_image_width() -> void:
+    can Abort.Panic:
+        # Build a tiny valid PNG using local encoder, then decode with too-small max_image_width.
+        enc_create: mutable OrbisPngEncCreateParam = zeroed
+        enc_create.this_size <- size_of(OrbisPngEncCreateParam).u32()
+        enc_create.attribute <- ORBIS_PNG_ENC_ATTRIBUTE_NONE
+        enc_create.max_image_width <- 16
+        enc_create.max_filter_number <- 5
+        enc_mem: mutable u8[64] = zeroed
+        enc_handle: mutable OrbisPngEncHandle = null
+        assert scePngEncCreate(enc_create.ref[OrbisPngEncCreateParam&], enc_mem.ref[mutable u8&] as mutable void&?, 64, enc_handle.ref[mutable OrbisPngEncHandle&]) == ORBIS_OK
+
+        src: mutable u8[16] = zeroed
+        src[0] <- 1.u8()
+        src[1] <- 2.u8()
+        src[2] <- 3.u8()
+        src[3] <- 4.u8()
+        src[4] <- 5.u8()
+        src[5] <- 6.u8()
+        src[6] <- 7.u8()
+        src[7] <- 8.u8()
+        src[8] <- 9.u8()
+        src[9] <- 10.u8()
+        src[10] <- 11.u8()
+        src[11] <- 12.u8()
+        src[12] <- 13.u8()
+        src[13] <- 14.u8()
+        src[14] <- 15.u8()
+        src[15] <- 16.u8()
+        png: mutable u8[256] = zeroed
+        ep: mutable OrbisPngEncEncodeParam = zeroed
+        ep.image_mem_addr <- src.ref[u8&]
+        ep.png_mem_addr <- png.ref[mutable u8&]
+        ep.image_mem_size <- 16
+        ep.png_mem_size <- 256
+        ep.image_width <- 2
+        ep.image_height <- 2
+        ep.image_pitch <- 8
+        ep.pixel_format <- ORBIS_PNG_ENC_PIXEL_FORMAT_R8G8B8A8
+        ep.color_space <- ORBIS_PNG_ENC_COLOR_SPACE_RGBA
+        ep.bit_depth <- 8
+        ep.filter_type <- ORBIS_PNG_ENC_FILTER_TYPE_ALL
+        ep.compression_level <- 6
+        ei: mutable OrbisPngEncOutputInfo = zeroed
+        assert scePngEncEncode(enc_handle, ep.ref[OrbisPngEncEncodeParam&], ei.ref[mutable OrbisPngEncOutputInfo&]) > 45
+        assert scePngEncDelete(enc_handle) == ORBIS_OK
+
+        dec_create: mutable OrbisPngDecCreateParam = zeroed
+        dec_create.this_size <- size_of(OrbisPngDecCreateParam).u32()
+        dec_create.attribute <- 0
+        dec_create.max_image_width <- 1
+        dec_mem: mutable u8[64] = zeroed
+        dec_handle: mutable OrbisPngDecHandle = null
+        assert scePngDecCreate(dec_create.ref[OrbisPngDecCreateParam&], dec_mem.ref[mutable u8&] as mutable void&?, 64, dec_handle.ref[mutable OrbisPngDecHandle&]) == ORBIS_OK
+
+        dp: mutable OrbisPngDecDecodeParam = zeroed
+        out: mutable u8[64] = zeroed
+        dp.png_mem_addr <- png.ref[u8&]
+        dp.image_mem_addr <- out.ref[mutable u8&]
+        dp.png_mem_size <- ei.data_size
+        dp.image_mem_size <- 64
+        dp.pixel_format <- ORBIS_PNG_DEC_PIXEL_FORMAT_R8G8B8A8
+        dp.alpha_value <- 0
+        dp.image_pitch <- 0
+        assert scePngDecDecode(dec_handle, dp.ref[OrbisPngDecDecodeParam&], null) == ORBIS_PNG_DEC_ERROR_INVALID_SIZE
+        assert scePngDecDelete(dec_handle) == ORBIS_OK
+
+@test
+def pngdec_rejects_oversize_raw_workspace() -> void:
+    can Abort.Panic:
+        # Minimal PNG layout with huge IHDR dimensions; decode should fail size check pre-inflate.
+        png: mutable u8[57] = zeroed
+        png[0] <- 137.u8()
+        png[1] <- 80.u8()
+        png[2] <- 78.u8()
+        png[3] <- 71.u8()
+        png[4] <- 13.u8()
+        png[5] <- 10.u8()
+        png[6] <- 26.u8()
+        png[7] <- 10.u8()
+        png[8] <- 0.u8()
+        png[9] <- 0.u8()
+        png[10] <- 0.u8()
+        png[11] <- 13.u8()
+        png[12] <- 73.u8()
+        png[13] <- 72.u8()
+        png[14] <- 68.u8()
+        png[15] <- 82.u8()
+        png[16] <- 0.u8()
+        png[17] <- 0.u8()
+        png[18] <- 19.u8()
+        png[19] <- 136.u8() # width 5000
+        png[20] <- 0.u8()
+        png[21] <- 0.u8()
+        png[22] <- 19.u8()
+        png[23] <- 136.u8() # height 5000
+        png[24] <- 8.u8()
+        png[25] <- 6.u8()
+        png[26] <- 0.u8()
+        png[27] <- 0.u8()
+        png[28] <- 0.u8()
+        # dummy crc + empty IEND chunk
+        png[33] <- 0.u8()
+        png[34] <- 0.u8()
+        png[35] <- 0.u8()
+        png[36] <- 0.u8()
+        png[37] <- 0.u8()
+        png[38] <- 0.u8()
+        png[39] <- 0.u8()
+        png[40] <- 0.u8()
+        png[41] <- 73.u8()
+        png[42] <- 69.u8()
+        png[43] <- 78.u8()
+        png[44] <- 68.u8()
+        png[45] <- 0.u8()
+        png[46] <- 0.u8()
+        png[47] <- 0.u8()
+        png[48] <- 0.u8()
+
+        create: mutable OrbisPngDecCreateParam = zeroed
+        create.this_size <- size_of(OrbisPngDecCreateParam).u32()
+        create.attribute <- 0
+        create.max_image_width <- 10000
+        mem: mutable u8[64] = zeroed
+        handle: mutable OrbisPngDecHandle = null
+        assert scePngDecCreate(create.ref[OrbisPngDecCreateParam&], mem.ref[mutable u8&] as mutable void&?, 64, handle.ref[mutable OrbisPngDecHandle&]) == ORBIS_OK
+
+        dec: mutable OrbisPngDecDecodeParam = zeroed
+        out: mutable u8[64] = zeroed
+        dec.png_mem_addr <- png.ref[u8&]
+        dec.image_mem_addr <- out.ref[mutable u8&]
+        dec.png_mem_size <- 57
+        dec.image_mem_size <- 64
+        dec.pixel_format <- ORBIS_PNG_DEC_PIXEL_FORMAT_R8G8B8A8
+        dec.alpha_value <- 0
+        dec.image_pitch <- 0
+        assert scePngDecDecode(handle, dec.ref[OrbisPngDecDecodeParam&], null) == ORBIS_PNG_DEC_ERROR_INVALID_SIZE
+        assert scePngDecDelete(handle) == ORBIS_OK
+
+@test
+def pngdec_parseheader_rejects_invalid_ihdr_fields() -> void:
+    can Abort.Panic:
+        # Start from a valid tiny encoded PNG, then corrupt IHDR fields and expect parse failure.
+        enc_create: mutable OrbisPngEncCreateParam = zeroed
+        enc_create.this_size <- size_of(OrbisPngEncCreateParam).u32()
+        enc_create.attribute <- ORBIS_PNG_ENC_ATTRIBUTE_NONE
+        enc_create.max_image_width <- 16
+        enc_create.max_filter_number <- 5
+        enc_mem: mutable u8[64] = zeroed
+        enc_handle: mutable OrbisPngEncHandle = null
+        assert scePngEncCreate(enc_create.ref[OrbisPngEncCreateParam&], enc_mem.ref[mutable u8&] as mutable void&?, 64, enc_handle.ref[mutable OrbisPngEncHandle&]) == ORBIS_OK
+
+        src: mutable u8[4] = zeroed
+        src[0] <- 1.u8()
+        src[1] <- 2.u8()
+        src[2] <- 3.u8()
+        src[3] <- 4.u8()
+        png: mutable u8[256] = zeroed
+        ep: mutable OrbisPngEncEncodeParam = zeroed
+        ep.image_mem_addr <- src.ref[u8&]
+        ep.png_mem_addr <- png.ref[mutable u8&]
+        ep.image_mem_size <- 4
+        ep.png_mem_size <- 256
+        ep.image_width <- 1
+        ep.image_height <- 1
+        ep.image_pitch <- 4
+        ep.pixel_format <- ORBIS_PNG_ENC_PIXEL_FORMAT_R8G8B8A8
+        ep.color_space <- ORBIS_PNG_ENC_COLOR_SPACE_RGBA
+        ep.bit_depth <- 8
+        ep.filter_type <- ORBIS_PNG_ENC_FILTER_TYPE_ALL
+        ep.compression_level <- 6
+        ei: mutable OrbisPngEncOutputInfo = zeroed
+        assert scePngEncEncode(enc_handle, ep.ref[OrbisPngEncEncodeParam&], ei.ref[mutable OrbisPngEncOutputInfo&]) > 45
+        assert scePngEncDelete(enc_handle) == ORBIS_OK
+
+        parse: mutable OrbisPngDecParseParam = zeroed
+        info: mutable OrbisPngDecImageInfo = zeroed
+        parse.png_mem_addr <- png.ref[u8&]
+        parse.png_mem_size <- ei.data_size
+        assert scePngDecParseHeader(parse.ref[OrbisPngDecParseParam&], info.ref[mutable OrbisPngDecImageInfo&]) == ORBIS_OK
+
+        # Corrupt compression method (IHDR byte 26) and force bad CRC to match changed IHDR.
+        bad1: mutable u8[256] = zeroed
+        i: u32 = 0
+        while i < ei.data_size:
+            bad1[i.usize()] <- png[i.usize()]
+            i <- i + 1
+        bad1[26] <- 1.u8()
+        parse.png_mem_addr <- bad1.ref[u8&]
+        assert scePngDecParseHeader(parse.ref[OrbisPngDecParseParam&], info.ref[mutable OrbisPngDecImageInfo&]) == ORBIS_PNG_DEC_ERROR_INVALID_DATA
+
+        # Zero image width and reject.
+        bad2: mutable u8[256] = zeroed
+        i <- 0
+        while i < ei.data_size:
+            bad2[i.usize()] <- png[i.usize()]
+            i <- i + 1
+        bad2[16] <- 0.u8()
+        bad2[17] <- 0.u8()
+        bad2[18] <- 0.u8()
+        bad2[19] <- 0.u8()
+        parse.png_mem_addr <- bad2.ref[u8&]
+        assert scePngDecParseHeader(parse.ref[OrbisPngDecParseParam&], info.ref[mutable OrbisPngDecImageInfo&]) == ORBIS_PNG_DEC_ERROR_INVALID_DATA
         assert out[18] == 115.u8()
         assert out[19] == 105.u8()
         assert out[20] == 116.u8()
