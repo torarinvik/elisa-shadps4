@@ -1,0 +1,271 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+const ORBIS_NP_MANAGER_REQUEST_LIMIT: s32 = 0x20
+const ORBIS_NP_MANAGER_REQUEST_ID_OFFSET: s32 = 0x20000000
+const ORBIS_NP_STATE_UNKNOWN: u32 = 0
+const ORBIS_NP_STATE_SIGNED_OUT: u32 = 1
+const ORBIS_NP_STATE_SIGNED_IN: u32 = 2
+const ORBIS_NP_REACHABILITY_STATE_UNAVAILABLE: u32 = 0
+const ORBIS_NP_REACHABILITY_STATE_AVAILABLE: u32 = 1
+const ORBIS_NP_REACHABILITY_STATE_REACHABLE: u32 = 2
+const ORBIS_NP_GAME_PRESENCE_STATUS_OFFLINE: u32 = 0
+const ORBIS_NP_GAME_PRESENCE_STATUS_ONLINE: u32 = 1
+
+@fixed_layout
+struct OrbisNpCountryCode:
+    country_code: mutable u8[2]
+    end: mutable u8
+    pad: mutable u8
+
+@fixed_layout
+struct OrbisNpAgeRestriction:
+    country_code: mutable OrbisNpCountryCode
+    age: mutable s8
+    padding: mutable u8[3]
+
+@fixed_layout
+struct OrbisNpContentRestriction:
+    size: mutable u64
+    default_age_restriction: mutable s8
+    padding: mutable u8[3]
+    age_restriction_count: mutable s32
+    age_restriction: mutable OrbisNpAgeRestriction&?
+
+@fixed_layout
+struct OrbisNpDate:
+    year: mutable u16
+    month: mutable u8
+    day: mutable u8
+
+@fixed_layout
+struct OrbisNpLanguageCode:
+    code: mutable u8[6]
+    padding: mutable u8[10]
+
+@fixed_layout
+struct OrbisNpParentalControlInfo:
+    content_restriction: mutable bool
+    chat_restriction: mutable bool
+    user_generated_content_restriction: mutable bool
+
+@fixed_layout
+struct OrbisNpCheckPlusParameter:
+    size: mutable u64
+    user_id: mutable s32
+    padding: mutable u8[4]
+    features: mutable u64
+    reserved: mutable u8[32]
+
+@fixed_layout
+struct OrbisNpCheckPlusResult:
+    authorized: mutable bool
+    reserved: mutable u8[32]
+
+@fixed_layout
+struct OrbisNpCreateAsyncRequestParameter:
+    size: mutable u64
+    cpu_affinity_mask: mutable u64
+    thread_priority: mutable s32
+    padding: mutable u8[4]
+
+global mutable g_np_manager_active_requests: s32 = 0
+global mutable g_np_manager_request_used: bool[32] = zeroed
+
+def NpManagerReqIndex(req_id: s32) -> s32:
+    return req_id - ORBIS_NP_MANAGER_REQUEST_ID_OFFSET - 1
+
+def NpManagerValidIndex(index: s32) -> bool:
+    return index >= 0 and index < ORBIS_NP_MANAGER_REQUEST_LIMIT
+
+def NpManagerCreateRequest() -> s32:
+    if g_np_manager_active_requests == ORBIS_NP_MANAGER_REQUEST_LIMIT:
+        return ORBIS_NP_ERROR_REQUEST_MAX
+    for i in 0..<ORBIS_NP_MANAGER_REQUEST_LIMIT:
+        if not g_np_manager_request_used[i]:
+            g_np_manager_request_used[i] <- true
+            g_np_manager_active_requests <- g_np_manager_active_requests + 1
+            return ORBIS_NP_MANAGER_REQUEST_ID_OFFSET + i + 1
+    return ORBIS_NP_ERROR_REQUEST_MAX
+
+def sceNpCreateRequest() -> s32:
+    return NpManagerCreateRequest()
+
+def sceNpCreateAsyncRequest(param: OrbisNpCreateAsyncRequestParameter&?) -> s32:
+    if param == null:
+        return ORBIS_NP_ERROR_INVALID_ARGUMENT
+    if param.size != size_of(OrbisNpCreateAsyncRequestParameter).u64():
+        return ORBIS_NP_ERROR_INVALID_SIZE
+    return NpManagerCreateRequest()
+
+def NpManagerValidateRequest(req_id: s32) -> int:
+    index: s32 = NpManagerReqIndex(req_id)
+    if not NpManagerValidIndex(index) or not g_np_manager_request_used[index]:
+        return ORBIS_NP_ERROR_REQUEST_NOT_FOUND
+    return ORBIS_OK
+
+def sceNpCheckNpAvailability(req_id: s32, online_id: mutable OrbisNpOnlineId&?) -> int:
+    _ = online_id
+    ok: int = NpManagerValidateRequest(req_id)
+    if ok != ORBIS_OK:
+        return ok
+    return ORBIS_NP_ERROR_SIGNED_OUT
+
+def sceNpCheckNpAvailabilityA(req_id: s32, user_id: s32) -> int:
+    _ = user_id
+    ok: int = NpManagerValidateRequest(req_id)
+    if ok != ORBIS_OK:
+        return ok
+    return ORBIS_NP_ERROR_SIGNED_OUT
+
+def sceNpCheckNpReachability(req_id: s32, user_id: s32, state: mutable u32&?) -> int:
+    _ = user_id
+    ok: int = NpManagerValidateRequest(req_id)
+    if ok != ORBIS_OK:
+        return ok
+    if state != null:
+        state <- ORBIS_NP_REACHABILITY_STATE_UNAVAILABLE
+    return ORBIS_OK
+
+def sceNpCheckPlus(req_id: s32, param: OrbisNpCheckPlusParameter&?, result: mutable OrbisNpCheckPlusResult&?) -> int:
+    ok: int = NpManagerValidateRequest(req_id)
+    if ok != ORBIS_OK:
+        return ok
+    if param == null or result == null:
+        return ORBIS_NP_ERROR_INVALID_ARGUMENT
+    result.authorized <- false
+    return ORBIS_OK
+
+def sceNpAbortRequest(req_id: s32) -> int:
+    return NpManagerValidateRequest(req_id)
+
+def sceNpWaitAsync(req_id: s32, result: mutable s32&?) -> int:
+    if result == null:
+        return ORBIS_NP_ERROR_INVALID_ARGUMENT
+    ok: int = NpManagerValidateRequest(req_id)
+    if ok != ORBIS_OK:
+        return ok
+    result <- ORBIS_NP_ERROR_SIGNED_OUT
+    return ORBIS_OK
+
+def sceNpPollAsync(req_id: s32, result: mutable s32&?) -> int:
+    return sceNpWaitAsync(req_id, result)
+
+def sceNpDeleteRequest(req_id: s32) -> int:
+    index: s32 = NpManagerReqIndex(req_id)
+    if not NpManagerValidIndex(index) or not g_np_manager_request_used[index]:
+        return ORBIS_NP_ERROR_REQUEST_NOT_FOUND
+    g_np_manager_request_used[index] <- false
+    g_np_manager_active_requests <- g_np_manager_active_requests - 1
+    return ORBIS_OK
+
+def sceNpGetAccountCountry(online_id: mutable OrbisNpOnlineId&?, country_code: mutable OrbisNpCountryCode&?) -> int:
+    _ = online_id
+    if country_code == null:
+        return ORBIS_NP_ERROR_INVALID_ARGUMENT
+    country_code.country_code[0] <- 'U'
+    country_code.country_code[1] <- 'S'
+    country_code.end <- 0
+    return ORBIS_OK
+
+def sceNpGetAccountCountryA(user_id: s32, country_code: mutable OrbisNpCountryCode&?) -> int:
+    _ = user_id
+    return sceNpGetAccountCountry(null, country_code)
+
+def sceNpGetAccountDateOfBirth(online_id: mutable OrbisNpOnlineId&?, date: mutable OrbisNpDate&?) -> int:
+    _ = online_id
+    if date == null:
+        return ORBIS_NP_ERROR_INVALID_ARGUMENT
+    date.year <- 1970
+    date.month <- 1
+    date.day <- 1
+    return ORBIS_OK
+
+def sceNpGetAccountDateOfBirthA(user_id: s32, date: mutable OrbisNpDate&?) -> int:
+    _ = user_id
+    return sceNpGetAccountDateOfBirth(null, date)
+
+def sceNpGetAccountId(online_id: mutable OrbisNpOnlineId&?, account_id: mutable u64&?) -> int:
+    _ = online_id
+    if account_id == null:
+        return ORBIS_NP_ERROR_INVALID_ARGUMENT
+    return ORBIS_NP_ERROR_SIGNED_OUT
+
+def sceNpGetAccountIdA(user_id: s32, account_id: mutable u64&?) -> int:
+    _ = user_id
+    if account_id == null:
+        return ORBIS_NP_ERROR_INVALID_ARGUMENT
+    return ORBIS_NP_ERROR_SIGNED_OUT
+
+def sceNpGetNpId(user_id: s32, np_id: mutable OrbisNpId&?) -> int:
+    _ = user_id
+    if np_id == null:
+        return ORBIS_NP_ERROR_INVALID_ARGUMENT
+    return ORBIS_NP_ERROR_SIGNED_OUT
+
+def sceNpGetOnlineId(user_id: s32, online_id: mutable OrbisNpOnlineId&?) -> int:
+    _ = user_id
+    if online_id == null:
+        return ORBIS_NP_ERROR_INVALID_ARGUMENT
+    return ORBIS_NP_ERROR_SIGNED_OUT
+
+def sceNpGetNpReachabilityState(user_id: s32, state: mutable u32&?) -> int:
+    _ = user_id
+    if state == null:
+        return ORBIS_NP_ERROR_INVALID_ARGUMENT
+    state <- ORBIS_NP_REACHABILITY_STATE_UNAVAILABLE
+    return ORBIS_OK
+
+def sceNpGetState(user_id: s32, state: mutable u32&?) -> int:
+    _ = user_id
+    if state == null:
+        return ORBIS_NP_ERROR_INVALID_ARGUMENT
+    state <- ORBIS_NP_STATE_SIGNED_OUT
+    return ORBIS_OK
+
+def sceNpHasSignedUp(user_id: s32, result: mutable bool&?) -> int:
+    _ = user_id
+    if result == null:
+        return ORBIS_NP_ERROR_INVALID_ARGUMENT
+    result <- false
+    return ORBIS_OK
+
+def sceNpSetContentRestriction(restriction: OrbisNpContentRestriction&?) -> int:
+    if restriction == null:
+        return ORBIS_NP_ERROR_INVALID_ARGUMENT
+    if restriction.size != size_of(OrbisNpContentRestriction).u64():
+        return ORBIS_NP_ERROR_INVALID_SIZE
+    return ORBIS_OK
+
+def sceNpSetNpTitleId(title_id: OrbisNpTitleId&?, title_secret: OrbisNpTitleSecret&?) -> int:
+    _ = title_secret
+    if title_id == null:
+        return ORBIS_NP_ERROR_INVALID_ARGUMENT
+    return ORBIS_OK
+
+def sceNpCheckCallback() -> int:
+    return ORBIS_OK
+
+def sceNpCheckCallbackForLib() -> int:
+    return ORBIS_OK
+
+def sceNpRegisterStateCallback(callback: void&?, userdata: void&?) -> s32:
+    _ = callback
+    _ = userdata
+    return 1
+
+def sceNpRegisterStateCallbackA(callback: void&?, userdata: void&?) -> s32:
+    _ = callback
+    _ = userdata
+    return 1
+
+def sceNpRegisterNpReachabilityStateCallback(callback: void&?, userdata: void&?) -> s32:
+    _ = callback
+    _ = userdata
+    return 1
+
+def sceNpRegisterStateCallbackForToolkit(callback: void&?, userdata: void&?) -> s32:
+    _ = callback
+    _ = userdata
+    return 1
+
