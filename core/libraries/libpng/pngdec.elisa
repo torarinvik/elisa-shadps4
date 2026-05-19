@@ -1032,6 +1032,42 @@ def scePngDecDecode(handle: OrbisPngDecHandle, param: OrbisPngDecDecodeParam&?, 
     parse_ret: int = PngDec_ParseHeader(param.png_mem_addr, param.png_mem_size, parsed.ref[mutable OrbisPngDecImageInfo&], header.ref[mutable PngDecHeader&])
     if parse_ret != ORBIS_OK:
         return parse_ret
+    h: OrbisPngDecHandleInternal& = handle
+    if parsed.image_width > h.max_image_width:
+        return ORBIS_PNG_DEC_ERROR_INVALID_SIZE
+
+    src_channels: u32 = 0
+    if header.color_type == 0.u8():
+        src_channels <- 1
+    elif header.color_type == 2.u8():
+        src_channels <- 3
+    elif header.color_type == 3.u8():
+        src_channels <- 1
+    elif header.color_type == 4.u8():
+        src_channels <- 2
+    elif header.color_type == 6.u8():
+        src_channels <- 4
+    else:
+        return ORBIS_PNG_DEC_ERROR_UNSUPPORT_DATA
+    bits_per_px: u32 = src_channels * header.bit_depth.u32()
+    if bits_per_px == 0:
+        return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+    # Fixed decode workspace for now; reject oversized images deterministically.
+    if header.interlace == 0.u8():
+        row_bits: u32 = parsed.image_width * bits_per_px
+        row_bytes: u32 = (row_bits + 7) / 8
+        need_raw: u32 = (row_bytes + 1) * parsed.image_height
+        if need_raw > 1048576:
+            return ORBIS_PNG_DEC_ERROR_INVALID_SIZE
+    elif header.interlace == 1.u8():
+        # Adam7 total filtered bytes upper-bounded by 2x linear payload for supported formats.
+        row_bits2: u32 = parsed.image_width * bits_per_px
+        row_bytes2: u32 = (row_bits2 + 7) / 8
+        need_raw2: u32 = (row_bytes2 + 1) * parsed.image_height
+        if need_raw2 > 524288:
+            return ORBIS_PNG_DEC_ERROR_INVALID_SIZE
+    else:
+        return ORBIS_PNG_DEC_ERROR_UNSUPPORT_DATA
 
     png_ptr: u8& = (param.png_mem_addr as u8&)
     ancillary: mutable PngDecAncillary = zeroed

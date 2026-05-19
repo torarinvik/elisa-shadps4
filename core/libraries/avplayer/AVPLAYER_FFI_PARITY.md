@@ -73,6 +73,7 @@ Current validated prefix structs:
 - `Implemented`: source readiness now treats demux packet queues as frame availability signals (not just decoded output queues)
 - `Implemented`: source readiness now only counts queues for enabled stream types (avoids stale-queue false positives after stream mode changes)
 - `Implemented`: EOF signaling from frame getters is now unified across audio/video paths using source activity (`avsrc_is_active`)
+- `Implemented`: frame getters now only emit controller EOF when source EOF is terminal; loop-enabled restart windows no longer raise false EOF transitions
 - `Implemented`: source activity (`IsActive`) now includes demux packet queues, preventing false-inactive states while decode work is buffered
 - `Implemented`: source activity queue checks are now filtered by enabled stream types (avoids stale-queue false-active states after stream mode changes)
 - `Implemented`: disabling a stream now clears that stream’s output/demux queues and per-stream timing/EOF markers immediately

@@ -109,6 +109,7 @@ struct OrbisNgs2WaveformInfo:
     num_audio_frame_samples: u32
     num_delay_samples: u32
     num_blocks: u32
+    a_block0: OrbisNgs2WaveformBlock
 
 struct OrbisNgs2VoiceParamHeader:
     size: u16
@@ -158,6 +159,7 @@ global mutable last_system_max_grain_samples: u32 = 512
 global mutable last_system_num_grain_samples: u32 = 256
 global mutable last_rack_id: u32 = 0
 global mutable last_rack_max_voices: u32 = DEFAULT_MAX_VOICES
+global mutable last_voice_index: u32 = 0
 global mutable last_system_render_count: s64 = 0
 global mutable last_rack_render_count: u64 = 0
 
@@ -172,7 +174,11 @@ def _is_rack(handle: OrbisNgs2Handle) -> bool:
     return handle != 0 and handle == last_rack_handle
 
 def _is_voice(handle: OrbisNgs2Handle) -> bool:
-    return handle != 0 and handle == last_voice_handle
+    if handle == 0:
+        return false
+    if last_rack_handle == 0:
+        return false
+    return handle > last_rack_handle and handle <= last_rack_handle + (last_rack_max_voices as OrbisNgs2Handle)
 
 def sceNgs2CalcWaveformBlock(format: OrbisNgs2WaveformFormat&?, sample_pos: u32, num_samples: u32, out_block: mutable OrbisNgs2WaveformBlock&?) -> s32:
     _ = sample_pos
@@ -210,6 +216,8 @@ def _fill_fallback_waveform_info(has_data: bool, data_size: usize, out_info: mut
     out_info.num_audio_frame_samples <- 1u32
     if has_data:
         out_info.num_blocks <- 1u32
+        out_info.a_block0.data_size <- data_size as u32
+        out_info.a_block0.num_repeats <- 1u32
 
 def sceNgs2ParseWaveformData(data: void&?, data_size: usize, out_info: mutable OrbisNgs2WaveformInfo&?) -> s32:
     if data == null or data_size == 0:
@@ -281,6 +289,7 @@ def sceNgs2RackDestroy(rack_handle: OrbisNgs2Handle, out_buffer_info: mutable Or
         return ORBIS_NGS2_ERROR_INVALID_RACK_HANDLE
     last_rack_handle <- 0
     last_voice_handle <- 0
+    last_voice_index <- 0u32
     return ORBIS_OK
 
 def sceNgs2RackGetInfo(rack_handle: OrbisNgs2Handle, out_info: mutable OrbisNgs2RackInfo&?, info_size: usize) -> s32:
@@ -317,9 +326,10 @@ def sceNgs2RackGetVoiceHandle(rack_handle: OrbisNgs2Handle, voice_index: u32, ou
         return ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS
     if not _is_rack(rack_handle):
         return ORBIS_NGS2_ERROR_INVALID_RACK_HANDLE
-    if voice_index >= DEFAULT_MAX_VOICES:
+    if voice_index >= last_rack_max_voices:
         return ORBIS_NGS2_ERROR_INVALID_VOICE_INDEX
-    last_voice_handle <- _alloc()
+    last_voice_handle <- last_rack_handle + (voice_index as OrbisNgs2Handle) + 1
+    last_voice_index <- voice_index
     out_voice <- last_voice_handle
     return ORBIS_OK
 
@@ -395,6 +405,7 @@ def sceNgs2SystemDestroy(system_handle: OrbisNgs2Handle, out_buffer_info: mutabl
     last_system_handle <- 0
     last_rack_handle <- 0
     last_voice_handle <- 0
+    last_voice_index <- 0u32
     return ORBIS_OK
 
 def sceNgs2SystemEnumHandles(out_handle: mutable OrbisNgs2Handle&?, max_handles: u32) -> s32:
@@ -532,7 +543,7 @@ def sceNgs2VoiceGetOwner(voice_handle: OrbisNgs2Handle, out_rack: mutable OrbisN
     if not _is_voice(voice_handle):
         return ORBIS_NGS2_ERROR_INVALID_VOICE_HANDLE
     out_rack <- last_rack_handle
-    out_index <- 0
+    out_index <- (voice_handle - last_rack_handle - 1) as u32
     return ORBIS_OK
 
 def sceNgs2VoiceGetPortInfo(voice_handle: OrbisNgs2Handle, port: u32, out_info: mutable void&?, out_info_size: usize) -> s32:
