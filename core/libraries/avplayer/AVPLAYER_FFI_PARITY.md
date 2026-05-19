@@ -71,8 +71,10 @@ Current validated prefix structs:
 - `Implemented`: media-clock `CurrentTime` now includes cached stream start-time offsets for timeline-aligned reporting
 - `Implemented`: buffering state updates in frame getters are now source-readiness driven (`avsrc_has_frames`) instead of hardcoded booleans
 - `Implemented`: source readiness now treats demux packet queues as frame availability signals (not just decoded output queues)
+- `Implemented`: source readiness now only counts queues for enabled stream types (avoids stale-queue false positives after stream mode changes)
 - `Implemented`: EOF signaling from frame getters is now unified across audio/video paths using source activity (`avsrc_is_active`)
 - `Implemented`: source activity (`IsActive`) now includes demux packet queues, preventing false-inactive states while decode work is buffered
+- `Implemented`: source activity queue checks are now filtered by enabled stream types (avoids stale-queue false-active states after stream mode changes)
 - `Implemented`: `IsActive` and `CurrentTime` gating now follow the C++ source shape
 - `Partial`: no full demux/decode threads, packet queues, or converted frame pipeline
 - `Partial`: no guest buffer pool or frame-object lifetime model like C++
