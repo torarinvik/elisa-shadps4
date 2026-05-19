@@ -64,6 +64,7 @@ Current validated prefix structs:
 - `Implemented`: bounded decode-driven output fill step before get-audio/get-video return paths
 - `Implemented`: source-side cached stream metadata (video dimensions, audio channel/sample rate) used by frame getters with stream-info fallback
 - `Implemented`: frame getters now clear stream detail payloads before filling (prevents stale metadata leakage across calls)
+- `Implemented`: `AvPlayerFrameInfoEx` now uses a richer Ex-specific detail layout closer to the C++ public API, including video framerate/crop/pitch/bit-depth fields
 - `Implemented`: source tracks delivered frame interval estimates; audio frame `size` now uses cadence-based estimate instead of constant zero
 - `Implemented`: source caches stream start-time/duration for active audio/video and frame getters now apply cached stream start-time offset to output timestamps
 - `Implemented`: start-time offset application now keys on `start_time` presence (not duration presence), improving streams with unknown/zero duration

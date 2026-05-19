@@ -1,0 +1,305 @@
+include "../error_codes.elisa"
+include "./pad_errors.elisa"
+
+type s32 = i32
+type OrbisUserServiceUserId = s32
+
+@fixed_layout
+struct OrbisPadControllerInformation:
+    touch_pad_dummy: mutable u8[16]
+    stick_dummy: mutable u8[2]
+    connectionType: mutable u8
+    connectedCount: mutable u8
+    connected: mutable bool
+    deviceClass: mutable s32
+    reserve: mutable u8[8]
+
+@fixed_layout
+struct OrbisPadExtendedControllerInformation:
+    base: mutable OrbisPadControllerInformation
+    padType1: mutable u16
+    padType2: mutable u16
+    capability: mutable u8
+    data: mutable u8[8]
+
+@fixed_layout
+struct OrbisPadLightBarParam:
+    r: mutable u8
+    g: mutable u8
+    b: mutable u8
+    reserve: mutable u8
+
+@fixed_layout
+struct OrbisPadVibrationParam:
+    largeMotor: mutable u8
+    smallMotor: mutable u8
+
+@fixed_layout
+struct OrbisPadData:
+    buttons: mutable u32
+    left_x: mutable u8
+    left_y: mutable u8
+    right_x: mutable u8
+    right_y: mutable u8
+    l2: mutable u8
+    r2: mutable u8
+    pad0: mutable u8[2]
+    pad1: mutable u8[80]
+    connected: mutable bool
+    timestamp: mutable u64
+    pad2: mutable u8[32]
+
+@fixed_layout
+struct OrbisPadInfo:
+    unk1: mutable u32
+    unk2: mutable u32
+    pad_handle: mutable u32
+    unk3: mutable u32
+    colour: mutable u32
+
+const ORBIS_PAD_PORT_TYPE_STANDARD: s32 = 0
+const ORBIS_PAD_PORT_TYPE_SPECIAL: s32 = 2
+const ORBIS_PAD_PORT_TYPE_REMOTE_CONTROL: s32 = 16
+const ORBIS_USER_SERVICE_USER_ID_SYSTEM: s32 = -2
+const ORBIS_PAD_MAX_HANDLES: int = 16
+
+@fixed_layout
+struct PadHandleEntry:
+    used: mutable bool
+    user_id: mutable s32
+    pad_type: mutable s32
+    index: mutable s32
+    handle: mutable s32
+
+global mutable g_initialized: bool = false
+global mutable g_pad_handle_counter: s32 = 1
+global mutable g_entries: array[PadHandleEntry, ORBIS_PAD_MAX_HANDLES] = zeroed
+
+def pad_find_slot(user_id: s32, pad_type: s32, index: s32) -> int:
+    i: mutable int = 0
+    while i < ORBIS_PAD_MAX_HANDLES:
+        if g_entries[i].used and g_entries[i].user_id == user_id and g_entries[i].pad_type == pad_type and g_entries[i].index == index:
+            return i
+        i <- i + 1
+    return -1
+
+def pad_find_handle(handle: s32) -> int:
+    i: mutable int = 0
+    while i < ORBIS_PAD_MAX_HANDLES:
+        if g_entries[i].used and g_entries[i].handle == handle:
+            return i
+        i <- i + 1
+    return -1
+
+def pad_alloc_slot() -> int:
+    i: mutable int = 0
+    while i < ORBIS_PAD_MAX_HANDLES:
+        if not g_entries[i].used:
+            return i
+        i <- i + 1
+    return -1
+
+def scePadInit() -> int:
+    g_initialized <- true
+    return ORBIS_OK
+
+def scePadOpen(userId: OrbisUserServiceUserId, type: s32, index: s32, pParam: void&?) -> int:
+    _ = pParam
+    if not g_initialized:
+        return ORBIS_PAD_ERROR_NOT_INITIALIZED
+    if userId < 0 and userId != ORBIS_USER_SERVICE_USER_ID_SYSTEM:
+        return ORBIS_DEVICE_SERVICE_ERROR_INVALID_USER
+    if pad_find_slot(userId, type, index) != -1:
+        return ORBIS_PAD_ERROR_ALREADY_OPENED
+    if userId == ORBIS_USER_SERVICE_USER_ID_SYSTEM:
+        if type != ORBIS_PAD_PORT_TYPE_REMOTE_CONTROL:
+            return ORBIS_DEVICE_SERVICE_ERROR_INVALID_USER
+    else:
+        if type == ORBIS_PAD_PORT_TYPE_REMOTE_CONTROL:
+            return ORBIS_PAD_ERROR_INVALID_ARG
+    slot: int = pad_alloc_slot()
+    if slot == -1:
+        return ORBIS_PAD_ERROR_FATAL
+    handle: s32 = g_pad_handle_counter
+    g_pad_handle_counter <- g_pad_handle_counter + 1
+    g_entries[slot].used <- true
+    g_entries[slot].user_id <- userId
+    g_entries[slot].pad_type <- type
+    g_entries[slot].index <- index
+    g_entries[slot].handle <- handle
+    return handle
+
+def scePadOpenExt(userId: OrbisUserServiceUserId, type: s32, index: s32, pParam: void&?) -> int:
+    _ = pParam
+    return scePadOpen(userId, type, index, null)
+
+def scePadGetHandle(userId: OrbisUserServiceUserId, type: s32, index: s32) -> int:
+    if not g_initialized:
+        return ORBIS_PAD_ERROR_NOT_INITIALIZED
+    if userId == -1:
+        return ORBIS_PAD_ERROR_DEVICE_NO_HANDLE
+    slot: int = pad_find_slot(userId, type, index)
+    if slot == -1:
+        return ORBIS_PAD_ERROR_DEVICE_NO_HANDLE
+    return g_entries[slot].handle
+
+def scePadClose(handle: s32) -> int:
+    slot: int = pad_find_handle(handle)
+    if slot == -1:
+        return ORBIS_PAD_ERROR_INVALID_HANDLE
+    g_entries[slot].used <- false
+    return ORBIS_OK
+
+def scePadGetControllerInformation(handle: s32, pInfo: OrbisPadControllerInformation&?) -> int:
+    if pad_find_handle(handle) == -1:
+        return ORBIS_PAD_ERROR_INVALID_HANDLE
+    if pInfo == null:
+        return ORBIS_PAD_ERROR_INVALID_ARG
+    pInfo[0].connectionType <- ORBIS_PAD_PORT_TYPE_STANDARD.u8()
+    pInfo[0].connectedCount <- 1
+    pInfo[0].connected <- true
+    pInfo[0].deviceClass <- 0
+    return ORBIS_OK
+
+def scePadGetExtControllerInformation(handle: s32, pInfo: OrbisPadExtendedControllerInformation&?) -> int:
+    if pInfo == null:
+        return ORBIS_PAD_ERROR_INVALID_ARG
+    pInfo[0].padType1 <- 0
+    pInfo[0].padType2 <- 0
+    pInfo[0].capability <- 0
+    return scePadGetControllerInformation(handle, pInfo[0].base.cast[OrbisPadControllerInformation&?])
+
+def scePadRead(handle: s32, pData: OrbisPadData&?, num: s32) -> int:
+    if pad_find_handle(handle) == -1:
+        return ORBIS_PAD_ERROR_INVALID_HANDLE
+    if pData == null or num <= 0:
+        return ORBIS_PAD_ERROR_INVALID_ARG
+    pData[0] <- zeroed
+    pData[0].connected <- true
+    return 1
+
+def scePadReadState(handle: s32, pData: OrbisPadData&?) -> int:
+    r: int = scePadRead(handle, pData, 1)
+    if r < 0:
+        return r
+    return ORBIS_OK
+
+def scePadGetInfo(data: OrbisPadInfo&?) -> int:
+    if data == null:
+        return ORBIS_PAD_ERROR_INVALID_ARG
+    data[0] <- zeroed
+    data[0].unk1 <- 1
+    data[0].pad_handle <- 1
+    data[0].unk3 <- 0x00000101
+    return ORBIS_OK
+
+def scePadResetLightBar(handle: s32) -> int:
+    if pad_find_handle(handle) == -1:
+        return ORBIS_PAD_ERROR_INVALID_HANDLE
+    return ORBIS_OK
+
+def scePadSetLightBar(handle: s32, pParam: OrbisPadLightBarParam&?) -> int:
+    if pad_find_handle(handle) == -1:
+        return ORBIS_PAD_ERROR_INVALID_HANDLE
+    if pParam == null:
+        return ORBIS_PAD_ERROR_INVALID_ARG
+    if pParam[0].r < 0x0d and pParam[0].g < 0x0d and pParam[0].b < 0x0d:
+        return ORBIS_PAD_ERROR_INVALID_LIGHTBAR_SETTING
+    return ORBIS_OK
+
+def scePadSetLightBarForTracker(handle: s32, pParam: OrbisPadLightBarParam&?) -> int:
+    if pad_find_handle(handle) == -1:
+        return ORBIS_PAD_ERROR_INVALID_HANDLE
+    _ = pParam
+    return ORBIS_OK
+
+def scePadSetVibration(handle: s32, pParam: OrbisPadVibrationParam&?) -> int:
+    if pad_find_handle(handle) == -1:
+        return ORBIS_PAD_ERROR_INVALID_HANDLE
+    if pParam == null:
+        return ORBIS_PAD_ERROR_INVALID_ARG
+    return ORBIS_OK
+
+# remaining C++ exports currently stubbed in upstream; keep ORBIS_OK defaults
+def scePadConnectPort() -> int: return ORBIS_OK
+def scePadDeviceClassGetExtendedInformation(handle: s32, pExtInfo: void&?) -> int: _ = handle; _ = pExtInfo; return ORBIS_OK
+def scePadDeviceClassParseData(handle: s32, pData: void&?, pDeviceClassData: void&?) -> int: _ = handle; _ = pData; _ = pDeviceClassData; return ORBIS_OK
+def scePadDeviceOpen() -> int: return ORBIS_OK
+def scePadDisableVibration() -> int: return ORBIS_OK
+def scePadDisconnectDevice() -> int: return ORBIS_OK
+def scePadDisconnectPort() -> int: return ORBIS_OK
+def scePadEnableAutoDetect() -> int: return ORBIS_OK
+def scePadEnableExtensionPort() -> int: return ORBIS_OK
+def scePadEnableSpecificDeviceClass() -> int: return ORBIS_OK
+def scePadEnableUsbConnection() -> int: return ORBIS_OK
+def scePadGetBluetoothAddress() -> int: return ORBIS_OK
+def scePadGetCapability() -> int: return ORBIS_OK
+def scePadGetDataInternal() -> int: return ORBIS_OK
+def scePadGetDeviceId() -> int: return ORBIS_OK
+def scePadGetDeviceInfo() -> int: return ORBIS_OK
+def scePadGetExtensionUnitInfo() -> int: return ORBIS_OK
+def scePadGetFeatureReport() -> int: return ORBIS_OK
+def scePadGetIdleCount() -> int: return ORBIS_OK
+def scePadGetInfoByPortType() -> int: return ORBIS_OK
+def scePadGetLicenseControllerInformation() -> int: return ORBIS_OK
+def scePadGetMotionSensorPosition() -> int: return ORBIS_OK
+def scePadGetMotionTimerUnit() -> int: return ORBIS_OK
+def scePadGetSphereRadius() -> int: return ORBIS_OK
+def scePadGetVersionInfo() -> int: return ORBIS_OK
+def scePadIsBlasterConnected() -> int: return ORBIS_OK
+def scePadIsDS4Connected() -> int: return ORBIS_OK
+def scePadIsLightBarBaseBrightnessControllable() -> int: return ORBIS_OK
+def scePadIsMoveConnected() -> int: return ORBIS_OK
+def scePadIsMoveReproductionModel() -> int: return ORBIS_OK
+def scePadIsValidHandle() -> int: return ORBIS_OK
+def scePadMbusInit() -> int: return ORBIS_OK
+def scePadMbusTerm() -> int: return ORBIS_OK
+def scePadOpenExt2() -> int: return ORBIS_OK
+def scePadOutputReport() -> int: return ORBIS_OK
+def scePadReadBlasterForTracker() -> int: return ORBIS_OK
+def scePadReadExt() -> int: return ORBIS_OK
+def scePadReadForTracker() -> int: return ORBIS_OK
+def scePadReadHistory() -> int: return ORBIS_OK
+def scePadReadStateExt() -> int: return ORBIS_OK
+def scePadResetLightBarAll() -> int: return ORBIS_OK
+def scePadResetLightBarAllByPortType() -> int: return ORBIS_OK
+def scePadResetOrientation(handle: s32) -> int: if pad_find_handle(handle) == -1: return ORBIS_PAD_ERROR_INVALID_HANDLE; return ORBIS_OK
+def scePadResetOrientationForTracker() -> int: return ORBIS_OK
+def scePadSetAngularVelocityBiasCorrectionState() -> int: return ORBIS_OK
+def scePadSetAngularVelocityDeadbandState(handle: s32, bEnable: bool) -> int: _ = handle; _ = bEnable; return ORBIS_OK
+def scePadSetAutoPowerOffCount() -> int: return ORBIS_OK
+def scePadSetButtonRemappingInfo() -> int: return ORBIS_OK
+def scePadSetConnection() -> int: return ORBIS_OK
+def scePadSetExtensionReport() -> int: return ORBIS_OK
+def scePadSetFeatureReport() -> int: return ORBIS_OK
+def scePadSetForceIntercepted() -> int: return ORBIS_OK
+def scePadSetLightBarBaseBrightness() -> int: return ORBIS_OK
+def scePadSetLightBarBlinking() -> int: return ORBIS_OK
+def scePadSetLoginUserNumber() -> int: return ORBIS_OK
+def scePadSetMotionSensorState(handle: s32, bEnable: bool) -> int: _ = handle; _ = bEnable; return ORBIS_OK
+def scePadSetProcessFocus() -> int: return ORBIS_OK
+def scePadSetProcessPrivilege() -> int: return ORBIS_OK
+def scePadSetProcessPrivilegeOfButtonRemapping() -> int: return ORBIS_OK
+def scePadSetShareButtonMaskForRemotePlay() -> int: return ORBIS_OK
+def scePadSetTiltCorrectionState(handle: s32, bEnable: bool) -> int: _ = handle; _ = bEnable; return ORBIS_OK
+def scePadSetUserColor() -> int: return ORBIS_OK
+def scePadSetVibrationForce() -> int: return ORBIS_OK
+def scePadSetVrTrackingMode() -> int: return ORBIS_OK
+def scePadShareOutputData() -> int: return ORBIS_OK
+def scePadStartRecording() -> int: return ORBIS_OK
+def scePadStopRecording() -> int: return ORBIS_OK
+def scePadSwitchConnection() -> int: return ORBIS_OK
+def scePadVertualDeviceAddDevice() -> int: return ORBIS_OK
+def scePadVirtualDeviceAddDevice() -> int: return ORBIS_OK
+def scePadVirtualDeviceDeleteDevice() -> int: return ORBIS_OK
+def scePadVirtualDeviceDisableButtonRemapping() -> int: return ORBIS_OK
+def scePadVirtualDeviceGetRemoteSetting() -> int: return ORBIS_OK
+def scePadVirtualDeviceInsertData() -> int: return ORBIS_OK
+def Func_298D21481F94C9FA() -> int: return ORBIS_OK
+def Func_51E514BCD3A05CA5() -> int: return ORBIS_OK
+def Func_89C9237E393DA243() -> int: return ORBIS_OK
+def Func_EF103E845B6F0420() -> int: return ORBIS_OK
+
+def RegisterLib(sym: void&?) -> void:
+    _ = sym
+    return

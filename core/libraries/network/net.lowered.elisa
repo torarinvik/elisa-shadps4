@@ -372,6 +372,10 @@ extern c_close(fd: int) -> int
 @c_abi(c)
 extern c_inet_pton(af: int, src: u8&?, dst: u8&?) -> int
 
+@link_name(inet_ntop)
+@c_abi(c)
+extern c_inet_ntop(af: int, src: u8&?, dst: u8&?, size: u32) -> u8&?
+
 @link_name(getaddrinfo)
 @c_abi(c)
 extern c_getaddrinfo(node: u8&?, service: u8&?, hints: void&?, result: mutable void&?&) -> int
@@ -505,6 +509,14 @@ const ORBIS_NET_SEND_FLAGS: int = 0x40020000
 
 const ORBIS_NET_RECV_FLAGS: int = 0x40000000
 
+const ORBIS_NET_AF_INET: int = 2
+
+const ORBIS_NET_AF_INET6: int = 28
+
+const NATIVE_AF_INET: int = 2
+
+const NATIVE_AF_INET6: int = 30
+
 struct OrbisNetSocketState:
     in_use: mutable bool
     handle: mutable i64
@@ -526,6 +538,8 @@ global mutable g_net_last_error: int = ORBIS_OK
 global mutable g_net_next_socket_handle: i64 = 1
 
 global mutable g_net_next_resolver_handle: i64 = 1
+
+global mutable g_net_next_pool_handle: int = 1
 
 global mutable g_net_sockets: array[OrbisNetSocketState, ORBIS_NET_MAX_SOCKETS] = zeroed
 
@@ -1140,8 +1154,17 @@ def sceNetGetIfnameNumList() -> int:
     LOG_ERROR("Lib_Net", "(STUBBED) called")
     return ORBIS_OK
 
-def sceNetGetMacAddress() -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
+def sceNetGetMacAddress(addr: mutable u8&?, flags: int) -> int:
+    if (addr == null):
+        return ORBIS_NET_EINVAL
+    out: mutable u8& = addr.cast[mutable u8&]
+    out <- 0x02u8
+    ((out + 1usize)) <- 0x00u8
+    ((out + 2usize)) <- 0x00u8
+    ((out + 3usize)) <- 0x00u8
+    ((out + 4usize)) <- 0x00u8
+    ((out + 5usize)) <- 0x01u8
+    _ = flags
     return ORBIS_OK
 
 def sceNetGetMemoryPoolStats() -> int:
@@ -1228,16 +1251,41 @@ def sceNetHtonll(host64: u64) -> u64:
 def sceNetHtons(host16: u16) -> u16:
     return (((((host16 & 0xff)) << 8)) | ((((host16 >> 8)) & 0xff)))
 
-def sceNetInetNtop() -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
-    return ORBIS_OK
+def sceNetInetNtop(af: int, src: u8&?, dst: u8&?, size: u32) -> u8&?:
+    if ((src == null) or (dst == null)):
+        sceNet_SetErr(ORBIS_NET_ENOSPC)
+        return null
+    native_af: int = 0
+    if (af == ORBIS_NET_AF_INET):
+        native_af <- NATIVE_AF_INET
+    else:
+        if (af == ORBIS_NET_AF_INET6):
+            native_af <- NATIVE_AF_INET6
+        else:
+            sceNet_SetErr(ORBIS_NET_EAFNOSUPPORT)
+            return null
+    result: u8&? = c_inet_ntop(native_af, src, dst, size)
+    if (result == null):
+        sceNet_SetErr(ORBIS_NET_ENOSPC)
+    else:
+        sceNet_SetErr(ORBIS_OK)
+    return result
 
 def sceNetInetNtopWithScopeId() -> int:
     LOG_ERROR("Lib_Net", "(STUBBED) called")
     return ORBIS_OK
 
 def sceNetInetPton(af: int, src: u8&?, dst: u8&?) -> int:
-    return c_inet_pton(af, src, dst)
+    native_af: int = 0
+    if (af == ORBIS_NET_AF_INET):
+        native_af <- NATIVE_AF_INET
+    else:
+        if (af == ORBIS_NET_AF_INET6):
+            native_af <- NATIVE_AF_INET6
+        else:
+            sceNet_SetErr(ORBIS_NET_EAFNOSUPPORT)
+            return (-1)
+    return c_inet_pton(native_af, src, dst)
 
 def sceNetInetPtonEx(af: int, src: u8&?, dst: u8&?, flags: int) -> int:
     _ = flags
@@ -1308,8 +1356,13 @@ def sceNetNtohll(net64: u64) -> u64:
 def sceNetNtohs(net16: u16) -> u16:
     return sceNetHtons(net16)
 
-def sceNetPoolCreate() -> int:
-    return sceNet_RequireInit()
+def sceNetPoolCreate(name: u8&?, size: int, flags: int) -> int:
+    id: int = g_net_next_pool_handle
+    g_net_next_pool_handle <- (g_net_next_pool_handle + 1)
+    _ = name
+    _ = size
+    _ = flags
+    return id
 
 def sceNetPoolDestroy() -> int:
     LOG_ERROR("Lib_Net", "(STUBBED) called")
@@ -1632,9 +1685,17 @@ def sceNetSocket(name: u8&?, family: int, type: int, protocol: int) -> i64:
     sceNet_SetErr(ORBIS_NET_ERROR_ENFILE)
     return (-1)
 
-def sceNetSocketAbort() -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
-    return ORBIS_OK
+def sceNetSocketAbort(s: i64, flags: int) -> int:
+    err: int = sceNet_RequireInit()
+    if (err != ORBIS_OK):
+        return err
+    idx: int = sceNet_FindSocket(s)
+    if (idx < 0):
+        sceNet_SetErr(ORBIS_NET_ERROR_ENOTSOCK)
+        return ORBIS_NET_ERROR_ENOTSOCK
+    _ = flags
+    sceNet_SetErr(ORBIS_NET_ERROR_EBADF)
+    return ORBIS_NET_ERROR_EBADF
 
 def sceNetSocketClose(s: i64) -> int:
     if (not g_net_initialized):
