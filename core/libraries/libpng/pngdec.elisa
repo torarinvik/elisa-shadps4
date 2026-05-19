@@ -191,6 +191,181 @@ def PngDec_DistFromCode(code: u32, extra_bits: mutable u32&, base_dist: mutable 
     base_dist <- (1 << (grp + 1)) + 1 + ((code % 2) * (1 << grp))
     return ORBIS_OK
 
+def PngDec_DecodeCompressedPayload(buf: mutable u8&, total_bytes: u32, bit_pos: mutable u32&, out: mutable u8&, out_cap: u32, out_off: mutable u32&, lit_lengths: mutable u8&, lit_codes: mutable u16&, lit_count: u32, lit_max_bits: u32, dist_lengths: mutable u8&, dist_codes: mutable u16&, dist_count: u32, dist_max_bits: u32) -> int:
+    while true:
+        sym: mutable u32 = 0
+        ds: int = PngDec_DecodeHuffSymbol(buf, total_bytes, bit_pos.ref[mutable u32&], lit_lengths, lit_codes, lit_count, lit_max_bits, sym.ref[mutable u32&])
+        if ds != ORBIS_OK:
+            return ds
+        if sym < 256:
+            if out_off >= out_cap:
+                return ORBIS_PNG_DEC_ERROR_INVALID_SIZE
+            out[out_off.usize()] <- sym.u8()
+            out_off <- out_off + 1
+        elif sym == 256:
+            return ORBIS_OK
+        else:
+            extra_len_bits: mutable u32 = 0
+            base_len: mutable u32 = 0
+            if PngDec_LengthFromCode(sym, extra_len_bits.ref[mutable u32&], base_len.ref[mutable u32&]) != ORBIS_OK:
+                return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+            extra_len: mutable u32 = 0
+            if extra_len_bits > 0:
+                if PngDec_ReadBits(buf, total_bytes, bit_pos.ref[mutable u32&], extra_len_bits, extra_len.ref[mutable u32&]) != ORBIS_OK:
+                    return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+            match_len: u32 = base_len + extra_len
+
+            dist_sym: mutable u32 = 0
+            if PngDec_DecodeHuffSymbol(buf, total_bytes, bit_pos.ref[mutable u32&], dist_lengths, dist_codes, dist_count, dist_max_bits, dist_sym.ref[mutable u32&]) != ORBIS_OK:
+                return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+            extra_dist_bits: mutable u32 = 0
+            base_dist: mutable u32 = 0
+            if PngDec_DistFromCode(dist_sym, extra_dist_bits.ref[mutable u32&], base_dist.ref[mutable u32&]) != ORBIS_OK:
+                return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+            extra_dist: mutable u32 = 0
+            if extra_dist_bits > 0:
+                if PngDec_ReadBits(buf, total_bytes, bit_pos.ref[mutable u32&], extra_dist_bits, extra_dist.ref[mutable u32&]) != ORBIS_OK:
+                    return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+            dist: u32 = base_dist + extra_dist
+            if dist == 0 or dist > out_off:
+                return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+            if out_off + match_len > out_cap:
+                return ORBIS_PNG_DEC_ERROR_INVALID_SIZE
+            k: u32 = 0
+            while k < match_len:
+                out[(out_off + k).usize()] <- out[(out_off - dist + k).usize()]
+                k <- k + 1
+            out_off <- out_off + match_len
+
+def PngDec_ReadDynamicTrees(buf: mutable u8&, total_bytes: u32, bit_pos: mutable u32&, lit_lengths: mutable u8&, lit_codes: mutable u16&, lit_count: mutable u32&, lit_max_bits: mutable u32&, dist_lengths: mutable u8&, dist_codes: mutable u16&, dist_count: mutable u32&, dist_max_bits: mutable u32&) -> int:
+    hlit_v: mutable u32 = 0
+    hdist_v: mutable u32 = 0
+    hclen_v: mutable u32 = 0
+    if PngDec_ReadBits(buf, total_bytes, bit_pos.ref[mutable u32&], 5, hlit_v.ref[mutable u32&]) != ORBIS_OK:
+        return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+    if PngDec_ReadBits(buf, total_bytes, bit_pos.ref[mutable u32&], 5, hdist_v.ref[mutable u32&]) != ORBIS_OK:
+        return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+    if PngDec_ReadBits(buf, total_bytes, bit_pos.ref[mutable u32&], 4, hclen_v.ref[mutable u32&]) != ORBIS_OK:
+        return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+    hlit: u32 = hlit_v + 257
+    hdist: u32 = hdist_v + 1
+    hclen: u32 = hclen_v + 4
+
+    code_len_order: mutable u8[19] = zeroed
+    code_len_order[0] <- 16.u8()
+    code_len_order[1] <- 17.u8()
+    code_len_order[2] <- 18.u8()
+    code_len_order[3] <- 0.u8()
+    code_len_order[4] <- 8.u8()
+    code_len_order[5] <- 7.u8()
+    code_len_order[6] <- 9.u8()
+    code_len_order[7] <- 6.u8()
+    code_len_order[8] <- 10.u8()
+    code_len_order[9] <- 5.u8()
+    code_len_order[10] <- 11.u8()
+    code_len_order[11] <- 4.u8()
+    code_len_order[12] <- 12.u8()
+    code_len_order[13] <- 3.u8()
+    code_len_order[14] <- 13.u8()
+    code_len_order[15] <- 2.u8()
+    code_len_order[16] <- 14.u8()
+    code_len_order[17] <- 1.u8()
+    code_len_order[18] <- 15.u8()
+
+    cl_lengths: mutable u8[19] = zeroed
+    i: u32 = 0
+    while i < hclen:
+        v: mutable u32 = 0
+        if PngDec_ReadBits(buf, total_bytes, bit_pos.ref[mutable u32&], 3, v.ref[mutable u32&]) != ORBIS_OK:
+            return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+        cl_lengths[code_len_order[i.usize()].usize()] <- v.u8()
+        i <- i + 1
+    cl_codes: mutable u16[19] = zeroed
+    if PngDec_BuildCanonical(cl_lengths.ref[mutable u8&], 19, cl_codes.ref[mutable u16&], 7) != ORBIS_OK:
+        return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+
+    total: u32 = hlit + hdist
+    if total > 320:
+        return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+    all_lengths: mutable u8[320] = zeroed
+    idx: u32 = 0
+    while idx < total:
+        sym: mutable u32 = 0
+        if PngDec_DecodeHuffSymbol(buf, total_bytes, bit_pos.ref[mutable u32&], cl_lengths.ref[mutable u8&], cl_codes.ref[mutable u16&], 19, 7, sym.ref[mutable u32&]) != ORBIS_OK:
+            return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+        if sym <= 15:
+            all_lengths[idx.usize()] <- sym.u8()
+            idx <- idx + 1
+        elif sym == 16:
+            if idx == 0:
+                return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+            extra2: mutable u32 = 0
+            if PngDec_ReadBits(buf, total_bytes, bit_pos.ref[mutable u32&], 2, extra2.ref[mutable u32&]) != ORBIS_OK:
+                return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+            rep: u32 = 3 + extra2
+            prev: u8 = all_lengths[(idx - 1).usize()]
+            if idx + rep > total:
+                return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+            r: u32 = 0
+            while r < rep:
+                all_lengths[(idx + r).usize()] <- prev
+                r <- r + 1
+            idx <- idx + rep
+        elif sym == 17:
+            extra3: mutable u32 = 0
+            if PngDec_ReadBits(buf, total_bytes, bit_pos.ref[mutable u32&], 3, extra3.ref[mutable u32&]) != ORBIS_OK:
+                return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+            rep0: u32 = 3 + extra3
+            if idx + rep0 > total:
+                return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+            r0: u32 = 0
+            while r0 < rep0:
+                all_lengths[(idx + r0).usize()] <- 0.u8()
+                r0 <- r0 + 1
+            idx <- idx + rep0
+        elif sym == 18:
+            extra7: mutable u32 = 0
+            if PngDec_ReadBits(buf, total_bytes, bit_pos.ref[mutable u32&], 7, extra7.ref[mutable u32&]) != ORBIS_OK:
+                return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+            rep00: u32 = 11 + extra7
+            if idx + rep00 > total:
+                return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+            r00: u32 = 0
+            while r00 < rep00:
+                all_lengths[(idx + r00).usize()] <- 0.u8()
+                r00 <- r00 + 1
+            idx <- idx + rep00
+        else:
+            return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+
+    i <- 0
+    while i < hlit:
+        lit_lengths[i.usize()] <- all_lengths[i.usize()]
+        i <- i + 1
+    i <- hlit
+    while i < 288:
+        lit_lengths[i.usize()] <- 0.u8()
+        i <- i + 1
+    i <- 0
+    while i < hdist:
+        dist_lengths[i.usize()] <- all_lengths[(hlit + i).usize()]
+        i <- i + 1
+    i <- hdist
+    while i < 32:
+        dist_lengths[i.usize()] <- 0.u8()
+        i <- i + 1
+
+    if PngDec_BuildCanonical(lit_lengths, 288, lit_codes, 15) != ORBIS_OK:
+        return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+    if PngDec_BuildCanonical(dist_lengths, 32, dist_codes, 15) != ORBIS_OK:
+        return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+
+    lit_count <- 288
+    dist_count <- 32
+    lit_max_bits <- 15
+    dist_max_bits <- 15
+    return ORBIS_OK
+
 def PngDec_MapColorType(color_type: u8) -> u16:
     if color_type == 0.u8():
         return ORBIS_PNG_DEC_COLOR_SPACE_GRAYSCALE
@@ -359,50 +534,24 @@ def PngDec_InflateStored(zlib: mutable u8&, zlib_size: u32, out: mutable u8&, ou
             out_off <- out_off + len
             bit_pos <- (byte_off + len) * 8
         elif btype == 1:
-            while true:
-                sym: mutable u32 = 0
-                ds: int = PngDec_DecodeHuffSymbol(zlib, zlib_size, bit_pos.ref[mutable u32&], lit_lengths.ref[mutable u8&], lit_codes.ref[mutable u16&], 288, 9, sym.ref[mutable u32&])
-                if ds != ORBIS_OK:
-                    return ds
-                if sym < 256:
-                    if out_off >= out_cap:
-                        return ORBIS_PNG_DEC_ERROR_INVALID_SIZE
-                    out[out_off.usize()] <- sym.u8()
-                    out_off <- out_off + 1
-                elif sym == 256:
-                    break
-                else:
-                    extra_len_bits: mutable u32 = 0
-                    base_len: mutable u32 = 0
-                    if PngDec_LengthFromCode(sym, extra_len_bits.ref[mutable u32&], base_len.ref[mutable u32&]) != ORBIS_OK:
-                        return ORBIS_PNG_DEC_ERROR_INVALID_DATA
-                    extra_len: mutable u32 = 0
-                    if extra_len_bits > 0:
-                        if PngDec_ReadBits(zlib, zlib_size, bit_pos.ref[mutable u32&], extra_len_bits, extra_len.ref[mutable u32&]) != ORBIS_OK:
-                            return ORBIS_PNG_DEC_ERROR_INVALID_DATA
-                    match_len: u32 = base_len + extra_len
-
-                    dist_sym: mutable u32 = 0
-                    if PngDec_DecodeHuffSymbol(zlib, zlib_size, bit_pos.ref[mutable u32&], dist_lengths.ref[mutable u8&], dist_codes.ref[mutable u16&], 32, 5, dist_sym.ref[mutable u32&]) != ORBIS_OK:
-                        return ORBIS_PNG_DEC_ERROR_INVALID_DATA
-                    extra_dist_bits: mutable u32 = 0
-                    base_dist: mutable u32 = 0
-                    if PngDec_DistFromCode(dist_sym, extra_dist_bits.ref[mutable u32&], base_dist.ref[mutable u32&]) != ORBIS_OK:
-                        return ORBIS_PNG_DEC_ERROR_INVALID_DATA
-                    extra_dist: mutable u32 = 0
-                    if extra_dist_bits > 0:
-                        if PngDec_ReadBits(zlib, zlib_size, bit_pos.ref[mutable u32&], extra_dist_bits, extra_dist.ref[mutable u32&]) != ORBIS_OK:
-                            return ORBIS_PNG_DEC_ERROR_INVALID_DATA
-                    dist: u32 = base_dist + extra_dist
-                    if dist == 0 or dist > out_off:
-                        return ORBIS_PNG_DEC_ERROR_INVALID_DATA
-                    if out_off + match_len > out_cap:
-                        return ORBIS_PNG_DEC_ERROR_INVALID_SIZE
-                    k: u32 = 0
-                    while k < match_len:
-                        out[(out_off + k).usize()] <- out[(out_off - dist + k).usize()]
-                        k <- k + 1
-                    out_off <- out_off + match_len
+            dec_fixed: int = PngDec_DecodeCompressedPayload(zlib, zlib_size, bit_pos.ref[mutable u32&], out, out_cap, out_off.ref[mutable u32&], lit_lengths.ref[mutable u8&], lit_codes.ref[mutable u16&], 288, 9, dist_lengths.ref[mutable u8&], dist_codes.ref[mutable u16&], 32, 5)
+            if dec_fixed != ORBIS_OK:
+                return dec_fixed
+        elif btype == 2:
+            dyn_lit_lengths: mutable u8[288] = zeroed
+            dyn_lit_codes: mutable u16[288] = zeroed
+            dyn_dist_lengths: mutable u8[32] = zeroed
+            dyn_dist_codes: mutable u16[32] = zeroed
+            dyn_lit_count: mutable u32 = 0
+            dyn_lit_max_bits: mutable u32 = 0
+            dyn_dist_count: mutable u32 = 0
+            dyn_dist_max_bits: mutable u32 = 0
+            read_dyn: int = PngDec_ReadDynamicTrees(zlib, zlib_size, bit_pos.ref[mutable u32&], dyn_lit_lengths.ref[mutable u8&], dyn_lit_codes.ref[mutable u16&], dyn_lit_count.ref[mutable u32&], dyn_lit_max_bits.ref[mutable u32&], dyn_dist_lengths.ref[mutable u8&], dyn_dist_codes.ref[mutable u16&], dyn_dist_count.ref[mutable u32&], dyn_dist_max_bits.ref[mutable u32&])
+            if read_dyn != ORBIS_OK:
+                return read_dyn
+            dec_dyn: int = PngDec_DecodeCompressedPayload(zlib, zlib_size, bit_pos.ref[mutable u32&], out, out_cap, out_off.ref[mutable u32&], dyn_lit_lengths.ref[mutable u8&], dyn_lit_codes.ref[mutable u16&], dyn_lit_count, dyn_lit_max_bits, dyn_dist_lengths.ref[mutable u8&], dyn_dist_codes.ref[mutable u16&], dyn_dist_count, dyn_dist_max_bits)
+            if dec_dyn != ORBIS_OK:
+                return dec_dyn
         else:
             return ORBIS_PNG_DEC_ERROR_UNSUPPORT_DATA
 

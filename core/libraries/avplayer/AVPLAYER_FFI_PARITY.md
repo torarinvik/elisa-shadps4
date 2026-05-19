@@ -65,10 +65,14 @@ Current validated prefix structs:
 - `Implemented`: frame getters now clear stream detail payloads before filling (prevents stale metadata leakage across calls)
 - `Implemented`: source tracks delivered frame interval estimates; audio frame `size` now uses cadence-based estimate instead of constant zero
 - `Implemented`: source caches stream start-time/duration for active audio/video and frame getters now apply cached stream start-time offset to output timestamps
+- `Implemented`: start-time offset application now keys on `start_time` presence (not duration presence), improving streams with unknown/zero duration
+- `Implemented`: handle `CurrentTime` bookkeeping now updates from post-offset frame timestamps (internal time matches returned timeline)
 - `Implemented`: `CurrentTime` now prefers media-clock timestamps (audio/video decoded output) before wall-clock fallback
+- `Implemented`: media-clock `CurrentTime` now includes cached stream start-time offsets for timeline-aligned reporting
 - `Implemented`: buffering state updates in frame getters are now source-readiness driven (`avsrc_has_frames`) instead of hardcoded booleans
 - `Implemented`: source readiness now treats demux packet queues as frame availability signals (not just decoded output queues)
 - `Implemented`: EOF signaling from frame getters is now unified across audio/video paths using source activity (`avsrc_is_active`)
+- `Implemented`: source activity (`IsActive`) now includes demux packet queues, preventing false-inactive states while decode work is buffered
 - `Implemented`: `IsActive` and `CurrentTime` gating now follow the C++ source shape
 - `Partial`: no full demux/decode threads, packet queues, or converted frame pipeline
 - `Partial`: no guest buffer pool or frame-object lifetime model like C++
