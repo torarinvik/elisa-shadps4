@@ -42,6 +42,14 @@ global mutable avsrc_video_width_cache: u32[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_video_height_cache: u32[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_audio_channels_cache: u32[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_audio_sample_rate_cache: u32[AVSRC_MAX_HANDLES] = zeroed
+global mutable avsrc_video_duration_cache: u64[AVSRC_MAX_HANDLES] = zeroed
+global mutable avsrc_video_start_time_cache: u64[AVSRC_MAX_HANDLES] = zeroed
+global mutable avsrc_audio_duration_cache: u64[AVSRC_MAX_HANDLES] = zeroed
+global mutable avsrc_audio_start_time_cache: u64[AVSRC_MAX_HANDLES] = zeroed
+global mutable avsrc_last_video_out_ts: u64[AVSRC_MAX_HANDLES] = zeroed
+global mutable avsrc_last_audio_out_ts: u64[AVSRC_MAX_HANDLES] = zeroed
+global mutable avsrc_video_frame_interval_ms: u32[AVSRC_MAX_HANDLES] = zeroed
+global mutable avsrc_audio_frame_interval_ms: u32[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_video_q_head: int[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_video_q_tail: int[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_video_q_size: int[AVSRC_MAX_HANDLES] = zeroed
@@ -196,6 +204,14 @@ def avsrc_init_handle(slot: int):
     avsrc_video_height_cache[slot] <- 0
     avsrc_audio_channels_cache[slot] <- 0
     avsrc_audio_sample_rate_cache[slot] <- 0
+    avsrc_video_duration_cache[slot] <- 0
+    avsrc_video_start_time_cache[slot] <- 0
+    avsrc_audio_duration_cache[slot] <- 0
+    avsrc_audio_start_time_cache[slot] <- 0
+    avsrc_last_video_out_ts[slot] <- 0
+    avsrc_last_audio_out_ts[slot] <- 0
+    avsrc_video_frame_interval_ms[slot] <- 33
+    avsrc_audio_frame_interval_ms[slot] <- 33
     avsrc_video_q_head[slot] <- 0
     avsrc_video_q_tail[slot] <- 0
     avsrc_video_q_size[slot] <- 0
@@ -287,12 +303,16 @@ def avsrc_enable_stream(slot: int, stream_index: u32) -> bool:
         avsrc_video_stream_index[slot] <- stream_index.i32()
         avsrc_video_width_cache[slot] <- video_width
         avsrc_video_height_cache[slot] <- video_height
+        avsrc_video_duration_cache[slot] <- duration
+        avsrc_video_start_time_cache[slot] <- start_time
         return true
     if typ == AVPLAYER_STREAM_TYPE_AUDIO:
         avsrc_audio_enabled[slot] <- true
         avsrc_audio_stream_index[slot] <- stream_index.i32()
         avsrc_audio_channels_cache[slot] <- audio_channels
         avsrc_audio_sample_rate_cache[slot] <- audio_sample_rate
+        avsrc_audio_duration_cache[slot] <- duration
+        avsrc_audio_start_time_cache[slot] <- start_time
         return true
     if typ == AVPLAYER_STREAM_TYPE_TIMED_TEXT:
         avsrc_timedtext_enabled[slot] <- true
@@ -316,12 +336,16 @@ def avsrc_disable_stream(slot: int, stream_index: u32) -> bool:
         avsrc_video_stream_index[slot] <- -1
         avsrc_video_width_cache[slot] <- 0
         avsrc_video_height_cache[slot] <- 0
+        avsrc_video_duration_cache[slot] <- 0
+        avsrc_video_start_time_cache[slot] <- 0
         return true
     if typ == AVPLAYER_STREAM_TYPE_AUDIO:
         avsrc_audio_enabled[slot] <- false
         avsrc_audio_stream_index[slot] <- -1
         avsrc_audio_channels_cache[slot] <- 0
         avsrc_audio_sample_rate_cache[slot] <- 0
+        avsrc_audio_duration_cache[slot] <- 0
+        avsrc_audio_start_time_cache[slot] <- 0
         return true
     if typ == AVPLAYER_STREAM_TYPE_TIMED_TEXT:
         avsrc_timedtext_enabled[slot] <- false
@@ -531,6 +555,10 @@ def avsrc_start(slot: int) -> bool:
     avsrc_start_time_ns[slot] <- high_resolution_now_ns()
     avsrc_pause_time_ns[slot] <- 0
     avsrc_pause_duration_ns[slot] <- 0
+    avsrc_last_video_out_ts[slot] <- 0
+    avsrc_last_audio_out_ts[slot] <- 0
+    avsrc_video_frame_interval_ms[slot] <- 33
+    avsrc_audio_frame_interval_ms[slot] <- 33
     avsrc_video_q_head[slot] <- 0
     avsrc_video_q_tail[slot] <- 0
     avsrc_video_q_size[slot] <- 0
@@ -626,6 +654,10 @@ def avsrc_stop(slot: int) -> bool:
     avsrc_start_time_ns[slot] <- 0
     avsrc_pause_time_ns[slot] <- 0
     avsrc_pause_duration_ns[slot] <- 0
+    avsrc_last_video_out_ts[slot] <- 0
+    avsrc_last_audio_out_ts[slot] <- 0
+    avsrc_video_frame_interval_ms[slot] <- 33
+    avsrc_audio_frame_interval_ms[slot] <- 33
     avsrc_last_audio_ts[slot] <- 0
     avsrc_video_q_head[slot] <- 0
     avsrc_video_q_tail[slot] <- 0
@@ -666,6 +698,8 @@ def avsrc_jump_to_time(slot: int, target_time: u64) -> bool:
     avsrc_video_eof[slot] <- false
     avsrc_audio_eof[slot] <- false
     avsrc_last_audio_ts[slot] <- target_time
+    avsrc_last_video_out_ts[slot] <- 0
+    avsrc_last_audio_out_ts[slot] <- 0
     avsrc_video_q_head[slot] <- 0
     avsrc_video_q_tail[slot] <- 0
     avsrc_video_q_size[slot] <- 0
@@ -721,6 +755,12 @@ def avsrc_get_video_data(slot: int, out_ts: mutable u64&) -> bool:
         if now_ts > 0 and now_ts < candidate_ts:
             return false
     if avsrc_video_q_pop(slot, out_ts):
+        prev_video_ts: u64 = avsrc_last_video_out_ts[slot]
+        if prev_video_ts > 0 and out_ts > prev_video_ts:
+            delta: u64 = out_ts - prev_video_ts
+            if delta > 0 and delta < 1000:
+                avsrc_video_frame_interval_ms[slot] <- delta.u32()
+        avsrc_last_video_out_ts[slot] <- out_ts
         return true
     out_ts <- avsrc_last_audio_ts[slot]
     return true
@@ -729,6 +769,12 @@ def avsrc_get_audio_data(slot: int, out_ts: mutable u64&) -> bool:
     if not avsrc_has_source[slot] or not avsrc_started[slot] or avsrc_is_paused[slot] or not avsrc_audio_enabled[slot]:
         return false
     if avsrc_audio_q_pop(slot, out_ts):
+        prev_audio_ts: u64 = avsrc_last_audio_out_ts[slot]
+        if prev_audio_ts > 0 and out_ts > prev_audio_ts:
+            delta: u64 = out_ts - prev_audio_ts
+            if delta > 0 and delta < 1000:
+                avsrc_audio_frame_interval_ms[slot] <- delta.u32()
+        avsrc_last_audio_out_ts[slot] <- out_ts
         avsrc_last_audio_ts[slot] <- out_ts
         return true
     if avsrc_ffmpeg_enabled[slot]:
@@ -736,6 +782,12 @@ def avsrc_get_audio_data(slot: int, out_ts: mutable u64&) -> bool:
         if not avsrc_prefetch_audio(slot):
             return false
         if avsrc_audio_q_pop(slot, out_ts):
+            prev_audio_ts: u64 = avsrc_last_audio_out_ts[slot]
+            if prev_audio_ts > 0 and out_ts > prev_audio_ts:
+                delta: u64 = out_ts - prev_audio_ts
+                if delta > 0 and delta < 1000:
+                    avsrc_audio_frame_interval_ms[slot] <- delta.u32()
+            avsrc_last_audio_out_ts[slot] <- out_ts
             avsrc_last_audio_ts[slot] <- out_ts
             return true
         return false
@@ -782,3 +834,21 @@ def avsrc_get_audio_channels(slot: int) -> u32:
 
 def avsrc_get_audio_sample_rate(slot: int) -> u32:
     return avsrc_audio_sample_rate_cache[slot]
+
+def avsrc_get_video_duration(slot: int) -> u64:
+    return avsrc_video_duration_cache[slot]
+
+def avsrc_get_video_start_time(slot: int) -> u64:
+    return avsrc_video_start_time_cache[slot]
+
+def avsrc_get_audio_duration(slot: int) -> u64:
+    return avsrc_audio_duration_cache[slot]
+
+def avsrc_get_audio_start_time(slot: int) -> u64:
+    return avsrc_audio_start_time_cache[slot]
+
+def avsrc_get_video_frame_interval_ms(slot: int) -> u32:
+    return avsrc_video_frame_interval_ms[slot]
+
+def avsrc_get_audio_frame_interval_ms(slot: int) -> u32:
+    return avsrc_audio_frame_interval_ms[slot]

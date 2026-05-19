@@ -1,0 +1,253 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../../error_codes.elisa"
+include "../orbis_error.elisa"
+include "../posix_error.elisa"
+
+const ORBIS_KERNEL_SEM_VALUE_MAX: int = 0x7fffffff
+const PTHREAD_KEYS_MAX: int = 256
+
+@fixed_layout
+struct PthreadSem:
+    value: mutable int
+
+@fixed_layout
+struct OrbisSem:
+    used: mutable bool
+    token_count: mutable int
+    max_count: mutable int
+    init_count: mutable int
+
+global mutable g_orbis_sems: OrbisSem[64]
+global mutable g_tls_allocated: bool[PTHREAD_KEYS_MAX]
+global mutable g_tls_values: void&?[PTHREAD_KEYS_MAX]
+
+def threads_posix_to_orbis_errno(e: int) -> int:
+    return e + ORBIS_KERNEL_ERROR_UNKNOWN
+
+def sceKernelCreateSema(sem: mutable int&, p_name: static u8&?, attr: u32, init_count: int, max_count: int, p_opt_param: void&?) -> int:
+    _ = p_opt_param
+    if p_name == null or attr > 2u32 or init_count < 0 or max_count <= 0 or init_count > max_count:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    i: mutable int = 0
+    while i < 64:
+        if not g_orbis_sems[i].used:
+            g_orbis_sems[i].used <- true
+            g_orbis_sems[i].token_count <- init_count
+            g_orbis_sems[i].max_count <- max_count
+            g_orbis_sems[i].init_count <- init_count
+            sem <- i
+            return ORBIS_OK
+        i <- i + 1
+    return ORBIS_KERNEL_ERROR_ENOMEM
+
+def sceKernelWaitSema(sem: int, need_count: int, p_timeout: mutable u32&) -> int:
+    _ = p_timeout
+    if sem < 0 or sem >= 64 or not g_orbis_sems[sem].used:
+        return ORBIS_KERNEL_ERROR_ESRCH
+    if need_count <= 0:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    if g_orbis_sems[sem].token_count < need_count:
+        return ORBIS_KERNEL_ERROR_ETIMEDOUT
+    g_orbis_sems[sem].token_count <- g_orbis_sems[sem].token_count - need_count
+    return ORBIS_OK
+
+def sceKernelSignalSema(sem: int, signal_count: int) -> int:
+    if sem < 0 or sem >= 64 or not g_orbis_sems[sem].used:
+        return ORBIS_KERNEL_ERROR_ESRCH
+    if signal_count < 0:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    if g_orbis_sems[sem].token_count + signal_count > g_orbis_sems[sem].max_count:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    g_orbis_sems[sem].token_count <- g_orbis_sems[sem].token_count + signal_count
+    return ORBIS_OK
+
+def sceKernelPollSema(sem: int, need_count: int) -> int:
+    if sem < 0 or sem >= 64 or not g_orbis_sems[sem].used:
+        return ORBIS_KERNEL_ERROR_ESRCH
+    if need_count <= 0:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    if g_orbis_sems[sem].token_count < need_count:
+        return ORBIS_KERNEL_ERROR_EBUSY
+    g_orbis_sems[sem].token_count <- g_orbis_sems[sem].token_count - need_count
+    return ORBIS_OK
+
+def sceKernelCancelSema(sem: int, set_count: int, p_num_wait_threads: mutable int&) -> int:
+    if sem < 0 or sem >= 64 or not g_orbis_sems[sem].used:
+        return ORBIS_KERNEL_ERROR_ESRCH
+    p_num_wait_threads <- 0
+    if set_count < 0:
+        g_orbis_sems[sem].token_count <- g_orbis_sems[sem].init_count
+    else:
+        g_orbis_sems[sem].token_count <- set_count
+    return ORBIS_OK
+
+def sceKernelDeleteSema(sem: int) -> int:
+    if sem < 0 or sem >= 64 or not g_orbis_sems[sem].used:
+        return ORBIS_KERNEL_ERROR_ESRCH
+    g_orbis_sems[sem].used <- false
+    g_orbis_sems[sem].token_count <- 0
+    g_orbis_sems[sem].max_count <- 0
+    g_orbis_sems[sem].init_count <- 0
+    return ORBIS_OK
+
+def posix_sem_init(sem: mutable PthreadSem&?&, pshared: int, value: u32) -> int:
+    _ = pshared
+    if value > ORBIS_KERNEL_SEM_VALUE_MAX as u32:
+        return -1
+    if sem != null:
+        sem <- PthreadSem(value as int)
+    return 0
+
+def posix_sem_destroy(sem: mutable PthreadSem&?&) -> int:
+    if sem == null or sem == null:
+        return -1
+    sem <- null
+    return 0
+
+def posix_sem_wait(sem: mutable PthreadSem&?&) -> int:
+    if sem == null or sem == null:
+        return -1
+    if sem.value <= 0:
+        return -1
+    sem.value <- sem.value - 1
+    return 0
+
+def posix_sem_trywait(sem: mutable PthreadSem&?&) -> int:
+    return posix_sem_wait(sem)
+
+def posix_sem_timedwait(sem: mutable PthreadSem&?&, t: void&?) -> int:
+    _ = t
+    return posix_sem_wait(sem)
+
+def posix_sem_post(sem: mutable PthreadSem&?&) -> int:
+    if sem == null or sem == null:
+        return -1
+    if sem.value >= ORBIS_KERNEL_SEM_VALUE_MAX:
+        return -1
+    sem.value <- sem.value + 1
+    return 0
+
+def posix_sem_getvalue(sem: PthreadSem&?, sval: mutable int&) -> int:
+    if sem == null:
+        return -1
+    sval <- sem.value
+    return 0
+
+def scePthreadSemInit(sem: mutable PthreadSem&?&, flag: int, value: u32, name: static u8&?) -> int:
+    _ = name
+    if flag != 0:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    if posix_sem_init(sem, 0, value) != 0:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    return ORBIS_OK
+
+def scePthreadSemDestroy(sem: mutable PthreadSem&?&) -> int:
+    if posix_sem_destroy(sem) != 0:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    return ORBIS_OK
+
+def scePthreadSemWait(sem: mutable PthreadSem&?&) -> int:
+    r: int = posix_sem_wait(sem)
+    if r != 0:
+        return threads_posix_to_orbis_errno(POSIX_EAGAIN)
+    return ORBIS_OK
+
+def scePthreadSemTrywait(sem: mutable PthreadSem&?&) -> int:
+    r: int = posix_sem_trywait(sem)
+    if r != 0:
+        return threads_posix_to_orbis_errno(POSIX_EAGAIN)
+    return ORBIS_OK
+
+def scePthreadSemTimedwait(sem: mutable PthreadSem&?&, usec: u32) -> int:
+    _ = usec
+    r: int = posix_sem_timedwait(sem, null)
+    if r != 0:
+        return threads_posix_to_orbis_errno(POSIX_ETIMEDOUT)
+    return ORBIS_OK
+
+def scePthreadSemPost(sem: mutable PthreadSem&?&) -> int:
+    r: int = posix_sem_post(sem)
+    if r != 0:
+        return threads_posix_to_orbis_errno(POSIX_EOVERFLOW)
+    return ORBIS_OK
+
+def scePthreadSemGetvalue(sem: PthreadSem&?, sval: mutable int&) -> int:
+    r: int = posix_sem_getvalue(sem, sval)
+    if r != 0:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    return ORBIS_OK
+
+def posix_pthread_key_create(key: mutable int&, destructor: void&?) -> int:
+    _ = destructor
+    i: mutable int = 0
+    while i < PTHREAD_KEYS_MAX:
+        if not g_tls_allocated[i]:
+            g_tls_allocated[i] <- true
+            g_tls_values[i] <- null
+            key <- i
+            return 0
+        i <- i + 1
+    return POSIX_EAGAIN
+
+def posix_pthread_key_delete(key: int) -> int:
+    if key < 0 or key >= PTHREAD_KEYS_MAX:
+        return POSIX_EINVAL
+    if not g_tls_allocated[key]:
+        return POSIX_EINVAL
+    g_tls_allocated[key] <- false
+    g_tls_values[key] <- null
+    return 0
+
+def posix_pthread_setspecific(key: int, value: void&?) -> int:
+    if key < 0 or key >= PTHREAD_KEYS_MAX:
+        return POSIX_EINVAL
+    if not g_tls_allocated[key]:
+        return POSIX_EINVAL
+    g_tls_values[key] <- value
+    return 0
+
+def posix_pthread_getspecific(key: int) -> void&?:
+    if key < 0 or key >= PTHREAD_KEYS_MAX:
+        return null
+    if not g_tls_allocated[key]:
+        return null
+    return g_tls_values[key]
+
+def RegisterSemaphore(sym: void&?) -> void:
+    _ = sym
+    LIB_FUNCTION("188x57JYp0g", "libkernel", 1, "libkernel", sceKernelCreateSema)
+    LIB_FUNCTION("Zxa0VhQVTsk", "libkernel", 1, "libkernel", sceKernelWaitSema)
+    LIB_FUNCTION("4czppHBiriw", "libkernel", 1, "libkernel", sceKernelSignalSema)
+    LIB_FUNCTION("12wOHk8ywb0", "libkernel", 1, "libkernel", sceKernelPollSema)
+    LIB_FUNCTION("4DM06U2BNEY", "libkernel", 1, "libkernel", sceKernelCancelSema)
+    LIB_FUNCTION("R1Jvn8bSCW8", "libkernel", 1, "libkernel", sceKernelDeleteSema)
+    LIB_FUNCTION("pDuPEf3m4fI", "libScePosix", 1, "libkernel", posix_sem_init)
+    LIB_FUNCTION("cDW233RAwWo", "libScePosix", 1, "libkernel", posix_sem_destroy)
+    LIB_FUNCTION("YCV5dGGBcCo", "libScePosix", 1, "libkernel", posix_sem_wait)
+    LIB_FUNCTION("WBWzsRifCEA", "libScePosix", 1, "libkernel", posix_sem_trywait)
+    LIB_FUNCTION("w5IHyvahg-o", "libScePosix", 1, "libkernel", posix_sem_timedwait)
+    LIB_FUNCTION("IKP8typ0QUk", "libScePosix", 1, "libkernel", posix_sem_post)
+    LIB_FUNCTION("Bq+LRV-N6Hk", "libScePosix", 1, "libkernel", posix_sem_getvalue)
+    LIB_FUNCTION("GEnUkDZoUwY", "libkernel", 1, "libkernel", scePthreadSemInit)
+    LIB_FUNCTION("Vwc+L05e6oE", "libkernel", 1, "libkernel", scePthreadSemDestroy)
+    LIB_FUNCTION("C36iRE0F5sE", "libkernel", 1, "libkernel", scePthreadSemWait)
+    LIB_FUNCTION("H2a+IN9TP0E", "libkernel", 1, "libkernel", scePthreadSemTrywait)
+    LIB_FUNCTION("fjN6NQHhK8k", "libkernel", 1, "libkernel", scePthreadSemTimedwait)
+    LIB_FUNCTION("aishVAiFaYM", "libkernel", 1, "libkernel", scePthreadSemPost)
+    LIB_FUNCTION("DjpBvGlaWbQ", "libkernel", 1, "libkernel", scePthreadSemGetvalue)
+
+def RegisterSpec(sym: void&?) -> void:
+    _ = sym
+    LIB_FUNCTION("mqULNdimTn0", "libScePosix", 1, "libkernel", posix_pthread_key_create)
+    LIB_FUNCTION("6BpEZuDT7YI", "libScePosix", 1, "libkernel", posix_pthread_key_delete)
+    LIB_FUNCTION("0-KXaS70xy4", "libScePosix", 1, "libkernel", posix_pthread_getspecific)
+    LIB_FUNCTION("WrOLvHU0yQM", "libScePosix", 1, "libkernel", posix_pthread_setspecific)
+    LIB_FUNCTION("mqULNdimTn0", "libkernel", 1, "libkernel", posix_pthread_key_create)
+    LIB_FUNCTION("0-KXaS70xy4", "libkernel", 1, "libkernel", posix_pthread_getspecific)
+    LIB_FUNCTION("WrOLvHU0yQM", "libkernel", 1, "libkernel", posix_pthread_setspecific)
+    LIB_FUNCTION("geDaqgH9lTg", "libkernel", 1, "libkernel", posix_pthread_key_create)
+    LIB_FUNCTION("PrdHuuDekhY", "libkernel", 1, "libkernel", posix_pthread_key_delete)
+    LIB_FUNCTION("eoht7mQOCmo", "libkernel", 1, "libkernel", posix_pthread_getspecific)
+    LIB_FUNCTION("+BzXYkqYeLE", "libkernel", 1, "libkernel", posix_pthread_setspecific)

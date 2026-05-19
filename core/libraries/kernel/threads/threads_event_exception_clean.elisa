@@ -1,0 +1,215 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../../error_codes.elisa"
+include "../orbis_error.elisa"
+include "../posix_error.elisa"
+
+const POSIX_SIGUSR1: int = 30
+
+@fixed_layout
+struct PthreadCleanup:
+    routine: mutable void&?
+    routine_arg: mutable void&?
+    onheap: mutable int
+
+@fixed_layout
+struct EventFlag:
+    used: mutable bool
+    bits: mutable u64
+    attr: mutable u32
+
+global mutable g_event_flags: EventFlag[64]
+global mutable g_exception_handlers: void&?[130]
+
+def __pthread_cleanup_push_imp(routine: void&?, arg: void&?, newbuf: mutable PthreadCleanup&?) -> void:
+    if newbuf == null:
+        return
+    newbuf.routine <- routine
+    newbuf.routine_arg <- arg
+    newbuf.onheap <- 0
+
+def posix_pthread_cleanup_push(routine: void&?, arg: void&?) -> void:
+    _ = routine
+    _ = arg
+    return
+
+def posix_pthread_cleanup_pop(execute: int) -> void:
+    _ = execute
+    return
+
+def sceKernelCreateEventFlag(ef: mutable int&, p_name: static u8&?, attr: u32, init_pattern: u64, p_opt_param: void&?) -> int:
+    if p_name == null or p_opt_param != null:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    i: mutable int = 0
+    while i < 64:
+        if not g_event_flags[i].used:
+            g_event_flags[i].used <- true
+            g_event_flags[i].bits <- init_pattern
+            g_event_flags[i].attr <- attr
+            ef <- i
+            return ORBIS_OK
+        i <- i + 1
+    return ORBIS_KERNEL_ERROR_ENOMEM
+
+def sceKernelDeleteEventFlag(ef: int) -> int:
+    if ef < 0 or ef >= 64 or not g_event_flags[ef].used:
+        return ORBIS_KERNEL_ERROR_ESRCH
+    g_event_flags[ef].used <- false
+    g_event_flags[ef].bits <- 0u64
+    return ORBIS_OK
+
+def sceKernelOpenEventFlag() -> int:
+    return ORBIS_OK
+
+def sceKernelCloseEventFlag() -> int:
+    return ORBIS_OK
+
+def sceKernelClearEventFlag(ef: int, bit_pattern: u64) -> int:
+    if ef < 0 or ef >= 64 or not g_event_flags[ef].used:
+        return ORBIS_KERNEL_ERROR_ESRCH
+    g_event_flags[ef].bits <- g_event_flags[ef].bits and bit_pattern
+    return ORBIS_OK
+
+def sceKernelCancelEventFlag(ef: int, set_pattern: u64, p_num_wait_threads: mutable int&) -> int:
+    if ef < 0 or ef >= 64 or not g_event_flags[ef].used:
+        return ORBIS_KERNEL_ERROR_ESRCH
+    g_event_flags[ef].bits <- set_pattern
+    p_num_wait_threads <- 0
+    return ORBIS_OK
+
+def sceKernelSetEventFlag(ef: int, bit_pattern: u64) -> int:
+    if ef < 0 or ef >= 64 or not g_event_flags[ef].used:
+        return ORBIS_KERNEL_ERROR_ESRCH
+    g_event_flags[ef].bits <- g_event_flags[ef].bits or bit_pattern
+    return ORBIS_OK
+
+def sceKernelPollEventFlag(ef: int, bit_pattern: u64, wait_mode: u32, p_result_pat: mutable u64&) -> int:
+    if ef < 0 or ef >= 64 or not g_event_flags[ef].used:
+        return ORBIS_KERNEL_ERROR_ESRCH
+    if bit_pattern == 0u64:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    bits: u64 = g_event_flags[ef].bits
+    and_mode: bool = (wait_mode and 0x0fu32) == 0x01u32
+    ok: bool = false
+    if and_mode:
+        ok <- (bits and bit_pattern) == bit_pattern
+    else:
+        ok <- (bits and bit_pattern) != 0u64
+    p_result_pat <- bits
+    if not ok:
+        return ORBIS_KERNEL_ERROR_EBUSY
+    if (wait_mode and 0x10u32) != 0u32:
+        g_event_flags[ef].bits <- 0u64
+    if (wait_mode and 0x20u32) != 0u32:
+        g_event_flags[ef].bits <- g_event_flags[ef].bits and (not bit_pattern)
+    return ORBIS_OK
+
+def sceKernelWaitEventFlag(ef: int, bit_pattern: u64, wait_mode: u32, p_result_pat: mutable u64&, p_timeout: mutable u32&) -> int:
+    _ = p_timeout
+    r: int = sceKernelPollEventFlag(ef, bit_pattern, wait_mode, p_result_pat)
+    if r == ORBIS_KERNEL_ERROR_EBUSY:
+        return ORBIS_KERNEL_ERROR_ETIMEDOUT
+    return r
+
+def posix_sigaction(sig: int, act: void&?, oact: void&?) -> int:
+    _ = sig
+    _ = act
+    _ = oact
+    return ORBIS_OK
+
+def posix_sigemptyset(setp: void&?) -> int:
+    _ = setp
+    return ORBIS_OK
+
+def posix_sigfillset(setp: void&?) -> int:
+    _ = setp
+    return ORBIS_OK
+
+def posix_sigprocmask(how: int, setp: void&?, osetp: void&?) -> int:
+    _ = how
+    _ = setp
+    _ = osetp
+    return ORBIS_OK
+
+def posix_pthread_kill(thread: void&?, sig: int) -> int:
+    _ = thread
+    if sig < 1 or sig > 128:
+        return POSIX_EINVAL
+    return ORBIS_OK
+
+def posix_sigalstack() -> int:
+    return ORBIS_OK
+
+def sceKernelInstallExceptionHandler(signum: int, handler: void&?) -> int:
+    if signum < 0 or signum >= 130:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    if g_exception_handlers[signum] != null:
+        return ORBIS_KERNEL_ERROR_EAGAIN
+    g_exception_handlers[signum] <- handler
+    return ORBIS_OK
+
+def sceKernelRemoveExceptionHandler(signum: int) -> int:
+    if signum < 0 or signum >= 130:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    g_exception_handlers[signum] <- null
+    return ORBIS_OK
+
+def sceKernelRaiseException(thread: void&?, signum: int) -> int:
+    _ = thread
+    if signum != POSIX_SIGUSR1:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    return ORBIS_OK
+
+def sceKernelDebugRaiseException(err_code: int, unk: i64) -> int:
+    _ = err_code
+    if unk != 0i64:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    return ORBIS_OK
+
+def sceKernelDebugRaiseExceptionOnReleaseMode(err_code: int, unk: i64) -> int:
+    _ = err_code
+    if unk != 0i64:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    return ORBIS_OK
+
+def RegisterPthreadClean(sym: void&?) -> void:
+    _ = sym
+    LIB_FUNCTION("4ZeZWcMsAV0", "libScePosix", 1, "libkernel", posix_pthread_cleanup_push)
+    LIB_FUNCTION("RVxb0Ssa5t0", "libScePosix", 1, "libkernel", posix_pthread_cleanup_pop)
+    LIB_FUNCTION("1xvtUVx1-Sg", "libkernel", 1, "libkernel", __pthread_cleanup_push_imp)
+    LIB_FUNCTION("iWsFlYMf3Kw", "libkernel", 1, "libkernel", posix_pthread_cleanup_pop)
+
+def RegisterKernelEventFlag(sym: void&?) -> void:
+    _ = sym
+    LIB_FUNCTION("PZku4ZrXJqg", "libkernel", 1, "libkernel", sceKernelCancelEventFlag)
+    LIB_FUNCTION("7uhBFWRAS60", "libkernel", 1, "libkernel", sceKernelClearEventFlag)
+    LIB_FUNCTION("s9-RaxukuzQ", "libkernel", 1, "libkernel", sceKernelCloseEventFlag)
+    LIB_FUNCTION("BpFoboUJoZU", "libkernel", 1, "libkernel", sceKernelCreateEventFlag)
+    LIB_FUNCTION("8mql9OcQnd4", "libkernel", 1, "libkernel", sceKernelDeleteEventFlag)
+    LIB_FUNCTION("1vDaenmJtyA", "libkernel", 1, "libkernel", sceKernelOpenEventFlag)
+    LIB_FUNCTION("9lvj5DjHZiA", "libkernel", 1, "libkernel", sceKernelPollEventFlag)
+    LIB_FUNCTION("IOnSvHzqu6A", "libkernel", 1, "libkernel", sceKernelSetEventFlag)
+    LIB_FUNCTION("JTvBflhYazQ", "libkernel", 1, "libkernel", sceKernelWaitEventFlag)
+
+def RegisterException(sym: void&?) -> void:
+    _ = sym
+    LIB_FUNCTION("il03nluKfMk", "libkernel_unity", 1, "libkernel", sceKernelRaiseException)
+    LIB_FUNCTION("WkwEd3N7w0Y", "libkernel_unity", 1, "libkernel", sceKernelInstallExceptionHandler)
+    LIB_FUNCTION("Qhv5ARAoOEc", "libkernel_unity", 1, "libkernel", sceKernelRemoveExceptionHandler)
+    LIB_FUNCTION("OMDRKKAZ8I4", "libkernel", 1, "libkernel", sceKernelDebugRaiseException)
+    LIB_FUNCTION("zE-wXIZjLoM", "libkernel", 1, "libkernel", sceKernelDebugRaiseExceptionOnReleaseMode)
+    LIB_FUNCTION("WkwEd3N7w0Y", "libkernel", 1, "libkernel", sceKernelInstallExceptionHandler)
+    LIB_FUNCTION("Qhv5ARAoOEc", "libkernel", 1, "libkernel", sceKernelRemoveExceptionHandler)
+    LIB_FUNCTION("KiJEPEWRyUY", "libkernel", 1, "libkernel", posix_sigaction)
+    LIB_FUNCTION("+F7C-hdk7+E", "libkernel", 1, "libkernel", posix_sigemptyset)
+    LIB_FUNCTION("VkTAsrZDcJ0", "libkernel", 1, "libkernel", posix_sigfillset)
+    LIB_FUNCTION("aPcyptbOiZs", "libkernel", 1, "libkernel", posix_sigprocmask)
+    LIB_FUNCTION("yH-uQW3LbX0", "libkernel", 1, "libkernel", posix_pthread_kill)
+    LIB_FUNCTION("sHziAegVp74", "libkernel", 1, "libkernel", posix_sigalstack)
+    LIB_FUNCTION("KiJEPEWRyUY", "libScePosix", 1, "libkernel", posix_sigaction)
+    LIB_FUNCTION("+F7C-hdk7+E", "libScePosix", 1, "libkernel", posix_sigemptyset)
+    LIB_FUNCTION("VkTAsrZDcJ0", "libScePosix", 1, "libkernel", posix_sigfillset)
+    LIB_FUNCTION("aPcyptbOiZs", "libScePosix", 1, "libkernel", posix_sigprocmask)
+    LIB_FUNCTION("yH-uQW3LbX0", "libScePosix", 1, "libkernel", posix_pthread_kill)
+    LIB_FUNCTION("sHziAegVp74", "libScePosix", 1, "libkernel", posix_sigalstack)
