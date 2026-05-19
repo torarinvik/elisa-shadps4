@@ -10,6 +10,9 @@ struct AjmParsedBatchSlot:
     in_use: mutable bool
     batch_id: mutable u32
     context_id: mutable u32
+    canceled: mutable bool
+    waiting: mutable bool
+    processed: mutable bool
     summary: mutable AjmParsedBatch
 
 global mutable ajm_parsed_batch_table: array[AjmParsedBatchSlot, AJM_PARSED_BATCH_TABLE_CAP] = zeroed
@@ -285,14 +288,17 @@ def AjmBatch_ParseJobBuffer(batch: u8&, batch_size: usize) -> AjmParsedBatch:
     out.parse_error <- ORBIS_OK
     return out
 
-def AjmBatchTable_Upsert(batch_id: u32, context_id: u32, parsed: AjmParsedBatch):
+def AjmBatchTable_Upsert(batch_id: u32, context_id: u32, parsed: AjmParsedBatch) -> bool:
     # First try updating an existing slot for this batch id.
     for i in 0..<AJM_PARSED_BATCH_TABLE_CAP:
         slot: AjmParsedBatchSlot& = ajm_parsed_batch_table[i].ref[AjmParsedBatchSlot&]
         if slot.in_use and slot.batch_id == batch_id:
             slot.context_id <- context_id
+            slot.canceled <- false
+            slot.waiting <- false
+            slot.processed <- parsed.job_count == 0
             slot.summary <- parsed
-            return
+            return true
     # Then insert into the first free slot.
     for i in 0..<AJM_PARSED_BATCH_TABLE_CAP:
         slot: AjmParsedBatchSlot& = ajm_parsed_batch_table[i].ref[AjmParsedBatchSlot&]
@@ -300,8 +306,12 @@ def AjmBatchTable_Upsert(batch_id: u32, context_id: u32, parsed: AjmParsedBatch)
             slot.in_use <- true
             slot.batch_id <- batch_id
             slot.context_id <- context_id
+            slot.canceled <- false
+            slot.waiting <- false
+            slot.processed <- parsed.job_count == 0
             slot.summary <- parsed
-            return
+            return true
+    return false
 
 def AjmBatchTable_Remove(batch_id: u32):
     for i in 0..<AJM_PARSED_BATCH_TABLE_CAP:
@@ -310,19 +320,33 @@ def AjmBatchTable_Remove(batch_id: u32):
             slot.in_use <- false
             slot.batch_id <- 0
             slot.context_id <- 0
+            slot.canceled <- false
+            slot.waiting <- false
+            slot.processed <- false
             slot.summary <- zeroed
             return
 
-def AjmBatchTable_Find(batch_id: u32) -> AjmParsedBatchSlot&?:
+def AjmBatchTable_Find(batch_id: u32) -> mutable AjmParsedBatchSlot&?:
     for i in 0..<AJM_PARSED_BATCH_TABLE_CAP:
         slot: AjmParsedBatchSlot& = ajm_parsed_batch_table[i].ref[AjmParsedBatchSlot&]
         if slot.in_use and slot.batch_id == batch_id:
-            return slot.ref[AjmParsedBatchSlot&]
+            return slot.ref[mutable AjmParsedBatchSlot&]
     return null
 
 def sceAjmBatchCancel(context_id: u32, batch_id: u32) -> int:
-    _ = batch_id
-    return AjmContext_Ensure(context_id)
+    if not Ajm_IsKnownContextId(context_id):
+        return ORBIS_AJM_ERROR_INVALID_CONTEXT
+    err: int = AjmContext_Ensure(context_id)
+    if err != ORBIS_OK:
+        return err
+    slot: mutable AjmParsedBatchSlot&? = AjmBatchTable_Find(batch_id)
+    if slot == null:
+        return ORBIS_AJM_ERROR_INVALID_BATCH
+    if slot.context_id != context_id:
+        return ORBIS_AJM_ERROR_INVALID_BATCH
+    if not slot.processed:
+        slot.canceled <- true
+    return ORBIS_OK
 
 def sceAjmBatchStartBuffer(context_id: u32, p_batch: mutable u8&, batch_size: u32, priority: int, batch_error: mutable AjmBatchError&, out_batch_id: mutable u32&) -> int:
     _ = p_batch
@@ -334,6 +358,8 @@ def sceAjmBatchStartBuffer(context_id: u32, p_batch: mutable u8&, batch_size: u3
     be.job_ra <- null
     if (batch_size & 7) != 0:
         return ORBIS_AJM_ERROR_MALFORMED_BATCH
+    if not Ajm_IsKnownContextId(context_id):
+        return ORBIS_AJM_ERROR_INVALID_CONTEXT
     err: int = AjmContext_Ensure(context_id)
     if err != ORBIS_OK:
         return err
@@ -345,17 +371,20 @@ def sceAjmBatchStartBuffer(context_id: u32, p_batch: mutable u8&, batch_size: u3
 
     assigned_batch_id: u32 = ajm_next_batch_id
     out_batch_id <- assigned_batch_id
-    AjmBatchTable_Upsert(assigned_batch_id, context_id, parsed)
+    if not AjmBatchTable_Upsert(assigned_batch_id, context_id, parsed):
+        return ORBIS_AJM_ERROR_OUT_OF_MEMORY
     ajm_next_batch_id += 1
     return ORBIS_OK
 
 def sceAjmBatchWait(context_id: u32, batch_id: u32, timeout: u32, batch_error: mutable AjmBatchError&) -> int:
     _ = timeout
+    if not Ajm_IsKnownContextId(context_id):
+        return ORBIS_AJM_ERROR_INVALID_CONTEXT
     err: int = AjmContext_Ensure(context_id)
     if err != ORBIS_OK:
         return err
 
-    slot: AjmParsedBatchSlot&? = AjmBatchTable_Find(batch_id)
+    slot: mutable AjmParsedBatchSlot&? = AjmBatchTable_Find(batch_id)
     if slot == null:
         be: mutable AjmBatchError& = batch_error
         be.error_code <- ORBIS_AJM_ERROR_INVALID_BATCH
@@ -365,10 +394,26 @@ def sceAjmBatchWait(context_id: u32, batch_id: u32, timeout: u32, batch_error: m
         return ORBIS_AJM_ERROR_INVALID_BATCH
 
     if slot.context_id != context_id:
-        return ORBIS_AJM_ERROR_INVALID_CONTEXT
+        return ORBIS_AJM_ERROR_INVALID_BATCH
 
-    # Current Elisa AJM path performs immediate parse/accept; no async worker yet.
+    # C++ parity model:
+    # - reject overlapping waits with BUSY
+    # - IN_PROGRESS on timed wait that has not finished
+    # - completion destroys batch id then returns OK or CANCELLED
+    if slot.waiting:
+        return ORBIS_AJM_ERROR_BUSY
+    slot.waiting <- true
+    if not slot.processed:
+        if timeout != 0xffffffff:
+            slot.waiting <- false
+            return ORBIS_AJM_ERROR_IN_PROGRESS
+        slot.processed <- true
+
+    was_canceled: bool = slot.canceled
+    slot.waiting <- false
     AjmBatchTable_Remove(batch_id)
+    if was_canceled:
+        return ORBIS_AJM_ERROR_CANCELLED
     be: mutable AjmBatchError& = batch_error
     be.error_code <- ORBIS_OK
     be.job_addr <- null

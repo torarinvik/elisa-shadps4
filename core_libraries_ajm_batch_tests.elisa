@@ -1,0 +1,119 @@
+include "../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "./core/libraries/ajm/ajm_batch.elisa"
+
+def reset_ajm_batch_state() -> void:
+    ajm_next_context_id <- 1
+    ajm_next_batch_id <- 1
+    ci: mutable usize = 0
+    while ci < AJM_MAX_CONTEXTS:
+        ajm_contexts[ci].active <- false
+        ajm_contexts[ci].next_instance_slot <- 1
+        ri: mutable usize = 0
+        while ri < 24:
+            ajm_contexts[ci].registered[ri] <- false
+            ri += 1
+        ii: mutable usize = 0
+        while ii < AJM_MAX_INSTANCES_PER_CONTEXT:
+            ajm_contexts[ci].instance_active[ii] <- false
+            ii += 1
+        ci += 1
+    bi: mutable usize = 0
+    while bi < AJM_PARSED_BATCH_TABLE_CAP:
+        ajm_parsed_batch_table[bi].in_use <- false
+        ajm_parsed_batch_table[bi].batch_id <- 0
+        ajm_parsed_batch_table[bi].context_id <- 0
+        ajm_parsed_batch_table[bi].canceled <- false
+        ajm_parsed_batch_table[bi].waiting <- false
+        ajm_parsed_batch_table[bi].processed <- false
+        ajm_parsed_batch_table[bi].summary <- zeroed
+        bi += 1
+
+def AjmWriteU32Le(dst: mutable u8&, off: usize, value: u32):
+    dst[off + 0] <- (value & 0xff).u8()
+    dst[off + 1] <- ((value >> 8) & 0xff).u8()
+    dst[off + 2] <- ((value >> 16) & 0xff).u8()
+    dst[off + 3] <- ((value >> 24) & 0xff).u8()
+
+def AjmHeaderWord(ident: u32, payload: u32) -> u32:
+    return (ident & 0x3f) | ((payload & 0x000fffff) << 6)
+
+@test
+def ajm_batch_wait_rejects_wrong_context_as_invalid_batch() -> void:
+    can Abort.Panic:
+        reset_ajm_batch_state()
+        c0: mutable u32 = 0
+        c1: mutable u32 = 0
+        assert sceAjmInitialize(0, c0.ref[mutable u32&]) == ORBIS_OK
+        assert sceAjmInitialize(0, c1.ref[mutable u32&]) == ORBIS_OK
+
+        batch: mutable array[u8, 16] = zeroed
+        AjmWriteU32Le(batch[0].ref[mutable u8&], 0, AjmHeaderWord(AjmIdentJob, 1))
+        AjmWriteU32Le(batch[0].ref[mutable u8&], 4, 8)
+        AjmWriteU32Le(batch[0].ref[mutable u8&], 8, AjmHeaderWord(AjmIdentReturnAddressBuf, 0))
+        AjmWriteU32Le(batch[0].ref[mutable u8&], 12, 0)
+
+        be_start: mutable AjmBatchError = zeroed
+        bid: mutable u32 = 0
+        assert sceAjmBatchStartBuffer(c0, batch[0].ref[mutable u8&], 16, 0, be_start.ref[mutable AjmBatchError&], bid.ref[mutable u32&]) == ORBIS_OK
+        be_wait: mutable AjmBatchError = zeroed
+        assert sceAjmBatchWait(c1, bid, 0xffffffff, be_wait.ref[mutable AjmBatchError&]) == ORBIS_AJM_ERROR_INVALID_BATCH
+
+@test
+def ajm_batch_cancel_marks_batch_and_wait_returns_cancelled() -> void:
+    can Abort.Panic:
+        reset_ajm_batch_state()
+        c0: mutable u32 = 0
+        assert sceAjmInitialize(0, c0.ref[mutable u32&]) == ORBIS_OK
+
+        batch: mutable array[u8, 16] = zeroed
+        AjmWriteU32Le(batch[0].ref[mutable u8&], 0, AjmHeaderWord(AjmIdentJob, 1))
+        AjmWriteU32Le(batch[0].ref[mutable u8&], 4, 8)
+        AjmWriteU32Le(batch[0].ref[mutable u8&], 8, AjmHeaderWord(AjmIdentReturnAddressBuf, 0))
+        AjmWriteU32Le(batch[0].ref[mutable u8&], 12, 0)
+
+        be_start: mutable AjmBatchError = zeroed
+        bid: mutable u32 = 0
+        assert sceAjmBatchStartBuffer(c0, batch[0].ref[mutable u8&], 16, 0, be_start.ref[mutable AjmBatchError&], bid.ref[mutable u32&]) == ORBIS_OK
+        assert sceAjmBatchCancel(c0, bid) == ORBIS_OK
+
+        be_wait: mutable AjmBatchError = zeroed
+        assert sceAjmBatchWait(c0, bid, 0xffffffff, be_wait.ref[mutable AjmBatchError&]) == ORBIS_AJM_ERROR_CANCELLED
+
+@test
+def ajm_batch_wait_reports_in_progress_for_timed_wait() -> void:
+    can Abort.Panic:
+        reset_ajm_batch_state()
+        c0: mutable u32 = 0
+        assert sceAjmInitialize(0, c0.ref[mutable u32&]) == ORBIS_OK
+
+        batch: mutable array[u8, 16] = zeroed
+        AjmWriteU32Le(batch[0].ref[mutable u8&], 0, AjmHeaderWord(AjmIdentJob, 1))
+        AjmWriteU32Le(batch[0].ref[mutable u8&], 4, 8)
+        AjmWriteU32Le(batch[0].ref[mutable u8&], 8, AjmHeaderWord(AjmIdentReturnAddressBuf, 0))
+        AjmWriteU32Le(batch[0].ref[mutable u8&], 12, 0)
+
+        be_start: mutable AjmBatchError = zeroed
+        bid: mutable u32 = 0
+        assert sceAjmBatchStartBuffer(c0, batch[0].ref[mutable u8&], 16, 0, be_start.ref[mutable AjmBatchError&], bid.ref[mutable u32&]) == ORBIS_OK
+        be_wait: mutable AjmBatchError = zeroed
+        assert sceAjmBatchWait(c0, bid, 0, be_wait.ref[mutable AjmBatchError&]) == ORBIS_AJM_ERROR_IN_PROGRESS
+
+        # Infinite wait should complete and consume the same batch.
+        assert sceAjmBatchWait(c0, bid, 0xffffffff, be_wait.ref[mutable AjmBatchError&]) == ORBIS_OK
+
+@test
+def ajm_batch_wait_reports_busy_when_already_waiting() -> void:
+    can Abort.Panic:
+        reset_ajm_batch_state()
+        c0: mutable u32 = 0
+        assert sceAjmInitialize(0, c0.ref[mutable u32&]) == ORBIS_OK
+
+        parsed: mutable AjmParsedBatch = zeroed
+        parsed.job_count <- 1
+        assert AjmBatchTable_Upsert(77, c0, parsed)
+        slot: mutable AjmParsedBatchSlot&? = AjmBatchTable_Find(77)
+        assert slot != null
+        slot.waiting <- true
+
+        be_wait: mutable AjmBatchError = zeroed
+        assert sceAjmBatchWait(c0, 77, 0xffffffff, be_wait.ref[mutable AjmBatchError&]) == ORBIS_AJM_ERROR_BUSY

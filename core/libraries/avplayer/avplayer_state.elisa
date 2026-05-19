@@ -1,31 +1,38 @@
-# SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
-# SPDX-License-Identifier: GPL-2.0-or-later
+include "./avplayer_error.elisa"
 
-const AV_STATE_INITIAL: s32 = 0
-const AV_STATE_ADDING_SOURCE: s32 = 1
-const AV_STATE_READY: s32 = 2
-const AV_STATE_STARTING: s32 = 3
-const AV_STATE_PLAY: s32 = 4
-const AV_STATE_PAUSE: s32 = 5
-const AV_STATE_BUFFERING: s32 = 6
-const AV_STATE_STOP: s32 = 7
-const AV_STATE_END_OF_FILE: s32 = 8
-const AV_STATE_ERROR: s32 = 9
-const AV_STATE_JUMP: s32 = 10
-const AV_STATE_TRICK_MODE: s32 = 11
+const AV_STATE_INITIAL: i32 = 0
+const AV_STATE_ADDING_SOURCE: i32 = 1
+const AV_STATE_READY: i32 = 2
+const AV_STATE_STARTING: i32 = 3
+const AV_STATE_PLAY: i32 = 4
+const AV_STATE_PAUSE: i32 = 5
+const AV_STATE_BUFFERING: i32 = 6
+const AV_STATE_STOP: i32 = 7
+const AV_STATE_END_OF_FILE: i32 = 8
+const AV_STATE_ERROR: i32 = 9
+const AV_STATE_JUMP: i32 = 10
+const AV_STATE_TRICK_MODE: i32 = 11
 
-const AVPLAYER_EVENTS_STATE_STOP: s32 = 0x01
-const AVPLAYER_EVENTS_STATE_READY: s32 = 0x02
-const AVPLAYER_EVENTS_STATE_PLAY: s32 = 0x03
-const AVPLAYER_EVENTS_STATE_PAUSE: s32 = 0x04
-const AVPLAYER_EVENTS_STATE_BUFFERING: s32 = 0x05
-const AVPLAYER_EVENTS_WARNING_ID: s32 = 0x20
+const AVPLAYER_EVENTS_STATE_STOP: i32 = 0x01
+const AVPLAYER_EVENTS_STATE_READY: i32 = 0x02
+const AVPLAYER_EVENTS_STATE_PLAY: i32 = 0x03
+const AVPLAYER_EVENTS_STATE_PAUSE: i32 = 0x04
+const AVPLAYER_EVENTS_STATE_BUFFERING: i32 = 0x05
+const AVPLAYER_EVENTS_WARNING_ID: i32 = 0x20
+const AVS_MAX_HANDLES: int = 64
+const AVS_EVENT_NONE: i32 = 0
+const AVS_EVENT_WARNING: i32 = 1
+const AVS_EVENT_ADD_SOURCE: i32 = 2
+const AVS_EVENT_ERROR: i32 = 3
+const AVS_EVENT_REVERT_STATE: i32 = 4
 
-global mutable g_state_current: s32[AVPLAYER_MAX_HANDLES] = zeroed
-global mutable g_state_previous: s32[AVPLAYER_MAX_HANDLES] = zeroed
-global mutable g_state_has_source: bool[AVPLAYER_MAX_HANDLES] = zeroed
-global mutable g_state_event_last: s32[AVPLAYER_MAX_HANDLES] = zeroed
-global mutable g_state_warning_last: s32[AVPLAYER_MAX_HANDLES] = zeroed
+global mutable g_state_current: i32[AVS_MAX_HANDLES] = zeroed
+global mutable g_state_previous: i32[AVS_MAX_HANDLES] = zeroed
+global mutable g_state_has_source: bool[AVS_MAX_HANDLES] = zeroed
+global mutable g_state_event_last: i32[AVS_MAX_HANDLES] = zeroed
+global mutable g_state_warning_last: i32[AVS_MAX_HANDLES] = zeroed
+global mutable g_state_pending_event: i32[AVS_MAX_HANDLES] = zeroed
+global mutable g_state_pending_payload: i32[AVS_MAX_HANDLES] = zeroed
 
 def avs_init_handle(slot: int):
     g_state_current[slot] <- AV_STATE_INITIAL
@@ -33,98 +40,139 @@ def avs_init_handle(slot: int):
     g_state_has_source[slot] <- false
     g_state_event_last[slot] <- 0
     g_state_warning_last[slot] <- 0
+    g_state_pending_event[slot] <- AVS_EVENT_NONE
+    g_state_pending_payload[slot] <- 0
 
-def avs_is_state_transition_valid(slot: int, state: s32) -> bool:
-    cur: s32 = g_state_current[slot]
-    if state == AV_STATE_PLAY:
-        return cur != AV_STATE_STOP and cur != AV_STATE_END_OF_FILE and cur != AV_STATE_ERROR
-    if state == AV_STATE_PAUSE:
-        return cur != AV_STATE_STOP and cur != AV_STATE_END_OF_FILE and cur != AV_STATE_STARTING and cur != AV_STATE_ERROR
-    if state == AV_STATE_JUMP:
-        return cur != AV_STATE_STOP and cur != AV_STATE_END_OF_FILE and cur != AV_STATE_TRICK_MODE and cur != AV_STATE_STARTING and cur != AV_STATE_ERROR
-    if state == AV_STATE_TRICK_MODE:
-        return cur != AV_STATE_STOP and cur != AV_STATE_END_OF_FILE and cur != AV_STATE_JUMP and cur != AV_STATE_STARTING and cur != AV_STATE_ERROR
-    if state == AV_STATE_BUFFERING:
-        return cur != AV_STATE_STOP and cur != AV_STATE_END_OF_FILE and cur != AV_STATE_PAUSE and cur != AV_STATE_STARTING and cur != AV_STATE_ERROR
-    return true
+def avs_is_state_transition_valid(from_state: i32, to_state: i32) -> bool:
+    if from_state == to_state:
+        return true
+    if from_state == AV_STATE_INITIAL and to_state == AV_STATE_ADDING_SOURCE:
+        return true
+    if from_state == AV_STATE_ADDING_SOURCE and to_state == AV_STATE_READY:
+        return true
+    if from_state == AV_STATE_READY and (to_state == AV_STATE_STARTING or to_state == AV_STATE_PLAY or to_state == AV_STATE_STOP):
+        return true
+    if from_state == AV_STATE_STARTING and (to_state == AV_STATE_PLAY or to_state == AV_STATE_BUFFERING or to_state == AV_STATE_STOP):
+        return true
+    if from_state == AV_STATE_PLAY and (to_state == AV_STATE_PAUSE or to_state == AV_STATE_BUFFERING or to_state == AV_STATE_STOP or to_state == AV_STATE_END_OF_FILE or to_state == AV_STATE_JUMP):
+        return true
+    if from_state == AV_STATE_PAUSE and (to_state == AV_STATE_PLAY or to_state == AV_STATE_STOP or to_state == AV_STATE_JUMP):
+        return true
+    if from_state == AV_STATE_BUFFERING and (to_state == AV_STATE_PLAY or to_state == AV_STATE_STOP):
+        return true
+    if from_state == AV_STATE_END_OF_FILE and (to_state == AV_STATE_PLAY or to_state == AV_STATE_STOP):
+        return true
+    if from_state == AV_STATE_JUMP and (to_state == AV_STATE_PLAY or to_state == AV_STATE_PAUSE or to_state == AV_STATE_STOP):
+        return true
+    if to_state == AV_STATE_ERROR:
+        return true
+    return false
 
-def avs_set_state(slot: int, state: s32) -> bool:
-    if not avs_is_state_transition_valid(slot, state):
+def avs_set_state(slot: int, next_state: i32) -> bool:
+    curr: i32 = g_state_current[slot]
+    if not avs_is_state_transition_valid(curr, next_state):
+        g_state_previous[slot] <- curr
+        g_state_current[slot] <- AV_STATE_ERROR
+        g_state_warning_last[slot] <- AVPLAYER_EVENTS_WARNING_ID
         return false
-    g_state_previous[slot] <- g_state_current[slot]
-    g_state_current[slot] <- state
+    g_state_previous[slot] <- curr
+    g_state_current[slot] <- next_state
+    avs_emit_event_for_state(slot, next_state)
     return true
 
-def avs_emit_event_for_state(slot: int, state: s32):
+def avs_emit_event_for_state(slot: int, state: i32):
     if state == AV_STATE_READY:
         g_state_event_last[slot] <- AVPLAYER_EVENTS_STATE_READY
     elif state == AV_STATE_PLAY:
         g_state_event_last[slot] <- AVPLAYER_EVENTS_STATE_PLAY
-    elif state == AV_STATE_STOP:
-        g_state_event_last[slot] <- AVPLAYER_EVENTS_STATE_STOP
     elif state == AV_STATE_PAUSE:
         g_state_event_last[slot] <- AVPLAYER_EVENTS_STATE_PAUSE
     elif state == AV_STATE_BUFFERING:
         g_state_event_last[slot] <- AVPLAYER_EVENTS_STATE_BUFFERING
+    elif state == AV_STATE_STOP:
+        g_state_event_last[slot] <- AVPLAYER_EVENTS_STATE_STOP
 
-def avs_on_warning(slot: int, warning_id: s32):
-    g_state_warning_last[slot] <- warning_id
-    g_state_event_last[slot] <- AVPLAYER_EVENTS_WARNING_ID
+def avs_on_warning(slot: int, warning_id: i32):
+    g_state_pending_event[slot] <- AVS_EVENT_WARNING
+    g_state_pending_payload[slot] <- warning_id
 
 def avs_on_add_source(slot: int):
     g_state_has_source[slot] <- true
-    _ = avs_set_state(slot, AV_STATE_READY)
-    avs_emit_event_for_state(slot, AV_STATE_READY)
+    _ = avs_set_state(slot, AV_STATE_ADDING_SOURCE)
+    g_state_pending_event[slot] <- AVS_EVENT_ADD_SOURCE
+    g_state_pending_payload[slot] <- 0
+
+def avs_on_error(slot: int, error_id: i32):
+    g_state_pending_event[slot] <- AVS_EVENT_ERROR
+    g_state_pending_payload[slot] <- error_id
+
+def avs_on_revert_state(slot: int):
+    g_state_pending_event[slot] <- AVS_EVENT_REVERT_STATE
+
+def avs_on_eof(slot: int):
+    _ = avs_set_state(slot, AV_STATE_END_OF_FILE)
+
+def avs_process_events(slot: int, source_find_stream_info_ok: bool):
+    evt: i32 = g_state_pending_event[slot]
+    payload: i32 = g_state_pending_payload[slot]
+    g_state_pending_event[slot] <- AVS_EVENT_NONE
+    g_state_pending_payload[slot] <- 0
+    if evt == AVS_EVENT_NONE:
+        return
+    if evt == AVS_EVENT_WARNING:
+        g_state_warning_last[slot] <- payload
+        g_state_event_last[slot] <- AVPLAYER_EVENTS_WARNING_ID
+        return
+    if evt == AVS_EVENT_ERROR:
+        g_state_warning_last[slot] <- payload
+        g_state_event_last[slot] <- AVPLAYER_EVENTS_WARNING_ID
+        _ = avs_set_state(slot, AV_STATE_ERROR)
+        return
+    if evt == AVS_EVENT_REVERT_STATE:
+        _ = avs_set_state(slot, g_state_previous[slot])
+        return
+    if evt == AVS_EVENT_ADD_SOURCE:
+        if source_find_stream_info_ok:
+            _ = avs_set_state(slot, AV_STATE_READY)
+        else:
+            g_state_warning_last[slot] <- ORBIS_AVPLAYER_ERROR_NOT_SUPPORTED
+            g_state_event_last[slot] <- AVPLAYER_EVENTS_WARNING_ID
+            _ = avs_set_state(slot, AV_STATE_ERROR)
+        return
 
 def avs_start(slot: int) -> bool:
     if not g_state_has_source[slot]:
         return false
     if not avs_set_state(slot, AV_STATE_STARTING):
         return false
-    if not avs_set_state(slot, AV_STATE_PLAY):
-        return false
-    avs_emit_event_for_state(slot, AV_STATE_PLAY)
-    return true
+    return avs_set_state(slot, AV_STATE_PLAY)
 
 def avs_pause(slot: int) -> bool:
-    if not g_state_has_source[slot]:
+    if g_state_current[slot] != AV_STATE_PLAY:
         return false
-    cur: s32 = g_state_current[slot]
-    if cur == AV_STATE_END_OF_FILE:
-        return true
-    if cur == AV_STATE_PAUSE or cur == AV_STATE_READY or cur == AV_STATE_INITIAL or cur == AV_STATE_ADDING_SOURCE:
-        return false
-    if not avs_set_state(slot, AV_STATE_PAUSE):
-        return false
-    avs_emit_event_for_state(slot, AV_STATE_PAUSE)
-    return true
+    return avs_set_state(slot, AV_STATE_PAUSE)
 
 def avs_resume(slot: int) -> bool:
-    if not g_state_has_source[slot]:
-        return false
     if g_state_current[slot] != AV_STATE_PAUSE:
         return false
-    prev: s32 = g_state_previous[slot]
-    if not avs_set_state(slot, prev):
-        return false
-    avs_emit_event_for_state(slot, prev)
-    return true
+    return avs_set_state(slot, AV_STATE_PLAY)
 
 def avs_stop(slot: int) -> bool:
-    if not g_state_has_source[slot]:
-        return false
-    if g_state_current[slot] == AV_STATE_STOP:
-        return false
-    if not avs_set_state(slot, AV_STATE_STOP):
-        return false
-    avs_emit_event_for_state(slot, AV_STATE_STOP)
-    return true
+    return avs_set_state(slot, AV_STATE_STOP)
 
 def avs_is_active(slot: int) -> bool:
-    cur: s32 = g_state_current[slot]
-    return g_state_has_source[slot] and cur != AV_STATE_STOP and cur != AV_STATE_ERROR and cur != AV_STATE_END_OF_FILE
+    state: i32 = g_state_current[slot]
+    return state == AV_STATE_PLAY or state == AV_STATE_PAUSE or state == AV_STATE_BUFFERING or state == AV_STATE_STARTING
 
-def avs_set_looping(slot: int, is_looping: bool) -> bool:
+def avs_set_looping(slot: int, loop_flag: bool) -> bool:
     _ = slot
-    _ = is_looping
+    _ = loop_flag
     return true
+
+def avs_update_buffering_state(slot: int, has_frames_for_play: bool, has_frames_for_buffer_resume: bool):
+    if g_state_current[slot] == AV_STATE_BUFFERING:
+        if has_frames_for_buffer_resume:
+            _ = avs_set_state(slot, AV_STATE_PLAY)
+    elif g_state_current[slot] == AV_STATE_PLAY:
+        if not has_frames_for_play:
+            _ = avs_set_state(slot, AV_STATE_BUFFERING)

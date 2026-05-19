@@ -1,0 +1,295 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./fiber_error.elisa"
+
+const ORBIS_FIBER_MAX_NAME_LENGTH: usize = 31
+const ORBIS_FIBER_CONTEXT_MINIMUM_SIZE: u64 = 512
+
+const FiberState_Run: u32 = 1
+const FiberState_Idle: u32 = 2
+const FiberState_Terminated: u32 = 3
+
+const FiberFlags_None: u32 = 0x0
+const FiberFlags_NoUlobjmgr: u32 = 0x1
+const FiberFlags_ContextSizeCheck: u32 = 0x10
+const FiberFlags_SetFpuRegs: u32 = 0x100
+
+const kFiberSignature0: u32 = 0xdef1649c
+const kFiberSignature1: u32 = 0xb37592a0
+const kFiberOptSignature: u32 = 0xbb40e64d
+const kFiberFirmware35: u32 = 0x03500000
+
+@fixed_layout
+struct OrbisFiberContext:
+    rax: mutable u64
+    rcx: mutable u64
+    rdx: mutable u64
+    rbx: mutable u64
+    rsp: mutable u64
+    rbp: mutable u64
+    r8: mutable u64
+    r9: mutable u64
+    r10: mutable u64
+    r11: mutable u64
+    r12: mutable u64
+    r13: mutable u64
+    r14: mutable u64
+    r15: mutable u64
+    fpucw: mutable u16
+    mxcsr: mutable u32
+    pad_after_mxcsr: mutable array[u8, 2]
+    current_fiber: mutable OrbisFiber&?
+    prev_fiber: mutable OrbisFiber&?
+    arg_on_run_to: mutable u64
+    arg_on_return: mutable u64
+    return_val: mutable u64
+
+@fixed_layout
+struct OrbisFiberData:
+    entry: mutable void&?
+    arg_on_initialize: mutable u64
+    arg_on_run_to: mutable u64
+    stack_addr: mutable void&?
+    state: mutable u32&?
+    fpucw: mutable u16
+    pad: mutable array[u8, 2]
+    mxcsr: mutable u32
+
+@fixed_layout
+struct OrbisFiber:
+    magic_start: mutable u32
+    state: mutable u32
+    entry: mutable void&?
+    arg_on_initialize: mutable u64
+    addr_context: mutable void&?
+    size_context: mutable u64
+    name: mutable array[u8, 32]
+    saved_context: mutable OrbisFiberContext&?
+    flags: mutable u32
+    context_start: mutable void&?
+    context_end: mutable void&?
+    magic_end: mutable u32
+
+@fixed_layout
+struct OrbisFiberInfo:
+    size: mutable u64
+    entry: mutable void&?
+    arg_on_initialize: mutable u64
+    addr_context: mutable void&?
+    size_context: mutable u64
+    name: mutable array[u8, 32]
+    size_context_margin: mutable u64
+    pad: mutable array[u8, 48]
+
+@fixed_layout
+struct OrbisFiberOptParam:
+    magic: mutable u32
+
+global mutable fiber_current_context: mutable OrbisFiberContext&? = null
+global mutable fiber_context_size_check_enabled: bool = false
+
+@c_abi(c)
+extern _sceFiberSetJmp(ctx: mutable OrbisFiberContext&) -> i32
+@c_abi(c)
+extern _sceFiberLongJmp(ctx: mutable OrbisFiberContext&) -> i32
+@c_abi(c)
+extern _sceFiberSwitchEntry(data: mutable OrbisFiberData&, set_fpu: bool) -> void
+
+def GetFiberContext() -> mutable OrbisFiberContext&?:
+    return fiber_current_context
+
+def Fiber_StrLen(src: static u8&) -> usize:
+    i: mutable usize = 0
+    while src[i] != 0:
+        i <- i + 1
+    return i
+
+def Fiber_CopyName(dst: mutable u8&, src: static u8&) -> void:
+    src_len: usize = Fiber_StrLen(src)
+    copy_len: mutable usize = src_len
+    if copy_len > ORBIS_FIBER_MAX_NAME_LENGTH:
+        copy_len <- ORBIS_FIBER_MAX_NAME_LENGTH
+
+    i: mutable usize = 0
+    while i < copy_len:
+        dst[i] <- src[i]
+        i <- i + 1
+
+    while i < ORBIS_FIBER_MAX_NAME_LENGTH and src_len < ORBIS_FIBER_MAX_NAME_LENGTH:
+        dst[i] <- 0
+        i <- i + 1
+
+def Fiber_HasValidMagic(fiber: OrbisFiber&) -> bool:
+    return fiber.magic_start == kFiberSignature0 and fiber.magic_end == kFiberSignature1
+
+def Fiber_TryTransitionState(fiber: mutable OrbisFiber&, expected: u32, desired: u32) -> bool:
+    if fiber.state != expected:
+        return false
+    fiber.state <- desired
+    return true
+
+def Fiber_ApplyContextSizeCheckFill(fiber: mutable OrbisFiber&) -> void:
+    _ = fiber
+
+def Fiber_CheckStackOverflow(ctx: OrbisFiberContext&) -> void:
+    _ = ctx
+
+def Fiber_AttachContext(fiber: mutable OrbisFiber&, addr_context: mutable void&?, size_context: u64) -> i32:
+    if size_context != 0 and size_context < ORBIS_FIBER_CONTEXT_MINIMUM_SIZE:
+        return ORBIS_FIBER_ERROR_RANGE
+    if (size_context & 15) != 0:
+        return ORBIS_FIBER_ERROR_INVALID
+    if addr_context == null or size_context == 0:
+        return ORBIS_FIBER_ERROR_INVALID
+    _ = fiber
+    return 0
+
+def sceFiberInitializeImpl(fiber: mutable OrbisFiber&?, name: static u8&?, entry: void&?, arg_on_initialize: u64, addr_context: mutable void&?, size_context: u64, opt_param: OrbisFiberOptParam&?, flags: u32, build_ver: u32) -> i32:
+    if fiber == null or name == null or entry == null:
+        return ORBIS_FIBER_ERROR_NULL
+    if (fiber.cast[uintptr] & 7) != 0 or (addr_context != null and (addr_context.cast[uintptr] & 15) != 0):
+        return ORBIS_FIBER_ERROR_ALIGNMENT
+    if opt_param != null and (opt_param.cast[uintptr] & 7) != 0:
+        return ORBIS_FIBER_ERROR_ALIGNMENT
+    if size_context != 0 and size_context < ORBIS_FIBER_CONTEXT_MINIMUM_SIZE:
+        return ORBIS_FIBER_ERROR_RANGE
+    if (size_context & 15) != 0:
+        return ORBIS_FIBER_ERROR_INVALID
+    if addr_context == null and size_context != 0:
+        return ORBIS_FIBER_ERROR_INVALID
+    if addr_context != null and size_context == 0:
+        return ORBIS_FIBER_ERROR_INVALID
+    if opt_param != null and opt_param.magic != kFiberOptSignature:
+        return ORBIS_FIBER_ERROR_INVALID
+
+    fiber_ref: mutable OrbisFiber& = fiber.cast[OrbisFiber&]
+    name_ref: static u8& = name.cast[static u8&]
+
+    user_flags: mutable u32 = flags
+    if build_ver >= kFiberFirmware35:
+        user_flags <- user_flags | FiberFlags_SetFpuRegs
+    if fiber_context_size_check_enabled:
+        user_flags <- user_flags | FiberFlags_ContextSizeCheck
+
+    fiber_ref.entry <- entry
+    fiber_ref.arg_on_initialize <- arg_on_initialize
+    fiber_ref.size_context <- size_context
+    fiber_ref.flags <- user_flags
+    Fiber_CopyName(fiber_ref.name[0].ref[mutable u8&], name_ref)
+    fiber_ref.magic_start <- kFiberSignature0
+    fiber_ref.magic_end <- kFiberSignature1
+    fiber_ref.state <- FiberState_Idle
+    return 0
+
+def sceFiberOptParamInitialize(opt_param: mutable OrbisFiberOptParam&?) -> i32:
+    if opt_param == null:
+        return ORBIS_FIBER_ERROR_NULL
+    if (opt_param.cast[uintptr] & 7) != 0:
+        return ORBIS_FIBER_ERROR_ALIGNMENT
+    opt_param.magic <- kFiberOptSignature
+    return 0
+
+def sceFiberFinalize(fiber: mutable OrbisFiber&?) -> i32:
+    if fiber == null:
+        return ORBIS_FIBER_ERROR_NULL
+    if (fiber.cast[uintptr] & 7) != 0:
+        return ORBIS_FIBER_ERROR_ALIGNMENT
+
+    fiber_ref: mutable OrbisFiber& = fiber.cast[OrbisFiber&]
+    if not Fiber_HasValidMagic(fiber_ref):
+        return ORBIS_FIBER_ERROR_INVALID
+    if not Fiber_TryTransitionState(fiber_ref, FiberState_Idle, FiberState_Terminated):
+        return ORBIS_FIBER_ERROR_STATE
+    return 0
+
+def sceFiberRunImpl(fiber: mutable OrbisFiber&?, addr_context: mutable void&?, size_context: u64, arg_on_run_to: u64, arg_on_return: mutable u64&?) -> i32:
+    _ = addr_context
+    _ = size_context
+    _ = arg_on_run_to
+    _ = arg_on_return
+    if fiber == null:
+        return ORBIS_FIBER_ERROR_NULL
+    return 0
+
+def sceFiberSwitchImpl(fiber: mutable OrbisFiber&?, addr_context: mutable void&?, size_context: u64, arg_on_run_to: u64, arg_on_run: mutable u64&?) -> i32:
+    _ = addr_context
+    _ = size_context
+    _ = arg_on_run_to
+    _ = arg_on_run
+    if fiber == null:
+        return ORBIS_FIBER_ERROR_NULL
+    return 0
+
+def sceFiberGetSelf(fiber: mutable OrbisFiber&?) -> i32:
+    _ = fiber
+    return ORBIS_FIBER_ERROR_PERMISSION
+
+def sceFiberReturnToThread(arg_on_return: u64, arg_on_run: mutable u64&?) -> i32:
+    _ = arg_on_return
+    _ = arg_on_run
+    return ORBIS_FIBER_ERROR_PERMISSION
+
+def sceFiberGetInfo(fiber: mutable OrbisFiber&?, fiber_info: mutable OrbisFiberInfo&?) -> i32:
+    if fiber == null or fiber_info == null:
+        return ORBIS_FIBER_ERROR_NULL
+    if (fiber.cast[uintptr] & 7) != 0 or (fiber_info.cast[uintptr] & 7) != 0:
+        return ORBIS_FIBER_ERROR_ALIGNMENT
+
+    fiber_ref: mutable OrbisFiber& = fiber.cast[OrbisFiber&]
+    info_ref: mutable OrbisFiberInfo& = fiber_info.cast[OrbisFiberInfo&]
+    if info_ref.size != size_of(OrbisFiberInfo).u64():
+        return ORBIS_FIBER_ERROR_INVALID
+    if not Fiber_HasValidMagic(fiber_ref):
+        return ORBIS_FIBER_ERROR_INVALID
+
+    info_ref.entry <- fiber_ref.entry
+    info_ref.arg_on_initialize <- fiber_ref.arg_on_initialize
+    info_ref.addr_context <- fiber_ref.addr_context
+    info_ref.size_context <- fiber_ref.size_context
+    Fiber_CopyName(info_ref.name[0].ref[mutable u8&], fiber_ref.name[0].ref[mutable u8&].cast[static u8&])
+    info_ref.size_context_margin <- 0xffffffffffffffffu64
+    return 0
+
+def sceFiberStartContextSizeCheck(flags: u32) -> i32:
+    if flags != 0:
+        return ORBIS_FIBER_ERROR_INVALID
+    if fiber_context_size_check_enabled:
+        return ORBIS_FIBER_ERROR_STATE
+    fiber_context_size_check_enabled <- true
+    return 0
+
+def sceFiberStopContextSizeCheck() -> i32:
+    if not fiber_context_size_check_enabled:
+        return ORBIS_FIBER_ERROR_STATE
+    fiber_context_size_check_enabled <- false
+    return 0
+
+def sceFiberRename(fiber: mutable OrbisFiber&?, name: static u8&?) -> i32:
+    if fiber == null or name == null:
+        return ORBIS_FIBER_ERROR_NULL
+    if (fiber.cast[uintptr] & 7) != 0:
+        return ORBIS_FIBER_ERROR_ALIGNMENT
+
+    fiber_ref: mutable OrbisFiber& = fiber.cast[OrbisFiber&]
+    if not Fiber_HasValidMagic(fiber_ref):
+        return ORBIS_FIBER_ERROR_INVALID
+
+    Fiber_CopyName(fiber_ref.name[0].ref[mutable u8&], name.cast[static u8&])
+    return ORBIS_OK
+
+def sceFiberGetThreadFramePointerAddress(addr_frame_pointer: mutable u64&?) -> i32:
+    _ = addr_frame_pointer
+    return ORBIS_FIBER_ERROR_PERMISSION
+
+def sceFiberInitialize(fiber: mutable OrbisFiber&?, name: static u8&?, entry: void&?, arg_on_initialize: u64, addr_context: mutable void&?, size_context: u64, opt_param: OrbisFiberOptParam&?, build_ver: u32) -> i32:
+    return sceFiberInitializeImpl(fiber, name, entry, arg_on_initialize, addr_context, size_context, opt_param, 0, build_ver)
+
+def sceFiberRun(fiber: mutable OrbisFiber&?, arg_on_run_to: u64, arg_on_return: mutable u64&?) -> i32:
+    return sceFiberRunImpl(fiber, null, 0, arg_on_run_to, arg_on_return)
+
+def sceFiberSwitch(fiber: mutable OrbisFiber&?, arg_on_run_to: u64, arg_on_run: mutable u64&?) -> i32:
+    return sceFiberSwitchImpl(fiber, null, 0, arg_on_run_to, arg_on_run)
+
+def Fiber_RegisterLib(sym: void&?) -> void:
+    _ = sym

@@ -1,0 +1,463 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../error_codes.elisa"
+include "./hmd_error.elisa"
+include "./hmd_distortion.elisa"
+include "./hmd_reprojection.elisa"
+
+const ORBIS_HMD_DEVICE_STATUS_READY: u32 = 0u32
+const ORBIS_HMD_DEVICE_STATUS_NOT_READY: u32 = 1u32
+const ORBIS_HMD_DEVICE_STATUS_NOT_DETECTED: u32 = 2u32
+const ORBIS_HMD_DEVICE_STATUS_NOT_READY_HMU_DISCONNECT: u32 = 3u32
+
+const ORBIS_USER_SERVICE_USER_ID_SYSTEM: s32 = 0xff
+const ORBIS_USER_SERVICE_USER_ID_INVALID: s32 = -1
+const ORBIS_HMD_SDK_FW_45: s32 = 0x04500000
+
+struct OrbisHmdInitializeParam:
+    reserved0: void&?
+    reserved: u8[8]
+
+struct OrbisHmdOpenParam:
+    reserve: u8[32]
+
+struct OrbisHmdFieldOfView:
+    tan_out: f32
+    tan_in: f32
+    tan_top: f32
+    tan_bottom: f32
+
+struct OrbisHmdPanelResolution:
+    width: u32
+    height: u32
+
+struct OrbisHmdFlipToDisplayLatency:
+    refresh_rate_90hz: u16
+    refresh_rate_120hz: u16
+
+struct OrbisHmdDeviceInfo:
+    panel_resolution: OrbisHmdPanelResolution
+    flip_to_display_latency: OrbisHmdFlipToDisplayLatency
+
+struct OrbisHmdDeviceInformation:
+    status: u32
+    user_id: s32
+    reserve0: u8[4]
+    device_info: OrbisHmdDeviceInfo
+    hmu_mount: u8
+    reserve1: u8[7]
+
+struct OrbisHmdEyeOffset:
+    offset_x: f32
+    offset_y: f32
+    offset_z: f32
+    reserve: u8[20]
+
+global mutable hmd_library_initialized: bool = false
+global mutable hmd_firmware_version: s32 = 0
+global mutable hmd_internal_handle: s32 = 0
+global mutable hmd_user_id: s32 = -1
+
+def hmd_fill_device_info(info: mutable OrbisHmdDeviceInformation&):
+    info.status <- ORBIS_HMD_DEVICE_STATUS_NOT_DETECTED
+    info.user_id <- hmd_user_id
+    info.reserve0[0] <- 0u8
+    info.reserve0[1] <- 0u8
+    info.reserve0[2] <- 0u8
+    info.reserve0[3] <- 0u8
+    info.device_info.panel_resolution.width <- 0u32
+    info.device_info.panel_resolution.height <- 0u32
+    info.device_info.flip_to_display_latency.refresh_rate_90hz <- 0u16
+    info.device_info.flip_to_display_latency.refresh_rate_120hz <- 0u16
+    info.hmu_mount <- 0u8
+    i: mutable int = 0
+    while i < 7:
+        info.reserve1[i] <- 0u8
+        i <- i + 1
+
+def sceHmdInitialize(param: OrbisHmdInitializeParam&?) -> s32:
+    if hmd_library_initialized:
+        return ORBIS_HMD_ERROR_ALREADY_INITIALIZED
+    if param == null:
+        return ORBIS_HMD_ERROR_PARAMETER_NULL
+    if param.reserved0 != null:
+        _ = sceHmdDistortionInitialize(param.reserved0)
+    hmd_library_initialized <- true
+    return ORBIS_OK
+
+def sceHmdInitialize315(param: OrbisHmdInitializeParam&?) -> s32:
+    if hmd_library_initialized:
+        return ORBIS_HMD_ERROR_ALREADY_INITIALIZED
+    if param == null:
+        return ORBIS_HMD_ERROR_PARAMETER_NULL
+    hmd_library_initialized <- true
+    return ORBIS_OK
+
+def sceHmdOpen(user_id: s32, type: s32, index: s32, param: mutable OrbisHmdOpenParam&?) -> s32:
+    if not hmd_library_initialized:
+        return ORBIS_HMD_ERROR_NOT_INITIALIZED
+    if type != 0 or index != 0 or param != null:
+        return ORBIS_HMD_ERROR_PARAMETER_INVALID
+    if hmd_internal_handle != 0:
+        return ORBIS_HMD_ERROR_ALREADY_OPENED
+    if user_id == ORBIS_USER_SERVICE_USER_ID_INVALID or user_id == ORBIS_USER_SERVICE_USER_ID_SYSTEM:
+        return ORBIS_HMD_ERROR_PARAMETER_INVALID
+    hmd_user_id <- user_id
+    hmd_internal_handle <- 0x0f000000
+    return hmd_internal_handle
+
+def sceHmdGet2DEyeOffset(handle: s32, left_offset: mutable OrbisHmdEyeOffset&?, right_offset: mutable OrbisHmdEyeOffset&?) -> s32:
+    if not hmd_library_initialized:
+        return ORBIS_HMD_ERROR_NOT_INITIALIZED
+    if handle != hmd_internal_handle:
+        return ORBIS_HMD_ERROR_HANDLE_INVALID
+    if hmd_firmware_version >= ORBIS_HMD_SDK_FW_45:
+        return ORBIS_HMD_ERROR_HANDLE_INVALID
+    if left_offset == null or right_offset == null:
+        return ORBIS_HMD_ERROR_PARAMETER_NULL
+    left_offset.offset_x <- -0.0315f32
+    left_offset.offset_y <- 0f32
+    left_offset.offset_z <- 0f32
+    right_offset.offset_x <- 0.0315f32
+    right_offset.offset_y <- 0f32
+    right_offset.offset_z <- 0f32
+    return ORBIS_OK
+
+def sceHmdGetAssyError(data: void&?) -> s32:
+    if data == null:
+        return ORBIS_HMD_ERROR_PARAMETER_NULL
+    if not hmd_library_initialized:
+        return ORBIS_HMD_ERROR_NOT_INITIALIZED
+    return ORBIS_HMD_ERROR_DEVICE_DISCONNECTED
+
+def sceHmdGetDeviceInformation(info: mutable OrbisHmdDeviceInformation&?) -> s32:
+    if info == null:
+        return ORBIS_HMD_ERROR_PARAMETER_NULL
+    if not hmd_library_initialized:
+        return ORBIS_HMD_ERROR_NOT_INITIALIZED
+    hmd_fill_device_info(info)
+    return ORBIS_OK
+
+def sceHmdGetDeviceInformationByHandle(handle: s32, info: mutable OrbisHmdDeviceInformation&?) -> s32:
+    if handle != hmd_internal_handle:
+        return ORBIS_HMD_ERROR_HANDLE_INVALID
+    if hmd_firmware_version >= ORBIS_HMD_SDK_FW_45:
+        return ORBIS_HMD_ERROR_HANDLE_INVALID
+    if info == null:
+        return ORBIS_HMD_ERROR_PARAMETER_NULL
+    if not hmd_library_initialized:
+        return ORBIS_HMD_ERROR_NOT_INITIALIZED
+    hmd_fill_device_info(info)
+    return ORBIS_OK
+
+def sceHmdGetFieldOfView(handle: s32, field_of_view: mutable OrbisHmdFieldOfView&?) -> s32:
+    if field_of_view == null:
+        return ORBIS_HMD_ERROR_PARAMETER_NULL
+    if handle != hmd_internal_handle:
+        return ORBIS_HMD_ERROR_HANDLE_INVALID
+    if hmd_firmware_version >= ORBIS_HMD_SDK_FW_45:
+        return ORBIS_HMD_ERROR_HANDLE_INVALID
+    if not hmd_library_initialized:
+        return ORBIS_HMD_ERROR_NOT_INITIALIZED
+    return ORBIS_HMD_ERROR_HANDLE_INVALID
+
+def sceHmdGetInertialSensorData(handle: s32, data: void&?, unk: s32) -> s32:
+    _ = data
+    _ = unk
+    if not hmd_library_initialized:
+        return ORBIS_HMD_ERROR_NOT_INITIALIZED
+    if handle != hmd_internal_handle:
+        return ORBIS_HMD_ERROR_HANDLE_INVALID
+    if hmd_firmware_version >= ORBIS_HMD_SDK_FW_45:
+        return ORBIS_HMD_ERROR_HANDLE_INVALID
+    return ORBIS_HMD_ERROR_DEVICE_DISCONNECTED
+
+def sceHmdClose(handle: s32) -> s32:
+    if not hmd_library_initialized:
+        return ORBIS_HMD_ERROR_NOT_INITIALIZED
+    if handle != hmd_internal_handle:
+        return ORBIS_HMD_ERROR_HANDLE_INVALID
+    hmd_internal_handle <- 0
+    hmd_user_id <- -1
+    return ORBIS_OK
+
+def sceHmdTerminate() -> s32:
+    if not hmd_library_initialized:
+        return ORBIS_HMD_ERROR_NOT_INITIALIZED
+    _ = sceHmdDistortionTerminate()
+    hmd_library_initialized <- false
+    return ORBIS_OK
+
+def sceHmdInternalGetDeviceStatus(status: mutable u32&?) -> s32:
+    if status == null:
+        return ORBIS_HMD_ERROR_PARAMETER_NULL
+    status <- ORBIS_HMD_DEVICE_STATUS_NOT_DETECTED
+    return ORBIS_OK
+
+def sceHmdInternalMmapIsConnect() -> s32:
+    return 0
+
+def Func_69383B2B4E3AEABF(handle: s32, data: void&?, unk: s32) -> s32:
+    _ = data
+    _ = unk
+    if not hmd_library_initialized:
+        return ORBIS_HMD_ERROR_NOT_INITIALIZED
+    if handle != hmd_internal_handle:
+        return ORBIS_HMD_ERROR_HANDLE_INVALID
+    if hmd_firmware_version >= ORBIS_HMD_SDK_FW_45:
+        return ORBIS_HMD_ERROR_HANDLE_INVALID
+    return ORBIS_HMD_ERROR_DEVICE_DISCONNECTED
+
+# Internal/unknown HMD functions currently stubbed in C++ as well.
+def sceHmdInternal3dAudioClose() -> s32:
+    return ORBIS_OK
+def sceHmdInternal3dAudioOpen() -> s32:
+    return ORBIS_OK
+def sceHmdInternal3dAudioSendData() -> s32:
+    return ORBIS_OK
+def sceHmdInternalAnotherScreenClose() -> s32:
+    return ORBIS_OK
+def sceHmdInternalAnotherScreenGetAudioStatus() -> s32:
+    return ORBIS_OK
+def sceHmdInternalAnotherScreenGetFadeState() -> s32:
+    return ORBIS_OK
+def sceHmdInternalAnotherScreenGetVideoStatus() -> s32:
+    return ORBIS_OK
+def sceHmdInternalAnotherScreenOpen() -> s32:
+    return ORBIS_OK
+def sceHmdInternalAnotherScreenSendAudio() -> s32:
+    return ORBIS_OK
+def sceHmdInternalAnotherScreenSendVideo() -> s32:
+    return ORBIS_OK
+def sceHmdInternalAnotherScreenSetFadeAndSwitch() -> s32:
+    return ORBIS_OK
+def sceHmdInternalBindDeviceWithUserId() -> s32:
+    return ORBIS_OK
+def sceHmdInternalCheckDeviceModelMk3() -> s32:
+    return ORBIS_OK
+def sceHmdInternalCheckS3dPassModeAvailable() -> s32:
+    return ORBIS_OK
+def sceHmdInternalCrashReportCancel() -> s32:
+    return ORBIS_OK
+def sceHmdInternalCrashReportClose() -> s32:
+    return ORBIS_OK
+def sceHmdInternalCrashReportOpen() -> s32:
+    return ORBIS_OK
+def sceHmdInternalCrashReportReadData() -> s32:
+    return ORBIS_OK
+def sceHmdInternalCrashReportReadDataSize() -> s32:
+    return ORBIS_OK
+def sceHmdInternalCreateSharedMemory() -> s32:
+    return ORBIS_OK
+def sceHmdInternalDfuCheckAfterPvt() -> s32:
+    return ORBIS_OK
+def sceHmdInternalDfuCheckPartialUpdateAvailable() -> s32:
+    return ORBIS_OK
+def sceHmdInternalDfuClose() -> s32:
+    return ORBIS_OK
+def sceHmdInternalDfuGetStatus() -> s32:
+    return ORBIS_OK
+def sceHmdInternalDfuOpen() -> s32:
+    return ORBIS_OK
+def sceHmdInternalDfuReset() -> s32:
+    return ORBIS_OK
+def sceHmdInternalDfuSend() -> s32:
+    return ORBIS_OK
+def sceHmdInternalDfuSendSize() -> s32:
+    return ORBIS_OK
+def sceHmdInternalDfuSetMode() -> s32:
+    return ORBIS_OK
+def sceHmdInternalDfuStart() -> s32:
+    return ORBIS_OK
+def sceHmdInternalEventInitialize() -> s32:
+    return ORBIS_OK
+def sceHmdInternalGetBrightness() -> s32:
+    return ORBIS_OK
+def sceHmdInternalGetCrashDumpInfo() -> s32:
+    return ORBIS_OK
+def sceHmdInternalGetDebugMode() -> s32:
+    return ORBIS_OK
+def sceHmdInternalGetDebugSocialScreenMode() -> s32:
+    return ORBIS_OK
+def sceHmdInternalGetDebugTextMode() -> s32:
+    return ORBIS_OK
+def sceHmdInternalGetDefaultLedData() -> s32:
+    return ORBIS_OK
+def sceHmdInternalGetDemoMode() -> s32:
+    return ORBIS_OK
+def sceHmdInternalGetDeviceInformation() -> s32:
+    return ORBIS_OK
+def sceHmdInternalGetDeviceInformationByHandle() -> s32:
+    return ORBIS_OK
+def sceHmdInternalGetEyeStatus() -> s32:
+    return ORBIS_OK
+def sceHmdInternalGetHmuOpticalParam() -> s32:
+    return ORBIS_OK
+def sceHmdInternalGetHmuPowerStatusForDebug() -> s32:
+    return ORBIS_OK
+def sceHmdInternalGetHmuSerialNumber() -> s32:
+    return ORBIS_OK
+def sceHmdInternalGetIPD() -> s32:
+    return ORBIS_OK
+def sceHmdInternalGetIpdSettingEnableForSystemService() -> s32:
+    return ORBIS_OK
+def sceHmdInternalGetPuBuildNumber() -> s32:
+    return ORBIS_OK
+def sceHmdInternalGetPuPositionParam() -> s32:
+    return ORBIS_OK
+def sceHmdInternalGetPuRevision() -> s32:
+    return ORBIS_OK
+def sceHmdInternalGetPUSerialNumber() -> s32:
+    return ORBIS_OK
+def sceHmdInternalGetPUVersion() -> s32:
+    return ORBIS_OK
+def sceHmdInternalGetRequiredPUPVersion() -> s32:
+    return ORBIS_OK
+def sceHmdInternalGetStatusReport() -> s32:
+    return ORBIS_OK
+def sceHmdInternalGetTv4kCapability() -> s32:
+    return ORBIS_OK
+def sceHmdInternalGetVirtualDisplayDepth() -> s32:
+    return ORBIS_OK
+def sceHmdInternalGetVirtualDisplayHeight() -> s32:
+    return ORBIS_OK
+def sceHmdInternalGetVirtualDisplaySize() -> s32:
+    return ORBIS_OK
+def sceHmdInternalGetVr2dData() -> s32:
+    return ORBIS_OK
+def sceHmdInternalIsCommonDlgMiniAppVr2d() -> s32:
+    return ORBIS_OK
+def sceHmdInternalIsCommonDlgVr2d() -> s32:
+    return ORBIS_OK
+def sceHmdInternalIsGameVr2d() -> s32:
+    return ORBIS_OK
+def sceHmdInternalIsMiniAppVr2d() -> s32:
+    return ORBIS_OK
+def sceHmdInternalMapSharedMemory() -> s32:
+    return ORBIS_OK
+def sceHmdInternalMirroringModeSetAspect() -> s32:
+    return ORBIS_OK
+def sceHmdInternalMirroringModeSetAspectDebug() -> s32:
+    return ORBIS_OK
+def sceHmdInternalMmapGetCount() -> s32:
+    return ORBIS_OK
+def sceHmdInternalMmapGetModeId() -> s32:
+    return ORBIS_OK
+def sceHmdInternalMmapGetSensorCalibrationData() -> s32:
+    return ORBIS_OK
+def sceHmdInternalPushVr2dData() -> s32:
+    return ORBIS_OK
+def sceHmdInternalRegisterEventCallback() -> s32:
+    return ORBIS_OK
+def sceHmdInternalResetInertialSensor() -> s32:
+    return ORBIS_OK
+def sceHmdInternalResetLedForVrTracker() -> s32:
+    return ORBIS_OK
+def sceHmdInternalResetLedForVsh() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSeparateModeClose() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSeparateModeGetAudioStatus() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSeparateModeGetVideoStatus() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSeparateModeOpen() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSeparateModeSendAudio() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSeparateModeSendVideo() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSetBrightness() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSetCrashReportCommand() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSetDebugGpo() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSetDebugMode() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSetDebugSocialScreenMode() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSetDebugTextMode() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSetDefaultLedData() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSetDemoMode() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSetDeviceConnection() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSetForcedCrash() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSetHmuPowerControl() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSetHmuPowerControlForDebug() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSetIPD() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSetIpdSettingEnableForSystemService() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSetLedOn() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSetM2LedBrightness() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSetM2LedOn() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSetPortConnection() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSetPortStatus() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSetS3dPassMode() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSetSidetone() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSetUserType() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSetVirtualDisplayDepth() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSetVirtualDisplayHeight() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSetVirtualDisplaySize() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSetVRMode() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSocialScreenGetFadeState() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSocialScreenSetFadeAndSwitch() -> s32:
+    return ORBIS_OK
+def sceHmdInternalSocialScreenSetOutput() -> s32:
+    return ORBIS_OK
+def Func_202D0D1A687FCD2F() -> s32:
+    return ORBIS_OK
+def Func_358DBF818A3D8A12() -> s32:
+    return ORBIS_OK
+def Func_5CCBADA76FE8F40E() -> s32:
+    return ORBIS_OK
+def Func_63D403167DC08CF0() -> s32:
+    return ORBIS_OK
+def Func_791560C32F4F6D68() -> s32:
+    return ORBIS_OK
+def Func_7C955961EA85B6D3() -> s32:
+    return ORBIS_OK
+def Func_9952277839236BA7() -> s32:
+    return ORBIS_OK
+def Func_9A276E739E54EEAF() -> s32:
+    return ORBIS_OK
+def Func_9E501994E289CBE7() -> s32:
+    return ORBIS_OK
+def Func_A31F4DA8B3BD2E12() -> s32:
+    return ORBIS_OK
+def Func_A92D7C23AC364993() -> s32:
+    return ORBIS_OK
+def Func_ADCCC25CB876FDBE() -> s32:
+    return ORBIS_OK
+def Func_B16652641FE69F0E() -> s32:
+    return ORBIS_OK
+def Func_FC193BD653F2AF2E() -> s32:
+    return ORBIS_OK
+def Func_FF2E0E53015FE231() -> s32:
+    return ORBIS_OK
+
+def RegisterLib(sym: void&?) -> void:
+    _ = sym
+    RegisterDistortion(sym)
+    RegisterReprojection(sym)

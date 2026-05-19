@@ -1,0 +1,63 @@
+include "../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "./core/libraries/error_codes.elisa"
+include "./core/libraries/audio/audio_port.elisa"
+include "./core/libraries/audio/audioout_error.elisa"
+include "./core/libraries/audio/audioin_error.elisa"
+include "./core/libraries/audio/audio_ffi.elisa"
+include "./core/libraries/audio/audioout_nids.elisa"
+include "./core/libraries/audio/audioin_nids.elisa"
+include "./core/libraries/audio/audioout.elisa"
+include "./core/libraries/audio/audioin.elisa"
+
+@test
+def audioout_open_validation_order_and_errors() -> void:
+    can Abort.Panic:
+        assert sceAudioOutOpen(0, 0, 0, 256u32, 48000u32, 1u32) == ORBIS_AUDIO_OUT_ERROR_NOT_INIT
+        assert sceAudioOutInit() == ORBIS_OK
+        assert sceAudioOutInit() == ORBIS_AUDIO_OUT_ERROR_ALREADY_INIT
+        assert sceAudioOutOpen(0, 0, 0, 0u32, 48000u32, 1u32) == ORBIS_AUDIO_OUT_ERROR_INVALID_SIZE
+        assert sceAudioOutOpen(0, 0, 0, 256u32, 44100u32, 1u32) == ORBIS_AUDIO_OUT_ERROR_INVALID_SAMPLE_FREQ
+        assert sceAudioOutOpen(0, 99, 0, 256u32, 48000u32, 1u32) == ORBIS_AUDIO_OUT_ERROR_INVALID_PORT_TYPE
+        AudioOut_ShutdownBackends()
+
+@test
+def audioout_handle_and_batch_validation() -> void:
+    can Abort.Panic:
+        assert sceAudioOutInit() == ORBIS_OK
+        h: s32 = sceAudioOutOpen(0, 0, 0, 256u32, 48000u32, 1u32)
+        assert h > 0
+        bad: s32 = 0x10000000
+        assert sceAudioOutClose(bad) == ORBIS_AUDIO_OUT_ERROR_INVALID_PORT
+        assert sceAudioOutGetLastOutputTime(h, null) == ORBIS_AUDIO_OUT_ERROR_INVALID_POINTER
+        params: mutable u8[32]
+        _ = memset(params[0].ref[mutable u8&] as mutable void&, 0, 32usize)
+        _ = memcpy(params[0].ref[mutable u8&] as mutable void&, h.ref[s32&] as void&, 4usize)
+        assert sceAudioOutOutputs(params[0].ref[mutable u8&] as void&, 1u32) >= 0
+        assert sceAudioOutClose(h) == ORBIS_OK
+        AudioOut_ShutdownBackends()
+
+@test
+def audioin_open_input_silentstate_cycle() -> void:
+    can Abort.Panic:
+        assert sceAudioInInit() == ORBIS_OK
+        hi: s32 = sceAudioInOpen(0, 0u32, 0u32, 256u32, 16000u32, 0u32)
+        assert hi > 0
+        assert sceAudioInInput(hi, null) == ORBIS_AUDIO_IN_ERROR_INVALID_POINTER
+        buf: mutable u8[1024]
+        _ = memset(buf[0].ref[mutable u8&] as mutable void&, 0, 1024usize)
+        r: s32 = sceAudioInInput(hi, buf[0].ref[mutable u8&])
+        assert r >= 0
+        s: s32 = sceAudioInGetSilentState(hi)
+        assert s == 0 or s == ORBIS_AUDIO_IN_SILENT_STATE_DEVICE_NONE
+        assert sceAudioInClose(hi) == ORBIS_OK
+        AudioIn_ShutdownBackends()
+
+@test
+def audio_nid_tables_match_cpp_counts() -> void:
+    can Abort.Panic:
+        assert AUDIOOUT_NIDS_COUNT == 69usize
+        assert AUDIOIN_NIDS_COUNT == 42usize
+        first_out: AudioOutNidEntry = AudioOut_NidEntryAt(0usize)
+        assert first_out.nid == "cx2dYFbzIAg"
+        first_in: AudioInNidEntry = AudioIn_NidEntryAt(0usize)
+        assert first_in.nid == "IQtWgnrw6v8"

@@ -1,0 +1,66 @@
+include "../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "./core/libraries/content_export/content_export.elisa"
+
+type TestAllocFn = func(u64, void&?) -> void&?
+type TestFreeFn = func(void&?, void&?) -> void
+
+def content_export_test_alloc(datasize: u64, userdata: void&?) -> void&?:
+    _ = datasize
+    _ = userdata
+    return null
+
+def content_export_test_free(p: void&?, userdata: void&?) -> void:
+    _ = p
+    _ = userdata
+
+def make_valid_init_param() -> OrbisContentExportInitParam:
+    p: mutable OrbisContentExportInitParam = zeroed
+    p.mallocfunc <- content_export_test_alloc.cast[OrbisContentExportMalloc]
+    p.freefunc <- content_export_test_free.cast[OrbisContentExportFree]
+    p.userdata <- null
+    p.bufsize <- 0
+    p.reserved0 <- 0
+    p.reserved1 <- 0
+    return p
+
+@test
+def content_export_init_requires_valid_callbacks() -> void:
+    g_is_initialized <- false
+    assert sceContentExportInit(null) == ORBIS_CONTENT_EXPORT_ERROR_INVALDPARAM
+
+    p: mutable OrbisContentExportInitParam = zeroed
+    assert sceContentExportInit(p.ref[mutable OrbisContentExportInitParam&]) == ORBIS_CONTENT_EXPORT_ERROR_INVALDPARAM
+
+    p.mallocfunc <- content_export_test_alloc.cast[OrbisContentExportMalloc]
+    assert sceContentExportInit(p.ref[mutable OrbisContentExportInitParam&]) == ORBIS_CONTENT_EXPORT_ERROR_INVALDPARAM
+
+@test
+def content_export_init2_validates_reserved_and_bufsize() -> void:
+    g_is_initialized <- false
+    p: mutable OrbisContentExportInitParam = make_valid_init_param()
+
+    p.reserved0 <- 1
+    assert sceContentExportInit2(p.ref[mutable OrbisContentExportInitParam&]) == ORBIS_CONTENT_EXPORT_ERROR_INVALDPARAM
+    p.reserved0 <- 0
+
+    p.reserved1 <- 1
+    assert sceContentExportInit2(p.ref[mutable OrbisContentExportInitParam&]) == ORBIS_CONTENT_EXPORT_ERROR_INVALDPARAM
+    p.reserved1 <- 0
+
+    p.bufsize <- 0x80
+    assert sceContentExportInit2(p.ref[mutable OrbisContentExportInitParam&]) == ORBIS_CONTENT_EXPORT_ERROR_INVALDPARAM
+    p.bufsize <- 0x100
+
+    assert sceContentExportInit2(p.ref[mutable OrbisContentExportInitParam&]) == ORBIS_OK
+    assert sceContentExportTerm() == ORBIS_OK
+
+@test
+def content_export_lifecycle_and_multiple_init_behavior() -> void:
+    g_is_initialized <- false
+    p: mutable OrbisContentExportInitParam = make_valid_init_param()
+
+    assert sceContentExportTerm() == ORBIS_CONTENT_EXPORT_ERROR_NOINIT
+    assert sceContentExportInit(p.ref[mutable OrbisContentExportInitParam&]) == ORBIS_OK
+    assert sceContentExportInit(p.ref[mutable OrbisContentExportInitParam&]) == ORBIS_CONTENT_EXPORT_ERROR_MULTIPLEINIT
+    assert sceContentExportTerm() == ORBIS_OK
+    assert sceContentExportTerm() == ORBIS_CONTENT_EXPORT_ERROR_NOINIT
