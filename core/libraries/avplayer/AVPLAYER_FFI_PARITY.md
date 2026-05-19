@@ -77,6 +77,8 @@ Current validated prefix structs:
 - `Implemented`: source activity queue checks are now filtered by enabled stream types (avoids stale-queue false-active states after stream mode changes)
 - `Implemented`: disabling a stream now clears that stream’s output/demux queues and per-stream timing/EOF markers immediately
 - `Implemented`: stream-disable path now recomputes combined EOF immediately after per-stream clear operations
+- `Implemented`: add-source paths now reset queue state, stream metadata/timing caches, cadence markers, and playback time anchors before new source lifecycle begins
+- `Implemented`: add-source source-runtime baseline now also resets loop mode to false for deterministic per-source setup
 - `Implemented`: `IsActive` and `CurrentTime` gating now follow the C++ source shape
 - `Partial`: no full demux/decode threads, packet queues, or converted frame pipeline
 - `Partial`: no guest buffer pool or frame-object lifetime model like C++
@@ -93,7 +95,9 @@ Current validated prefix structs:
 - `Implemented`: queue-full policy now prefers higher-priority events (`ERROR`/`EOF`) over low-priority events
 - `Implemented`: controller now processes events in bounded bursts per tick (FIFO drain up to cap) instead of single-event only
 - `Implemented`: controller queue now coalesces consecutive duplicate events/payloads to reduce redundant event churn
-- `Implemented`: controller flushes pending queued events on terminal transitions (`STOP`, explicit `ERROR`, and add-source failure to `ERROR`)
+- `Implemented`: controller flushes and scrubs pending queued events on hard transitions (`STOP`, explicit `ERROR`, add-source failure to `ERROR`, and `REVERT_STATE`)
+- `Implemented`: add-source entry now hard-flushes queued controller events before scheduling add-source processing
+- `Implemented`: add-source controller flow now re-baselines state to `INITIAL` before entering `ADDING_SOURCE`
 - `Partial`: no dedicated controller thread or full C++ event queue semantics
 
 ### FFI layer (`avplayer_ffmpeg_ffi.elisa`)

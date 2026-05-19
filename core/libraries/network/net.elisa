@@ -9,6 +9,60 @@ include "../../../common/logging/log.elisa"
 const ORBIS_NET_MAX_SOCKETS: usize = 64
 const ORBIS_NET_MAX_RESOLVERS: usize = 16
 const ORBIS_NET_RESOLVER_ASYNC: int = 1
+const ORBIS_NET_SEND_FLAGS: int = 0x40020000
+const ORBIS_NET_RECV_FLAGS: int = 0x40000000
+
+@link_name(socket)
+@c_abi(c)
+extern c_socket(domain: int, socktype: int, protocol: int) -> int
+
+@link_name(bind)
+@c_abi(c)
+extern c_bind(fd: int, addr: u8&?, addrlen: u32) -> int
+
+@link_name(connect)
+@c_abi(c)
+extern c_connect(fd: int, addr: u8&?, addrlen: u32) -> int
+
+@link_name(listen)
+@c_abi(c)
+extern c_listen(fd: int, backlog: int) -> int
+
+@link_name(sendto)
+@c_abi(c)
+extern c_sendto(fd: int, buf: u8&?, len: usize, flags: int, addr: u8&?, addrlen: u32) -> isize
+
+@link_name(sendmsg)
+@c_abi(c)
+extern c_sendmsg(fd: int, msg: u8&?, flags: int) -> isize
+
+@link_name(recvfrom)
+@c_abi(c)
+extern c_recvfrom(fd: int, buf: u8&?, len: usize, flags: int, addr: u8&?, paddrlen: u32&?) -> isize
+
+@link_name(recvmsg)
+@c_abi(c)
+extern c_recvmsg(fd: int, msg: u8&?, flags: int) -> isize
+
+@link_name(shutdown)
+@c_abi(c)
+extern c_shutdown(fd: int, how: int) -> int
+
+@link_name(close)
+@c_abi(c)
+extern c_close(fd: int) -> int
+
+@link_name(inet_pton)
+@c_abi(c)
+extern c_inet_pton(af: int, src: u8&?, dst: u8&?) -> int
+
+@link_name(getaddrinfo)
+@c_abi(c)
+extern c_getaddrinfo(node: u8&?, service: u8&?, hints: void&?, result: mutable void&?&) -> int
+
+@link_name(freeaddrinfo)
+@c_abi(c)
+extern c_freeaddrinfo(result: void&?) -> void
 
 struct OrbisNetSocketState:
     in_use: mutable bool
@@ -69,6 +123,20 @@ def sceNet_RequireInit() -> int:
         sceNet_SetErr(ORBIS_NET_ERROR_ENOTINIT)
         return ORBIS_NET_ERROR_ENOTINIT
     return ORBIS_OK
+
+def sceNet_FfiIntResult(result: int, fallback: int) -> int:
+    if result < 0:
+        sceNet_SetErr(fallback)
+        return fallback
+    sceNet_SetErr(ORBIS_OK)
+    return result
+
+def sceNet_FfiSizeResult(result: isize, fallback: int) -> int:
+    if result < 0:
+        sceNet_SetErr(fallback)
+        return fallback
+    sceNet_SetErr(ORBIS_OK)
+    return result.int()
 
 def in6addr_any() -> int:
     LOG_ERROR("Lib_Net", "(STUBBED) called")
@@ -188,10 +256,8 @@ def sceNetBind(s: i64, addr: u8&?, addrlen: int) -> int:
     if idx < 0:
         sceNet_SetErr(ORBIS_NET_ERROR_ENOTSOCK)
         return ORBIS_NET_ERROR_ENOTSOCK
-    _ = addr
-    _ = addrlen
-    sceNet_SetErr(ORBIS_OK)
-    return ORBIS_OK
+    result: int = c_bind(s.int(), addr, addrlen.u32())
+    return sceNet_FfiIntResult(result, ORBIS_NET_ERROR_EINVAL)
 
 def sceNetClearDnsCache() -> int:
     LOG_ERROR("Lib_Net", "(STUBBED) called")
@@ -476,11 +542,12 @@ def sceNetConnect(s: i64, addr: u8&?, addrlen: int) -> int:
     if idx < 0:
         sceNet_SetErr(ORBIS_NET_ERROR_ENOTSOCK)
         return ORBIS_NET_ERROR_ENOTSOCK
+    result: int = c_connect(s.int(), addr, addrlen.u32())
+    if result < 0:
+        return sceNet_FfiIntResult(result, ORBIS_NET_ERROR_ECONNREFUSED)
     slot: mutable OrbisNetSocketState& = g_net_sockets[idx.usize()].ref[mutable OrbisNetSocketState&]
     slot.connected <- true
     slot.listening <- false
-    _ = addr
-    _ = addrlen
     sceNet_SetErr(ORBIS_OK)
     return ORBIS_OK
 
@@ -682,12 +749,16 @@ def sceNetGetSystemTime() -> int:
     return ORBIS_OK
 
 def sceNetHtonl(host32: u32) -> u32:
-    return ((host32 & 0xff) << 24) | ((host32 & 0xff00) << 8) |
-        ((host32 >> 8) & 0xff00) | ((host32 >> 24) & 0xff)
+    b0: u32 = (host32 & 0xff) << 24
+    b1: u32 = (host32 & 0xff00) << 8
+    b2: u32 = (host32 >> 8) & 0xff00
+    b3: u32 = (host32 >> 24) & 0xff
+    return b0 | b1 | b2 | b3
 
 def sceNetHtonll(host64: u64) -> u64:
-    return ((sceNetHtonl((host64 & 0xffffffffu64).u32()).u64()) << 32) |
-        sceNetHtonl((host64 >> 32).u32()).u64()
+    lo: u64 = sceNetHtonl((host64 & 0xffffffffu64).u32()).u64()
+    hi: u64 = sceNetHtonl((host64 >> 32).u32()).u64()
+    return (lo << 32) | hi
 
 def sceNetHtons(host16: u16) -> u16:
     return ((host16 & 0xff) << 8) | ((host16 >> 8) & 0xff)
@@ -700,13 +771,12 @@ def sceNetInetNtopWithScopeId() -> int:
     LOG_ERROR("Lib_Net", "(STUBBED) called")
     return ORBIS_OK
 
-def sceNetInetPton() -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
-    return ORBIS_OK
+def sceNetInetPton(af: int, src: u8&?, dst: u8&?) -> int:
+    return c_inet_pton(af, src, dst)
 
-def sceNetInetPtonEx() -> int:
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
-    return ORBIS_OK
+def sceNetInetPtonEx(af: int, src: u8&?, dst: u8&?, flags: int) -> int:
+    _ = flags
+    return sceNetInetPton(af, src, dst)
 
 def sceNetInetPtonWithScopeId() -> int:
     LOG_ERROR("Lib_Net", "(STUBBED) called")
@@ -744,11 +814,13 @@ def sceNetListen(s: i64, backlog: int) -> int:
     if idx < 0:
         sceNet_SetErr(ORBIS_NET_ERROR_ENOTSOCK)
         return ORBIS_NET_ERROR_ENOTSOCK
+    result: int = c_listen(s.int(), backlog)
+    if result < 0:
+        return sceNet_FfiIntResult(result, ORBIS_NET_ERROR_EINVAL)
     slot: mutable OrbisNetSocketState& = g_net_sockets[idx.usize()].ref[mutable OrbisNetSocketState&]
     slot.listening <- true
     slot.shutdown_state <- 0
     slot.connected <- false
-    _ = backlog
     sceNet_SetErr(ORBIS_OK)
     return ORBIS_OK
 
@@ -764,8 +836,9 @@ def sceNetNtohl(net32: u32) -> u32:
     return sceNetHtonl(net32)
 
 def sceNetNtohll(net64: u64) -> u64:
-    return ((sceNetNtohl((net64 & 0xffffffffu64).u32()).u64()) << 32) |
-        sceNetNtohl((net64 >> 32).u32()).u64()
+    lo: u64 = sceNetNtohl((net64 & 0xffffffffu64).u32()).u64()
+    hi: u64 = sceNetNtohl((net64 >> 32).u32()).u64()
+    return (lo << 32) | hi
 
 def sceNetNtohs(net16: u16) -> u16:
     return sceNetHtons(net16)
@@ -793,11 +866,8 @@ def sceNetRecv(s: i64, buf: u8&?, len: u64, flags: int) -> int:
     if idx < 0:
         sceNet_SetErr(ORBIS_NET_ERROR_ENOTSOCK)
         return ORBIS_NET_ERROR_ENOTSOCK
-    _ = buf
-    _ = len
-    _ = flags
-    sceNet_SetErr(ORBIS_OK)
-    return ORBIS_OK
+    result: isize = c_recvfrom(s.int(), buf, len.usize(), flags | ORBIS_NET_RECV_FLAGS, null, null)
+    return sceNet_FfiSizeResult(result, ORBIS_NET_ERROR_EAGAIN)
 
 def sceNetRecvfrom(s: i64, buf: u8&?, len: u64, flags: int, addr: u8&?, paddrlen: u32&?) -> int:
     err: int = sceNet_RequireInit()
@@ -807,13 +877,8 @@ def sceNetRecvfrom(s: i64, buf: u8&?, len: u64, flags: int, addr: u8&?, paddrlen
     if idx < 0:
         sceNet_SetErr(ORBIS_NET_ERROR_ENOTSOCK)
         return ORBIS_NET_ERROR_ENOTSOCK
-    _ = buf
-    _ = len
-    _ = flags
-    _ = addr
-    _ = paddrlen
-    sceNet_SetErr(ORBIS_OK)
-    return ORBIS_OK
+    result: isize = c_recvfrom(s.int(), buf, len.usize(), flags | ORBIS_NET_RECV_FLAGS, addr, paddrlen)
+    return sceNet_FfiSizeResult(result, ORBIS_NET_ERROR_EAGAIN)
 
 def sceNetRecvmsg(s: i64, msg: u8&?, flags: int) -> int:
     err: int = sceNet_RequireInit()
@@ -823,10 +888,8 @@ def sceNetRecvmsg(s: i64, msg: u8&?, flags: int) -> int:
     if idx < 0:
         sceNet_SetErr(ORBIS_NET_ERROR_ENOTSOCK)
         return ORBIS_NET_ERROR_ENOTSOCK
-    _ = msg
-    _ = flags
-    sceNet_SetErr(ORBIS_OK)
-    return ORBIS_OK
+    result: isize = c_recvmsg(s.int(), msg, flags | ORBIS_NET_RECV_FLAGS)
+    return sceNet_FfiSizeResult(result, ORBIS_NET_ERROR_EAGAIN)
 
 def sceNetResolverAbort() -> int:
     LOG_ERROR("Lib_Net", "(STUBBED) called")
@@ -878,9 +941,16 @@ def sceNetResolverDestroy(resolverid: i64) -> int:
     return ORBIS_OK
 
 def sceNetResolverGetError(resolverid: i64, status: mutable int&?) -> int:
-    _ = resolverid
-    _ = status
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
+    if status == null:
+        sceNet_SetErr(ORBIS_NET_ERROR_EINVAL)
+        return ORBIS_NET_ERROR_EINVAL
+    idx: int = sceNet_FindResolver(resolverid)
+    if idx < 0:
+        sceNet_SetErr(ORBIS_NET_ERROR_EBADF)
+        return ORBIS_NET_ERROR_EBADF
+    slot: mutable OrbisNetResolverState& = g_net_resolvers[idx.usize()].ref[mutable OrbisNetResolverState&]
+    status <- slot.last_error
+    sceNet_SetErr(ORBIS_OK)
     return ORBIS_OK
 
 def sceNetResolverStartAton() -> int:
@@ -892,13 +962,29 @@ def sceNetResolverStartAton6() -> int:
     return ORBIS_OK
 
 def sceNetResolverStartNtoa(resolverid: i64, hostname: u8&?, addr: u8&?, timeout: int, retry: int, flags: int) -> int:
-    _ = resolverid
-    _ = hostname
+    idx: int = sceNet_FindResolver(resolverid)
+    if idx < 0:
+        sceNet_SetErr(ORBIS_NET_ERROR_EBADF)
+        return ORBIS_NET_ERROR_EBADF
+    slot: mutable OrbisNetResolverState& = g_net_resolvers[idx.usize()].ref[mutable OrbisNetResolverState&]
+    if hostname == null:
+        slot.last_error <- ORBIS_NET_ERROR_EINVAL
+        sceNet_SetErr(ORBIS_NET_ERROR_EINVAL)
+        return ORBIS_NET_ERROR_EINVAL
+    native_result: mutable void&? = null
+    lookup: int = c_getaddrinfo(hostname, null, null, native_result)
+    if lookup != 0:
+        slot.last_error <- ORBIS_NET_ERROR_RESOLVER_ENOHOST
+        sceNet_SetErr(ORBIS_NET_ERROR_RESOLVER_ENOHOST)
+        return ORBIS_NET_ERROR_RESOLVER_ENOHOST
+    if native_result != null:
+        c_freeaddrinfo(native_result)
+    slot.last_error <- ORBIS_OK
     _ = addr
     _ = timeout
     _ = retry
     _ = flags
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
+    sceNet_SetErr(ORBIS_OK)
     return ORBIS_OK
 
 def sceNetResolverStartNtoa6() -> int:
@@ -906,14 +992,7 @@ def sceNetResolverStartNtoa6() -> int:
     return ORBIS_OK
 
 def sceNetResolverStartNtoaMultipleRecords(resolverid: i64, hostname: u8&?, info: u8&?, timeout: int, retry: int, flags: int) -> int:
-    _ = resolverid
-    _ = hostname
-    _ = info
-    _ = timeout
-    _ = retry
-    _ = flags
-    LOG_ERROR("Lib_Net", "(STUBBED) called")
-    return ORBIS_OK
+    return sceNetResolverStartNtoa(resolverid, hostname, info, timeout, retry, flags)
 
 def sceNetResolverStartNtoaMultipleRecordsEx() -> int:
     LOG_ERROR("Lib_Net", "(STUBBED) called")
@@ -927,11 +1006,8 @@ def sceNetSend(s: i64, buf: u8&?, len: u64, flags: int) -> int:
     if idx < 0:
         sceNet_SetErr(ORBIS_NET_ERROR_ENOTSOCK)
         return ORBIS_NET_ERROR_ENOTSOCK
-    _ = buf
-    _ = len
-    _ = flags
-    sceNet_SetErr(ORBIS_OK)
-    return ORBIS_OK
+    result: isize = c_sendto(s.int(), buf, len.usize(), flags | ORBIS_NET_SEND_FLAGS, null, 0)
+    return sceNet_FfiSizeResult(result, ORBIS_NET_ERROR_EPIPE)
 
 def sceNetSendmsg(s: i64, msg: u8&?, flags: int) -> int:
     err: int = sceNet_RequireInit()
@@ -941,10 +1017,8 @@ def sceNetSendmsg(s: i64, msg: u8&?, flags: int) -> int:
     if idx < 0:
         sceNet_SetErr(ORBIS_NET_ERROR_ENOTSOCK)
         return ORBIS_NET_ERROR_ENOTSOCK
-    _ = msg
-    _ = flags
-    sceNet_SetErr(ORBIS_OK)
-    return ORBIS_OK
+    result: isize = c_sendmsg(s.int(), msg, flags | ORBIS_NET_SEND_FLAGS)
+    return sceNet_FfiSizeResult(result, ORBIS_NET_ERROR_EPIPE)
 
 def sceNetSendto(s: i64, buf: u8&?, len: u64, flags: int, addr: u8&?, addrlen: int) -> int:
     err: int = sceNet_RequireInit()
@@ -954,13 +1028,8 @@ def sceNetSendto(s: i64, buf: u8&?, len: u64, flags: int, addr: u8&?, addrlen: i
     if idx < 0:
         sceNet_SetErr(ORBIS_NET_ERROR_ENOTSOCK)
         return ORBIS_NET_ERROR_ENOTSOCK
-    _ = buf
-    _ = len
-    _ = flags
-    _ = addr
-    _ = addrlen
-    sceNet_SetErr(ORBIS_OK)
-    return ORBIS_OK
+    result: isize = c_sendto(s.int(), buf, len.usize(), flags | ORBIS_NET_SEND_FLAGS, addr, addrlen.u32())
+    return sceNet_FfiSizeResult(result, ORBIS_NET_ERROR_EPIPE)
 
 def sceNetSetDns6Info() -> int:
     LOG_ERROR("Lib_Net", "(STUBBED) called")
@@ -1065,9 +1134,11 @@ def sceNetShutdown(s: i64, how: int) -> int:
     if idx < 0:
         sceNet_SetErr(ORBIS_NET_ERROR_ENOTSOCK)
         return ORBIS_NET_ERROR_ENOTSOCK
+    result: int = c_shutdown(s.int(), how)
+    if result < 0:
+        return sceNet_FfiIntResult(result, ORBIS_NET_ERROR_ENOTCONN)
     slot: mutable OrbisNetSocketState& = g_net_sockets[idx.usize()].ref[mutable OrbisNetSocketState&]
     slot.shutdown_state <- how
-    _ = how
     sceNet_SetErr(ORBIS_OK)
     return ORBIS_OK
 
@@ -1075,23 +1146,24 @@ def sceNetSocket(name: u8&?, family: int, type: int, protocol: int) -> i64:
     err: int = sceNet_RequireInit()
     if err != ORBIS_OK:
         return ORBIS_NET_ERROR_ENOTINIT
+    native_fd: int = c_socket(family, type, protocol)
+    if native_fd < 0:
+        sceNet_SetErr(ORBIS_NET_ERROR_EPROTONOSUPPORT)
+        return ORBIS_NET_ERROR_EPROTONOSUPPORT
     i: usize = 0
     while i < ORBIS_NET_MAX_SOCKETS:
         slot: mutable OrbisNetSocketState& = g_net_sockets[i].ref[mutable OrbisNetSocketState&]
         if not slot.in_use:
             slot.in_use <- true
-            slot.handle <- g_net_next_socket_handle
+            slot.handle <- native_fd.i64()
             slot.connected <- false
             slot.listening <- false
             slot.shutdown_state <- 0
-            g_net_next_socket_handle <- g_net_next_socket_handle + 1
             _ = name
-            _ = family
-            _ = type
-            _ = protocol
             sceNet_SetErr(ORBIS_OK)
             return slot.handle.int()
         i += 1
+    _ = c_close(native_fd)
     sceNet_SetErr(ORBIS_NET_ERROR_ENFILE)
     return -1
 
@@ -1105,6 +1177,9 @@ def sceNetSocketClose(s: i64) -> int:
     idx: int = sceNet_FindSocket(s)
     if idx < 0:
         return ORBIS_NET_ERROR_ENOTSOCK
+    result: int = c_close(s.int())
+    if result < 0:
+        return sceNet_FfiIntResult(result, ORBIS_NET_ERROR_EBADF)
     slot: mutable OrbisNetSocketState& = g_net_sockets[idx.usize()].ref[mutable OrbisNetSocketState&]
     slot <- zeroed
     g_net_last_error <- ORBIS_OK

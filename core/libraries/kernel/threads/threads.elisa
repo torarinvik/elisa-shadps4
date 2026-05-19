@@ -8,6 +8,8 @@ include "./threads_sema_spec.elisa"
 include "./threads_event_exception_clean.elisa"
 
 extern pthread_self() -> void&?
+extern pthread_equal(t1: void&?, t2: void&?) -> int
+extern sched_yield() -> int
 
 const ORBIS_KERNEL_PRIO_FIFO_DEFAULT: int = 700
 const ORBIS_KERNEL_PRIO_FIFO_LOWEST: int = 256
@@ -291,6 +293,10 @@ def posix_pthread_once(once_control: mutable PthreadOnce&?, init_routine: void&?
 
 def posix_pthread_equal(thread1: void&?, thread2: void&?) -> int:
     threads_bootstrap_runtime()
+    if thread1 != null and thread2 != null:
+        host_eq: int = pthread_equal(thread1, thread2)
+        if host_eq != 0:
+            return 1
     if thread1 == thread2:
         return 1
     return 0
@@ -303,7 +309,7 @@ def posix_pthread_self() -> void&?:
     return g_fake_thread_id as void&?
 
 def posix_pthread_yield() -> int:
-    return 0
+    return sched_yield()
 
 def posix_pthread_detach(pthread: void&?) -> int:
     threads_bootstrap_runtime()
@@ -314,6 +320,8 @@ def posix_pthread_detach(pthread: void&?) -> int:
         return POSIX_ESRCH
     if g_fake_threads_detached[id] or g_fake_threads_has_joiner[id]:
         return POSIX_EINVAL
+    if g_fake_threads_exited[id]:
+        g_fake_threads_alive[id] <- false
     g_fake_threads_detached[id] <- true
     return 0
 
@@ -348,9 +356,15 @@ def posix_pthread_join(pthread: void&?, thread_return: mutable void&?&) -> int:
     g_fake_threads_alive[id] <- false
     g_fake_threads_detached[id] <- true
     g_fake_threads_has_joiner[id] <- false
+    g_fake_threads_exited[id] <- false
+    g_fake_threads_retval[id] <- null
     return 0
 
 def posix_pthread_timedjoin_np(pthread: void&?, thread_return: mutable void&?&, abstime: void&?) -> int:
+    if pthread == null:
+        return POSIX_EINVAL
+    if threads_handle_to_id(pthread) == g_fake_thread_id:
+        return POSIX_EDEADLK
     if abstime == null:
         return POSIX_EINVAL
     id: int = threads_handle_to_id(pthread)
@@ -497,8 +511,8 @@ def scePthreadSetaffinity(thread: void&?, mask: u64) -> int:
     g_fake_affinity_mask <- mask
     return 0
 
-def sched_yield() -> int:
-    return 0
+def posix_sched_yield_shim() -> int:
+    return sched_yield()
 
 def _sceKernelSetThreadDtors(dtor: void&?) -> void:
     g_fake_thread_dtors <- dtor
@@ -579,7 +593,7 @@ def RegisterThread(sym: void&?) -> void:
     LIB_FUNCTION("9vyP6Z7bqzc", "libScePosix", 1, "libkernel", posix_pthread_rename_np)
     LIB_FUNCTION("FIs3-UQT9sg", "libScePosix", 1, "libkernel", posix_pthread_getschedparam)
     LIB_FUNCTION("Xs9hdiD7sAA", "libScePosix", 1, "libkernel", posix_pthread_setschedparam)
-    LIB_FUNCTION("6XG4B33N09g", "libScePosix", 1, "libkernel", sched_yield)
+    LIB_FUNCTION("6XG4B33N09g", "libScePosix", 1, "libkernel", posix_sched_yield_shim)
     LIB_FUNCTION("HoLVWNanBBc", "libScePosix", 1, "libkernel", posix_getpid)
     LIB_FUNCTION("Z4QosVuAsA0", "libkernel", 1, "libkernel", posix_pthread_once)
     LIB_FUNCTION("EotR8a3ASf4", "libkernel", 1, "libkernel", posix_pthread_self)
@@ -614,7 +628,7 @@ def RegisterThread(sym: void&?) -> void:
     LIB_FUNCTION("1tKyG7RlMJo", "libkernel", 1, "libkernel", scePthreadGetprio)
     LIB_FUNCTION("W0Hpm2X0uPE", "libkernel", 1, "libkernel", posix_pthread_setprio)
     LIB_FUNCTION("rNhWz+lvOMU", "libkernel", 1, "libkernel", _sceKernelSetThreadDtors)
-    LIB_FUNCTION("6XG4B33N09g", "libkernel", 1, "libkernel", sched_yield)
+    LIB_FUNCTION("6XG4B33N09g", "libkernel", 1, "libkernel", posix_sched_yield_shim)
     LIB_FUNCTION("HoLVWNanBBc", "libkernel", 1, "libkernel", posix_getpid)
     LIB_FUNCTION("rcrVFJsQWRY", "libkernel", 1, "libkernel", scePthreadGetaffinity)
     LIB_FUNCTION("bt3CTBKmGyI", "libkernel", 1, "libkernel", scePthreadSetaffinity)
