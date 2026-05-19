@@ -510,6 +510,54 @@ def PngDec_GatherIdat(buf: u8&, size: u32, idat: mutable u8&, idat_cap: u32) -> 
         return ORBIS_PNG_DEC_ERROR_INVALID_DATA
     return out_off.i32()
 
+def PngDec_ParseAncillary(buf: u8&, size: u32, anc: mutable PngDecAncillary&, plte_rgb: mutable u8&, plte_cap: u32, trns_alpha: mutable u8&, trns_cap: u32) -> int:
+    cursor: u32 = 8
+    anc.has_plte <- false
+    anc.plte_count <- 0
+    anc.has_trns <- false
+    anc.trns_count <- 0
+    anc.trns_gray <- 0
+    anc.trns_red <- 0
+    anc.trns_green <- 0
+    anc.trns_blue <- 0
+    while cursor + 12 <= size:
+        chunk_len: u32 = PngDec_ReadBe32(buf, cursor)
+        if cursor + 12 + chunk_len > size:
+            return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+        t0: u8 = buf[(cursor + 4).usize()]
+        t1: u8 = buf[(cursor + 5).usize()]
+        t2: u8 = buf[(cursor + 6).usize()]
+        t3: u8 = buf[(cursor + 7).usize()]
+        if t0 == 80.u8() and t1 == 76.u8() and t2 == 84.u8() and t3 == 69.u8():
+            if chunk_len % 3 != 0:
+                return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+            if chunk_len > plte_cap:
+                return ORBIS_PNG_DEC_ERROR_INVALID_SIZE
+            i: u32 = 0
+            while i < chunk_len:
+                plte_rgb[i.usize()] <- buf[(cursor + 8 + i).usize()]
+                i <- i + 1
+            anc.has_plte <- true
+            anc.plte_count <- chunk_len / 3
+        elif t0 == 116.u8() and t1 == 82.u8() and t2 == 78.u8() and t3 == 83.u8():
+            anc.has_trns <- true
+            if chunk_len <= trns_cap:
+                i2: u32 = 0
+                while i2 < chunk_len:
+                    trns_alpha[i2.usize()] <- buf[(cursor + 8 + i2).usize()]
+                    i2 <- i2 + 1
+                anc.trns_count <- chunk_len
+            if chunk_len >= 2:
+                anc.trns_gray <- ((buf[(cursor + 8).usize()].u16() << 8) | buf[(cursor + 9).usize()].u16())
+            if chunk_len >= 6:
+                anc.trns_red <- ((buf[(cursor + 8).usize()].u16() << 8) | buf[(cursor + 9).usize()].u16())
+                anc.trns_green <- ((buf[(cursor + 10).usize()].u16() << 8) | buf[(cursor + 11).usize()].u16())
+                anc.trns_blue <- ((buf[(cursor + 12).usize()].u16() << 8) | buf[(cursor + 13).usize()].u16())
+        if t0 == 73.u8() and t1 == 69.u8() and t2 == 78.u8() and t3 == 68.u8():
+            break
+        cursor <- cursor + 12 + chunk_len
+    return ORBIS_OK
+
 def PngDec_InflateStored(zlib: mutable u8&, zlib_size: u32, out: mutable u8&, out_cap: u32) -> int:
     if zlib_size < 6:
         return ORBIS_PNG_DEC_ERROR_INVALID_DATA
@@ -669,9 +717,130 @@ def PngDec_UnfilterRow(filter: u8, recon: mutable u8&, src: mutable u8&, prev: m
         return ORBIS_OK
     return ORBIS_PNG_DEC_ERROR_UNSUPPORT_DATA
 
-def PngDec_DecodeRows(header: PngDecHeader&, raw: mutable u8&, raw_size: u32, dst: mutable u8&, dst_cap: u32, pitch: u32, pixel_format: u16, alpha_value: u16) -> int:
-    if header.interlace != 0.u8():
+def PngDec_ReadRgbaAt(header: PngDecHeader&, anc: PngDecAncillary&, plte_rgb: mutable u8&, trns_alpha: mutable u8&, row: mutable u8&, x: u32, alpha_value: u16, r_out: mutable u8&, g_out: mutable u8&, b_out: mutable u8&, a_out: mutable u8&) -> int:
+    r: u8 = 0.u8()
+    g: u8 = 0.u8()
+    b: u8 = 0.u8()
+    a: u8 = alpha_value.u8()
+    if header.color_type == 0.u8():
+        if header.bit_depth == 8.u8():
+            gray8: u8 = row[x.usize()]
+            r <- gray8
+            g <- gray8
+            b <- gray8
+        elif header.bit_depth == 16.u8():
+            g16: u8 = row[(x * 2).usize()]
+            r <- g16
+            g <- g16
+            b <- g16
+        else:
+            bit_depth: u32 = header.bit_depth.u32()
+            bit_index: u32 = x * bit_depth
+            byte_index: u32 = bit_index / 8
+            shift: u32 = 8 - bit_depth - (bit_index % 8)
+            mask: u32 = (1 << bit_depth) - 1
+            sample: u32 = (row[byte_index.usize()].u32() >> shift) & mask
+            maxv: u32 = (1 << bit_depth) - 1
+            grayb: u8 = ((sample * 255) / maxv).u8()
+            r <- grayb
+            g <- grayb
+            b <- grayb
+    elif header.color_type == 2.u8():
+        if header.bit_depth == 8.u8():
+            r <- row[(x * 3).usize()]
+            g <- row[(x * 3 + 1).usize()]
+            b <- row[(x * 3 + 2).usize()]
+        elif header.bit_depth == 16.u8():
+            r <- row[(x * 6).usize()]
+            g <- row[(x * 6 + 2).usize()]
+            b <- row[(x * 6 + 4).usize()]
+        else:
+            return ORBIS_PNG_DEC_ERROR_UNSUPPORT_DATA
+    elif header.color_type == 3.u8():
+        bit_depth: u32 = header.bit_depth.u32()
+        if bit_depth != 1 and bit_depth != 2 and bit_depth != 4 and bit_depth != 8:
+            return ORBIS_PNG_DEC_ERROR_UNSUPPORT_DATA
+        bit_index: u32 = x * bit_depth
+        byte_index: u32 = bit_index / 8
+        shift: u32 = 8 - bit_depth - (bit_index % 8)
+        mask: u32 = (1 << bit_depth) - 1
+        pal_idx: u32 = (row[byte_index.usize()].u32() >> shift) & mask
+        if not anc.has_plte or pal_idx >= anc.plte_count:
+            return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+        r <- plte_rgb[(pal_idx * 3).usize()]
+        g <- plte_rgb[(pal_idx * 3 + 1).usize()]
+        b <- plte_rgb[(pal_idx * 3 + 2).usize()]
+        if anc.has_trns and pal_idx < anc.trns_count:
+            a <- trns_alpha[pal_idx.usize()]
+    elif header.color_type == 4.u8():
+        if header.bit_depth == 8.u8():
+            gray8a: u8 = row[(x * 2).usize()]
+            r <- gray8a
+            g <- gray8a
+            b <- gray8a
+            a <- row[(x * 2 + 1).usize()]
+        elif header.bit_depth == 16.u8():
+            gray16a: u8 = row[(x * 4).usize()]
+            r <- gray16a
+            g <- gray16a
+            b <- gray16a
+            a <- row[(x * 4 + 2).usize()]
+        else:
+            return ORBIS_PNG_DEC_ERROR_UNSUPPORT_DATA
+    elif header.color_type == 6.u8():
+        if header.bit_depth == 8.u8():
+            r <- row[(x * 4).usize()]
+            g <- row[(x * 4 + 1).usize()]
+            b <- row[(x * 4 + 2).usize()]
+            a <- row[(x * 4 + 3).usize()]
+        elif header.bit_depth == 16.u8():
+            r <- row[(x * 8).usize()]
+            g <- row[(x * 8 + 2).usize()]
+            b <- row[(x * 8 + 4).usize()]
+            a <- row[(x * 8 + 6).usize()]
+        else:
+            return ORBIS_PNG_DEC_ERROR_UNSUPPORT_DATA
+    else:
         return ORBIS_PNG_DEC_ERROR_UNSUPPORT_DATA
+    if anc.has_trns:
+        if header.color_type == 0.u8():
+            if header.bit_depth == 16.u8():
+                gray16: u16 = (row[(x * 2).usize()].u16() << 8) | row[(x * 2 + 1).usize()].u16()
+                if gray16 == anc.trns_gray:
+                    a <- 0.u8()
+            elif header.bit_depth == 8.u8():
+                if row[x.usize()].u16() == anc.trns_gray:
+                    a <- 0.u8()
+        elif header.color_type == 2.u8():
+            if header.bit_depth == 16.u8():
+                rr: u16 = (row[(x * 6).usize()].u16() << 8) | row[(x * 6 + 1).usize()].u16()
+                gg: u16 = (row[(x * 6 + 2).usize()].u16() << 8) | row[(x * 6 + 3).usize()].u16()
+                bb: u16 = (row[(x * 6 + 4).usize()].u16() << 8) | row[(x * 6 + 5).usize()].u16()
+                if rr == anc.trns_red and gg == anc.trns_green and bb == anc.trns_blue:
+                    a <- 0.u8()
+            elif header.bit_depth == 8.u8():
+                if row[(x * 3).usize()].u16() == anc.trns_red and row[(x * 3 + 1).usize()].u16() == anc.trns_green and row[(x * 3 + 2).usize()].u16() == anc.trns_blue:
+                    a <- 0.u8()
+    r_out <- r
+    g_out <- g
+    b_out <- b
+    a_out <- a
+    return ORBIS_OK
+
+def PngDec_WritePixel(dst: mutable u8&, dst_stride: u32, pixel_format: u16, x: u32, y: u32, r: u8, g: u8, b: u8, a: u8) -> void:
+    d: u32 = y * dst_stride + x * 4
+    if pixel_format == ORBIS_PNG_DEC_PIXEL_FORMAT_R8G8B8A8:
+        dst[d.usize()] <- r
+        dst[(d + 1).usize()] <- g
+        dst[(d + 2).usize()] <- b
+        dst[(d + 3).usize()] <- a
+    else:
+        dst[d.usize()] <- b
+        dst[(d + 1).usize()] <- g
+        dst[(d + 2).usize()] <- r
+        dst[(d + 3).usize()] <- a
+
+def PngDec_DecodeRows(header: PngDecHeader&, anc: PngDecAncillary&, plte_rgb: mutable u8&, trns_alpha: mutable u8&, raw: mutable u8&, raw_size: u32, dst: mutable u8&, dst_cap: u32, pitch: u32, pixel_format: u16, alpha_value: u16) -> int:
 
     src_channels: u32 = 0
     if header.color_type == 0.u8():
@@ -687,121 +856,145 @@ def PngDec_DecodeRows(header: PngDecHeader&, raw: mutable u8&, raw_size: u32, ds
     else:
         return ORBIS_PNG_DEC_ERROR_UNSUPPORT_DATA
 
-    bits_per_row: u32 = header.width * src_channels * header.bit_depth.u32()
-    row_src_bytes: u32 = (bits_per_row + 7) / 8
-    if row_src_bytes == 0:
-        return ORBIS_PNG_DEC_ERROR_INVALID_DATA
-    need_raw: u32 = (row_src_bytes + 1) * header.height
-    if raw_size < need_raw:
-        return ORBIS_PNG_DEC_ERROR_INVALID_DATA
-
     dst_stride: u32 = pitch
     if dst_stride == 0:
         dst_stride <- header.width * 4
     if dst_stride * header.height > dst_cap:
         return ORBIS_PNG_DEC_ERROR_INVALID_SIZE
 
-    if row_src_bytes > 262144:
-        return ORBIS_PNG_DEC_ERROR_INVALID_SIZE
-    recon_row: mutable u8[262144] = zeroed
-    prev_row: mutable u8[262144] = zeroed
+    bits_per_px: u32 = src_channels * header.bit_depth.u32()
+    bpp: u32 = (bits_per_px + 7) / 8
+    if bpp == 0:
+        bpp <- 1
 
-    y: u32 = 0
-    while y < header.height:
-        src_row: u32 = y * (row_src_bytes + 1)
-        filter: u8 = raw[src_row.usize()]
-        src_px: u32 = src_row + 1
-        unfilter_ret: int = PngDec_UnfilterRow(filter, recon_row.ref[mutable u8&], raw[src_px.usize()].ref[mutable u8&], prev_row.ref[mutable u8&], row_src_bytes, src_channels)
-        if unfilter_ret != ORBIS_OK:
-            return unfilter_ret
-        dst_row: u32 = y * dst_stride
-        x: u32 = 0
-        while x < header.width:
-            r: u8 = 0.u8()
-            g: u8 = 0.u8()
-            b: u8 = 0.u8()
-            a: u8 = alpha_value.u8()
-            if header.color_type == 0.u8():
-                if header.bit_depth == 8.u8():
-                    gray8: u8 = recon_row[x.usize()]
-                    r <- gray8
-                    g <- gray8
-                    b <- gray8
-                elif header.bit_depth == 16.u8():
-                    g16: u8 = recon_row[(x * 2).usize()]
-                    r <- g16
-                    g <- g16
-                    b <- g16
-                else:
-                    bit_depth: u32 = header.bit_depth.u32()
-                    bit_index: u32 = x * bit_depth
-                    byte_index: u32 = bit_index / 8
-                    shift: u32 = 8 - bit_depth - (bit_index % 8)
-                    mask: u32 = (1 << bit_depth) - 1
-                    sample: u32 = (recon_row[byte_index.usize()].u32() >> shift) & mask
-                    maxv: u32 = (1 << bit_depth) - 1
-                    grayb: u8 = ((sample * 255) / maxv).u8()
-                    r <- grayb
-                    g <- grayb
-                    b <- grayb
-            elif header.color_type == 2.u8():
-                if header.bit_depth == 8.u8():
-                    r <- recon_row[(x * 3).usize()]
-                    g <- recon_row[(x * 3 + 1).usize()]
-                    b <- recon_row[(x * 3 + 2).usize()]
-                elif header.bit_depth == 16.u8():
-                    r <- recon_row[(x * 6).usize()]
-                    g <- recon_row[(x * 6 + 2).usize()]
-                    b <- recon_row[(x * 6 + 4).usize()]
-                else:
-                    return ORBIS_PNG_DEC_ERROR_UNSUPPORT_DATA
-            elif header.color_type == 4.u8():
-                if header.bit_depth == 8.u8():
-                    gray8a: u8 = recon_row[(x * 2).usize()]
-                    r <- gray8a
-                    g <- gray8a
-                    b <- gray8a
-                    a <- recon_row[(x * 2 + 1).usize()]
-                elif header.bit_depth == 16.u8():
-                    gray16a: u8 = recon_row[(x * 4).usize()]
-                    r <- gray16a
-                    g <- gray16a
-                    b <- gray16a
-                    a <- recon_row[(x * 4 + 2).usize()]
-                else:
-                    return ORBIS_PNG_DEC_ERROR_UNSUPPORT_DATA
-            elif header.color_type == 6.u8():
-                if header.bit_depth == 8.u8():
-                    r <- recon_row[(x * 4).usize()]
-                    g <- recon_row[(x * 4 + 1).usize()]
-                    b <- recon_row[(x * 4 + 2).usize()]
-                    a <- recon_row[(x * 4 + 3).usize()]
-                elif header.bit_depth == 16.u8():
-                    r <- recon_row[(x * 8).usize()]
-                    g <- recon_row[(x * 8 + 2).usize()]
-                    b <- recon_row[(x * 8 + 4).usize()]
-                    a <- recon_row[(x * 8 + 6).usize()]
-                else:
-                    return ORBIS_PNG_DEC_ERROR_UNSUPPORT_DATA
-            else:
-                return ORBIS_PNG_DEC_ERROR_UNSUPPORT_DATA
-            d: u32 = dst_row + x * 4
-            if pixel_format == ORBIS_PNG_DEC_PIXEL_FORMAT_R8G8B8A8:
-                dst[d.usize()] <- r
-                dst[(d + 1).usize()] <- g
-                dst[(d + 2).usize()] <- b
-                dst[(d + 3).usize()] <- a
-            else:
-                dst[d.usize()] <- b
-                dst[(d + 1).usize()] <- g
-                dst[(d + 2).usize()] <- r
-                dst[(d + 3).usize()] <- a
-            x <- x + 1
-        i: u32 = 0
-        while i < row_src_bytes:
-            prev_row[i.usize()] <- recon_row[i.usize()]
-            i <- i + 1
-        y <- y + 1
+    if header.interlace == 0.u8():
+        bits_per_row: u32 = header.width * bits_per_px
+        row_src_bytes: u32 = (bits_per_row + 7) / 8
+        if row_src_bytes == 0:
+            return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+        need_raw: u32 = (row_src_bytes + 1) * header.height
+        if raw_size < need_raw:
+            return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+        if row_src_bytes > 262144:
+            return ORBIS_PNG_DEC_ERROR_INVALID_SIZE
+        recon_row: mutable u8[262144] = zeroed
+        prev_row: mutable u8[262144] = zeroed
+
+        y: u32 = 0
+        while y < header.height:
+            src_row: u32 = y * (row_src_bytes + 1)
+            filter: u8 = raw[src_row.usize()]
+            src_px: u32 = src_row + 1
+            unfilter_ret: int = PngDec_UnfilterRow(filter, recon_row.ref[mutable u8&], raw[src_px.usize()].ref[mutable u8&], prev_row.ref[mutable u8&], row_src_bytes, bpp)
+            if unfilter_ret != ORBIS_OK:
+                return unfilter_ret
+            x: u32 = 0
+            while x < header.width:
+                r: mutable u8 = 0
+                g: mutable u8 = 0
+                b: mutable u8 = 0
+                a: mutable u8 = 0
+                px_ret: int = PngDec_ReadRgbaAt(header, anc, plte_rgb, trns_alpha, recon_row.ref[mutable u8&], x, alpha_value, r.ref[mutable u8&], g.ref[mutable u8&], b.ref[mutable u8&], a.ref[mutable u8&])
+                if px_ret != ORBIS_OK:
+                    return px_ret
+                PngDec_WritePixel(dst, dst_stride, pixel_format, x, y, r, g, b, a)
+                x <- x + 1
+            i: u32 = 0
+            while i < row_src_bytes:
+                prev_row[i.usize()] <- recon_row[i.usize()]
+                i <- i + 1
+            y <- y + 1
+        return ORBIS_OK
+
+    if header.interlace != 1.u8():
+        return ORBIS_PNG_DEC_ERROR_UNSUPPORT_DATA
+    pass_x_start: mutable u32[7] = zeroed
+    pass_y_start: mutable u32[7] = zeroed
+    pass_x_step: mutable u32[7] = zeroed
+    pass_y_step: mutable u32[7] = zeroed
+    pass_x_start[0] <- 0
+    pass_y_start[0] <- 0
+    pass_x_step[0] <- 8
+    pass_y_step[0] <- 8
+    pass_x_start[1] <- 4
+    pass_y_start[1] <- 0
+    pass_x_step[1] <- 8
+    pass_y_step[1] <- 8
+    pass_x_start[2] <- 0
+    pass_y_start[2] <- 4
+    pass_x_step[2] <- 4
+    pass_y_step[2] <- 8
+    pass_x_start[3] <- 2
+    pass_y_start[3] <- 0
+    pass_x_step[3] <- 4
+    pass_y_step[3] <- 4
+    pass_x_start[4] <- 0
+    pass_y_start[4] <- 2
+    pass_x_step[4] <- 2
+    pass_y_step[4] <- 4
+    pass_x_start[5] <- 1
+    pass_y_start[5] <- 0
+    pass_x_step[5] <- 2
+    pass_y_step[5] <- 2
+    pass_x_start[6] <- 0
+    pass_y_start[6] <- 1
+    pass_x_step[6] <- 1
+    pass_y_step[6] <- 2
+
+    raw_off: u32 = 0
+    pass_idx: u32 = 0
+    while pass_idx < 7:
+        sx: u32 = pass_x_start[pass_idx.usize()]
+        sy: u32 = pass_y_start[pass_idx.usize()]
+        dx: u32 = pass_x_step[pass_idx.usize()]
+        dy: u32 = pass_y_step[pass_idx.usize()]
+        pass_width: u32 = 0
+        if header.width > sx:
+            pass_width <- (header.width - sx + dx - 1) / dx
+        pass_height: u32 = 0
+        if header.height > sy:
+            pass_height <- (header.height - sy + dy - 1) / dy
+        if pass_width == 0 or pass_height == 0:
+            pass_idx <- pass_idx + 1
+            continue
+        pass_bits_per_row: u32 = pass_width * bits_per_px
+        pass_row_bytes: u32 = (pass_bits_per_row + 7) / 8
+        if pass_row_bytes > 262144:
+            return ORBIS_PNG_DEC_ERROR_INVALID_SIZE
+        recon_row_p: mutable u8[262144] = zeroed
+        prev_row_p: mutable u8[262144] = zeroed
+        py: u32 = 0
+        while py < pass_height:
+            if raw_off + 1 + pass_row_bytes > raw_size:
+                return ORBIS_PNG_DEC_ERROR_INVALID_DATA
+            filter: u8 = raw[raw_off.usize()]
+            raw_off <- raw_off + 1
+            unfilter_ret: int = PngDec_UnfilterRow(filter, recon_row_p.ref[mutable u8&], raw[raw_off.usize()].ref[mutable u8&], prev_row_p.ref[mutable u8&], pass_row_bytes, bpp)
+            if unfilter_ret != ORBIS_OK:
+                return unfilter_ret
+            px: u32 = 0
+            while px < pass_width:
+                r: mutable u8 = 0
+                g: mutable u8 = 0
+                b: mutable u8 = 0
+                a: mutable u8 = 0
+                px_ret: int = PngDec_ReadRgbaAt(header, anc, plte_rgb, trns_alpha, recon_row_p.ref[mutable u8&], px, alpha_value, r.ref[mutable u8&], g.ref[mutable u8&], b.ref[mutable u8&], a.ref[mutable u8&])
+                if px_ret != ORBIS_OK:
+                    return px_ret
+                out_x: u32 = sx + px * dx
+                out_y: u32 = sy + py * dy
+                if out_x < header.width and out_y < header.height:
+                    PngDec_WritePixel(dst, dst_stride, pixel_format, out_x, out_y, r, g, b, a)
+                px <- px + 1
+            i2: u32 = 0
+            while i2 < pass_row_bytes:
+                prev_row_p[i2.usize()] <- recon_row_p[i2.usize()]
+                i2 <- i2 + 1
+            raw_off <- raw_off + pass_row_bytes
+            py <- py + 1
+        pass_idx <- pass_idx + 1
+    if raw_off > raw_size:
+        return ORBIS_PNG_DEC_ERROR_INVALID_SIZE
     return ORBIS_OK
 
 def scePngDecCreate(param: OrbisPngDecCreateParam&?, memory_address: mutable void&?, memory_size: u32, handle: mutable OrbisPngDecHandle&) -> int:
@@ -838,6 +1031,12 @@ def scePngDecDecode(handle: OrbisPngDecHandle, param: OrbisPngDecDecodeParam&?, 
         return parse_ret
 
     png_ptr: u8& = (param.png_mem_addr as u8&)
+    ancillary: mutable PngDecAncillary = zeroed
+    palette_rgb: mutable u8[768] = zeroed
+    trns_alpha: mutable u8[256] = zeroed
+    anc_ret: int = PngDec_ParseAncillary(png_ptr, param.png_mem_size, ancillary.ref[mutable PngDecAncillary&], palette_rgb.ref[mutable u8&], 768, trns_alpha.ref[mutable u8&], 256)
+    if anc_ret != ORBIS_OK:
+        return anc_ret
     idat: mutable u8[1048576] = zeroed
     idat_size: int = PngDec_GatherIdat(png_ptr, param.png_mem_size, idat.ref[mutable u8&], 1048576)
     if idat_size < 0:
@@ -849,7 +1048,7 @@ def scePngDecDecode(handle: OrbisPngDecHandle, param: OrbisPngDecDecodeParam&?, 
         return raw_size
 
     dst: mutable u8& = (param.image_mem_addr as mutable u8&)
-    decode_ret: int = PngDec_DecodeRows(header, raw.ref[mutable u8&], raw_size.u32(), dst, param.image_mem_size, param.image_pitch, param.pixel_format, param.alpha_value)
+    decode_ret: int = PngDec_DecodeRows(header, ancillary, palette_rgb.ref[mutable u8&], trns_alpha.ref[mutable u8&], raw.ref[mutable u8&], raw_size.u32(), dst, param.image_mem_size, param.image_pitch, param.pixel_format, param.alpha_value)
     if decode_ret != ORBIS_OK:
         return decode_ret
 
