@@ -51,6 +51,10 @@ global mutable avsrc_audio_start_time_cache: u64[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_last_video_out_ts: u64[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_last_audio_out_ts: u64[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_last_audio_size_bytes: u32[AVSRC_MAX_HANDLES] = zeroed
+global mutable avsrc_last_video_pitch: u32[AVSRC_MAX_HANDLES] = zeroed
+global mutable avsrc_last_video_aspect_num: u32[AVSRC_MAX_HANDLES] = zeroed
+global mutable avsrc_last_video_aspect_den: u32[AVSRC_MAX_HANDLES] = zeroed
+global mutable avsrc_last_video_full_range: bool[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_video_frame_interval_ms: u32[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_audio_frame_interval_ms: u32[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_video_q_head: int[AVSRC_MAX_HANDLES] = zeroed
@@ -498,9 +502,26 @@ def avsrc_prefetch_video(slot: int) -> bool:
         return avsrc_video_q_size[slot] > 0
     if avsrc_ffmpeg_enabled[slot] and avsrc_video_codec_ctx[slot] != null and avsrc_video_stream_index[slot] >= 0:
         decoded_ts: mutable u64 = 0
-        decode_rc: i32 = avplayer_ffmpeg_decode_next_ts(avsrc_ffmpeg_handle[slot], avsrc_video_stream_index[slot].u32(), avsrc_video_codec_ctx[slot], decoded_ts)
+        decoded_audio_samples: mutable u32 = 0
+        decoded_audio_sample_rate: mutable u32 = 0
+        decoded_audio_channels: mutable u32 = 0
+        decoded_video_width: mutable u32 = 0
+        decoded_video_height: mutable u32 = 0
+        decoded_video_pitch: mutable u32 = 0
+        decoded_video_aspect_num: mutable u32 = 0
+        decoded_video_aspect_den: mutable u32 = 0
+        decode_rc: i32 = avplayer_ffmpeg_decode_next_ts_ex(avsrc_ffmpeg_handle[slot], avsrc_video_stream_index[slot].u32(), avsrc_video_codec_ctx[slot], decoded_ts, decoded_audio_samples, decoded_audio_sample_rate, decoded_audio_channels, decoded_video_width, decoded_video_height, decoded_video_pitch, decoded_video_aspect_num, decoded_video_aspect_den)
         if decode_rc == 0:
             avsrc_video_q_push(slot, decoded_ts)
+            if decoded_video_width > 0:
+                avsrc_video_width_cache[slot] <- decoded_video_width
+            if decoded_video_height > 0:
+                avsrc_video_height_cache[slot] <- decoded_video_height
+            if decoded_video_pitch > 0:
+                avsrc_last_video_pitch[slot] <- decoded_video_pitch
+            if decoded_video_aspect_num > 0 and decoded_video_aspect_den > 0:
+                avsrc_last_video_aspect_num[slot] <- decoded_video_aspect_num
+                avsrc_last_video_aspect_den[slot] <- decoded_video_aspect_den
             avsrc_video_eof[slot] <- false
             avsrc_refresh_eof(slot)
             if avsrc_video_q_size[slot] >= AVSRC_PREFETCH_TARGET:
@@ -537,9 +558,23 @@ def avsrc_prefetch_audio(slot: int) -> bool:
         return avsrc_audio_q_size[slot] > 0
     if avsrc_ffmpeg_enabled[slot] and avsrc_audio_codec_ctx[slot] != null and avsrc_audio_stream_index[slot] >= 0:
         decoded_ts: mutable u64 = 0
-        decode_rc: i32 = avplayer_ffmpeg_decode_next_ts(avsrc_ffmpeg_handle[slot], avsrc_audio_stream_index[slot].u32(), avsrc_audio_codec_ctx[slot], decoded_ts)
+        decoded_samples: mutable u32 = 0
+        decoded_sample_rate: mutable u32 = 0
+        decoded_channels: mutable u32 = 0
+        decoded_video_width: mutable u32 = 0
+        decoded_video_height: mutable u32 = 0
+        decoded_video_pitch: mutable u32 = 0
+        decoded_video_aspect_num: mutable u32 = 0
+        decoded_video_aspect_den: mutable u32 = 0
+        decode_rc: i32 = avplayer_ffmpeg_decode_next_ts_ex(avsrc_ffmpeg_handle[slot], avsrc_audio_stream_index[slot].u32(), avsrc_audio_codec_ctx[slot], decoded_ts, decoded_samples, decoded_sample_rate, decoded_channels, decoded_video_width, decoded_video_height, decoded_video_pitch, decoded_video_aspect_num, decoded_video_aspect_den)
         if decode_rc == 0:
             avsrc_audio_q_push(slot, decoded_ts)
+            if decoded_sample_rate > 0:
+                avsrc_audio_sample_rate_cache[slot] <- decoded_sample_rate
+            if decoded_channels > 0:
+                avsrc_audio_channels_cache[slot] <- decoded_channels
+            if decoded_samples > 0 and avsrc_audio_channels_cache[slot] > 0:
+                avsrc_last_audio_size_bytes[slot] <- decoded_samples * avsrc_audio_channels_cache[slot] * 2
             avsrc_audio_eof[slot] <- false
             avsrc_refresh_eof(slot)
             return avsrc_audio_q_size[slot] > 0
@@ -1004,3 +1039,15 @@ def avsrc_get_audio_frame_interval_ms(slot: int) -> u32:
 
 def avsrc_get_last_audio_size_bytes(slot: int) -> u32:
     return avsrc_last_audio_size_bytes[slot]
+
+def avsrc_get_last_video_pitch(slot: int) -> u32:
+    return avsrc_last_video_pitch[slot]
+
+def avsrc_get_last_video_aspect_num(slot: int) -> u32:
+    return avsrc_last_video_aspect_num[slot]
+
+def avsrc_get_last_video_aspect_den(slot: int) -> u32:
+    return avsrc_last_video_aspect_den[slot]
+
+def avsrc_get_last_video_full_range(slot: int) -> bool:
+    return avsrc_last_video_full_range[slot]

@@ -1,0 +1,96 @@
+include "../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "./core/libraries/network/net.elisa"
+
+struct NetParityEpollEvent:
+    events: mutable u32
+    pad: mutable u32
+    ident: mutable u64
+    data_u64: mutable u64
+
+@test
+def net_resolver_bridge_parity_contracts() -> void:
+    can Abort.Panic:
+        assert sceNetInit() == ORBIS_OK
+
+        status: mutable int = 0
+        assert sceNetResolverGetError(12345, status.ref[mutable int&]) == ORBIS_NET_ERROR_EBADF
+        assert sceNetResolverGetError(12345, null) == ORBIS_NET_ERROR_EINVAL
+
+        rid: int = sceNetResolverCreate(null, 1, 0)
+        assert rid > 0
+
+        assert sceNetResolverGetError(rid.i64(), status.ref[mutable int&]) == ORBIS_OK
+
+        addr: mutable u32 = 0u32
+        assert sceNetResolverStartNtoa(rid.i64(), "localhost", addr.ref[mutable u32&].cast[mutable u8&], 0, 0, 0) == ORBIS_OK
+
+        assert sceNetResolverDestroy(rid.i64()) == ORBIS_OK
+        assert sceNetResolverDestroy(rid.i64()) == ORBIS_NET_ERROR_EBADF
+
+@test
+def net_epoll_bridge_parity_contracts() -> void:
+    can Abort.Panic:
+        assert sceNetInit() == ORBIS_OK
+
+        assert sceNetEpollDestroy(9999) == ORBIS_NET_ERROR_EBADF
+        assert sceNetEpollWait(9999, null, 1, 0) == ORBIS_NET_ERROR_EBADF
+
+        ep: int = sceNetEpollCreate("elisa-epoll", 0)
+        assert ep > 0
+
+        sock: i64 = sceNetSocket("ep-sock", ORBIS_NET_AF_INET, ORBIS_NET_SOCK_STREAM.int(), 0)
+        assert sock > 0
+
+        event_storage: mutable array[u8, 32] = zeroed
+        event_ptr: mutable u8& = event_storage[0].ref[mutable u8&]
+
+        assert sceNetEpollControl(ep.i64(), 1, sock, event_ptr) == ORBIS_OK
+        assert sceNetEpollControl(ep.i64(), 1, sock, event_ptr) == ORBIS_NET_ERROR_EEXIST
+        assert sceNetEpollControl(ep.i64(), 3, sock, null) == ORBIS_OK
+        assert sceNetEpollControl(ep.i64(), 3, sock, null) == ORBIS_NET_ERROR_EBADF
+
+        assert sceNetSocketClose(sock) == ORBIS_OK
+        assert sceNetEpollDestroy(ep.i64()) == ORBIS_OK
+
+@test
+def net_resolver_async_epoll_bridge_contracts() -> void:
+    can Abort.Panic:
+        assert sceNetInit() == ORBIS_OK
+
+        rid: int = sceNetResolverCreate("resolver-async", 1, 0)
+        assert rid > 0
+
+        ep: int = sceNetEpollCreate("resolver-epoll", 0)
+        assert ep > 0
+
+        event_storage: mutable array[u8, 32] = zeroed
+        event_ptr: mutable u8& = event_storage[0].ref[mutable u8&]
+
+        assert sceNetEpollControl(ep.i64(), 1, rid.i64(), event_ptr) == ORBIS_OK
+
+        addr: mutable u32 = 0u32
+        first_async: int = sceNetResolverStartNtoa(
+            rid.i64(), "localhost", addr.ref[mutable u32&].cast[mutable u8&], 0, 0, ORBIS_NET_RESOLVER_ASYNC)
+        assert first_async == ORBIS_OK
+
+        # C++ resolver keeps one pending async slot; a second async request should report busy.
+        second_async: int = sceNetResolverStartNtoa(
+            rid.i64(), "localhost", addr.ref[mutable u32&].cast[mutable u8&], 0, 0, ORBIS_NET_RESOLVER_ASYNC)
+        assert second_async == ORBIS_NET_ERROR_RESOLVER_EBUSY
+
+        wait_storage: mutable array[u8, 32] = zeroed
+        wait_ptr: mutable u8& = wait_storage[0].ref[mutable u8&]
+        wait_ret: int = sceNetEpollWait(ep.i64(), wait_ptr, 1, 0)
+        assert wait_ret >= 0
+        assert wait_ret <= 1
+        if wait_ret == 1:
+            ev: mutable NetParityEpollEvent& = wait_ptr.cast[mutable NetParityEpollEvent&]
+            assert ev.ident == rid.u64()
+            assert ev.events == ORBIS_NET_EPOLLDESCID
+
+        status: mutable int = 0
+        assert sceNetResolverGetError(rid.i64(), status.ref[mutable int&]) == ORBIS_OK
+
+        assert sceNetEpollControl(ep.i64(), 3, rid.i64(), null) == ORBIS_OK
+        assert sceNetEpollDestroy(ep.i64()) == ORBIS_OK
+        assert sceNetResolverDestroy(rid.i64()) == ORBIS_OK

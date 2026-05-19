@@ -9,6 +9,14 @@ This ledger classifies C ABI boundaries used by `core/devtools/widget`.
   - This is an allowed long-term C ABI boundary.
   - Elisa should call only the C-compatible surface in `imgui_abi.elisa`.
 
+## Ported Widget Logic
+
+- `reg_popup.elisa`
+  - Owns the popup state, labels, row values, and derived color/depth helper math.
+  - The previous `GetColorSliceSize()` placeholder has been replaced with the
+    `AmdGpu::NumBitsPerBlock(DataFormat)` parity table from `pixel_format.cpp`.
+  - It may still call ImGui through the allowed C ABI boundary above.
+
 ## Temporary Project-Owned C++ Bridges
 
 - `Core::Memory` snapshot bridge for `memory_map.elisa`

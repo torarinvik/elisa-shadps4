@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 # SPDX-License-Identifier: GPL-2.0-or-later
 
-include "../error_codes.elisa"
 include "./ngs2_error.elisa"
 
 type OrbisNgs2Handle = u64
@@ -159,6 +158,7 @@ const RACK_BUFFER_PER_VOICE_SIZE: usize = 128
 struct Ngs2SystemSlot:
     used: mutable bool
     handle: mutable OrbisNgs2Handle
+    buffer_info: mutable OrbisNgs2ContextBufferInfo
     user_data: mutable usize
     sample_rate: mutable u32
     max_grain_samples: mutable u32
@@ -170,6 +170,7 @@ struct Ngs2SystemSlot:
 struct Ngs2RackSlot:
     used: mutable bool
     handle: mutable OrbisNgs2Handle
+    buffer_info: mutable OrbisNgs2ContextBufferInfo
     system_handle: mutable OrbisNgs2Handle
     user_data: mutable usize
     rack_id: mutable u32
@@ -178,8 +179,8 @@ struct Ngs2RackSlot:
     render_count: mutable u64
 
 global mutable next_handle: OrbisNgs2Handle = 0x100000
-global mutable ngs2_systems: Ngs2SystemSlot[NGS2_MAX_SYSTEMS]
-global mutable ngs2_racks: Ngs2RackSlot[NGS2_MAX_RACKS]
+global mutable ngs2_systems: array[Ngs2SystemSlot, NGS2_MAX_SYSTEMS]
+global mutable ngs2_racks: array[Ngs2RackSlot, NGS2_MAX_RACKS]
 global mutable last_system_handle: OrbisNgs2Handle = 0
 global mutable last_rack_handle: OrbisNgs2Handle = 0
 global mutable last_voice_handle: OrbisNgs2Handle = 0
@@ -325,8 +326,6 @@ def sceNgs2ParseWaveformFile(path: u8&?, offset: u64, out_info: mutable OrbisNgs
 def sceNgs2ParseWaveformUser(handler: OrbisNgs2ParseReadHandler, user_data: usize, out_info: mutable OrbisNgs2WaveformInfo&?) -> s32:
     _ = handler
     _ = user_data
-    if handler == null:
-        return ORBIS_NGS2_ERROR_INVALID_WAVEFORM_ADDRESS
     if out_info == null:
         return ORBIS_NGS2_ERROR_INVALID_OUT_ADDRESS
     _fill_fallback_waveform_info(false, 0, out_info)
@@ -334,7 +333,6 @@ def sceNgs2ParseWaveformUser(handler: OrbisNgs2ParseReadHandler, user_data: usiz
 
 # Rack
 def sceNgs2RackCreate(system_handle: OrbisNgs2Handle, rack_id: u32, option: OrbisNgs2RackOption&?, buffer_info: OrbisNgs2ContextBufferInfo&?, out_rack: mutable OrbisNgs2Handle&?) -> s32:
-    _ = buffer_info
     if system_handle == 0:
         return ORBIS_NGS2_ERROR_INVALID_SYSTEM_HANDLE
     if out_rack == null:
@@ -355,6 +353,9 @@ def sceNgs2RackCreate(system_handle: OrbisNgs2Handle, rack_id: u32, option: Orbi
     next_handle <- next_handle + max_voices.u64()
     ngs2_racks[rack_slot].used <- true
     ngs2_racks[rack_slot].handle <- rack_handle
+    ngs2_racks[rack_slot].buffer_info <- zeroed
+    if buffer_info != null:
+        ngs2_racks[rack_slot].buffer_info <- buffer_info
     ngs2_racks[rack_slot].system_handle <- system_handle
     ngs2_racks[rack_slot].user_data <- 0
     ngs2_racks[rack_slot].rack_id <- rack_id
@@ -380,10 +381,11 @@ def sceNgs2RackCreateWithAllocator(system_handle: OrbisNgs2Handle, rack_id: u32,
     return sceNgs2RackCreate(system_handle, rack_id, option, null, out_rack)
 
 def sceNgs2RackDestroy(rack_handle: OrbisNgs2Handle, out_buffer_info: mutable OrbisNgs2ContextBufferInfo&?) -> s32:
-    _ = out_buffer_info
     slot: int = _find_rack_slot(rack_handle)
     if rack_handle == 0 or slot < 0:
         return ORBIS_NGS2_ERROR_INVALID_RACK_HANDLE
+    if out_buffer_info != null:
+        out_buffer_info <- ngs2_racks[slot].buffer_info
     system_slot: int = _find_system_slot(ngs2_racks[slot].system_handle)
     if system_slot >= 0 and ngs2_systems[system_slot].rack_count > 0u32:
         ngs2_systems[system_slot].rack_count <- ngs2_systems[system_slot].rack_count - 1u32
@@ -440,6 +442,7 @@ def sceNgs2RackGetVoiceHandle(rack_handle: OrbisNgs2Handle, voice_index: u32, ou
     return ORBIS_OK
 
 def sceNgs2RackLock(rack_handle: OrbisNgs2Handle) -> s32:
+    _ = rack_handle
     return ORBIS_OK
 
 def sceNgs2RackQueryBufferSize(rack_id: u32, option: OrbisNgs2RackOption&?, out_size: mutable usize&?) -> s32:
@@ -484,6 +487,7 @@ def sceNgs2SystemCreate(option: OrbisNgs2SystemOption&?, buffer_info: OrbisNgs2C
     handle: OrbisNgs2Handle = _alloc()
     ngs2_systems[slot].used <- true
     ngs2_systems[slot].handle <- handle
+    ngs2_systems[slot].buffer_info <- buffer_info
     ngs2_systems[slot].user_data <- buffer_info.user_data
     ngs2_systems[slot].sample_rate <- 48000u32
     ngs2_systems[slot].max_grain_samples <- 512u32
@@ -520,6 +524,7 @@ def sceNgs2SystemCreateWithAllocator(option: OrbisNgs2SystemOption&?, allocator:
     handle: OrbisNgs2Handle = _alloc()
     ngs2_systems[slot].used <- true
     ngs2_systems[slot].handle <- handle
+    ngs2_systems[slot].buffer_info <- zeroed
     ngs2_systems[slot].user_data <- 0
     ngs2_systems[slot].sample_rate <- 48000u32
     ngs2_systems[slot].max_grain_samples <- 512u32
@@ -542,10 +547,11 @@ def sceNgs2SystemCreateWithAllocator(option: OrbisNgs2SystemOption&?, allocator:
     return ORBIS_OK
 
 def sceNgs2SystemDestroy(system_handle: OrbisNgs2Handle, out_buffer_info: mutable OrbisNgs2ContextBufferInfo&?) -> s32:
-    _ = out_buffer_info
     slot: int = _find_system_slot(system_handle)
     if system_handle == 0 or slot < 0:
         return ORBIS_NGS2_ERROR_INVALID_SYSTEM_HANDLE
+    if out_buffer_info != null:
+        out_buffer_info <- ngs2_systems[slot].buffer_info
     i: mutable int = 0
     while i < NGS2_MAX_RACKS:
         if ngs2_racks[i].used and ngs2_racks[i].system_handle == system_handle:
@@ -652,6 +658,8 @@ def sceNgs2SystemRender(system_handle: OrbisNgs2Handle, a_buffer_info: void&?, n
 def sceNgs2SystemResetOption(out_option: mutable OrbisNgs2SystemOption&?) -> s32:
     if out_option == null:
         return ORBIS_NGS2_ERROR_INVALID_OPTION_ADDRESS
+    out_option <- zeroed
+    out_option.size <- SYSTEM_OPTION_SIZE
     out_option.max_grain_samples <- 512u32
     out_option.num_grain_samples <- 256u32
     out_option.sample_rate <- 48000u32
@@ -805,8 +813,6 @@ def sceNgs2ReportRegisterHandler(report_type: u32, handler: OrbisNgs2ReportHandl
     _ = report_type
     _ = user_data
     _ = out_report_handle
-    if handler == null:
-        return ORBIS_NGS2_ERROR_INVALID_REPORT_HANDLE
     return ORBIS_OK
 
 def sceNgs2ReportUnregisterHandler(report_handle: OrbisNgs2Handle) -> s32:
@@ -877,70 +883,70 @@ def sceNgs2VoiceQueryInfo() -> s32:
 
 def sceNgs2VoiceRunCommands() -> s32:
     return ORBIS_OK
-def RegisterLib(sym: void&?) -> void:
-    LIB_FUNCTION("3pCNbVM11UA", "libSceNgs2", 1, "libSceNgs2", sceNgs2CalcWaveformBlock)
-    LIB_FUNCTION("6qN1zaEZuN0", "libSceNgs2", 1, "libSceNgs2", sceNgs2CustomRackGetModuleInfo)
-    LIB_FUNCTION("Kg1MA5j7KFk", "libSceNgs2", 1, "libSceNgs2", sceNgs2FftInit)
-    LIB_FUNCTION("D8eCqBxSojA", "libSceNgs2", 1, "libSceNgs2", sceNgs2FftProcess)
-    LIB_FUNCTION("-YNfTO6KOMY", "libSceNgs2", 1, "libSceNgs2", sceNgs2FftQuerySize)
-    LIB_FUNCTION("eF8yRCC6W64", "libSceNgs2", 1, "libSceNgs2", sceNgs2GeomApply)
-    LIB_FUNCTION("1WsleK-MTkE", "libSceNgs2", 1, "libSceNgs2", sceNgs2GeomCalcListener)
-    LIB_FUNCTION("7Lcfo8SmpsU", "libSceNgs2", 1, "libSceNgs2", sceNgs2GeomResetListenerParam)
-    LIB_FUNCTION("0lbbayqDNoE", "libSceNgs2", 1, "libSceNgs2", sceNgs2GeomResetSourceParam)
-    LIB_FUNCTION("ekGJmmoc8j4", "libSceNgs2", 1, "libSceNgs2", sceNgs2GetWaveformFrameInfo)
-    LIB_FUNCTION("BcoPfWfpvVI", "libSceNgs2", 1, "libSceNgs2", sceNgs2JobSchedulerResetOption)
-    LIB_FUNCTION("EEemGEQCjO8", "libSceNgs2", 1, "libSceNgs2", sceNgs2ModuleArrayEnumItems)
-    LIB_FUNCTION("TaoNtmMKkXQ", "libSceNgs2", 1, "libSceNgs2", sceNgs2ModuleEnumConfigs)
-    LIB_FUNCTION("ve6bZi+1sYQ", "libSceNgs2", 1, "libSceNgs2", sceNgs2ModuleQueueEnumItems)
-    LIB_FUNCTION("gbMKV+8Enuo", "libSceNgs2", 1, "libSceNgs2", sceNgs2PanGetVolumeMatrix)
-    LIB_FUNCTION("xa8oL9dmXkM", "libSceNgs2", 1, "libSceNgs2", sceNgs2PanInit)
-    LIB_FUNCTION("hyVLT2VlOYk", "libSceNgs2", 1, "libSceNgs2", sceNgs2ParseWaveformData)
-    LIB_FUNCTION("iprCTXPVWMI", "libSceNgs2", 1, "libSceNgs2", sceNgs2ParseWaveformFile)
-    LIB_FUNCTION("t9T0QM17Kvo", "libSceNgs2", 1, "libSceNgs2", sceNgs2ParseWaveformUser)
-    LIB_FUNCTION("cLV4aiT9JpA", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackCreate)
-    LIB_FUNCTION("U546k6orxQo", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackCreateWithAllocator)
-    LIB_FUNCTION("lCqD7oycmIM", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackDestroy)
-    LIB_FUNCTION("M4LYATRhRUE", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackGetInfo)
-    LIB_FUNCTION("Mn4XNDg03XY", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackGetUserData)
-    LIB_FUNCTION("MwmHz8pAdAo", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackGetVoiceHandle)
-    LIB_FUNCTION("MzTa7VLjogY", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackLock)
-    LIB_FUNCTION("0eFLVCfWVds", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackQueryBufferSize)
-    LIB_FUNCTION("TZqb8E-j3dY", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackQueryInfo)
-    LIB_FUNCTION("MI2VmBx2RbM", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackRunCommands)
-    LIB_FUNCTION("JNTMIaBIbV4", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackSetUserData)
-    LIB_FUNCTION("++YZ7P9e87U", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackUnlock)
-    LIB_FUNCTION("uBIN24Tv2MI", "libSceNgs2", 1, "libSceNgs2", sceNgs2ReportRegisterHandler)
-    LIB_FUNCTION("nPzb7Ly-VjE", "libSceNgs2", 1, "libSceNgs2", sceNgs2ReportUnregisterHandler)
-    LIB_FUNCTION("koBbCMvOKWw", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemCreate)
-    LIB_FUNCTION("mPYgU4oYpuY", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemCreateWithAllocator)
-    LIB_FUNCTION("u-WrYDaJA3k", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemDestroy)
-    LIB_FUNCTION("vubFP0T6MP0", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemEnumHandles)
-    LIB_FUNCTION("U-+7HsswcIs", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemEnumRackHandles)
-    LIB_FUNCTION("vU7TQ62pItw", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemGetInfo)
-    LIB_FUNCTION("4lFaRxd-aLs", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemGetUserData)
-    LIB_FUNCTION("gThZqM5PYlQ", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemLock)
-    LIB_FUNCTION("pgFAiLR5qT4", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemQueryBufferSize)
-    LIB_FUNCTION("3oIK7y7O4k0", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemQueryInfo)
-    LIB_FUNCTION("i0VnXM-C9fc", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemRender)
-    LIB_FUNCTION("AQkj7C0f3PY", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemResetOption)
-    LIB_FUNCTION("gXiormHoZZ4", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemRunCommands)
-    LIB_FUNCTION("l4Q2dWEH6UM", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemSetGrainSamples)
-    LIB_FUNCTION("Wdlx0ZFTV9s", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemSetLoudThreshold)
-    LIB_FUNCTION("-tbc2SxQD60", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemSetSampleRate)
-    LIB_FUNCTION("GZB2v0XnG0k", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemSetUserData)
-    LIB_FUNCTION("JXRC5n0RQls", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemUnlock)
-    LIB_FUNCTION("sU2St3agdjg", "libSceNgs2", 1, "libSceNgs2", sceNgs2StreamCreate)
-    LIB_FUNCTION("I+RLwaauggA", "libSceNgs2", 1, "libSceNgs2", sceNgs2StreamCreateWithAllocator)
-    LIB_FUNCTION("bfoMXnTRtwE", "libSceNgs2", 1, "libSceNgs2", sceNgs2StreamDestroy)
-    LIB_FUNCTION("dxulc33msHM", "libSceNgs2", 1, "libSceNgs2", sceNgs2StreamQueryBufferSize)
-    LIB_FUNCTION("rfw6ufRsmow", "libSceNgs2", 1, "libSceNgs2", sceNgs2StreamQueryInfo)
-    LIB_FUNCTION("q+2W8YdK0F8", "libSceNgs2", 1, "libSceNgs2", sceNgs2StreamResetOption)
-    LIB_FUNCTION("qQHCi9pjDps", "libSceNgs2", 1, "libSceNgs2", sceNgs2StreamRunCommands)
-    LIB_FUNCTION("uu94irFOGpA", "libSceNgs2", 1, "libSceNgs2", sceNgs2VoiceControl)
-    LIB_FUNCTION("jjBVvPN9964", "libSceNgs2", 1, "libSceNgs2", sceNgs2VoiceGetMatrixInfo)
-    LIB_FUNCTION("W-Z8wWMBnhk", "libSceNgs2", 1, "libSceNgs2", sceNgs2VoiceGetOwner)
-    LIB_FUNCTION("WCayTgob7-o", "libSceNgs2", 1, "libSceNgs2", sceNgs2VoiceGetPortInfo)
-    LIB_FUNCTION("-TOuuAQ-buE", "libSceNgs2", 1, "libSceNgs2", sceNgs2VoiceGetState)
-    LIB_FUNCTION("rEh728kXk3w", "libSceNgs2", 1, "libSceNgs2", sceNgs2VoiceGetStateFlags)
-    LIB_FUNCTION("9eic4AmjGVI", "libSceNgs2", 1, "libSceNgs2", sceNgs2VoiceQueryInfo)
-    LIB_FUNCTION("AbYvTOZ8Pts", "libSceNgs2", 1, "libSceNgs2", sceNgs2VoiceRunCommands)
+def Ngs2_RegisterLib(sym: void&?) -> void:
+    LIB_FUNCTION("3pCNbVM11UA", "libSceNgs2", 1, "libSceNgs2", sceNgs2CalcWaveformBlock, sym)
+    LIB_FUNCTION("6qN1zaEZuN0", "libSceNgs2", 1, "libSceNgs2", sceNgs2CustomRackGetModuleInfo, sym)
+    LIB_FUNCTION("Kg1MA5j7KFk", "libSceNgs2", 1, "libSceNgs2", sceNgs2FftInit, sym)
+    LIB_FUNCTION("D8eCqBxSojA", "libSceNgs2", 1, "libSceNgs2", sceNgs2FftProcess, sym)
+    LIB_FUNCTION("-YNfTO6KOMY", "libSceNgs2", 1, "libSceNgs2", sceNgs2FftQuerySize, sym)
+    LIB_FUNCTION("eF8yRCC6W64", "libSceNgs2", 1, "libSceNgs2", sceNgs2GeomApply, sym)
+    LIB_FUNCTION("1WsleK-MTkE", "libSceNgs2", 1, "libSceNgs2", sceNgs2GeomCalcListener, sym)
+    LIB_FUNCTION("7Lcfo8SmpsU", "libSceNgs2", 1, "libSceNgs2", sceNgs2GeomResetListenerParam, sym)
+    LIB_FUNCTION("0lbbayqDNoE", "libSceNgs2", 1, "libSceNgs2", sceNgs2GeomResetSourceParam, sym)
+    LIB_FUNCTION("ekGJmmoc8j4", "libSceNgs2", 1, "libSceNgs2", sceNgs2GetWaveformFrameInfo, sym)
+    LIB_FUNCTION("BcoPfWfpvVI", "libSceNgs2", 1, "libSceNgs2", sceNgs2JobSchedulerResetOption, sym)
+    LIB_FUNCTION("EEemGEQCjO8", "libSceNgs2", 1, "libSceNgs2", sceNgs2ModuleArrayEnumItems, sym)
+    LIB_FUNCTION("TaoNtmMKkXQ", "libSceNgs2", 1, "libSceNgs2", sceNgs2ModuleEnumConfigs, sym)
+    LIB_FUNCTION("ve6bZi+1sYQ", "libSceNgs2", 1, "libSceNgs2", sceNgs2ModuleQueueEnumItems, sym)
+    LIB_FUNCTION("gbMKV+8Enuo", "libSceNgs2", 1, "libSceNgs2", sceNgs2PanGetVolumeMatrix, sym)
+    LIB_FUNCTION("xa8oL9dmXkM", "libSceNgs2", 1, "libSceNgs2", sceNgs2PanInit, sym)
+    LIB_FUNCTION("hyVLT2VlOYk", "libSceNgs2", 1, "libSceNgs2", sceNgs2ParseWaveformData, sym)
+    LIB_FUNCTION("iprCTXPVWMI", "libSceNgs2", 1, "libSceNgs2", sceNgs2ParseWaveformFile, sym)
+    LIB_FUNCTION("t9T0QM17Kvo", "libSceNgs2", 1, "libSceNgs2", sceNgs2ParseWaveformUser, sym)
+    LIB_FUNCTION("cLV4aiT9JpA", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackCreate, sym)
+    LIB_FUNCTION("U546k6orxQo", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackCreateWithAllocator, sym)
+    LIB_FUNCTION("lCqD7oycmIM", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackDestroy, sym)
+    LIB_FUNCTION("M4LYATRhRUE", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackGetInfo, sym)
+    LIB_FUNCTION("Mn4XNDg03XY", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackGetUserData, sym)
+    LIB_FUNCTION("MwmHz8pAdAo", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackGetVoiceHandle, sym)
+    LIB_FUNCTION("MzTa7VLjogY", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackLock, sym)
+    LIB_FUNCTION("0eFLVCfWVds", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackQueryBufferSize, sym)
+    LIB_FUNCTION("TZqb8E-j3dY", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackQueryInfo, sym)
+    LIB_FUNCTION("MI2VmBx2RbM", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackRunCommands, sym)
+    LIB_FUNCTION("JNTMIaBIbV4", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackSetUserData, sym)
+    LIB_FUNCTION("++YZ7P9e87U", "libSceNgs2", 1, "libSceNgs2", sceNgs2RackUnlock, sym)
+    LIB_FUNCTION("uBIN24Tv2MI", "libSceNgs2", 1, "libSceNgs2", sceNgs2ReportRegisterHandler, sym)
+    LIB_FUNCTION("nPzb7Ly-VjE", "libSceNgs2", 1, "libSceNgs2", sceNgs2ReportUnregisterHandler, sym)
+    LIB_FUNCTION("koBbCMvOKWw", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemCreate, sym)
+    LIB_FUNCTION("mPYgU4oYpuY", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemCreateWithAllocator, sym)
+    LIB_FUNCTION("u-WrYDaJA3k", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemDestroy, sym)
+    LIB_FUNCTION("vubFP0T6MP0", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemEnumHandles, sym)
+    LIB_FUNCTION("U-+7HsswcIs", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemEnumRackHandles, sym)
+    LIB_FUNCTION("vU7TQ62pItw", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemGetInfo, sym)
+    LIB_FUNCTION("4lFaRxd-aLs", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemGetUserData, sym)
+    LIB_FUNCTION("gThZqM5PYlQ", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemLock, sym)
+    LIB_FUNCTION("pgFAiLR5qT4", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemQueryBufferSize, sym)
+    LIB_FUNCTION("3oIK7y7O4k0", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemQueryInfo, sym)
+    LIB_FUNCTION("i0VnXM-C9fc", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemRender, sym)
+    LIB_FUNCTION("AQkj7C0f3PY", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemResetOption, sym)
+    LIB_FUNCTION("gXiormHoZZ4", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemRunCommands, sym)
+    LIB_FUNCTION("l4Q2dWEH6UM", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemSetGrainSamples, sym)
+    LIB_FUNCTION("Wdlx0ZFTV9s", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemSetLoudThreshold, sym)
+    LIB_FUNCTION("-tbc2SxQD60", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemSetSampleRate, sym)
+    LIB_FUNCTION("GZB2v0XnG0k", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemSetUserData, sym)
+    LIB_FUNCTION("JXRC5n0RQls", "libSceNgs2", 1, "libSceNgs2", sceNgs2SystemUnlock, sym)
+    LIB_FUNCTION("sU2St3agdjg", "libSceNgs2", 1, "libSceNgs2", sceNgs2StreamCreate, sym)
+    LIB_FUNCTION("I+RLwaauggA", "libSceNgs2", 1, "libSceNgs2", sceNgs2StreamCreateWithAllocator, sym)
+    LIB_FUNCTION("bfoMXnTRtwE", "libSceNgs2", 1, "libSceNgs2", sceNgs2StreamDestroy, sym)
+    LIB_FUNCTION("dxulc33msHM", "libSceNgs2", 1, "libSceNgs2", sceNgs2StreamQueryBufferSize, sym)
+    LIB_FUNCTION("rfw6ufRsmow", "libSceNgs2", 1, "libSceNgs2", sceNgs2StreamQueryInfo, sym)
+    LIB_FUNCTION("q+2W8YdK0F8", "libSceNgs2", 1, "libSceNgs2", sceNgs2StreamResetOption, sym)
+    LIB_FUNCTION("qQHCi9pjDps", "libSceNgs2", 1, "libSceNgs2", sceNgs2StreamRunCommands, sym)
+    LIB_FUNCTION("uu94irFOGpA", "libSceNgs2", 1, "libSceNgs2", sceNgs2VoiceControl, sym)
+    LIB_FUNCTION("jjBVvPN9964", "libSceNgs2", 1, "libSceNgs2", sceNgs2VoiceGetMatrixInfo, sym)
+    LIB_FUNCTION("W-Z8wWMBnhk", "libSceNgs2", 1, "libSceNgs2", sceNgs2VoiceGetOwner, sym)
+    LIB_FUNCTION("WCayTgob7-o", "libSceNgs2", 1, "libSceNgs2", sceNgs2VoiceGetPortInfo, sym)
+    LIB_FUNCTION("-TOuuAQ-buE", "libSceNgs2", 1, "libSceNgs2", sceNgs2VoiceGetState, sym)
+    LIB_FUNCTION("rEh728kXk3w", "libSceNgs2", 1, "libSceNgs2", sceNgs2VoiceGetStateFlags, sym)
+    LIB_FUNCTION("9eic4AmjGVI", "libSceNgs2", 1, "libSceNgs2", sceNgs2VoiceQueryInfo, sym)
+    LIB_FUNCTION("AbYvTOZ8Pts", "libSceNgs2", 1, "libSceNgs2", sceNgs2VoiceRunCommands, sym)

@@ -57,6 +57,11 @@ struct OrbisPadInfo:
     unk3: mutable u32
     colour: mutable u32
 
+@fixed_layout
+struct OrbisPadDeviceClassExtendedInformation:
+    deviceClass: mutable s32
+    reserved: mutable u8[16]
+
 const ORBIS_PAD_PORT_TYPE_STANDARD: s32 = 0
 const ORBIS_PAD_PORT_TYPE_SPECIAL: s32 = 2
 const ORBIS_PAD_PORT_TYPE_REMOTE_CONTROL: s32 = 16
@@ -74,6 +79,7 @@ struct PadHandleEntry:
 global mutable g_initialized: bool = false
 global mutable g_pad_handle_counter: s32 = 1
 global mutable g_entries: array[PadHandleEntry, ORBIS_PAD_MAX_HANDLES] = zeroed
+global mutable g_handle_colour: array[u32, ORBIS_PAD_MAX_HANDLES] = zeroed
 
 def pad_find_slot(user_id: s32, pad_type: s32, index: s32) -> int:
     i: mutable int = 0
@@ -127,6 +133,9 @@ def scePadOpen(userId: OrbisUserServiceUserId, type: s32, index: s32, pParam: vo
     g_entries[slot].pad_type <- type
     g_entries[slot].index <- index
     g_entries[slot].handle <- handle
+    g_handle_colour[slot] <- 0
+    _ = scePadResetLightBar(handle)
+    _ = scePadResetOrientation(handle)
     return handle
 
 def scePadOpenExt(userId: OrbisUserServiceUserId, type: s32, index: s32, pParam: void&?) -> int:
@@ -198,26 +207,37 @@ def scePadGetInfo(data: mutable OrbisPadInfo&?) -> int:
     data[0].unk1 <- 1
     data[0].pad_handle <- 1
     data[0].unk3 <- 0x00000101
+    slot: int = pad_find_handle(1)
+    if slot != -1:
+        data[0].colour <- g_handle_colour[slot]
     return ORBIS_OK
 
 def scePadResetLightBar(handle: s32) -> int:
-    if pad_find_handle(handle) == -1:
+    slot: int = pad_find_handle(handle)
+    if slot == -1:
         return ORBIS_PAD_ERROR_INVALID_HANDLE
+    # Matches C++ fallback behavior when no concrete user color data is available: blue.
+    g_handle_colour[slot] <- (0 + (0 << 8) + (255 << 16))
     return ORBIS_OK
 
 def scePadSetLightBar(handle: s32, pParam: OrbisPadLightBarParam&?) -> int:
-    if pad_find_handle(handle) == -1:
+    slot: int = pad_find_handle(handle)
+    if slot == -1:
         return ORBIS_PAD_ERROR_INVALID_HANDLE
     if pParam == null:
         return ORBIS_PAD_ERROR_INVALID_ARG
     if pParam[0].r < 0x0d and pParam[0].g < 0x0d and pParam[0].b < 0x0d:
         return ORBIS_PAD_ERROR_INVALID_LIGHTBAR_SETTING
+    g_handle_colour[slot] <- (pParam[0].r.u32() + (pParam[0].g.u32() << 8) + (pParam[0].b.u32() << 16))
     return ORBIS_OK
 
 def scePadSetLightBarForTracker(handle: s32, pParam: OrbisPadLightBarParam&?) -> int:
-    if pad_find_handle(handle) == -1:
+    slot: int = pad_find_handle(handle)
+    if slot == -1:
         return ORBIS_PAD_ERROR_INVALID_HANDLE
-    _ = pParam
+    if pParam == null:
+        return ORBIS_PAD_ERROR_INVALID_ARG
+    g_handle_colour[slot] <- (pParam[0].r.u32() + (pParam[0].g.u32() << 8) + (pParam[0].b.u32() << 16))
     return ORBIS_OK
 
 def scePadSetVibration(handle: s32, pParam: OrbisPadVibrationParam&?) -> int:
@@ -231,9 +251,13 @@ def scePadSetVibration(handle: s32, pParam: OrbisPadVibrationParam&?) -> int:
 def scePadConnectPort() -> int:
     return ORBIS_OK
 
-def scePadDeviceClassGetExtendedInformation(handle: s32, pExtInfo: void&?) -> int:
-    _ = handle
-    _ = pExtInfo
+def scePadDeviceClassGetExtendedInformation(handle: s32, pExtInfo: mutable OrbisPadDeviceClassExtendedInformation&?) -> int:
+    if pad_find_handle(handle) == -1:
+        return ORBIS_PAD_ERROR_INVALID_HANDLE
+    if pExtInfo == null:
+        return ORBIS_PAD_ERROR_INVALID_ARG
+    pExtInfo[0] <- zeroed
+    pExtInfo[0].deviceClass <- 0
     return ORBIS_OK
 
 def scePadDeviceClassParseData(handle: s32, pData: void&?, pDeviceClassData: void&?) -> int:

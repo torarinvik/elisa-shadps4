@@ -9,9 +9,6 @@ include "../../../common/logging/log.elisa"
 include "../../../common/error.elisa"
 
 const ORBIS_NET_MAX_SOCKETS: usize = 64
-const ORBIS_NET_MAX_RESOLVERS: usize = 16
-const ORBIS_NET_MAX_EPOLL: usize = 32
-const ORBIS_NET_MAX_EPOLL_EVENTS: usize = 64
 const ORBIS_NET_RESOLVER_ASYNC: int = 1
 const ORBIS_NET_SEND_FLAGS: int = 0x40020000
 const ORBIS_NET_RECV_FLAGS: int = 0x40000000
@@ -19,9 +16,6 @@ const ORBIS_NET_AF_INET: int = 2
 const ORBIS_NET_AF_INET6: int = 28
 const NATIVE_AF_INET: int = 2
 const NATIVE_AF_INET6: int = 30
-const ORBIS_NET_EPOLL_CTL_ADD: int = 1
-const ORBIS_NET_EPOLL_CTL_MOD: int = 2
-const ORBIS_NET_EPOLL_CTL_DEL: int = 3
 
 struct OrbisNetSocketState:
     in_use: mutable bool
@@ -30,28 +24,11 @@ struct OrbisNetSocketState:
     listening: mutable bool
     shutdown_state: mutable int
 
-struct OrbisNetResolverState:
-    in_use: mutable bool
-    handle: mutable i64
-    pool_id: mutable int
-    flags: mutable int
-    last_error: mutable int
-
-struct OrbisNetEpollState:
-    in_use: mutable bool
-    handle: mutable i64
-    count: mutable usize
-    ids: mutable array[i64, ORBIS_NET_MAX_EPOLL_EVENTS]
-
 global mutable g_net_initialized: bool = false
 global mutable g_net_last_error: int = ORBIS_OK
 global mutable g_net_next_socket_handle: i64 = 1
-global mutable g_net_next_resolver_handle: i64 = 1
 global mutable g_net_next_pool_handle: int = 1
-global mutable g_net_next_epoll_handle: i64 = 1
 global mutable g_net_sockets: array[OrbisNetSocketState, ORBIS_NET_MAX_SOCKETS] = zeroed
-global mutable g_net_resolvers: array[OrbisNetResolverState, ORBIS_NET_MAX_RESOLVERS] = zeroed
-global mutable g_net_epolls: array[OrbisNetEpollState, ORBIS_NET_MAX_EPOLL] = zeroed
 global mutable g_net_active_resolver: i64 = 0
 
 def sceNet_SetErr(err: int) -> void:
@@ -62,14 +39,6 @@ def sceNet_ResetState() -> void:
     while idx < ORBIS_NET_MAX_SOCKETS:
         g_net_sockets[idx] <- zeroed
         idx += 1
-    idx = 0
-    while idx < ORBIS_NET_MAX_RESOLVERS:
-        g_net_resolvers[idx] <- zeroed
-        idx += 1
-    idx = 0
-    while idx < ORBIS_NET_MAX_EPOLL:
-        g_net_epolls[idx] <- zeroed
-        idx += 1
     g_net_active_resolver <- 0
 
 def sceNet_FindSocket(handle: i64) -> int:
@@ -77,32 +46,6 @@ def sceNet_FindSocket(handle: i64) -> int:
     while idx < ORBIS_NET_MAX_SOCKETS:
         slot: mutable OrbisNetSocketState& = g_net_sockets[idx].ref[mutable OrbisNetSocketState&]
         if slot.in_use and slot.handle == handle:
-            return idx.int()
-        idx += 1
-    return -1
-
-def sceNet_FindResolver(handle: i64) -> int:
-    idx: usize = 0
-    while idx < ORBIS_NET_MAX_RESOLVERS:
-        slot: mutable OrbisNetResolverState& = g_net_resolvers[idx].ref[mutable OrbisNetResolverState&]
-        if slot.in_use and slot.handle == handle:
-            return idx.int()
-        idx += 1
-    return -1
-
-def sceNet_FindEpoll(handle: i64) -> int:
-    idx: usize = 0
-    while idx < ORBIS_NET_MAX_EPOLL:
-        slot: mutable OrbisNetEpollState& = g_net_epolls[idx].ref[mutable OrbisNetEpollState&]
-        if slot.in_use and slot.handle == handle:
-            return idx.int()
-        idx += 1
-    return -1
-
-def sceNet_EpollFindId(epoll: mutable OrbisNetEpollState&, id: i64) -> int:
-    idx: usize = 0
-    while idx < epoll.count:
-        if epoll.ids[idx] == id:
             return idx.int()
         idx += 1
     return -1
