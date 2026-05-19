@@ -1,5 +1,10 @@
 include "./core/libraries/kernel/threads/threads.elisa"
 
+global mutable g_thread_dtor_called: int = 0
+
+def test_thread_dtor_hook() -> void:
+    g_thread_dtor_called <- g_thread_dtor_called + 1
+
 def main() -> int:
     attr: mutable PthreadAttr&? = null
     init_res: int = posix_pthread_attr_init(attr)
@@ -166,5 +171,31 @@ def main() -> int:
     bad_param: mutable SchedParam = SchedParam(0)
     if posix_pthread_getschedparam(0x7fffffff as void&?, bad_policy, bad_param) != POSIX_ESRCH:
         return 63
+    timed_thr: mutable void&? = null
+    g_fake_threads_autocomplete <- false
+    if posix_pthread_create(timed_thr, null, null, null) != 0:
+        return 64
+    timed_ret: mutable void&? = null
+    if posix_pthread_timedjoin_np(timed_thr, timed_ret, null) != POSIX_EINVAL:
+        return 65
+    if posix_pthread_timedjoin_np(timed_thr, timed_ret, 1 as void&?) != POSIX_ETIMEDOUT:
+        return 66
+    g_fake_threads_autocomplete <- true
+
+    done_thr: mutable void&? = null
+    done_arg: void&? = 0x1234 as void&?
+    if posix_pthread_create(done_thr, null, null, done_arg) != 0:
+        return 67
+    done_ret: mutable void&? = null
+    if posix_pthread_join(done_thr, done_ret) != 0:
+        return 68
+    if done_ret != done_arg:
+        return 69
+
+    g_thread_dtor_called <- 0
+    _sceKernelSetThreadDtors(test_thread_dtor_hook)
+    posix_pthread_exit(null)
+    if g_thread_dtor_called != 1:
+        return 70
 
     return 0

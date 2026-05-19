@@ -64,6 +64,39 @@ def gnm_is_power_of_two(value: u32) -> bool:
         return false
     return (value & (value - 1u32)) == 0u32
 
+def gnm_write_set_sh_reg_2(cmdbuf: u32&?, index: u32, reg: u32, a: u32) -> u32:
+    cmdbuf[index] <- gnm_create_pm4_header(PM4ItOpcode_SetShReg, 3u32)
+    cmdbuf[index + 1u32] <- reg
+    cmdbuf[index + 2u32] <- a
+    return index + 3u32
+
+def gnm_write_set_sh_reg_3(cmdbuf: u32&?, index: u32, reg: u32, a: u32, b: u32) -> u32:
+    cmdbuf[index] <- gnm_create_pm4_header(PM4ItOpcode_SetShReg, 4u32)
+    cmdbuf[index + 1u32] <- reg
+    cmdbuf[index + 2u32] <- a
+    cmdbuf[index + 3u32] <- b
+    return index + 4u32
+
+def gnm_write_set_ctx_reg_2(cmdbuf: u32&?, index: u32, reg: u32, a: u32) -> u32:
+    cmdbuf[index] <- gnm_create_pm4_header(PM4ItOpcode_SetContextReg, 3u32)
+    cmdbuf[index + 1u32] <- reg
+    cmdbuf[index + 2u32] <- a
+    return index + 3u32
+
+def gnm_write_set_ctx_reg_3(cmdbuf: u32&?, index: u32, reg: u32, a: u32, b: u32) -> u32:
+    cmdbuf[index] <- gnm_create_pm4_header(PM4ItOpcode_SetContextReg, 4u32)
+    cmdbuf[index + 1u32] <- reg
+    cmdbuf[index + 2u32] <- a
+    cmdbuf[index + 3u32] <- b
+    return index + 4u32
+
+def gnm_write_trailing_nop(cmdbuf: u32&?, index: u32, payload_dwords: u32) -> void:
+    cmdbuf[index] <- gnm_create_pm4_header(PM4ItOpcode_Nop, payload_dwords)
+    i: mutable u32 = 0u32
+    while i < payload_dwords:
+        cmdbuf[index + 1u32 + i] <- 0u32
+        i <- i + 1u32
+
 def gnm_next_compute_queue_slot() -> int:
     i: mutable int = 0
     while i < GNM_MAX_COMPUTE_QUEUES:
@@ -765,62 +798,190 @@ def sceGnmSdmaOpen() -> int:
 def sceGnmSetCsShader(cmdbuf: u32&?, size: u32, cs_regs: u32&?) -> s32:
     if cmdbuf == null or size <= 0x18u32 or cs_regs == null or cs_regs[1] != 0u32:
         return -1
-    cmdbuf[0] <- cs_regs[0]
+    index: mutable u32 = 0u32
+    index <- gnm_write_set_sh_reg_3(cmdbuf, index, 0x20cu, cs_regs[0], 0u32)
+    index <- gnm_write_set_sh_reg_3(cmdbuf, index, 0x212u, cs_regs[2], cs_regs[3])
+    index <- gnm_write_set_sh_reg_3(cmdbuf, index, 0x207u, cs_regs[4], cs_regs[5], cs_regs[6])
+    gnm_write_trailing_nop(cmdbuf, index, 11u32)
     return ORBIS_OK
 
 def sceGnmSetCsShaderWithModifier(cmdbuf: u32&?, size: u32, cs_regs: u32&?, modifier: u32) -> s32:
-    _ = modifier
+    if modifier & 0xfffffc3fu32 != 0u32:
+        return -1
     if cmdbuf == null or size <= 0x18u32 or cs_regs == null or cs_regs[1] != 0u32:
         return -1
-    cmdbuf[0] <- cs_regs[0]
+    index: mutable u32 = 0u32
+    rsrc1: u32 = cs_regs[2] if modifier == 0u32 else ((cs_regs[2] & 0xfffffc3fu32) | modifier)
+    index <- gnm_write_set_sh_reg_3(cmdbuf, index, 0x20cu, cs_regs[0], 0u32)
+    index <- gnm_write_set_sh_reg_3(cmdbuf, index, 0x212u, rsrc1, cs_regs[3])
+    index <- gnm_write_set_sh_reg_3(cmdbuf, index, 0x207u, cs_regs[4], cs_regs[5], cs_regs[6])
+    gnm_write_trailing_nop(cmdbuf, index, 11u32)
     return ORBIS_OK
 
 def sceGnmSetEmbeddedPsShader(cmdbuf: u32&?, size: u32, shader_id: u32, shader_modifier: u32) -> s32:
+    if shader_id > 1u32:
+        return ORBIS_GNM_ERROR_FAILURE
     _ = shader_modifier
-    if shader_id > 1u32 or cmdbuf == null or size == 0u32:
-        return -1
+    ps0_regs: u32[12] = [
+        0x0fe000f0u32,
+        0u32,
+        0x000c0000u32,
+        4u32,
+        0u32,
+        4u32,
+        2u32,
+        2u32,
+        0u32,
+        0u32,
+        0x10u32,
+        0xfu32,
+    ]
+    ps1_regs: u32[12] = [
+        0x0fe000f2u32,
+        0u32,
+        0x2000u32,
+        0u32,
+        0u32,
+        2u32,
+        2u32,
+        2u32,
+        0u32,
+        0u32,
+        0x10u32,
+        3u32,
+    ]
+    ps_regs: u32[12] = ps0_regs if shader_id == 0u32 else ps1_regs
+    index: mutable u32 = 0u32
+    index <- gnm_write_set_sh_reg_3(cmdbuf, index, 8u, ps_regs[0], ps_regs[1])
+    index <- gnm_write_set_sh_reg_3(cmdbuf, index, 10u, ps_regs[2], ps_regs[3])
+    index <- gnm_write_set_ctx_reg_3(cmdbuf, index, 0x1c4u, ps_regs[4], ps_regs[5])
+    index <- gnm_write_set_ctx_reg_3(cmdbuf, index, 0x1b3u, ps_regs[6], ps_regs[7])
+    index <- gnm_write_set_ctx_reg_2(cmdbuf, index, 0x1b6u, ps_regs[8])
+    index <- gnm_write_set_ctx_reg_2(cmdbuf, index, 0x1b8u, ps_regs[9])
+    index <- gnm_write_set_ctx_reg_2(cmdbuf, index, 0x203u, ps_regs[10])
+    index <- gnm_write_set_ctx_reg_2(cmdbuf, index, 0x8fu, ps_regs[11])
+    gnm_write_trailing_nop(cmdbuf, index, 11u32)
     return ORBIS_OK
 
 def sceGnmSetEmbeddedVsShader(cmdbuf: u32&?, size: u32, shader_id: u32, modifier: u32) -> s32:
+    if shader_id > 1u32:
+        return ORBIS_GNM_ERROR_FAILURE
+    if shader_id != 0u32:
+        return ORBIS_GNM_ERROR_FAILURE
     _ = modifier
-    if shader_id > 1u32 or cmdbuf == null or size == 0u32:
-        return -1
+    vs_regs: u32[8] = [
+        0x0fe000f1u32,
+        0u32,
+        0x000c0000u32,
+        4u32,
+        0u32,
+        4u32,
+        0u32,
+        7u32,
+    ]
+    index: mutable u32 = 0u32
+    index <- gnm_write_set_sh_reg_3(cmdbuf, index, 0x48u, vs_regs[0], vs_regs[1])
+    index <- gnm_write_set_sh_reg_3(cmdbuf, index, 0x4au, vs_regs[2], vs_regs[3])
+    index <- gnm_write_set_ctx_reg_2(cmdbuf, index, 0x207u, vs_regs[6])
+    index <- gnm_write_set_ctx_reg_2(cmdbuf, index, 0x1b1u, vs_regs[4])
+    index <- gnm_write_set_ctx_reg_2(cmdbuf, index, 0x1c3u, vs_regs[5])
+    gnm_write_trailing_nop(cmdbuf, index, 11u32)
     return ORBIS_OK
 
 def sceGnmSetEsShader(cmdbuf: u32&?, size: u32, es_regs: u32&?, shader_modifier: u32) -> s32:
-    _ = shader_modifier
-    if cmdbuf == null or size <= 0x18u32 or es_regs == null:
+    if shader_modifier & 0xfcfffc3fu32 != 0u32:
         return -1
+    if cmdbuf == null or size < 0x14u32 or es_regs == null or es_regs[1] != 0u32:
+        return -1
+    index: mutable u32 = 0u32
+    rsrc1: u32 = es_regs[2] if shader_modifier == 0u32 else ((es_regs[2] & 0xfcfffc3fu32) | shader_modifier)
+    index <- gnm_write_set_sh_reg_3(cmdbuf, index, 0xc8u, es_regs[0], 0u32)
+    index <- gnm_write_set_sh_reg_3(cmdbuf, index, 0xcau, rsrc1, es_regs[3])
+    gnm_write_trailing_nop(cmdbuf, index, 11u32)
     return ORBIS_OK
 
 def sceGnmSetGsRingSizes() -> int:
     return 0
 
 def sceGnmSetGsShader(cmdbuf: u32&?, size: u32, gs_regs: u32&?) -> s32:
-    if cmdbuf == null or size < 3u32 or gs_regs == null:
+    if cmdbuf == null or size < 0x1du32 or gs_regs == null or gs_regs[1] != 0u32:
         return -1
+    index: mutable u32 = 0u32
+    index <- gnm_write_set_sh_reg_3(cmdbuf, index, 0x88u, gs_regs[0], 0u32)
+    index <- gnm_write_set_sh_reg_3(cmdbuf, index, 0x8au, gs_regs[2], gs_regs[3])
+    index <- gnm_write_set_ctx_reg_2(cmdbuf, index, 0x2e5u, gs_regs[4])
+    index <- gnm_write_set_ctx_reg_2(cmdbuf, index, 0x29bu, gs_regs[5])
+    index <- gnm_write_set_ctx_reg_2(cmdbuf, index, 0x2e4u, gs_regs[6])
+    gnm_write_trailing_nop(cmdbuf, index, 11u32)
     return ORBIS_OK
 
 def sceGnmSetHsShader(cmdbuf: u32&?, size: u32, hs_regs: u32&?, param4: u32) -> s32:
-    _ = param4
-    if cmdbuf == null or size < 3u32 or hs_regs == null:
+    if cmdbuf == null or size < 0x1eu32 or hs_regs == null or hs_regs[1] != 0u32:
         return -1
+    index: mutable u32 = 0u32
+    index <- gnm_write_set_sh_reg_3(cmdbuf, index, 0x108u, hs_regs[0], 0u32)
+    index <- gnm_write_set_sh_reg_3(cmdbuf, index, 0x10au, hs_regs[2], hs_regs[3])
+    index <- gnm_write_set_ctx_reg_3(cmdbuf, index, 0x286u, hs_regs[5], hs_regs[6])
+    index <- gnm_write_set_ctx_reg_2(cmdbuf, index, 0x2dbu, hs_regs[4])
+    index <- gnm_write_set_ctx_reg_2(cmdbuf, index, 0x2d6u, param4)
+    gnm_write_trailing_nop(cmdbuf, index, 11u32)
     return ORBIS_OK
 
 def sceGnmSetLsShader(cmdbuf: u32&?, size: u32, ls_regs: u32&?, shader_modifier: u32) -> s32:
-    _ = shader_modifier
-    if cmdbuf == null or size <= 0x18u32 or ls_regs == null:
+    modifier_mask: u32 = 0xfffffc3fu32 if (shader_modifier & 0xfffffc3fu32) == 0u32 else 0xfcfffc3fu32
+    if cmdbuf == null or size < 0x17u32 or ls_regs == null or (shader_modifier & modifier_mask) != 0u32:
         return -1
+    index: mutable u32 = 0u32
+    modifier_value: u32 = ls_regs[2] if shader_modifier == 0u32 else ((ls_regs[2] & modifier_mask) | shader_modifier)
+    index <- gnm_write_set_sh_reg_3(cmdbuf, index, 0x148u, ls_regs[0], 0u32)
+    index <- gnm_write_set_sh_reg_2(cmdbuf, index, 0x14bu, ls_regs[3])
+    index <- gnm_write_set_sh_reg_3(cmdbuf, index, 0x14au, modifier_value, ls_regs[3])
+    gnm_write_trailing_nop(cmdbuf, index, 11u32)
     return ORBIS_OK
 
 def sceGnmSetPsShader(cmdbuf: u32&?, size: u32, ps_regs: u32&?) -> s32:
-    if cmdbuf == null or size == 0u32 or ps_regs == null:
+    if cmdbuf == null or size <= 0x27u32:
         return -1
+    index: mutable u32 = 0u32
+    if ps_regs == null:
+        index <- gnm_write_set_sh_reg_3(cmdbuf, index, 8u, 0u32, 0u32)
+        index <- gnm_write_set_ctx_reg_2(cmdbuf, index, 0x203u, 0u32)
+        gnm_write_trailing_nop(cmdbuf, index, 0x20u32)
+        return ORBIS_OK
+    if ps_regs[1] != 0u32:
+        return -1
+    index <- gnm_write_set_sh_reg_3(cmdbuf, index, 8u, ps_regs[0], 0u32)
+    index <- gnm_write_set_sh_reg_3(cmdbuf, index, 0xau, ps_regs[2], ps_regs[3])
+    index <- gnm_write_set_ctx_reg_3(cmdbuf, index, 0x1c4u, ps_regs[4], ps_regs[5])
+    index <- gnm_write_set_ctx_reg_3(cmdbuf, index, 0x1b3u, ps_regs[6], ps_regs[7])
+    index <- gnm_write_set_ctx_reg_2(cmdbuf, index, 0x1b6u, ps_regs[8])
+    index <- gnm_write_set_ctx_reg_2(cmdbuf, index, 0x1b8u, ps_regs[9])
+    index <- gnm_write_set_ctx_reg_2(cmdbuf, index, 0x203u, ps_regs[10])
+    index <- gnm_write_set_ctx_reg_2(cmdbuf, index, 0x8fu, ps_regs[11])
+    gnm_write_trailing_nop(cmdbuf, index, 11u32)
     return ORBIS_OK
 
 def sceGnmSetPsShader350(cmdbuf: u32&?, size: u32, ps_regs: u32&?) -> s32:
-    if cmdbuf == null or size == 0u32 or ps_regs == null:
+    if cmdbuf == null or size <= 0x27u32:
         return -1
+    index: mutable u32 = 0u32
+    if ps_regs == null:
+        index <- gnm_write_set_sh_reg_3(cmdbuf, index, 8u, 0u32, 0u32)
+        index <- gnm_write_set_ctx_reg_2(cmdbuf, index, 0x203u, 0u32)
+        index <- gnm_write_set_ctx_reg_2(cmdbuf, index, 0x8fu, 0xfu)
+        gnm_write_trailing_nop(cmdbuf, index, 0x1du32)
+        return ORBIS_OK
+    if ps_regs[1] != 0u32:
+        return -1
+    index <- gnm_write_set_sh_reg_3(cmdbuf, index, 8u, ps_regs[0], 0u32)
+    index <- gnm_write_set_sh_reg_3(cmdbuf, index, 0xau, ps_regs[2], ps_regs[3])
+    index <- gnm_write_set_ctx_reg_3(cmdbuf, index, 0x1c4u, ps_regs[4], ps_regs[5])
+    index <- gnm_write_set_ctx_reg_3(cmdbuf, index, 0x1b3u, ps_regs[6], ps_regs[7])
+    index <- gnm_write_set_ctx_reg_2(cmdbuf, index, 0x1b6u, ps_regs[8])
+    index <- gnm_write_set_ctx_reg_2(cmdbuf, index, 0x1b8u, ps_regs[9])
+    index <- gnm_write_set_ctx_reg_2(cmdbuf, index, 0x203u, ps_regs[10])
+    index <- gnm_write_set_ctx_reg_2(cmdbuf, index, 0x8fu, ps_regs[11])
+    gnm_write_trailing_nop(cmdbuf, index, 11u32)
     return ORBIS_OK
 
 def sceGnmSetResourceRegistrationUserMemory() -> int:
@@ -830,33 +991,39 @@ def sceGnmSetResourceUserData() -> int:
     return ORBIS_GNM_ERROR_FAILURE
 
 def sceGnmSetSpiEnableSqCounters() -> int:
-    return 0
-
-def sceGnmSetSpiEnableSqCountersForUnitInstance() -> int:
-    return 0
-
-def sceGnmSetupMipStatsReport() -> int:
     return ORBIS_GNM_ERROR_FAILURE
 
+def sceGnmSetSpiEnableSqCountersForUnitInstance() -> int:
+    return ORBIS_GNM_ERROR_FAILURE
+
+def sceGnmSetupMipStatsReport() -> int:
+    return ORBIS_OK
+
 def sceGnmSetVgtControl(cmdbuf: u32&?, size: u32, prim_group_sz_minus_one: u32, partial_vs_wave_mode: u32, wd_switch_only_on_eop_mode: u32) -> s32:
-    _ = prim_group_sz_minus_one
-    _ = partial_vs_wave_mode
-    _ = wd_switch_only_on_eop_mode
-    if cmdbuf == null or size != 3u32:
+    if cmdbuf == null or size != 3u32 or prim_group_sz_minus_one >= 0x100u32 or (partial_vs_wave_mode | wd_switch_only_on_eop_mode) >= 2u32:
         return -1
+    index: mutable u32 = 0u32
+    index <- gnm_write_set_ctx_reg_2(cmdbuf, index, 0x2aau, prim_group_sz_minus_one | ((partial_vs_wave_mode & 1u32) << 16u32))
     return ORBIS_OK
 
 def sceGnmSetVsShader(cmdbuf: u32&?, size: u32, vs_regs: u32&?, shader_modifier: u32) -> s32:
-    _ = shader_modifier
-    if cmdbuf == null or size <= 0x18u32 or vs_regs == null:
+    if cmdbuf == null or size < 0x1cu32 or vs_regs == null or (shader_modifier & 0xfcfffc3fu32) != 0u32 or vs_regs[1] != 0u32:
         return -1
+    index: mutable u32 = 0u32
+    var: u32 = vs_regs[2] if shader_modifier == 0u32 else ((vs_regs[2] & 0xfcfffc3fu32) | shader_modifier)
+    index <- gnm_write_set_sh_reg_3(cmdbuf, index, 0x48u, vs_regs[0], 0u32)
+    index <- gnm_write_set_sh_reg_3(cmdbuf, index, 0x4au, var, vs_regs[3])
+    index <- gnm_write_set_ctx_reg_2(cmdbuf, index, 0x207u, vs_regs[6])
+    index <- gnm_write_set_ctx_reg_2(cmdbuf, index, 0x1b1u, vs_regs[4])
+    index <- gnm_write_set_ctx_reg_2(cmdbuf, index, 0x1c3u, vs_regs[5])
+    gnm_write_trailing_nop(cmdbuf, index, 11u32)
     return ORBIS_OK
 
 def sceGnmSetWaveLimitMultiplier() -> int:
-    return ORBIS_GNM_ERROR_FAILURE
+    return ORBIS_OK
 
 def sceGnmSetWaveLimitMultipliers() -> int:
-    return ORBIS_GNM_ERROR_FAILURE
+    return ORBIS_OK
 
 def sceGnmSpmEndSpm() -> int:
     return ORBIS_GNM_ERROR_FAILURE
@@ -1247,10 +1414,10 @@ def sceGnmDrawInitToDefaultContextStateInternalSize() -> int:
     return 0
 
 def sceGnmFindResources() -> int:
-    return 0
+    return ORBIS_GNM_ERROR_FAILURE
 
 def sceGnmGetResourceRegistrationBuffers() -> int:
-    return 0
+    return ORBIS_GNM_ERROR_FAILURE
 
 def sceGnmRegisterOwnerForSystem() -> int:
     return ORBIS_GNM_ERROR_FAILURE

@@ -93,6 +93,7 @@ Current validated prefix structs:
 - `Implemented`: queue-full policy now prefers higher-priority events (`ERROR`/`EOF`) over low-priority events
 - `Implemented`: controller now processes events in bounded bursts per tick (FIFO drain up to cap) instead of single-event only
 - `Implemented`: controller queue now coalesces consecutive duplicate events/payloads to reduce redundant event churn
+- `Implemented`: controller flushes pending queued events on terminal transitions (`STOP`, explicit `ERROR`, and add-source failure to `ERROR`)
 - `Partial`: no dedicated controller thread or full C++ event queue semantics
 
 ### FFI layer (`avplayer_ffmpeg_ffi.elisa`)
