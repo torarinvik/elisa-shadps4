@@ -152,6 +152,52 @@ def PngEnc_SelectFilterType(filter_type: u16) -> u8:
         return 4.u8()
     return 0.u8()
 
+def PngEnc_SignedByte(v: u8) -> int:
+    i: int = v.i32()
+    if i < 128:
+        return i
+    return i - 256
+
+def PngEnc_FilterScore(filtered: mutable u8&, row_len: u32) -> i64:
+    score: i64 = 0
+    i: u32 = 0
+    while i < row_len:
+        score <- score + PngEnc_SignedByte(filtered[i.usize()]).abs().i64()
+        i <- i + 1
+    return score
+
+def PngEnc_ChooseBestFilter(filter_mask: u16, row: mutable u8&, prev: mutable u8&, scratch: mutable u8&, best: mutable u8&, row_len: u32, bpp: u32) -> u8:
+    best_filter: u8 = 0.u8()
+    best_score: i64 = 0x7fffffffffffffff
+    candidate: u8 = 0
+    while candidate <= 4:
+        allow: bool = false
+        if filter_mask == ORBIS_PNG_ENC_FILTER_TYPE_ALL:
+            allow <- true
+        elif candidate == 0 and filter_mask == ORBIS_PNG_ENC_FILTER_TYPE_NONE:
+            allow <- true
+        elif candidate == 1 and (filter_mask & ORBIS_PNG_ENC_FILTER_TYPE_SUB) != 0:
+            allow <- true
+        elif candidate == 2 and (filter_mask & ORBIS_PNG_ENC_FILTER_TYPE_UP) != 0:
+            allow <- true
+        elif candidate == 3 and (filter_mask & ORBIS_PNG_ENC_FILTER_TYPE_AVERAGE) != 0:
+            allow <- true
+        elif candidate == 4 and (filter_mask & ORBIS_PNG_ENC_FILTER_TYPE_PAETH) != 0:
+            allow <- true
+        if allow:
+            filter_ret: int = PngEnc_FilterRow(candidate, row, prev, scratch, row_len, bpp)
+            if filter_ret == ORBIS_OK:
+                score: i64 = PngEnc_FilterScore(scratch, row_len)
+                if score < best_score:
+                    best_score <- score
+                    best_filter <- candidate
+                    i: u32 = 0
+                    while i < row_len:
+                        best[i.usize()] <- scratch[i.usize()]
+                        i <- i + 1
+        candidate <- candidate + 1
+    return best_filter
+
 def PngEnc_FilterRow(filter: u8, row: mutable u8&, prev: mutable u8&, out: mutable u8&, row_len: u32, bpp: u32) -> int:
     i: u32 = 0
     if filter == 0.u8():
@@ -210,13 +256,14 @@ def PngEnc_BuildRawRows(param: OrbisPngEncEncodeParam&, raw: mutable u8&, raw_si
     row_buf: mutable u8[262144] = zeroed
     prev_row: mutable u8[262144] = zeroed
     filtered_row: mutable u8[262144] = zeroed
+    scratch_row: mutable u8[262144] = zeroed
     bpp: u32 = 3
     if param.color_space == ORBIS_PNG_ENC_COLOR_SPACE_RGBA:
         bpp <- 4
     y: u32 = 0
     while y < param.image_height:
         dst_row: u32 = y * (row_bytes + 1)
-        raw[dst_row.usize()] <- filter_method
+        selected_filter: u8 = filter_method
         src_row: u32 = y * param.image_pitch
         x: u32 = 0
         dst_channels: u32 = 3
@@ -239,7 +286,12 @@ def PngEnc_BuildRawRows(param: OrbisPngEncEncodeParam&, raw: mutable u8&, raw_si
             if param.color_space == ORBIS_PNG_ENC_COLOR_SPACE_RGBA:
                 row_buf[(x * dst_channels + 3).usize()] <- a
             x <- x + 1
-        filter_ret: int = PngEnc_FilterRow(filter_method, row_buf.ref[mutable u8&], prev_row.ref[mutable u8&], filtered_row.ref[mutable u8&], row_bytes, bpp)
+        if param.filter_type == ORBIS_PNG_ENC_FILTER_TYPE_ALL:
+            selected_filter <- PngEnc_ChooseBestFilter(param.filter_type, row_buf.ref[mutable u8&], prev_row.ref[mutable u8&], scratch_row.ref[mutable u8&], filtered_row.ref[mutable u8&], row_bytes, bpp)
+        else:
+            selected_filter <- filter_method
+        raw[dst_row.usize()] <- selected_filter
+        filter_ret: int = PngEnc_FilterRow(selected_filter, row_buf.ref[mutable u8&], prev_row.ref[mutable u8&], filtered_row.ref[mutable u8&], row_bytes, bpp)
         if filter_ret != ORBIS_OK:
             return filter_ret
         dst_data_off: u32 = dst_row + 1

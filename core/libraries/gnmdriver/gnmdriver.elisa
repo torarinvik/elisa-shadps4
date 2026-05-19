@@ -3,6 +3,7 @@
 
 include "../error_codes.elisa"
 include "./gnm_error.elisa"
+include "../kernel/orbis_error.elisa"
 
 type s32 = i32
 type s64 = i64
@@ -10,35 +11,85 @@ type OrbisKernelEqueue = s64
 type OrbisKernelEvent = void&?
 type VAddr = u64
 
+const GNM_MAX_COMPUTE_QUEUES: int = 64
+const GNM_NUM_COMPUTE_PIPES: int = 4
+const GNM_QUEUES_PER_PIPE: int = 16
+const GNM_INVALID_QUEUE_ADDR: u64 = 0xffffffffffffffffu64
+const ORBIS_GNM_TESSELLATION_FALLBACK_ADDR: u64 = 0x100000000000u64
+const GNM_TESSELLATION_OFFCHIP_SIZE: int = 0x800000
+
+@fixed_layout
+struct GnmComputeQueue:
+    used: mutable bool
+    pipe_id: mutable u32
+    queue_id: mutable u32
+    ring_base_addr: mutable VAddr
+    ring_size_dw: mutable u32
+    read_ptr_addr: mutable u32&?
+    next_offs_dw: mutable u32
+
+global mutable g_submissions_lock: u32 = 0
+global mutable g_frames_submitted: u64 = 0u64
+global mutable g_send_init_packet: bool = true
+global mutable g_sdk_version: s32 = 0
+global mutable g_tessellation_factors_ring_addr: u64 = GNM_INVALID_QUEUE_ADDR
+global mutable g_compute_queues: GnmComputeQueue[GNM_MAX_COMPUTE_QUEUES]
+
+def gnm_is_power_of_two(value: u32) -> bool:
+    if value == 0u32:
+        return false
+    return (value and (value - 1u32)) == 0u32
+
+def gnm_next_compute_queue_slot() -> int:
+    i: mutable int = 0
+    while i < GNM_MAX_COMPUTE_QUEUES:
+        if not g_compute_queues[i].used:
+            return i
+        i <- i + 1
+    return -1
+
 def sceGnmAddEqEvent(eq: OrbisKernelEqueue, id: u64, udata: void&?) -> s32:
-    _ = eq
+    if eq == 0:
+        return ORBIS_KERNEL_ERROR_EBADF
     _ = id
     _ = udata
     return 0
 
 def sceGnmAreSubmitsAllowed() -> int:
-    return 0
+    return 1 if g_submissions_lock == 0 else 0
 
 def sceGnmBeginWorkload(workload_stream: u32, workload: u64&?) -> int:
-    _ = workload_stream
-    _ = workload
-    return 0
+    if workload == null:
+        return 3
+    workload[0] <- 0u64 if workload_stream >= 0x10u32 else 1u64
+    return 1 if workload_stream > 0x0fu32 else 0
 
 def sceGnmComputeWaitOnAddress(cmdbuf: u32&?, size: u32, addr: u64, mask: u32, cmp_func: u32, ref: u32) -> s32:
-    _ = cmdbuf
-    _ = size
-    _ = addr
-    _ = mask
-    _ = cmp_func
-    _ = ref
-    return 0
+    if cmdbuf == null or size != 0xeu32:
+        return -1
+    cmdbuf[0] <- 0xc0000000u32
+    cmdbuf[1] <- size
+    cmdbuf[2] <- addr as u32
+    cmdbuf[3] <- (addr >> 32).u32()
+    cmdbuf[4] <- mask
+    cmdbuf[5] <- ref
+    cmdbuf[6] <- cmp_func
+    cmdbuf[7] <- (0x1u32 if addr > 0xffffu32 else 0u32) | 0x30u32
+    cmdbuf[8] <- 0u32
+    cmdbuf[9] <- 0u32
+    cmdbuf[10] <- 0u32
+    cmdbuf[11] <- 0u32
+    cmdbuf[12] <- 0u32
+    cmdbuf[13] <- 0u32
+    return ORBIS_OK
 
 def sceGnmComputeWaitSemaphore() -> int:
     return 0
 
 def sceGnmCreateWorkloadStream(param1: u64, workload_stream: u32&?) -> int:
-    _ = param1
-    _ = workload_stream
+    if param1 == 0 or workload_stream == null:
+        return 3
+    workload_stream[0] <- 1u32
     return 0
 
 def sceGnmDebuggerGetAddressWatch() -> int:
@@ -72,7 +123,8 @@ def sceGnmDebugHardwareStatus() -> int:
     return ORBIS_GNM_ERROR_FAILURE
 
 def sceGnmDeleteEqEvent(eq: OrbisKernelEqueue, id: u64) -> s32:
-    _ = eq
+    if eq == 0:
+        return ORBIS_KERNEL_ERROR_EBADF
     _ = id
     return 0
 
@@ -80,14 +132,19 @@ def sceGnmDestroyWorkloadStream() -> int:
     return 0
 
 def sceGnmDingDong(gnm_vqid: u32, next_offs_dw: u32) -> void:
-    _ = gnm_vqid
-    _ = next_offs_dw
+    if gnm_vqid == 0:
+        return
+    i: mutable int = (gnm_vqid - 1u32).i32()
+    if i < 0 or i >= GNM_MAX_COMPUTE_QUEUES or not g_compute_queues[i].used:
+        return
+    g_compute_queues[i].next_offs_dw <- next_offs_dw
+    if g_compute_queues[i].read_ptr_addr != null:
+        g_compute_queues[i].read_ptr_addr[0] <- 0u32
     return
 
 def sceGnmDingDongForWorkload(gnm_vqid: u32, next_offs_dw: u32, workload_id: u64) -> void:
-    _ = gnm_vqid
-    _ = next_offs_dw
     _ = workload_id
+    sceGnmDingDong(gnm_vqid, next_offs_dw)
     return
 
 def sceGnmDisableMipStatsReport() -> int:
@@ -306,7 +363,7 @@ def sceGnmGetGpuBlockStatus() -> int:
     return 0
 
 def sceGnmGetGpuCoreClockFrequency() -> u32:
-    return 0x32000000u32
+    return 800000000u32
 
 def sceGnmGetGpuInfoStatus() -> int:
     return 0
@@ -318,7 +375,7 @@ def sceGnmGetNumTcaUnits() -> int:
     return 0
 
 def sceGnmGetOffChipTessellationBufferSize() -> int:
-    return ORBIS_GNM_ERROR_FAILURE
+    return GNM_TESSELLATION_OFFCHIP_SIZE
 
 def sceGnmGetOwnerName() -> int:
     return 0
@@ -351,7 +408,8 @@ def sceGnmGetShaderStatus() -> int:
     return 0
 
 def sceGnmGetTheTessellationFactorRingBufferBaseAddress() -> u64:
-    return 0u64
+    if g_tessellation_factors_ring_addr == GNM_INVALID_QUEUE_ADDR:
+        g_tessellation_factors_ring_addr <- ORBIS_GNM_TESSELLATION_OFF? 
 
 def sceGnmGpuPaDebugEnter() -> void:
     return
