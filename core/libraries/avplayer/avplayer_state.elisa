@@ -20,19 +20,72 @@ const AVPLAYER_EVENTS_STATE_PAUSE: i32 = 0x04
 const AVPLAYER_EVENTS_STATE_BUFFERING: i32 = 0x05
 const AVPLAYER_EVENTS_WARNING_ID: i32 = 0x20
 const AVS_MAX_HANDLES: int = 64
+const AVS_EVENT_QUEUE_CAP: int = 16
 const AVS_EVENT_NONE: i32 = 0
 const AVS_EVENT_WARNING: i32 = 1
 const AVS_EVENT_ADD_SOURCE: i32 = 2
 const AVS_EVENT_ERROR: i32 = 3
 const AVS_EVENT_REVERT_STATE: i32 = 4
+const AVS_EVENT_EOF: i32 = 5
 
 global mutable g_state_current: i32[AVS_MAX_HANDLES] = zeroed
 global mutable g_state_previous: i32[AVS_MAX_HANDLES] = zeroed
 global mutable g_state_has_source: bool[AVS_MAX_HANDLES] = zeroed
 global mutable g_state_event_last: i32[AVS_MAX_HANDLES] = zeroed
 global mutable g_state_warning_last: i32[AVS_MAX_HANDLES] = zeroed
-global mutable g_state_pending_event: i32[AVS_MAX_HANDLES] = zeroed
-global mutable g_state_pending_payload: i32[AVS_MAX_HANDLES] = zeroed
+global mutable g_state_event_q_head: int[AVS_MAX_HANDLES] = zeroed
+global mutable g_state_event_q_tail: int[AVS_MAX_HANDLES] = zeroed
+global mutable g_state_event_q_size: int[AVS_MAX_HANDLES] = zeroed
+global mutable g_state_event_q_evt: i32[AVS_MAX_HANDLES * AVS_EVENT_QUEUE_CAP] = zeroed
+global mutable g_state_event_q_payload: i32[AVS_MAX_HANDLES * AVS_EVENT_QUEUE_CAP] = zeroed
+
+def avs_event_q_idx(slot: int, q_index: int) -> int:
+    return slot * AVS_EVENT_QUEUE_CAP + q_index
+
+def avs_event_priority(evt: i32) -> i32:
+    if evt == AVS_EVENT_ERROR:
+        return 3
+    if evt == AVS_EVENT_EOF:
+        return 2
+    if evt == AVS_EVENT_REVERT_STATE or evt == AVS_EVENT_ADD_SOURCE:
+        return 1
+    return 0
+
+def avs_event_q_push(slot: int, evt: i32, payload: i32):
+    if g_state_event_q_size[slot] >= AVS_EVENT_QUEUE_CAP:
+        head: int = g_state_event_q_head[slot]
+        head_idx: int = avs_event_q_idx(slot, head)
+        head_evt: i32 = g_state_event_q_evt[head_idx]
+        if avs_event_priority(evt) <= avs_event_priority(head_evt):
+            return
+        # Drop the oldest lower-priority event and make room for the new one.
+        g_state_event_q_head[slot] <- head + 1
+        if g_state_event_q_head[slot] >= AVS_EVENT_QUEUE_CAP:
+            g_state_event_q_head[slot] <- 0
+        g_state_event_q_size[slot] <- g_state_event_q_size[slot] - 1
+    qtail: mutable int = g_state_event_q_tail[slot]
+    idx: int = avs_event_q_idx(slot, qtail)
+    g_state_event_q_evt[idx] <- evt
+    g_state_event_q_payload[idx] <- payload
+    qtail <- qtail + 1
+    if qtail >= AVS_EVENT_QUEUE_CAP:
+        qtail <- 0
+    g_state_event_q_tail[slot] <- qtail
+    g_state_event_q_size[slot] <- g_state_event_q_size[slot] + 1
+
+def avs_event_q_pop(slot: int, out_evt: mutable i32&, out_payload: mutable i32&) -> bool:
+    if g_state_event_q_size[slot] <= 0:
+        return false
+    qhead: mutable int = g_state_event_q_head[slot]
+    idx: int = avs_event_q_idx(slot, qhead)
+    out_evt <- g_state_event_q_evt[idx]
+    out_payload <- g_state_event_q_payload[idx]
+    qhead <- qhead + 1
+    if qhead >= AVS_EVENT_QUEUE_CAP:
+        qhead <- 0
+    g_state_event_q_head[slot] <- qhead
+    g_state_event_q_size[slot] <- g_state_event_q_size[slot] - 1
+    return true
 
 def avs_init_handle(slot: int):
     g_state_current[slot] <- AV_STATE_INITIAL
@@ -40,8 +93,9 @@ def avs_init_handle(slot: int):
     g_state_has_source[slot] <- false
     g_state_event_last[slot] <- 0
     g_state_warning_last[slot] <- 0
-    g_state_pending_event[slot] <- AVS_EVENT_NONE
-    g_state_pending_payload[slot] <- 0
+    g_state_event_q_head[slot] <- 0
+    g_state_event_q_tail[slot] <- 0
+    g_state_event_q_size[slot] <- 0
 
 def avs_is_state_transition_valid(from_state: i32, to_state: i32) -> bool:
     if from_state == to_state:
@@ -52,13 +106,13 @@ def avs_is_state_transition_valid(from_state: i32, to_state: i32) -> bool:
         return true
     if from_state == AV_STATE_READY and (to_state == AV_STATE_STARTING or to_state == AV_STATE_PLAY or to_state == AV_STATE_STOP):
         return true
-    if from_state == AV_STATE_STARTING and (to_state == AV_STATE_PLAY or to_state == AV_STATE_BUFFERING or to_state == AV_STATE_STOP):
+    if from_state == AV_STATE_STARTING and (to_state == AV_STATE_PLAY or to_state == AV_STATE_BUFFERING or to_state == AV_STATE_STOP or to_state == AV_STATE_END_OF_FILE):
         return true
     if from_state == AV_STATE_PLAY and (to_state == AV_STATE_PAUSE or to_state == AV_STATE_BUFFERING or to_state == AV_STATE_STOP or to_state == AV_STATE_END_OF_FILE or to_state == AV_STATE_JUMP):
         return true
-    if from_state == AV_STATE_PAUSE and (to_state == AV_STATE_PLAY or to_state == AV_STATE_STOP or to_state == AV_STATE_JUMP):
+    if from_state == AV_STATE_PAUSE and (to_state == AV_STATE_PLAY or to_state == AV_STATE_STOP or to_state == AV_STATE_JUMP or to_state == AV_STATE_END_OF_FILE):
         return true
-    if from_state == AV_STATE_BUFFERING and (to_state == AV_STATE_PLAY or to_state == AV_STATE_STOP):
+    if from_state == AV_STATE_BUFFERING and (to_state == AV_STATE_PLAY or to_state == AV_STATE_STOP or to_state == AV_STATE_END_OF_FILE):
         return true
     if from_state == AV_STATE_END_OF_FILE and (to_state == AV_STATE_PLAY or to_state == AV_STATE_STOP):
         return true
@@ -93,31 +147,26 @@ def avs_emit_event_for_state(slot: int, state: i32):
         g_state_event_last[slot] <- AVPLAYER_EVENTS_STATE_STOP
 
 def avs_on_warning(slot: int, warning_id: i32):
-    g_state_pending_event[slot] <- AVS_EVENT_WARNING
-    g_state_pending_payload[slot] <- warning_id
+    avs_event_q_push(slot, AVS_EVENT_WARNING, warning_id)
 
 def avs_on_add_source(slot: int):
     g_state_has_source[slot] <- true
     _ = avs_set_state(slot, AV_STATE_ADDING_SOURCE)
-    g_state_pending_event[slot] <- AVS_EVENT_ADD_SOURCE
-    g_state_pending_payload[slot] <- 0
+    avs_event_q_push(slot, AVS_EVENT_ADD_SOURCE, 0)
 
 def avs_on_error(slot: int, error_id: i32):
-    g_state_pending_event[slot] <- AVS_EVENT_ERROR
-    g_state_pending_payload[slot] <- error_id
+    avs_event_q_push(slot, AVS_EVENT_ERROR, error_id)
 
 def avs_on_revert_state(slot: int):
-    g_state_pending_event[slot] <- AVS_EVENT_REVERT_STATE
+    avs_event_q_push(slot, AVS_EVENT_REVERT_STATE, 0)
 
 def avs_on_eof(slot: int):
-    _ = avs_set_state(slot, AV_STATE_END_OF_FILE)
+    avs_event_q_push(slot, AVS_EVENT_EOF, 0)
 
 def avs_process_events(slot: int, source_find_stream_info_ok: bool):
-    evt: i32 = g_state_pending_event[slot]
-    payload: i32 = g_state_pending_payload[slot]
-    g_state_pending_event[slot] <- AVS_EVENT_NONE
-    g_state_pending_payload[slot] <- 0
-    if evt == AVS_EVENT_NONE:
+    evt: mutable i32 = AVS_EVENT_NONE
+    payload: mutable i32 = 0
+    if not avs_event_q_pop(slot, evt, payload):
         return
     if evt == AVS_EVENT_WARNING:
         g_state_warning_last[slot] <- payload
@@ -130,6 +179,10 @@ def avs_process_events(slot: int, source_find_stream_info_ok: bool):
         return
     if evt == AVS_EVENT_REVERT_STATE:
         _ = avs_set_state(slot, g_state_previous[slot])
+        return
+    if evt == AVS_EVENT_EOF:
+        if g_state_current[slot] == AV_STATE_PLAY or g_state_current[slot] == AV_STATE_BUFFERING or g_state_current[slot] == AV_STATE_PAUSE or g_state_current[slot] == AV_STATE_STARTING:
+            _ = avs_set_state(slot, AV_STATE_END_OF_FILE)
         return
     if evt == AVS_EVENT_ADD_SOURCE:
         if source_find_stream_info_ok:
@@ -170,6 +223,8 @@ def avs_set_looping(slot: int, loop_flag: bool) -> bool:
     return true
 
 def avs_update_buffering_state(slot: int, has_frames_for_play: bool, has_frames_for_buffer_resume: bool):
+    if g_state_current[slot] == AV_STATE_STOP or g_state_current[slot] == AV_STATE_END_OF_FILE or g_state_current[slot] == AV_STATE_ERROR:
+        return
     if g_state_current[slot] == AV_STATE_BUFFERING:
         if has_frames_for_buffer_resume:
             _ = avs_set_state(slot, AV_STATE_PLAY)

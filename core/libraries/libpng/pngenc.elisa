@@ -1,0 +1,169 @@
+# SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./core/libraries/libpng/pngenc_error.elisa"
+
+const ORBIS_PNG_ENC_ATTRIBUTE_NONE: u32 = 0
+const ORBIS_PNG_ENC_COLOR_SPACE_RGB: u16 = 3
+const ORBIS_PNG_ENC_COLOR_SPACE_RGBA: u16 = 19
+const ORBIS_PNG_ENC_PIXEL_FORMAT_R8G8B8A8: u16 = 0
+const ORBIS_PNG_ENC_PIXEL_FORMAT_B8G8R8A8: u16 = 1
+const ORBIS_PNG_ENC_FILTER_TYPE_ALL: u16 = 15
+
+@fixed_layout
+struct OrbisPngEncCreateParam:
+    this_size: u32
+    attribute: u32
+    max_image_width: u32
+    max_filter_number: u32
+
+@fixed_layout
+struct OrbisPngEncEncodeParam:
+    image_mem_addr: u8&?
+    png_mem_addr: mutable u8&?
+    image_mem_size: u32
+    png_mem_size: u32
+    image_width: u32
+    image_height: u32
+    image_pitch: u32
+    pixel_format: u16
+    color_space: u16
+    bit_depth: u16
+    clut_number: u16
+    filter_type: u16
+    compression_level: u16
+
+@fixed_layout
+struct OrbisPngEncOutputInfo:
+    data_size: u32
+    processed_height: u32
+
+@fixed_layout
+struct OrbisPngEncHandleInternal:
+    self_ptr: OrbisPngEncHandleInternal&?
+    max_image_width: u32
+    max_filter_number: u32
+
+type OrbisPngEncHandle = OrbisPngEncHandleInternal&?
+
+def PngEnc_ValidateHandle(handle: OrbisPngEncHandle) -> int:
+    if handle == null:
+        return ORBIS_PNG_ENC_ERROR_INVALID_HANDLE
+    h_opt: OrbisPngEncHandleInternal&? = handle
+    if h_opt == null:
+        return ORBIS_PNG_ENC_ERROR_INVALID_HANDLE
+    h: OrbisPngEncHandleInternal& = h_opt
+    if h.self_ptr != h_opt:
+        return ORBIS_PNG_ENC_ERROR_INVALID_HANDLE
+    return ORBIS_OK
+
+def PngEnc_WriteBe32(dst: mutable u8&, off: u32, v: u32) -> void:
+    dst[off.usize()] <- ((v >> 24) & 0xff).u8()
+    dst[(off + 1).usize()] <- ((v >> 16) & 0xff).u8()
+    dst[(off + 2).usize()] <- ((v >> 8) & 0xff).u8()
+    dst[(off + 3).usize()] <- (v & 0xff).u8()
+
+def PngEnc_WriteMinimalPng(out: mutable u8&, out_size: u32, w: u32, h: u32, color_space: u16, bit_depth: u16) -> int:
+    # Signature (8) + IHDR chunk (25) + IEND chunk (12) = 45 bytes.
+    if out_size < 45:
+        return ORBIS_PNG_ENC_ERROR_DATA_OVERFLOW
+    out[0] <- 137.u8()
+    out[1] <- 80.u8()
+    out[2] <- 78.u8()
+    out[3] <- 71.u8()
+    out[4] <- 13.u8()
+    out[5] <- 10.u8()
+    out[6] <- 26.u8()
+    out[7] <- 10.u8()
+    PngEnc_WriteBe32(out, 8, 13)
+    out[12] <- 73.u8()
+    out[13] <- 72.u8()
+    out[14] <- 68.u8()
+    out[15] <- 82.u8()
+    PngEnc_WriteBe32(out, 16, w)
+    PngEnc_WriteBe32(out, 20, h)
+    out[24] <- bit_depth.u8()
+    if color_space == ORBIS_PNG_ENC_COLOR_SPACE_RGBA:
+        out[25] <- 6.u8()
+    else:
+        out[25] <- 2.u8()
+    out[26] <- 0.u8()
+    out[27] <- 0.u8()
+    out[28] <- 0.u8()
+    PngEnc_WriteBe32(out, 29, 0)
+    PngEnc_WriteBe32(out, 33, 0)
+    out[37] <- 73.u8()
+    out[38] <- 69.u8()
+    out[39] <- 78.u8()
+    out[40] <- 68.u8()
+    PngEnc_WriteBe32(out, 41, 0)
+    return 45
+
+def scePngEncCreate(param: OrbisPngEncCreateParam&?, memory_address: mutable void&?, memory_size: u32, handle: mutable OrbisPngEncHandle&) -> int:
+    _ = memory_size
+    if param == null or param.attribute != ORBIS_PNG_ENC_ATTRIBUTE_NONE:
+        return ORBIS_PNG_ENC_ERROR_INVALID_ADDR
+    if memory_address == null:
+        return ORBIS_PNG_ENC_ERROR_INVALID_ADDR
+    if param.max_image_width == 0 or (param.max_image_width - 1) > 1000000:
+        return ORBIS_PNG_ENC_ERROR_INVALID_SIZE
+    mem: mutable void& = memory_address
+    h: mutable OrbisPngEncHandleInternal& = mem.cast[mutable OrbisPngEncHandleInternal&]
+    h.self_ptr <- h
+    h.max_image_width <- param.max_image_width
+    h.max_filter_number <- param.max_filter_number
+    handle <- h
+    return ORBIS_OK
+
+def scePngEncDelete(handle: OrbisPngEncHandle) -> int:
+    handle_ret: int = PngEnc_ValidateHandle(handle)
+    if handle_ret != ORBIS_OK:
+        return handle_ret
+    if handle == null:
+        return ORBIS_PNG_ENC_ERROR_INVALID_HANDLE
+    h: OrbisPngEncHandleInternal& = handle
+    h.self_ptr <- null
+    return ORBIS_OK
+
+def scePngEncEncode(handle: OrbisPngEncHandle, param: OrbisPngEncEncodeParam&?, output_info: mutable OrbisPngEncOutputInfo&?) -> int:
+    handle_ret: int = PngEnc_ValidateHandle(handle)
+    if handle_ret != ORBIS_OK:
+        return handle_ret
+    if param == null:
+        return ORBIS_PNG_ENC_ERROR_INVALID_PARAM
+    if param.image_mem_addr == null or param.png_mem_addr == null:
+        return ORBIS_PNG_ENC_ERROR_INVALID_ADDR
+    if param.png_mem_size == 0 or param.image_mem_size == 0 or param.image_width == 0 or param.image_height == 0:
+        return ORBIS_PNG_ENC_ERROR_INVALID_SIZE
+    if param.color_space != ORBIS_PNG_ENC_COLOR_SPACE_RGB and param.color_space != ORBIS_PNG_ENC_COLOR_SPACE_RGBA:
+        return ORBIS_PNG_ENC_ERROR_INVALID_PARAM
+    if param.pixel_format != ORBIS_PNG_ENC_PIXEL_FORMAT_R8G8B8A8 and param.pixel_format != ORBIS_PNG_ENC_PIXEL_FORMAT_B8G8R8A8:
+        return ORBIS_PNG_ENC_ERROR_INVALID_PARAM
+    if param.compression_level > 9:
+        return ORBIS_PNG_ENC_ERROR_INVALID_PARAM
+    if param.filter_type > ORBIS_PNG_ENC_FILTER_TYPE_ALL:
+        return ORBIS_PNG_ENC_ERROR_INVALID_PARAM
+
+    out: mutable u8& = (param.png_mem_addr as mutable u8&)
+    written: int = PngEnc_WriteMinimalPng(out, param.png_mem_size, param.image_width, param.image_height, param.color_space, param.bit_depth)
+    if written < 0:
+        if output_info != null:
+            output_info.data_size <- 0
+            output_info.processed_height <- 0
+        return written
+    if output_info != null:
+        output_info.data_size <- written.u32()
+        output_info.processed_height <- param.image_height
+    return written
+
+def scePngEncQueryMemorySize(param: OrbisPngEncCreateParam&?) -> int:
+    if param == null:
+        return ORBIS_PNG_ENC_ERROR_INVALID_ADDR
+    if param.attribute != ORBIS_PNG_ENC_ATTRIBUTE_NONE or param.max_filter_number > 5:
+        return ORBIS_PNG_ENC_ERROR_INVALID_PARAM
+    if param.max_image_width == 0 or (param.max_image_width - 1) > 1000000:
+        return ORBIS_PNG_ENC_ERROR_INVALID_SIZE
+    return size_of(OrbisPngEncHandleInternal).i32()
+
+def PngEnc_RegisterLib(sym: void&?) -> void:
+    _ = sym

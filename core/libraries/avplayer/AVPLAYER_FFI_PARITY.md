@@ -55,6 +55,11 @@ Current validated prefix structs:
 - `Implemented`: EOF marking and loop retry on FFmpeg read failure
 - `Implemented`: lightweight prefetch queue for video/audio timestamps
 - `Implemented`: fallback prefetch reads from selected stream index (stream-directed demux timestamp pull)
+- `Implemented`: bounded shared demux fill step services both enabled streams before per-stream read paths
+- `Implemented`: explicit demux packet queues (video/audio) with prefetch consuming queued packets before decode fallback
+- `Implemented`: per-stream EOF tracking (video/audio) with combined source EOF derived from stream completion + queue emptiness
+- `Implemented`: centralized loop restart at demux stage (flush/reset queues + codec flush + FFmpeg restart)
+- `Implemented`: per-stream prefetch loop retries removed; loop handling now flows through centralized demux-stage restart
 - `Implemented`: `IsActive` and `CurrentTime` gating now follow the C++ source shape
 - `Partial`: no full demux/decode threads, packet queues, or converted frame pipeline
 - `Partial`: no guest buffer pool or frame-object lifetime model like C++
@@ -64,6 +69,11 @@ Current validated prefix structs:
 - `Implemented`: state enum model, transition checks, add-source/warning/error events
 - `Implemented`: basic buffering transition helper and EOF/error state hooks
 - `Implemented`: revert-state event type is now represented in the Elisa controller state
+- `Implemented`: EOF now flows through controller pending-event handling (queued) instead of immediate state mutation
+- `Implemented`: EOF transition validation extended for pause/buffering states
+- `Implemented`: per-handle FIFO event queue replaces single pending-event slot (preserves event ordering)
+- `Implemented`: EOF transition support extended through `STARTING`; buffering updates now ignore terminal/error states
+- `Implemented`: queue-full policy now prefers higher-priority events (`ERROR`/`EOF`) over low-priority events
 - `Partial`: no dedicated controller thread or full C++ event queue semantics
 
 ### FFI layer (`avplayer_ffmpeg_ffi.elisa`)
@@ -72,6 +82,7 @@ Current validated prefix structs:
 - `Implemented`: decoder discovery/open, codec-parameter copy, packet/frame lifecycle helpers
 - `Implemented`: FFmpeg-backed timestamp decode helper and stream-language lookup
 - `Implemented`: stream-specific packet timestamp read helper (`avplayer_ffmpeg_read_stream_packet_ts`)
+- `Implemented`: decoder EOF drain attempt (flush packet + receive) before signaling terminal EOF
 - `Implemented`: seek/flush accessors for source-level replay handling
 - `Implemented`: ABI prefix layout checks for core structs
 - `Missing`: swscale/swresample conversion helpers and full frame-format conversion parity

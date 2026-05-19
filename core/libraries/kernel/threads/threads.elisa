@@ -1,0 +1,412 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../../error_codes.elisa"
+include "../posix_error.elisa"
+
+const ORBIS_KERNEL_PRIO_FIFO_DEFAULT: int = 700
+const ORBIS_KERNEL_PRIO_FIFO_LOWEST: int = 256
+const ORBIS_KERNEL_PRIO_FIFO_HIGHEST: int = 767
+const ORBIS_KERNEL_PRIO_OTHER_DEFAULT: int = 900
+const ORBIS_KERNEL_PRIO_OTHER_LOWEST: int = 768
+const ORBIS_KERNEL_PRIO_OTHER_HIGHEST: int = 959
+const ORBIS_KERNEL_PRIO_RR_DEFAULT: int = 700
+const ORBIS_KERNEL_PRIO_RR_LOWEST: int = 256
+const ORBIS_KERNEL_PRIO_RR_HIGHEST: int = 767
+
+const PTHREAD_INHERIT_SCHED: int = 4
+const PTHREAD_STACK_MIN: u64 = 0x4000u64
+const PTHREAD_SCOPE_PROCESS: int = 0
+const PTHREAD_SCOPE_SYSTEM: int = 2
+const PTHREAD_DETACHED: int = 1
+
+@fixed_layout
+struct SchedParam:
+    sched_priority: mutable int
+
+@fixed_layout
+struct PthreadAttr:
+    sched_policy: mutable int
+    sched_inherit: mutable int
+    prio: mutable int
+    suspend: mutable int
+    flags: mutable int
+    stackaddr_attr: mutable void&?
+    stacksize_attr: mutable u64
+    guardsize_attr: mutable u64
+    cpusetsize: mutable u64
+    cpuset: mutable void&?
+
+global mutable g_default_attr: PthreadAttr = PthreadAttr(2, PTHREAD_INHERIT_SCHED, ORBIS_KERNEL_PRIO_FIFO_DEFAULT, 0, PTHREAD_SCOPE_SYSTEM, null, 0x100000u64, 0u64, 0u64, null)
+
+def posix_sched_get_priority_max(policy: int) -> int:
+    if policy == 1 or policy == 3:
+        return ORBIS_KERNEL_PRIO_FIFO_HIGHEST
+    if policy == 2:
+        return ORBIS_KERNEL_PRIO_OTHER_HIGHEST
+    return -1
+
+def posix_sched_get_priority_min(policy: int) -> int:
+    if policy == 1 or policy == 3:
+        return ORBIS_KERNEL_PRIO_FIFO_LOWEST
+    if policy == 2:
+        return ORBIS_KERNEL_PRIO_OTHER_LOWEST
+    return -1
+
+def posix_getpid() -> int:
+    return 0xBAD1
+
+def posix_pthread_attr_init(attr: mutable PthreadAttr&?&) -> int:
+    if attr == null:
+        return POSIX_EINVAL
+    local: mutable PthreadAttr = g_default_attr
+    attr <- local
+    return 0
+
+def posix_pthread_attr_destroy(attr: mutable PthreadAttr&?&) -> int:
+    if attr == null or attr == null:
+        return POSIX_EINVAL
+    attr <- null
+    return 0
+
+def posix_pthread_attr_getdetachstate(attr: PthreadAttr&?, detachstate: mutable int&) -> int:
+    if attr == null:
+        return POSIX_EINVAL
+    if (attr.flags and PTHREAD_DETACHED) != 0:
+        detachstate <- 1
+    else:
+        detachstate <- 0
+    return 0
+
+def posix_pthread_attr_setdetachstate(attr: mutable PthreadAttr&?, detachstate: int) -> int:
+    if attr == null or (detachstate != 0 and detachstate != 1):
+        return POSIX_EINVAL
+    if detachstate == 1:
+        attr.flags <- attr.flags or PTHREAD_DETACHED
+    else:
+        attr.flags <- attr.flags and (not PTHREAD_DETACHED)
+    return 0
+
+def posix_pthread_attr_getguardsize(attr: PthreadAttr&?, guardsize: mutable u64&) -> int:
+    if attr == null:
+        return POSIX_EINVAL
+    guardsize <- attr.guardsize_attr
+    return 0
+
+def posix_pthread_attr_setguardsize(attr: mutable PthreadAttr&?, guardsize: u64) -> int:
+    if attr == null:
+        return POSIX_EINVAL
+    attr.guardsize_attr <- guardsize
+    return 0
+
+def posix_pthread_attr_getinheritsched(attr: PthreadAttr&?, sched_inherit: mutable int&) -> int:
+    if attr == null:
+        return POSIX_EINVAL
+    sched_inherit <- attr.sched_inherit
+    return 0
+
+def posix_pthread_attr_setinheritsched(attr: mutable PthreadAttr&?, sched_inherit: int) -> int:
+    if attr == null:
+        return POSIX_EINVAL
+    if sched_inherit != PTHREAD_INHERIT_SCHED and sched_inherit != 0:
+        return POSIX_ENOTSUP
+    attr.sched_inherit <- sched_inherit
+    return 0
+
+def posix_pthread_attr_getschedparam(attr: PthreadAttr&?, param: mutable SchedParam&?) -> int:
+    if attr == null or param == null:
+        return POSIX_EINVAL
+    param.sched_priority <- attr.prio
+    return 0
+
+def posix_pthread_attr_setschedparam(attr: mutable PthreadAttr&?, param: SchedParam&?) -> int:
+    if attr == null:
+        return POSIX_EINVAL
+    if param == null:
+        return POSIX_ENOTSUP
+    attr.prio <- param.sched_priority
+    return 0
+
+def posix_pthread_attr_getschedpolicy(attr: PthreadAttr&?, policy: mutable int&) -> int:
+    if attr == null:
+        return POSIX_EINVAL
+    policy <- attr.sched_policy
+    return 0
+
+def posix_pthread_attr_setschedpolicy(attr: mutable PthreadAttr&?, policy: int) -> int:
+    if attr == null:
+        return POSIX_EINVAL
+    if policy < 1 or policy > 3:
+        return POSIX_ENOTSUP
+    attr.sched_policy <- policy
+    if policy == 2:
+        attr.prio <- ORBIS_KERNEL_PRIO_OTHER_DEFAULT
+    else:
+        attr.prio <- ORBIS_KERNEL_PRIO_FIFO_DEFAULT
+    return 0
+
+def posix_pthread_attr_getscope(attr: PthreadAttr&?, contentionscope: mutable int&) -> int:
+    if attr == null:
+        return POSIX_EINVAL
+    if (attr.flags and PTHREAD_SCOPE_SYSTEM) != 0:
+        contentionscope <- PTHREAD_SCOPE_SYSTEM
+    else:
+        contentionscope <- PTHREAD_SCOPE_PROCESS
+    return 0
+
+def posix_pthread_attr_setscope(attr: mutable PthreadAttr&?, contentionscope: int) -> int:
+    if attr == null:
+        return POSIX_EINVAL
+    if contentionscope != PTHREAD_SCOPE_PROCESS and contentionscope != PTHREAD_SCOPE_SYSTEM:
+        return POSIX_EINVAL
+    if contentionscope == PTHREAD_SCOPE_SYSTEM:
+        attr.flags <- attr.flags or PTHREAD_SCOPE_SYSTEM
+    else:
+        attr.flags <- attr.flags and (not PTHREAD_SCOPE_SYSTEM)
+    return 0
+
+def posix_pthread_attr_getstack(attr: PthreadAttr&?, stackaddr: mutable void&?&, stacksize: mutable u64&) -> int:
+    if attr == null:
+        return POSIX_EINVAL
+    stackaddr <- attr.stackaddr_attr
+    stacksize <- attr.stacksize_attr
+    return 0
+
+def posix_pthread_attr_setstack(attr: mutable PthreadAttr&?, stackaddr: void&?, stacksize: u64) -> int:
+    if attr == null or stackaddr == null or stacksize < PTHREAD_STACK_MIN:
+        return POSIX_EINVAL
+    attr.stackaddr_attr <- stackaddr
+    attr.stacksize_attr <- stacksize
+    return 0
+
+def posix_pthread_attr_getstackaddr(attr: PthreadAttr&?, stackaddr: mutable void&?&) -> int:
+    if attr == null:
+        return POSIX_EINVAL
+    stackaddr <- attr.stackaddr_attr
+    return 0
+
+def posix_pthread_attr_setstackaddr(attr: mutable PthreadAttr&?, stackaddr: void&?) -> int:
+    if attr == null or stackaddr == null:
+        return POSIX_EINVAL
+    attr.stackaddr_attr <- stackaddr
+    return 0
+
+def posix_pthread_attr_getstacksize(attr: PthreadAttr&?, stacksize: mutable u64&) -> int:
+    if attr == null:
+        return POSIX_EINVAL
+    stacksize <- attr.stacksize_attr
+    return 0
+
+def posix_pthread_attr_setstacksize(attr: mutable PthreadAttr&?, stacksize: u64) -> int:
+    if attr == null or stacksize < PTHREAD_STACK_MIN:
+        return POSIX_EINVAL
+    attr.stacksize_attr <- stacksize
+    return 0
+
+def posix_pthread_attr_get_np(pthread: void&?, dstattr: mutable PthreadAttr&?) -> int:
+    _ = pthread
+    if dstattr == null:
+        return POSIX_EINVAL
+    dstattr <- g_default_attr
+    return 0
+
+def posix_pthread_attr_setcreatesuspend_np(attr: mutable PthreadAttr&?) -> int:
+    if attr == null:
+        return POSIX_EINVAL
+    attr.suspend <- 1
+    return 0
+
+def posix_pthread_attr_getaffinity_np(pattr: PthreadAttr&?, cpusetsize: u64, cpusetp: mutable void&?) -> int:
+    _ = cpusetsize
+    _ = cpusetp
+    if pattr == null:
+        return POSIX_EINVAL
+    return 0
+
+def posix_pthread_attr_setaffinity_np(pattr: mutable PthreadAttr&?, cpusetsize: u64, cpusetp: void&?) -> int:
+    _ = cpusetsize
+    _ = cpusetp
+    if pattr == null:
+        return POSIX_EINVAL
+    return 0
+
+def scePthreadAttrGetaffinity(attr: PthreadAttr&?, mask: mutable u64&) -> int:
+    _ = attr
+    mask <- 0xffffffffffffffffu64
+    return 0
+
+def scePthreadAttrSetaffinity(attr: mutable PthreadAttr&?, mask: u64) -> int:
+    _ = mask
+    if attr == null:
+        return POSIX_EINVAL
+    return 0
+
+def posix_pthread_once() -> int:
+    return 0
+
+def posix_pthread_equal() -> int:
+    return 0
+
+def posix_pthread_self() -> void&?:
+    return null
+
+def posix_pthread_yield() -> int:
+    return 0
+
+def posix_pthread_detach() -> int:
+    return POSIX_ENOSYS
+
+def posix_pthread_exit() -> void:
+    return
+
+def posix_pthread_join() -> int:
+    return POSIX_ENOSYS
+
+def posix_pthread_create() -> int:
+    return POSIX_ENOSYS
+
+def posix_pthread_create_name_np() -> int:
+    return POSIX_ENOSYS
+
+def posix_pthread_setcancelstate() -> int:
+    return 0
+
+def posix_pthread_setprio() -> int:
+    return POSIX_ENOSYS
+
+def posix_pthread_rename_np() -> int:
+    return POSIX_ENOSYS
+
+def posix_pthread_getschedparam() -> int:
+    return POSIX_ENOSYS
+
+def posix_pthread_setschedparam() -> int:
+    return POSIX_ENOSYS
+
+def sched_yield() -> int:
+    return 0
+
+def posix_pthread_getaffinity_np() -> int:
+    return POSIX_ENOSYS
+
+def posix_pthread_setaffinity_np() -> int:
+    return POSIX_ENOSYS
+
+def posix_pthread_getthreadid_np() -> int:
+    return 0
+
+def posix_pthread_getname_np() -> int:
+    return POSIX_ENOSYS
+
+def posix_pthread_set_name_np() -> int:
+    return POSIX_ENOSYS
+
+def scePthreadGetprio() -> int:
+    return POSIX_ENOSYS
+
+def _sceKernelSetThreadDtors() -> void:
+    return
+
+def scePthreadGetaffinity() -> int:
+    return POSIX_ENOSYS
+
+def scePthreadSetaffinity() -> int:
+    return POSIX_ENOSYS
+
+def RegisterThreadAttr(sym: void&?) -> void:
+    LIB_FUNCTION("wtkt-teR1so", "libScePosix", 1, "libkernel", posix_pthread_attr_init)
+    LIB_FUNCTION("Ucsu-OK+els", "libScePosix", 1, "libkernel", posix_pthread_attr_get_np)
+    LIB_FUNCTION("-wzZ7dvA7UU", "libScePosix", 1, "libkernel", posix_pthread_attr_getaffinity_np)
+    LIB_FUNCTION("VUT1ZSrHT0I", "libScePosix", 1, "libkernel", posix_pthread_attr_getdetachstate)
+    LIB_FUNCTION("JNkVVsVDmOk", "libScePosix", 1, "libkernel", posix_pthread_attr_getguardsize)
+    LIB_FUNCTION("oLjPqUKhzes", "libScePosix", 1, "libkernel", posix_pthread_attr_getinheritsched)
+    LIB_FUNCTION("qlk9pSLsUmM", "libScePosix", 1, "libkernel", posix_pthread_attr_getschedparam)
+    LIB_FUNCTION("RtLRV-pBTTY", "libScePosix", 1, "libkernel", posix_pthread_attr_getschedpolicy)
+    LIB_FUNCTION("e2G+cdEkOmU", "libScePosix", 1, "libkernel", posix_pthread_attr_getscope)
+    LIB_FUNCTION("vQm4fDEsWi8", "libScePosix", 1, "libkernel", posix_pthread_attr_getstack)
+    LIB_FUNCTION("DxmIMUQ-wXY", "libScePosix", 1, "libkernel", posix_pthread_attr_getstackaddr)
+    LIB_FUNCTION("0qOtCR-ZHck", "libScePosix", 1, "libkernel", posix_pthread_attr_getstacksize)
+    LIB_FUNCTION("o8pd4juNbgc", "libScePosix", 1, "libkernel", posix_pthread_attr_setaffinity_np)
+    LIB_FUNCTION("Q2y5IqSDZGs", "libScePosix", 1, "libkernel", posix_pthread_attr_setcreatesuspend_np)
+    LIB_FUNCTION("E+tyo3lp5Lw", "libScePosix", 1, "libkernel", posix_pthread_attr_setdetachstate)
+    LIB_FUNCTION("JKyG3SWyA10", "libScePosix", 1, "libkernel", posix_pthread_attr_setguardsize)
+    LIB_FUNCTION("7ZlAakEf0Qg", "libScePosix", 1, "libkernel", posix_pthread_attr_setinheritsched)
+    LIB_FUNCTION("euKRgm0Vn2M", "libScePosix", 1, "libkernel", posix_pthread_attr_setschedparam)
+    LIB_FUNCTION("JarMIy8kKEY", "libScePosix", 1, "libkernel", posix_pthread_attr_setschedpolicy)
+    LIB_FUNCTION("xesmlSI-KCI", "libScePosix", 1, "libkernel", posix_pthread_attr_setscope)
+    LIB_FUNCTION("-SrbXpGR1f0", "libScePosix", 1, "libkernel", posix_pthread_attr_setstack)
+    LIB_FUNCTION("suCrEbr0xIQ", "libScePosix", 1, "libkernel", posix_pthread_attr_setstackaddr)
+    LIB_FUNCTION("2Q0z6rnBrTE", "libScePosix", 1, "libkernel", posix_pthread_attr_setstacksize)
+    LIB_FUNCTION("zHchY8ft5pk", "libScePosix", 1, "libkernel", posix_pthread_attr_destroy)
+
+    LIB_FUNCTION("nsYoNRywwNg", "libkernel", 1, "libkernel", posix_pthread_attr_init)
+    LIB_FUNCTION("x1X76arYMxU", "libkernel", 1, "libkernel", posix_pthread_attr_get_np)
+    LIB_FUNCTION("8+s5BzZjxSg", "libkernel", 1, "libkernel", scePthreadAttrGetaffinity)
+    LIB_FUNCTION("JaRMy+QcpeU", "libkernel", 1, "libkernel", posix_pthread_attr_getdetachstate)
+    LIB_FUNCTION("txHtngJ+eyc", "libkernel", 1, "libkernel", posix_pthread_attr_getguardsize)
+    LIB_FUNCTION("lpMP8HhkBbg", "libkernel", 1, "libkernel", posix_pthread_attr_getinheritsched)
+    LIB_FUNCTION("FXPWHNk8Of0", "libkernel", 1, "libkernel", posix_pthread_attr_getschedparam)
+    LIB_FUNCTION("NMyIQ9WgWbU", "libkernel", 1, "libkernel", posix_pthread_attr_getschedpolicy)
+    LIB_FUNCTION("+7B2AEKKns8", "libkernel", 1, "libkernel", posix_pthread_attr_getscope)
+    LIB_FUNCTION("-quPa4SEJUw", "libkernel", 1, "libkernel", posix_pthread_attr_getstack)
+    LIB_FUNCTION("Ru36fiTtJzA", "libkernel", 1, "libkernel", posix_pthread_attr_getstackaddr)
+    LIB_FUNCTION("-fA+7ZlGDQs", "libkernel", 1, "libkernel", posix_pthread_attr_getstacksize)
+    LIB_FUNCTION("3qxgM4ezETA", "libkernel", 1, "libkernel", scePthreadAttrSetaffinity)
+    LIB_FUNCTION("GZSR0Ooae9Q", "libkernel", 1, "libkernel", posix_pthread_attr_setcreatesuspend_np)
+    LIB_FUNCTION("-Wreprtu0Qs", "libkernel", 1, "libkernel", posix_pthread_attr_setdetachstate)
+    LIB_FUNCTION("El+cQ20DynU", "libkernel", 1, "libkernel", posix_pthread_attr_setguardsize)
+    LIB_FUNCTION("eXbUSpEaTsA", "libkernel", 1, "libkernel", posix_pthread_attr_setinheritsched)
+    LIB_FUNCTION("DzES9hQF4f4", "libkernel", 1, "libkernel", posix_pthread_attr_setschedparam)
+    LIB_FUNCTION("4+h9EzwKF4I", "libkernel", 1, "libkernel", posix_pthread_attr_setschedpolicy)
+    LIB_FUNCTION("YdZfEZfRnPk", "libkernel", 1, "libkernel", posix_pthread_attr_setscope)
+    LIB_FUNCTION("Bvn74vj6oLo", "libkernel", 1, "libkernel", posix_pthread_attr_setstack)
+    LIB_FUNCTION("F+yfmduIBB8", "libkernel", 1, "libkernel", posix_pthread_attr_setstackaddr)
+    LIB_FUNCTION("UTXzJbWhhTE", "libkernel", 1, "libkernel", posix_pthread_attr_setstacksize)
+    LIB_FUNCTION("62KCwEMmzcM", "libkernel", 1, "libkernel", posix_pthread_attr_destroy)
+
+def RegisterThread(sym: void&?) -> void:
+    _ = sym
+    LIB_FUNCTION("Z4QosVuAsA0", "libScePosix", 1, "libkernel", posix_pthread_once)
+    LIB_FUNCTION("7Xl257M4VNI", "libScePosix", 1, "libkernel", posix_pthread_equal)
+    LIB_FUNCTION("CBNtXOoef-E", "libScePosix", 1, "libkernel", posix_sched_get_priority_max)
+    LIB_FUNCTION("m0iS6jNsXds", "libScePosix", 1, "libkernel", posix_sched_get_priority_min)
+    LIB_FUNCTION("EotR8a3ASf4", "libScePosix", 1, "libkernel", posix_pthread_self)
+    LIB_FUNCTION("B5GmVDKwpn0", "libScePosix", 1, "libkernel", posix_pthread_yield)
+    LIB_FUNCTION("+U1R4WtXvoc", "libScePosix", 1, "libkernel", posix_pthread_detach)
+    LIB_FUNCTION("FJrT5LuUBAU", "libScePosix", 1, "libkernel", posix_pthread_exit)
+    LIB_FUNCTION("h9CcP3J0oVM", "libScePosix", 1, "libkernel", posix_pthread_join)
+    LIB_FUNCTION("OxhIB8LB-PQ", "libScePosix", 1, "libkernel", posix_pthread_create)
+    LIB_FUNCTION("Jmi+9w9u0E4", "libScePosix", 1, "libkernel", posix_pthread_create_name_np)
+    LIB_FUNCTION("lZzFeSxPl08", "libScePosix", 1, "libkernel", posix_pthread_setcancelstate)
+    LIB_FUNCTION("a2P9wYGeZvc", "libScePosix", 1, "libkernel", posix_pthread_setprio)
+    LIB_FUNCTION("9vyP6Z7bqzc", "libScePosix", 1, "libkernel", posix_pthread_rename_np)
+    LIB_FUNCTION("FIs3-UQT9sg", "libScePosix", 1, "libkernel", posix_pthread_getschedparam)
+    LIB_FUNCTION("Xs9hdiD7sAA", "libScePosix", 1, "libkernel", posix_pthread_setschedparam)
+    LIB_FUNCTION("6XG4B33N09g", "libScePosix", 1, "libkernel", sched_yield)
+    LIB_FUNCTION("HoLVWNanBBc", "libScePosix", 1, "libkernel", posix_getpid)
+
+    LIB_FUNCTION("14bOACANTBo", "libkernel", 1, "libkernel", posix_pthread_once)
+    LIB_FUNCTION("GBUY7ywdULE", "libkernel", 1, "libkernel", posix_pthread_rename_np)
+    LIB_FUNCTION("6UgtwV+0zb4", "libkernel", 1, "libkernel", posix_pthread_create_name_np)
+    LIB_FUNCTION("4qGrR6eoP9Y", "libkernel", 1, "libkernel", posix_pthread_detach)
+    LIB_FUNCTION("onNY9Byn-W8", "libkernel", 1, "libkernel", posix_pthread_join)
+    LIB_FUNCTION("P41kTWUS3EI", "libkernel", 1, "libkernel", posix_pthread_getschedparam)
+    LIB_FUNCTION("oIRFTjoILbg", "libkernel", 1, "libkernel", posix_pthread_setschedparam)
+    LIB_FUNCTION("How7B8Oet6k", "libkernel", 1, "libkernel", posix_pthread_getname_np)
+    LIB_FUNCTION("3kg7rT0NQIs", "libkernel", 1, "libkernel", posix_pthread_exit)
+    LIB_FUNCTION("aI+OeCz8xrQ", "libkernel", 1, "libkernel", posix_pthread_self)
+    LIB_FUNCTION("oxMp8uPqa+U", "libkernel", 1, "libkernel", posix_pthread_set_name_np)
+    LIB_FUNCTION("3PtV6p3QNX4", "libkernel", 1, "libkernel", posix_pthread_equal)
+    LIB_FUNCTION("T72hz6ffq08", "libkernel", 1, "libkernel", posix_pthread_yield)
+    LIB_FUNCTION("EI-5-jlq2dE", "libkernel", 1, "libkernel", posix_pthread_getthreadid_np)
+    LIB_FUNCTION("1tKyG7RlMJo", "libkernel", 1, "libkernel", scePthreadGetprio)
+    LIB_FUNCTION("W0Hpm2X0uPE", "libkernel", 1, "libkernel", posix_pthread_setprio)
+    LIB_FUNCTION("rNhWz+lvOMU", "libkernel", 1, "libkernel", _sceKernelSetThreadDtors)
+    LIB_FUNCTION("6XG4B33N09g", "libkernel", 1, "libkernel", sched_yield)
+    LIB_FUNCTION("HoLVWNanBBc", "libkernel", 1, "libkernel", posix_getpid)
+    LIB_FUNCTION("rcrVFJsQWRY", "libkernel", 1, "libkernel", scePthreadGetaffinity)
+    LIB_FUNCTION("bt3CTBKmGyI", "libkernel", 1, "libkernel", scePthreadSetaffinity)
+
+def RegisterThreads(sym: void&?) -> void:
+    RegisterThreadAttr(sym)
+    RegisterThread(sym)

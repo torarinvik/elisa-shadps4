@@ -168,9 +168,14 @@ global mutable avffmpeg_started: bool[AVPLAYER_FFMPEG_MAX_HANDLES] = zeroed
 global mutable avffmpeg_paused: bool[AVPLAYER_FFMPEG_MAX_HANDLES] = zeroed
 global mutable avffmpeg_next_ts_audio: u64[AVPLAYER_FFMPEG_MAX_HANDLES] = zeroed
 global mutable avffmpeg_next_ts_video: u64[AVPLAYER_FFMPEG_MAX_HANDLES] = zeroed
+global mutable avffmpeg_last_stream_ts: u64[AVPLAYER_FFMPEG_MAX_HANDLES * AVPLAYER_FFMPEG_MAX_STREAMS.int()] = zeroed
+global mutable avffmpeg_stream_eof_drained: bool[AVPLAYER_FFMPEG_MAX_HANDLES * AVPLAYER_FFMPEG_MAX_STREAMS.int()] = zeroed
 
 def avffmpeg_slot(handle: i32) -> int:
     return (handle - 1).int()
+
+def avffmpeg_stream_slot(handle: i32, stream_index: u32) -> int:
+    return avffmpeg_slot(handle) * AVPLAYER_FFMPEG_MAX_STREAMS.int() + stream_index.int()
 
 def avffmpeg_valid_handle(handle: i32) -> bool:
     if handle <= 0 or handle > AVPLAYER_FFMPEG_MAX_HANDLES.i32():
@@ -251,6 +256,12 @@ def avplayer_ffmpeg_start(handle: i32) -> i32:
     avffmpeg_paused[slot] <- false
     avffmpeg_next_ts_audio[slot] <- 0
     avffmpeg_next_ts_video[slot] <- 0
+    i: mutable int = 0
+    while i < AVPLAYER_FFMPEG_MAX_STREAMS.int():
+        stream_slot: int = slot * AVPLAYER_FFMPEG_MAX_STREAMS.int() + i
+        avffmpeg_last_stream_ts[stream_slot] <- 0
+        avffmpeg_stream_eof_drained[stream_slot] <- false
+        i <- i + 1
     return 0
 
 def avplayer_ffmpeg_stop(handle: i32) -> i32:
@@ -493,6 +504,7 @@ def avplayer_ffmpeg_decode_next_ts(handle: i32, stream_index: u32, codec_ctx: vo
     if raw_stream == null:
         return -1
     stream: AVStreamPublicPrefix& = raw_stream.ref[AVStreamPublicPrefix&]
+    stream_slot: int = avffmpeg_stream_slot(handle, stream_index)
 
     pkt: mutable void&? = av_packet_alloc()
     if pkt == null:
@@ -507,6 +519,25 @@ def avplayer_ffmpeg_decode_next_ts(handle: i32, stream_index: u32, codec_ctx: vo
         tries <- tries + 1
         rc: i32 = av_read_frame(avffmpeg_contexts[avffmpeg_slot(handle)], pkt)
         if rc < 0:
+            if avffmpeg_stream_eof_drained[stream_slot]:
+                av_frame_free(frame.ref[mutable void&?&])
+                av_packet_free(pkt.ref[mutable void&?&])
+                return -2
+            send_flush_rc: i32 = avcodec_send_packet(codec_ctx, null)
+            if send_flush_rc < 0 and send_flush_rc != -11:
+                av_frame_free(frame.ref[mutable void&?&])
+                av_packet_free(pkt.ref[mutable void&?&])
+                return -1
+            drain_rc: i32 = avcodec_receive_frame(codec_ctx, frame)
+            if drain_rc == 0:
+                next_ts: u64 = avffmpeg_last_stream_ts[stream_slot] + 33
+                avffmpeg_last_stream_ts[stream_slot] <- next_ts
+                out_ts <- next_ts
+                av_frame_unref(frame)
+                av_frame_free(frame.ref[mutable void&?&])
+                av_packet_free(pkt.ref[mutable void&?&])
+                return 0
+            avffmpeg_stream_eof_drained[stream_slot] <- true
             av_frame_free(frame.ref[mutable void&?&])
             av_packet_free(pkt.ref[mutable void&?&])
             return -2
@@ -532,6 +563,7 @@ def avplayer_ffmpeg_decode_next_ts(handle: i32, stream_index: u32, codec_ctx: vo
                     out_ts <- ((pkt_dts_u64 * 1000) * num.u64()) / den.u64()
                 else:
                     out_ts <- pkt_dts_u64 * 1000
+                avffmpeg_last_stream_ts[stream_slot] <- out_ts
                 av_frame_unref(frame)
                 av_frame_free(frame.ref[mutable void&?&])
                 av_packet_free(pkt.ref[mutable void&?&])
