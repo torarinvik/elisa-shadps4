@@ -1,0 +1,250 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../../common/io_file.elisa"
+
+const EI_MAG0: u8 = 0u8
+const EI_MAG1: u8 = 1u8
+const EI_MAG2: u8 = 2u8
+const EI_MAG3: u8 = 3u8
+const ELFMAG0: u8 = 0x7Fu8
+const ELFMAG1: u8 = 'E'.u8()
+const ELFMAG2: u8 = 'L'.u8()
+const ELFMAG3: u8 = 'F'.u8()
+
+const ET_SCE_EXEC: u16 = 0xfe00u16
+const ET_SCE_DYNEXEC: u16 = 0xfe10u16
+const ET_SCE_DYNAMIC: u16 = 0xfe18u16
+const EM_X86_64: u16 = 62u16
+const EV_CURRENT: u32 = 1u32
+
+struct self_header:
+    magic: u32
+    version: u8
+    mode: u8
+    endian: u8
+    attributes: u8
+    category: u8
+    program_type: u8
+    padding1: u16
+    header_size: u16
+    meta_size: u16
+    file_size: u32
+    padding2: u32
+    segment_count: u16
+    unknown1A: u16
+    padding3: u32
+
+struct elf_ident:
+    magic: u8[4]
+    ei_class: u8
+    ei_data: u8
+    ei_version: u8
+    ei_osabi: u8
+    ei_abiversion: u8
+    pad: u8[6]
+
+struct elf_header:
+    e_ident: elf_ident
+    e_type: u16
+    e_machine: u16
+    e_version: u32
+    e_entry: u64
+    e_phoff: u64
+    e_shoff: u64
+    e_flags: u32
+    e_ehsize: u16
+    e_phentsize: u16
+    e_phnum: u16
+    e_shentsize: u16
+    e_shnum: u16
+    e_shstrndx: u16
+
+struct elf_program_header:
+    p_type: u32
+    p_flags: u32
+    p_offset: u64
+    p_vaddr: u64
+    p_paddr: u64
+    p_filesz: u64
+    p_memsz: u64
+    p_align: u64
+
+struct self_segment_header:
+    flags: u64
+    file_offset: u64
+    file_size: u64
+    memory_size: u64
+
+struct elf_program_id_header:
+    authid: u64
+    program_type: u64
+    appver: u64
+    firmver: u64
+    digest: u8[32]
+
+struct Elf:
+    f: IOFile
+    self: self_header
+    elf_header_value: elf_header
+    is_self: bool
+    program_headers: darray[u8]
+    section_headers: darray[u8]
+    self_segments: darray[self_segment_header]
+    self_id_header: elf_program_id_header
+
+def Elf_new() -> Elf:
+    return Elf(IOFile_new(), zeroed, zeroed, false, zeroed, zeroed, zeroed, zeroed)
+
+def SelfSegment_IsBlocked(seg: self_segment_header&) -> bool:
+    return (seg.flags & 0x800u64) != 0u64
+
+def SelfSegment_GetId(seg: self_segment_header&) -> u32:
+    return ((seg.flags >> 20u64) & 0xFFFu64).u32()
+
+def Elf_IsSelfFile(self: Elf&) -> bool:
+    if self.self.magic != 0x1D3D154Fu32:
+        return false
+    if self.self.version != 0x00u8 or self.self.mode != 0x01u8 or self.self.endian != 0x01u8:
+        return false
+    if self.self.attributes != 0x12u8:
+        return false
+    if self.self.category != 0x01u8 or self.self.program_type != 0x01u8:
+        return false
+    return true
+
+def Elf_IsElfFile(self: Elf&) -> bool:
+    ident: elf_ident = self.elf_header_value.e_ident
+    if ident.magic[EI_MAG0.int()] != ELFMAG0 or ident.magic[EI_MAG1.int()] != ELFMAG1 or ident.magic[EI_MAG2.int()] != ELFMAG2 or ident.magic[EI_MAG3.int()] != ELFMAG3:
+        return false
+    if ident.ei_class != 0x02u8 or ident.ei_data != 0x01u8 or ident.ei_version != 0x01u8:
+        return false
+    if ident.ei_osabi != 0x09u8 or ident.ei_abiversion != 0x00u8:
+        return false
+    if self.elf_header_value.e_type != ET_SCE_DYNEXEC and self.elf_header_value.e_type != ET_SCE_DYNAMIC and self.elf_header_value.e_type != ET_SCE_EXEC:
+        return false
+    if self.elf_header_value.e_machine != EM_X86_64:
+        return false
+    if self.elf_header_value.e_version != EV_CURRENT:
+        return false
+    if self.elf_header_value.e_phentsize != size_of(elf_program_header).u16():
+        return false
+    if self.elf_header_value.e_shentsize > 0u16 and self.elf_header_value.e_shentsize != 64u16:
+        return false
+    return true
+
+def Elf_Open(self: mutable Elf&, file_name: static u8&) -> void:
+    self.f <- IOFile_opened(file_name, FileAccessMode.Read)
+    if not IOFile_IsOpen(self.f):
+        return
+    if not IOFile_ReadObject(self.f, self.self.ref[mutable self_header&]):
+        return
+    self.is_self <- Elf_IsSelfFile(self.ref[Elf&])
+    if not self.is_self:
+        _ = IOFile_Seek(self.f, 0)
+    else:
+        if self.self.segment_count > 0u16:
+            self.self_segments.resize(self.self.segment_count.usize())
+            _ = IOFile_ReadSpan(self.f, self.self_segments[0].ref[mutable self_segment_header&], self.self.segment_count.usize())
+    elf_header_pos: i64 = IOFile_Tell(self.f)
+    _ = IOFile_ReadObject(self.f, self.elf_header_value.ref[mutable elf_header&])
+    if not Elf_IsElfFile(self.ref[Elf&]):
+        return
+    if self.elf_header_value.e_phoff > 0u64 and self.elf_header_value.e_phnum > 0u16:
+        phdr_bytes: usize = self.elf_header_value.e_phentsize.usize() * self.elf_header_value.e_phnum.usize()
+        self.program_headers.resize(phdr_bytes)
+        _ = IOFile_Seek(self.f, elf_header_pos + self.elf_header_value.e_phoff.i64())
+        _ = IOFile_ReadRaw(self.f, self.program_headers[0].ref[mutable void&], 1, phdr_bytes)
+    if self.elf_header_value.e_shoff > 0u64 and self.elf_header_value.e_shnum > 0u16:
+        shdr_bytes: usize = self.elf_header_value.e_shentsize.usize() * self.elf_header_value.e_shnum.usize()
+        self.section_headers.resize(shdr_bytes)
+        _ = IOFile_Seek(self.f, elf_header_pos + self.elf_header_value.e_shoff.i64())
+        _ = IOFile_ReadRaw(self.f, self.section_headers[0].ref[mutable void&], 1, shdr_bytes)
+
+    if self.is_self:
+        header_size: u64 = 0u64
+        header_size <- header_size + size_of(self_header).u64()
+        header_size <- header_size + (size_of(self_segment_header).u64() * self.self.segment_count.u64())
+        header_size <- header_size + size_of(elf_header).u64()
+        header_size <- header_size + (self.elf_header_value.e_phnum.u64() * self.elf_header_value.e_phentsize.u64())
+        header_size <- header_size + (self.elf_header_value.e_shnum.u64() * self.elf_header_value.e_shentsize.u64())
+        header_size <- (header_size + 15u64) & (~15u64)
+        if self.elf_header_value.e_ehsize.u64() >= (header_size + size_of(elf_program_id_header).u64()):
+            _ = IOFile_Seek(self.f, header_size.i64())
+            _ = IOFile_ReadObject(self.f, self.self_id_header.ref[mutable elf_program_id_header&])
+
+def Elf_LoadSegment(self: mutable Elf&, virtual_addr: uintptr, file_offset: u64, size: usize) -> bool:
+    if not self.is_self:
+        if not IOFile_Seek(self.f, file_offset.i64()):
+            return false
+        return IOFile_ReadRaw(self.f, virtual_addr.cast[mutable void&], 1, size) == size
+    i: mutable usize = 0
+    while i < self.self_segments.len:
+        seg: self_segment_header = self.self_segments[i]
+        if SelfSegment_IsBlocked(seg):
+            phdr_id: u32 = SelfSegment_GetId(seg)
+            phoff: usize = phdr_id.usize() * size_of(elf_program_header)
+            if phoff + size_of(elf_program_header) <= self.program_headers.len:
+                phdr: elf_program_header = self.program_headers[phoff].ref[u8&].cast[elf_program_header&].value()
+                if file_offset >= phdr.p_offset and file_offset < (phdr.p_offset + phdr.p_filesz):
+                    mapped_off: u64 = (file_offset - phdr.p_offset) + seg.file_offset
+                    if not IOFile_Seek(self.f, mapped_off.i64()):
+                        return false
+                    return IOFile_ReadRaw(self.f, virtual_addr.cast[mutable void&], 1, size) == size
+        i <- i + 1
+    return false
+
+def Elf_GetProgramHeader(self: Elf&, index: usize) -> elf_program_header:
+    off: usize = index * size_of(elf_program_header)
+    return self.program_headers[off].ref[u8&].cast[elf_program_header&].value()
+
+def ElfPheaderTypeStr(ptype: u32) -> static u8&:
+    if ptype == 0u32:
+        return "Null"
+    if ptype == 1u32:
+        return "Loadable"
+    if ptype == 2u32:
+        return "Dynamic"
+    if ptype == 3u32:
+        return "Interpreter Path"
+    if ptype == 4u32:
+        return "Note"
+    if ptype == 0x61000001u32:
+        return "SCE Processor Parameters"
+    if ptype == 0x61000002u32:
+        return "SCE Module Parameters"
+    return "Unknown Section"
+
+def ElfPheaderFlagsStr(flags: u32) -> static u8&:
+    f0: static u8& = "_" if (flags & 0x4u32) == 0u32 else "R"
+    f1: static u8& = "_" if (flags & 0x2u32) == 0u32 else "W"
+    f2: static u8& = "_" if (flags & 0x1u32) == 0u32 else "X"
+    return rt_concat2_scratch(rt_concat2_scratch(rt_concat2_scratch(rt_concat2_scratch("(", f0), f1), f2), ")")
+
+def ElfPHeaderStr(self: Elf&, no: u16) -> static u8&:
+    if no.usize() >= self.elf_header_value.e_phnum.usize():
+        return ""
+    ph: elf_program_header = Elf_GetProgramHeader(self.ref[Elf&], no.usize())
+    return rt_concat2_scratch(
+        rt_concat2_scratch(
+            rt_concat2_scratch(
+                rt_concat2_scratch(
+                    rt_concat2_scratch("====== PROGRAM HEADER ", no.int().string()),
+                    " ========\n"),
+                rt_concat2_scratch(rt_concat2_scratch("p_type ....: ", ElfPheaderTypeStr(ph.p_type)), "\n")),
+            rt_concat2_scratch(rt_concat2_scratch(rt_concat2_scratch("p_flags ...: ", ph.p_flags.int().string()), " "), rt_concat2_scratch(ElfPheaderFlagsStr(ph.p_flags), "\n"))),
+        rt_concat2_scratch(rt_concat2_scratch("p_offset ..: ", ph.p_offset.int().string()), "\n"))
+
+def PHeaderDebugDump(self: Elf&, file_name: static u8&) -> void:
+    f: mutable IOFile = IOFile_opened(file_name, FileAccessMode.Create, FileType.TextFile)
+    if not IOFile_IsOpen(f):
+        return
+    if self.elf_header_value.e_phentsize > 0u16:
+        i: mutable u16 = 0u16
+        while i < self.elf_header_value.e_phnum:
+            s: static u8& = ElfPHeaderStr(self.ref[Elf&], i)
+            _ = IOFile_WriteSpan(f, s[0].ref[u8&], s.len)
+            i <- i + 1u16
+    _ = IOFile_Flush(f)
+    IOFile_Close(f)

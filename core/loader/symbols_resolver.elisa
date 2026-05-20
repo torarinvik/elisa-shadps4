@@ -1,0 +1,113 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../../common/io_file.elisa"
+include "../../common/string_util.elisa"
+include "../../core/aerolib/aerolib.elisa"
+
+enum SymbolType:
+    Unknown
+    Function
+    Object
+    Tls
+    NoType
+
+struct SymbolRecord:
+    name: static u8&
+    nid_name: static u8&
+    virtual_address: u64
+
+struct SymbolResolver:
+    name: static u8&
+    nidName: static u8&
+    library: static u8&
+    library_version: u16
+    module: static u8&
+    type: SymbolType
+
+struct SymbolsResolver:
+    symbols: darray[SymbolRecord]
+
+def SymbolsResolver_new() -> SymbolsResolver:
+    return SymbolsResolver(zeroed)
+
+def SymbolTypeToS(sym_type: SymbolType) -> static u8&:
+    if sym_type == SymbolType.Unknown:
+        return "Unknown"
+    if sym_type == SymbolType.Function:
+        return "Function"
+    if sym_type == SymbolType.Object:
+        return "Object"
+    if sym_type == SymbolType.Tls:
+        return "Tls"
+    return "NoType"
+
+def SymbolsResolver_GenerateName(s: SymbolResolver&) -> static u8&:
+    return rt_concat2_scratch(rt_concat2_scratch(rt_concat2_scratch(rt_concat2_scratch(rt_concat2_scratch(rt_concat2_scratch(rt_concat2_scratch(rt_concat2_scratch(s.name, "#"), s.library), "#"), s.library_version.int().string()), "#"), s.module), "#"), SymbolTypeToS(s.type))
+
+def SymbolsResolver_AddSymbol(self: mutable SymbolsResolver&, s: SymbolResolver&, virtual_addr: u64) -> void:
+    self.symbols.append(SymbolRecord(SymbolsResolver_GenerateName(s), s.nidName, virtual_addr))
+
+def SymbolsResolver_FindSymbol(self: SymbolsResolver&, s: SymbolResolver&) -> SymbolRecord?:
+    name: static u8& = SymbolsResolver_GenerateName(s)
+    i: mutable usize = 0
+    while i < self.symbols.len:
+        rec: SymbolRecord = self.symbols[i]
+        if rec.name == name:
+            return rec
+        i <- i + 1
+    return null
+
+def SymbolsResolver_DebugDump(self: SymbolsResolver&, file_name: static u8&) -> void:
+    f: mutable IOFile = IOFile_opened(file_name, FileAccessMode.Create, FileType.TextFile)
+    if not IOFile_IsOpen(f):
+        return
+    i: mutable usize = 0
+    while i < self.symbols.len:
+        sym: SymbolRecord = self.symbols[i]
+        ids: darray[static u8&] = SplitString(scratch_arena.ref[mutable Arena&], sym.name, '#')
+        nid: static u8& = sym.name
+        if ids.len > 0:
+            nid <- ids[0]
+        library: static u8& = ""
+        libver: static u8& = ""
+        module: static u8& = ""
+        stype: static u8& = ""
+        if ids.len > 1:
+            library <- ids[1]
+        if ids.len > 2:
+            libver <- ids[2]
+        if ids.len > 3:
+            module <- ids[3]
+        if ids.len > 4:
+            stype <- ids[4]
+        entry: NidEntry? = FindByNid(nid)
+        nid_name: static u8& = "UNK"
+        if entry != null:
+            nid_name <- entry.value().name
+        line: static u8& = rt_concat2_scratch(
+            rt_concat2_scratch(
+                rt_concat2_scratch(
+                    rt_concat2_scratch(
+                        rt_concat2_scratch(
+                            rt_concat2_scratch(
+                                rt_concat2_scratch(
+                                    rt_concat2_scratch(
+                                        rt_concat2_scratch(
+                                            rt_concat2_scratch(
+                                                rt_concat2_scratch("0x", sym.virtual_address.int().string()),
+                                                " "),
+                                            nid),
+                                        " "),
+                                    nid_name),
+                                " "),
+                            library),
+                        " "),
+                    libver),
+                " "),
+            rt_concat2_scratch(rt_concat2_scratch(rt_concat2_scratch(module, " "), stype), "\n"))
+        _ = IOFile_WriteSpan(f, line[0].ref[u8&], line.len)
+        i <- i + 1
+    _ = IOFile_Flush(f)
+    IOFile_Close(f)

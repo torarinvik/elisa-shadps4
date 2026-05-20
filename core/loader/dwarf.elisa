@@ -1,0 +1,154 @@
+# SPDX-FileCopyrightText: Copyright (C) 2001-2026 Free Software Foundation, Inc.
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+
+const DW_EH_PE_ptr: u8 = 0x00u8
+const DW_EH_PE_uleb128: u8 = 0x01u8
+const DW_EH_PE_udata2: u8 = 0x02u8
+const DW_EH_PE_udata4: u8 = 0x03u8
+const DW_EH_PE_udata8: u8 = 0x04u8
+const DW_EH_PE_signed: u8 = 0x08u8
+const DW_EH_PE_sleb128: u8 = 0x09u8
+const DW_EH_PE_sdata2: u8 = 0x0Au8
+const DW_EH_PE_sdata4: u8 = 0x0Bu8
+const DW_EH_PE_sdata8: u8 = 0x0Cu8
+const DW_EH_PE_absptr: u8 = 0x00u8
+const DW_EH_PE_pcrel: u8 = 0x10u8
+const DW_EH_PE_datarel: u8 = 0x30u8
+const DW_EH_PE_indirect: u8 = 0x80u8
+const DW_EH_PE_omit: u8 = 0xFFu8
+
+struct EHHeaderInfo:
+    eh_frame_ptr: uintptr
+    fde_count: usize
+    table: uintptr
+    table_enc: u8
+
+def Dwarf_SignExtend16(v: u16) -> u64:
+    s: s16 = v.cast[s16]
+    return s.i64().u64()
+
+def Dwarf_SignExtend32(v: u32) -> u64:
+    s: s32 = v.cast[s32]
+    return s.i64().u64()
+
+def Dwarf_ReadU8(addr: uintptr) -> u8:
+    return addr.cast[u8&].value()
+
+def Dwarf_ReadU16(addr: uintptr) -> u16:
+    return addr.cast[u16&].value()
+
+def Dwarf_ReadU32(addr: uintptr) -> u32:
+    return addr.cast[u32&].value()
+
+def Dwarf_ReadU64(addr: uintptr) -> u64:
+    return addr.cast[u64&].value()
+
+def Dwarf_ReadULEB128(addr: mutable uintptr&) -> u64:
+    result: mutable u64 = 0u64
+    shift: mutable u32 = 0u32
+    while true:
+        b: u8 = Dwarf_ReadU8(addr)
+        addr <- addr + 1u64.uintptr()
+        result <- result | (((b & 0x7Fu8).u64()) << shift)
+        if (b & 0x80u8) == 0u8:
+            break
+        shift <- shift + 7u32
+    return result
+
+def Dwarf_ReadSLEB128(addr: mutable uintptr&) -> u64:
+    result: mutable u64 = 0u64
+    shift: mutable u32 = 0u32
+    b: mutable u8 = 0u8
+    while true:
+        b <- Dwarf_ReadU8(addr)
+        addr <- addr + 1u64.uintptr()
+        result <- result | (((b & 0x7Fu8).u64()) << shift)
+        shift <- shift + 7u32
+        if (b & 0x80u8) == 0u8:
+            break
+    if shift < 64u32 and (b & 0x40u8) != 0u8:
+        result <- result | (~0u64 << shift)
+    return result
+
+def Dwarf_ReadEncoded(addr: mutable uintptr&, encoding: u8, datarel_base: uintptr) -> uintptr:
+    start_addr: uintptr = addr
+    result: u64 = 0u64
+    kind: u8 = encoding & 0x0Fu8
+    if kind == DW_EH_PE_ptr:
+        result <- Dwarf_ReadU64(addr)
+        addr <- addr + 8u64.uintptr()
+    elif kind == DW_EH_PE_uleb128:
+        result <- Dwarf_ReadULEB128(addr.ref[mutable uintptr&])
+    elif kind == DW_EH_PE_udata2:
+        result <- Dwarf_ReadU16(addr).u64()
+        addr <- addr + 2u64.uintptr()
+    elif kind == DW_EH_PE_udata4:
+        result <- Dwarf_ReadU32(addr).u64()
+        addr <- addr + 4u64.uintptr()
+    elif kind == DW_EH_PE_udata8:
+        result <- Dwarf_ReadU64(addr)
+        addr <- addr + 8u64.uintptr()
+    elif kind == DW_EH_PE_sdata2:
+        result <- Dwarf_SignExtend16(Dwarf_ReadU16(addr))
+        addr <- addr + 2u64.uintptr()
+    elif kind == DW_EH_PE_sdata4:
+        result <- Dwarf_SignExtend32(Dwarf_ReadU32(addr))
+        addr <- addr + 4u64.uintptr()
+    elif kind == DW_EH_PE_sdata8:
+        result <- Dwarf_ReadU64(addr)
+        addr <- addr + 8u64.uintptr()
+    elif kind == DW_EH_PE_sleb128:
+        result <- Dwarf_ReadSLEB128(addr.ref[mutable uintptr&])
+    else:
+        return 0u64.uintptr()
+
+    rel: u8 = encoding & 0x70u8
+    if rel == DW_EH_PE_pcrel:
+        result <- result + start_addr.u64()
+    elif rel == DW_EH_PE_datarel:
+        if datarel_base == 0u64.uintptr():
+            return 0u64.uintptr()
+        result <- result + datarel_base.u64()
+    elif rel != DW_EH_PE_absptr:
+        return 0u64.uintptr()
+
+    out_ptr: uintptr = result.uintptr()
+    if (encoding & DW_EH_PE_indirect) != 0u8:
+        out_ptr <- Dwarf_ReadU64(out_ptr).uintptr()
+    return out_ptr
+
+def DecodeEHHdr(ehHdrStart: uintptr, ehHdrEnd: uintptr, ehHdrInfo: mutable EHHeaderInfo&) -> bool:
+    if ehHdrEnd <= ehHdrStart:
+        return false
+    if (ehHdrEnd - ehHdrStart) < 4u64.uintptr():
+        return false
+    p: mutable uintptr = ehHdrStart
+    version: u8 = Dwarf_ReadU8(p)
+    p <- p + 1u64.uintptr()
+    if version != 1u8:
+        return false
+    eh_frame_ptr_enc: u8 = Dwarf_ReadU8(p)
+    p <- p + 1u64.uintptr()
+    fde_count_enc: u8 = Dwarf_ReadU8(p)
+    p <- p + 1u64.uintptr()
+    ehHdrInfo.table_enc <- Dwarf_ReadU8(p)
+    p <- p + 1u64.uintptr()
+
+    if eh_frame_ptr_enc == DW_EH_PE_omit:
+        ehHdrInfo.eh_frame_ptr <- 0.uintptr()
+    else:
+        ehHdrInfo.eh_frame_ptr <- Dwarf_ReadEncoded(p.ref[mutable uintptr&], eh_frame_ptr_enc, ehHdrStart)
+        if ehHdrInfo.eh_frame_ptr == 0u64.uintptr():
+            return false
+
+    if fde_count_enc == DW_EH_PE_omit:
+        ehHdrInfo.fde_count <- 0
+    else:
+        count_ptr: uintptr = Dwarf_ReadEncoded(p.ref[mutable uintptr&], fde_count_enc, ehHdrStart)
+        if count_ptr == 0u64.uintptr():
+            return false
+        ehHdrInfo.fde_count <- count_ptr.u64().usize()
+    ehHdrInfo.table <- p
+    return true

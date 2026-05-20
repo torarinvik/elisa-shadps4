@@ -1,0 +1,213 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "./core/libraries/zlib/zlib.elisa"
+
+def zlib_reset_for_tests() -> void:
+    zlib_reset_state()
+
+@test
+def zlib_init_finalize_and_guards_match_cpp_contract() -> void:
+    can Abort.Panic:
+        zlib_reset_for_tests()
+
+        req: mutable u64 = 0u64
+        out_len: mutable u32 = 77u32
+        out_status: mutable int = 33
+        timeout: mutable u32 = 1u32
+
+        assert sceZlibInflate(null, 0u32, null, 0u32, req.ref[mutable u64&]) == ORBIS_ZLIB_ERROR_NOT_INITIALIZED
+        assert sceZlibWaitForDone(req.ref[mutable u64&], timeout.ref[u32&]) == ORBIS_ZLIB_ERROR_NOT_INITIALIZED
+        assert sceZlibGetResult(1u64, out_len.ref[mutable u32&], out_status.ref[mutable int&]) == ORBIS_ZLIB_ERROR_NOT_INITIALIZED
+        assert sceZlibFinalize() == ORBIS_ZLIB_ERROR_NOT_INITIALIZED
+
+        assert sceZlibInitialize(null, 0u32) == ORBIS_OK
+        assert sceZlibInitialize(null, 0u32) == ORBIS_ZLIB_ERROR_ALREADY_INITIALIZED
+
+        assert sceZlibInflate(null, 1u32, req.ref[mutable u8&].cast[void&?], 2048u32, req.ref[mutable u64&]) == ORBIS_ZLIB_ERROR_INVALID
+        assert sceZlibInflate(req.ref[mutable u8&].cast[void&?], 0u32, req.ref[mutable u8&].cast[void&?], 2048u32, req.ref[mutable u64&]) == ORBIS_ZLIB_ERROR_INVALID
+        assert sceZlibInflate(req.ref[mutable u8&].cast[void&?], 1u32, null, 2048u32, req.ref[mutable u64&]) == ORBIS_ZLIB_ERROR_INVALID
+        assert sceZlibInflate(req.ref[mutable u8&].cast[void&?], 1u32, req.ref[mutable u8&].cast[void&?], 0u32, req.ref[mutable u64&]) == ORBIS_ZLIB_ERROR_INVALID
+        assert sceZlibInflate(req.ref[mutable u8&].cast[void&?], 1u32, req.ref[mutable u8&].cast[void&?], 2050u32, req.ref[mutable u64&]) == ORBIS_ZLIB_ERROR_INVALID
+        assert sceZlibInflate(req.ref[mutable u8&].cast[void&?], 1u32, req.ref[mutable u8&].cast[void&?], 67584u32, req.ref[mutable u64&]) == ORBIS_ZLIB_ERROR_INVALID
+        assert sceZlibInflate(req.ref[mutable u8&].cast[void&?], 1u32, req.ref[mutable u8&].cast[void&?], 2048u32, null) == ORBIS_ZLIB_ERROR_INVALID
+
+        assert sceZlibWaitForDone(null, timeout.ref[u32&]) == ORBIS_ZLIB_ERROR_INVALID
+        assert sceZlibWaitForDone(req.ref[mutable u64&], timeout.ref[u32&]) == ORBIS_ZLIB_ERROR_TIMEDOUT
+
+        assert sceZlibGetResult(1u64, null, out_status.ref[mutable int&]) == ORBIS_ZLIB_ERROR_INVALID
+        assert sceZlibGetResult(1u64, out_len.ref[mutable u32&], null) == ORBIS_ZLIB_ERROR_INVALID
+        assert sceZlibGetResult(999u64, out_len.ref[mutable u32&], out_status.ref[mutable int&]) == ORBIS_ZLIB_ERROR_NOT_FOUND
+
+        assert sceZlibFinalize() == ORBIS_OK
+        assert sceZlibFinalize() == ORBIS_ZLIB_ERROR_NOT_INITIALIZED
+
+@test
+def zlib_request_queue_and_result_lookup_behave_consistently() -> void:
+    can Abort.Panic:
+        zlib_reset_for_tests()
+        assert sceZlibInitialize(null, 0u32) == ORBIS_OK
+
+        src: mutable u8[16] = zeroed
+        # zlib stream for "hello"
+        src[0] <- 0x78
+        src[1] <- 0x9c
+        src[2] <- 0xcb
+        src[3] <- 0x48
+        src[4] <- 0xcd
+        src[5] <- 0xc9
+        src[6] <- 0xc9
+        src[7] <- 0x07
+        src[8] <- 0x00
+        src[9] <- 0x06
+        src[10] <- 0x2c
+        src[11] <- 0x02
+        src[12] <- 0x15
+        dst: mutable u8[2048] = zeroed
+
+        req1: mutable u64 = 0u64
+        req2: mutable u64 = 0u64
+
+        assert sceZlibInflate(src.ref[mutable u8&].cast[void&?], 13u32, dst.ref[mutable u8&].cast[void&?], 2048u32, req1.ref[mutable u64&]) == ORBIS_OK
+        assert sceZlibInflate(src.ref[mutable u8&].cast[void&?], 13u32, dst.ref[mutable u8&].cast[void&?], 2048u32, req2.ref[mutable u64&]) == ORBIS_OK
+        assert req2 == req1 + 1u64
+
+        done1: mutable u64 = 0u64
+        done2: mutable u64 = 0u64
+        assert sceZlibWaitForDone(done1.ref[mutable u64&], null) == ORBIS_OK
+        assert sceZlibWaitForDone(done2.ref[mutable u64&], null) == ORBIS_OK
+        assert done1 == req1
+        assert done2 == req2
+
+        out_len: mutable u32 = 999u32
+        out_status: mutable int = 999
+        assert sceZlibGetResult(req1, out_len.ref[mutable u32&], out_status.ref[mutable int&]) == ORBIS_OK
+        assert out_len == 5u32
+        assert out_status == ORBIS_OK
+        assert dst[0] == 104
+        assert dst[1] == 101
+        assert dst[2] == 108
+        assert dst[3] == 108
+        assert dst[4] == 111
+
+        assert sceZlibFinalize() == ORBIS_OK
+
+@test
+def zlib_wait_timeout_then_complete_with_worker_delay() -> void:
+    can Abort.Panic:
+        zlib_reset_for_tests()
+        zlib_set_test_delay_usec(50000u64)
+        assert sceZlibInitialize(null, 0u32) == ORBIS_OK
+
+        src: mutable u8[16] = zeroed
+        src[0] <- 0x78
+        src[1] <- 0x9c
+        src[2] <- 0xcb
+        src[3] <- 0x48
+        src[4] <- 0xcd
+        src[5] <- 0xc9
+        src[6] <- 0xc9
+        src[7] <- 0x07
+        src[8] <- 0x00
+        src[9] <- 0x06
+        src[10] <- 0x2c
+        src[11] <- 0x02
+        src[12] <- 0x15
+        dst: mutable u8[2048] = zeroed
+
+        req: mutable u64 = 0u64
+        assert sceZlibInflate(src.ref[mutable u8&].cast[void&?], 13u32, dst.ref[mutable u8&].cast[void&?], 2048u32, req.ref[mutable u64&]) == ORBIS_OK
+
+        done: mutable u64 = 0u64
+        short_timeout: mutable u32 = 1u32
+        assert sceZlibWaitForDone(done.ref[mutable u64&], short_timeout.ref[u32&]) == ORBIS_ZLIB_ERROR_TIMEDOUT
+
+        long_timeout: mutable u32 = 200u32
+        assert sceZlibWaitForDone(done.ref[mutable u64&], long_timeout.ref[u32&]) == ORBIS_OK
+        assert done == req
+
+        out_len: mutable u32 = 0u32
+        out_status: mutable int = 0
+        assert sceZlibGetResult(req, out_len.ref[mutable u32&], out_status.ref[mutable int&]) == ORBIS_OK
+        assert out_len == 5u32
+        assert out_status == ORBIS_OK
+        assert sceZlibFinalize() == ORBIS_OK
+
+@test
+def zlib_nospace_status_matches_cpp_mapping() -> void:
+    can Abort.Panic:
+        zlib_reset_for_tests()
+        assert sceZlibInitialize(null, 0u32) == ORBIS_OK
+
+        src: mutable u8[16] = zeroed
+        # zlib stream for "hello"
+        src[0] <- 0x78
+        src[1] <- 0x9c
+        src[2] <- 0xcb
+        src[3] <- 0x48
+        src[4] <- 0xcd
+        src[5] <- 0xc9
+        src[6] <- 0xc9
+        src[7] <- 0x07
+        src[8] <- 0x00
+        src[9] <- 0x06
+        src[10] <- 0x2c
+        src[11] <- 0x02
+        src[12] <- 0x15
+
+        # Must be valid API shape (multiple of 2KB), but too small for payload.
+        dst_small: mutable u8[2048] = zeroed
+        req: mutable u64 = 0u64
+        assert sceZlibInflate(src.ref[mutable u8&].cast[void&?], 13u32, dst_small.ref[mutable u8&].cast[void&?], 2048u32, req.ref[mutable u64&]) == ORBIS_OK
+
+        done: mutable u64 = 0u64
+        assert sceZlibWaitForDone(done.ref[mutable u64&], null) == ORBIS_OK
+        assert done == req
+
+        out_len: mutable u32 = 0u32
+        out_status: mutable int = 0
+        assert sceZlibGetResult(req, out_len.ref[mutable u32&], out_status.ref[mutable int&]) == ORBIS_OK
+        assert out_status == ORBIS_OK
+
+        # Guaranteed NOSPACE stream: inflates to 4096 bytes into a 2048-byte destination.
+        big_src: mutable u8[28] = zeroed
+        big_src[0] <- 0x78
+        big_src[1] <- 0xda
+        big_src[2] <- 0xed
+        big_src[3] <- 0xc1
+        big_src[4] <- 0x01
+        big_src[5] <- 0x0d
+        big_src[6] <- 0x00
+        big_src[7] <- 0x00
+        big_src[8] <- 0x00
+        big_src[9] <- 0xc2
+        big_src[10] <- 0xa0
+        big_src[11] <- 0x6c
+        big_src[12] <- 0xef
+        big_src[13] <- 0x5f
+        big_src[14] <- 0xca
+        big_src[15] <- 0x1e
+        big_src[16] <- 0x0e
+        big_src[17] <- 0x28
+        big_src[18] <- 0x00
+        big_src[19] <- 0x00
+        big_src[20] <- 0x00
+        big_src[21] <- 0xe0
+        big_src[22] <- 0xdd
+        big_src[23] <- 0x00
+        big_src[24] <- 0xff
+        big_src[25] <- 0xad
+        big_src[26] <- 0x10
+        big_src[27] <- 0x3d
+
+        req2: mutable u64 = 0u64
+        assert sceZlibInflate(big_src.ref[mutable u8&].cast[void&?], 28u32, dst_small.ref[mutable u8&].cast[void&?], 2048u32, req2.ref[mutable u64&]) == ORBIS_OK
+        done2: mutable u64 = 0u64
+        assert sceZlibWaitForDone(done2.ref[mutable u64&], null) == ORBIS_OK
+        out_len2: mutable u32 = 0u32
+        out_status2: mutable int = 0
+        assert sceZlibGetResult(req2, out_len2.ref[mutable u32&], out_status2.ref[mutable int&]) == ORBIS_OK
+        assert out_status2 == ORBIS_ZLIB_ERROR_NOSPACE
+
+        assert sceZlibFinalize() == ORBIS_OK
