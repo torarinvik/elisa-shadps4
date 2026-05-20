@@ -13,6 +13,8 @@ extern elisa_kernel_sem_timedwait(handle: void&?, need_count: int, usec: u64) ->
 extern elisa_kernel_sem_post(handle: void&?, signal_count: int) -> int
 extern elisa_kernel_sem_getvalue(handle: void&?, out_value: mutable int&?) -> int
 extern elisa_kernel_sem_set(handle: void&?, value: int) -> int
+extern elisa_kernel_sem_cancel(handle: void&?, set_value: int, out_waiters: mutable int&?) -> int
+extern elisa_kernel_sem_delete(handle: void&?, out_waiters: mutable int&?) -> int
 
 const ORBIS_KERNEL_SEM_VALUE_MAX: int = 0x7fffffff
 const PTHREAD_KEYS_MAX: int = 256
@@ -123,18 +125,22 @@ def sceKernelCancelSema(sem: int, set_count: int, p_num_wait_threads: mutable in
         return ORBIS_KERNEL_ERROR_ESRCH
     if p_num_wait_threads != null:
         p_num_wait_threads <- g_orbis_sem_waiters[sem]
+    set_value: int = set_count
     if set_count < 0:
-        g_orbis_sems[sem].token_count <- g_orbis_sems[sem].init_count
-    else:
-        g_orbis_sems[sem].token_count <- set_count
-    _ = elisa_kernel_sem_set(g_orbis_sems[sem].native_handle, g_orbis_sems[sem].token_count)
+        set_value <- g_orbis_sems[sem].init_count
+    g_orbis_sems[sem].token_count <- set_value
+    r_cancel: int = elisa_kernel_sem_cancel(g_orbis_sems[sem].native_handle, set_value, p_num_wait_threads)
+    if r_cancel != 0:
+        return threads_posix_to_orbis_errno(r_cancel)
     return ORBIS_OK
 
 def sceKernelDeleteSema(sem: int) -> int:
     if sem < 0 or sem >= 64 or not g_orbis_sems[sem].used:
         return ORBIS_KERNEL_ERROR_ESRCH
     if g_orbis_sems[sem].native_handle != null:
-        _ = elisa_kernel_sem_destroy(g_orbis_sems[sem].native_handle)
+        r_delete: int = elisa_kernel_sem_delete(g_orbis_sems[sem].native_handle, null)
+        if r_delete != 0:
+            return threads_posix_to_orbis_errno(r_delete)
     g_orbis_sems[sem].used <- false
     g_orbis_sems[sem].token_count <- 0
     g_orbis_sems[sem].max_count <- 0

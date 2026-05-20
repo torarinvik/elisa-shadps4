@@ -8,14 +8,31 @@ struct DimensionsQueue:
     read_index: mutable usize
     write_index: mutable usize
 
+struct DimensionsFigure:
+    present: mutable bool
+    index: mutable u8
+    id: mutable u32
+    data: mutable u8[0x2d * 0x04]
+
 global mutable g_dim_queue: DimensionsQueue = zeroed
+global mutable g_dim_figures: DimensionsFigure[7] = zeroed
 global mutable g_dim_init: bool = false
+global mutable g_dim_random_a: u32 = 0u32
+global mutable g_dim_random_b: u32 = 0u32
+global mutable g_dim_random_c: u32 = 0u32
+global mutable g_dim_random_d: u32 = 0u32
 
 def Dimensions_InitIfNeeded() -> void:
     if g_dim_init:
         return
     g_dim_queue.read_index <- 0
     g_dim_queue.write_index <- 0
+    i: mutable usize = 0
+    while i < 7:
+        g_dim_figures[i].present <- false
+        g_dim_figures[i].index <- 255u8
+        g_dim_figures[i].id <- 0u32
+        i <- i + 1
     g_dim_init <- true
 
 def Dimensions_QueuePush(packet: u8&) -> void:
@@ -55,6 +72,187 @@ def Dimensions_Blank(type_: u8, sequence: u8, out: mutable u8&) -> void:
     out[2] <- sequence
     out[3] <- Dimensions_Checksum(out, 3)
 
+def Dimensions_InitRng(seed: u32) -> void:
+    g_dim_random_a <- 0xf1ea5eedu32
+    g_dim_random_b <- seed
+    g_dim_random_c <- seed
+    g_dim_random_d <- seed
+    i: mutable int = 0
+    while i < 42:
+        _ = Dimensions_RngNext()
+        i <- i + 1
+
+def Dimensions_RngNext() -> u32:
+    e: u32 = g_dim_random_a - ((g_dim_random_b << 21u32) | (g_dim_random_b >> 11u32))
+    g_dim_random_a <- g_dim_random_b ^ ((g_dim_random_c << 19u32) | (g_dim_random_c >> 13u32))
+    g_dim_random_b <- g_dim_random_c + ((g_dim_random_d << 6u32) | (g_dim_random_d >> 26u32))
+    g_dim_random_c <- g_dim_random_d + e
+    g_dim_random_d <- e + g_dim_random_a
+    return g_dim_random_d
+
+def Dimensions_KeyWord(idx: int) -> u32:
+    if idx == 0:
+        return 0xb0f6fe55u32
+    if idx == 1:
+        return 0x410bbf62u32
+    if idx == 2:
+        return 0xb47cb3c9u32
+    return 0x7b293e97u32
+
+def Dimensions_Decrypt8(in_: u8&, out: mutable u8&) -> void:
+    data_one: mutable u32 = in_[0].u32() | (in_[1].u32() << 8u32) | (in_[2].u32() << 16u32) | (in_[3].u32() << 24u32)
+    data_two: mutable u32 = in_[4].u32() | (in_[5].u32() << 8u32) | (in_[6].u32() << 16u32) | (in_[7].u32() << 24u32)
+    key_one: u32 = Dimensions_KeyWord(0)
+    key_two: u32 = Dimensions_KeyWord(1)
+    key_three: u32 = Dimensions_KeyWord(2)
+    key_four: u32 = Dimensions_KeyWord(3)
+    sum: mutable u32 = 0xc6ef3720u32
+    delta: u32 = 0x9e3779b9u32
+    i: mutable int = 0
+    while i < 32:
+        data_two <- data_two - (((data_one << 4u32) + key_three) ^ (data_one + sum) ^ ((data_one >> 5u32) + key_four))
+        data_one <- data_one - (((data_two << 4u32) + key_one) ^ (data_two + sum) ^ ((data_two >> 5u32) + key_two))
+        sum <- sum - delta
+        i <- i + 1
+    out[0] <- (data_one & 0xffu32).u8()
+    out[1] <- ((data_one >> 8u32) & 0xffu32).u8()
+    out[2] <- ((data_one >> 16u32) & 0xffu32).u8()
+    out[3] <- ((data_one >> 24u32) & 0xffu32).u8()
+    out[4] <- (data_two & 0xffu32).u8()
+    out[5] <- ((data_two >> 8u32) & 0xffu32).u8()
+    out[6] <- ((data_two >> 16u32) & 0xffu32).u8()
+    out[7] <- ((data_two >> 24u32) & 0xffu32).u8()
+
+def Dimensions_Encrypt8(in_: u8&, out: mutable u8&) -> void:
+    data_one: mutable u32 = in_[0].u32() | (in_[1].u32() << 8u32) | (in_[2].u32() << 16u32) | (in_[3].u32() << 24u32)
+    data_two: mutable u32 = in_[4].u32() | (in_[5].u32() << 8u32) | (in_[6].u32() << 16u32) | (in_[7].u32() << 24u32)
+    key_one: u32 = Dimensions_KeyWord(0)
+    key_two: u32 = Dimensions_KeyWord(1)
+    key_three: u32 = Dimensions_KeyWord(2)
+    key_four: u32 = Dimensions_KeyWord(3)
+    sum: mutable u32 = 0u32
+    delta: u32 = 0x9e3779b9u32
+    i: mutable int = 0
+    while i < 32:
+        sum <- sum + delta
+        data_one <- data_one + (((data_two << 4u32) + key_one) ^ (data_two + sum) ^ ((data_two >> 5u32) + key_two))
+        data_two <- data_two + (((data_one << 4u32) + key_three) ^ (data_one + sum) ^ ((data_one >> 5u32) + key_four))
+        i <- i + 1
+    out[0] <- (data_one & 0xffu32).u8()
+    out[1] <- ((data_one >> 8u32) & 0xffu32).u8()
+    out[2] <- ((data_one >> 16u32) & 0xffu32).u8()
+    out[3] <- ((data_one >> 24u32) & 0xffu32).u8()
+    out[4] <- (data_two & 0xffu32).u8()
+    out[5] <- ((data_two >> 8u32) & 0xffu32).u8()
+    out[6] <- ((data_two >> 16u32) & 0xffu32).u8()
+    out[7] <- ((data_two >> 24u32) & 0xffu32).u8()
+
+def Dimensions_GenerateRandomNumber(payload: u8&, sequence: u8, out: mutable u8&) -> void:
+    value: mutable u8[8] = zeroed
+    Dimensions_Decrypt8(payload, value[0].ref[mutable u8&])
+    seed: u32 = value[0].u32() | (value[1].u32() << 8u32) | (value[2].u32() << 16u32) | (value[3].u32() << 24u32)
+    Dimensions_InitRng(seed)
+    enc_in: mutable u8[8] = zeroed
+    enc_in[0] <- value[4]
+    enc_in[1] <- value[5]
+    enc_in[2] <- value[6]
+    enc_in[3] <- value[7]
+    enc_out: mutable u8[8] = zeroed
+    Dimensions_Encrypt8(enc_in[0].ref[u8&], enc_out[0].ref[mutable u8&])
+    out[0] <- 0x55u8
+    out[1] <- 0x09u8
+    out[2] <- sequence
+    i: mutable usize = 0
+    while i < 8:
+        out[3 + i] <- enc_out[i]
+        i <- i + 1
+    out[11] <- Dimensions_Checksum(out, 11)
+
+def Dimensions_ChallengeResponse(payload: u8&, sequence: u8, out: mutable u8&) -> void:
+    value: mutable u8[8] = zeroed
+    Dimensions_Decrypt8(payload, value[0].ref[mutable u8&])
+    next_random: u32 = Dimensions_RngNext()
+    enc_in: mutable u8[8] = zeroed
+    enc_in[0] <- (next_random & 0xffu32).u8()
+    enc_in[1] <- ((next_random >> 8u32) & 0xffu32).u8()
+    enc_in[2] <- ((next_random >> 16u32) & 0xffu32).u8()
+    enc_in[3] <- ((next_random >> 24u32) & 0xffu32).u8()
+    enc_in[4] <- value[0]
+    enc_in[5] <- value[1]
+    enc_in[6] <- value[2]
+    enc_in[7] <- value[3]
+    enc_out: mutable u8[8] = zeroed
+    Dimensions_Encrypt8(enc_in[0].ref[u8&], enc_out[0].ref[mutable u8&])
+    out[0] <- 0x55u8
+    out[1] <- 0x09u8
+    out[2] <- sequence
+    i: mutable usize = 0
+    while i < 8:
+        out[3 + i] <- enc_out[i]
+        i <- i + 1
+    out[11] <- Dimensions_Checksum(out, 11)
+
+def Dimensions_QueryBlock(index: u8, page: u8, sequence: u8, out: mutable u8&) -> void:
+    out[0] <- 0x55u8
+    out[1] <- 0x12u8
+    out[2] <- sequence
+    out[3] <- 0u8
+    if index > 0u8 and index <= 7u8:
+        fig_i: usize = (index - 1u8).usize()
+        if g_dim_figures[fig_i].index != 255u8 and (4u8 * page) < (0x2du8 * 4u8 - 16u8):
+            base: usize = (4u8 * page).usize()
+            i: mutable usize = 0
+            while i < 16:
+                out[4 + i] <- g_dim_figures[fig_i].data[base + i]
+                i <- i + 1
+    out[20] <- Dimensions_Checksum(out, 20)
+
+def Dimensions_WriteBlock(index: u8, page: u8, payload: u8&, sequence: u8, out: mutable u8&) -> void:
+    out[0] <- 0x55u8
+    out[1] <- 0x02u8
+    out[2] <- sequence
+    out[3] <- 0u8
+    if index > 0u8 and index <= 7u8:
+        fig_i: usize = (index - 1u8).usize()
+        if g_dim_figures[fig_i].index != 255u8 and page < 0x2du8:
+            if page == 36u8:
+                g_dim_figures[fig_i].id <- payload[0].u32() | (payload[1].u32() << 8u32) | (payload[2].u32() << 16u32) | (payload[3].u32() << 24u32)
+            base: usize = (page * 4u8).usize()
+            i: mutable usize = 0
+            while i < 4:
+                g_dim_figures[fig_i].data[base + i] <- payload[i]
+                i <- i + 1
+    out[4] <- Dimensions_Checksum(out, 4)
+
+def Dimensions_GetModel(payload: u8&, sequence: u8, out: mutable u8&) -> void:
+    value: mutable u8[8] = zeroed
+    Dimensions_Decrypt8(payload, value[0].ref[mutable u8&])
+    index: u8 = value[0]
+    model: mutable u32 = 0u32
+    if index > 0u8 and index <= 7u8:
+        fig_i: usize = (index - 1u8).usize()
+        model <- g_dim_figures[fig_i].id
+    enc_in: mutable u8[8] = zeroed
+    enc_in[0] <- (model & 0xffu32).u8()
+    enc_in[1] <- ((model >> 8u32) & 0xffu32).u8()
+    enc_in[2] <- ((model >> 16u32) & 0xffu32).u8()
+    enc_in[3] <- ((model >> 24u32) & 0xffu32).u8()
+    enc_in[4] <- value[4]
+    enc_in[5] <- value[5]
+    enc_in[6] <- value[6]
+    enc_in[7] <- value[7]
+    enc_out: mutable u8[8] = zeroed
+    Dimensions_Encrypt8(enc_in[0].ref[u8&], enc_out[0].ref[mutable u8&])
+    out[0] <- 0x55u8
+    out[1] <- 0x0au8
+    out[2] <- sequence
+    out[3] <- 0u8
+    i: mutable usize = 0
+    while i < 8:
+        out[4 + i] <- enc_out[i]
+        i <- i + 1
+    out[12] <- Dimensions_Checksum(out, 12)
+
 def UsbdDimensionsEmu_CommandOut(buffer: u8&) -> int:
     Dimensions_InitIfNeeded()
     command: u8 = buffer[2]
@@ -79,33 +277,17 @@ def UsbdDimensionsEmu_CommandOut(buffer: u8&) -> int:
         q_result[15] <- 0x34u8
         q_result[16] <- 0x46u8
     elif command == 0xb1u8:
-        Dimensions_Blank(0x01u8, sequence, q_result[0].ref[mutable u8&])
+        Dimensions_GenerateRandomNumber(buffer[4].ref[u8&], sequence, q_result[0].ref[mutable u8&])
     elif command == 0xb3u8:
-        Dimensions_Blank(0x09u8, sequence, q_result[0].ref[mutable u8&])
+        Dimensions_ChallengeResponse(buffer[4].ref[u8&], sequence, q_result[0].ref[mutable u8&])
     elif command == 0xc0u8 or command == 0xc1u8 or command == 0xc2u8 or command == 0xc3u8 or command == 0xc4u8 or command == 0xc6u8 or command == 0xc7u8 or command == 0xc8u8:
         Dimensions_Blank(0x01u8, sequence, q_result[0].ref[mutable u8&])
     elif command == 0xd2u8:
-        q_result[0] <- 0x55u8
-        q_result[1] <- 0x12u8
-        q_result[2] <- sequence
-        q_result[3] <- 0u8
-        q_result[20] <- Dimensions_Checksum(q_result[0].ref[u8&], 20)
+        Dimensions_QueryBlock(buffer[4], buffer[5], sequence, q_result[0].ref[mutable u8&])
     elif command == 0xd3u8:
-        q_result[0] <- 0x55u8
-        q_result[1] <- 0x02u8
-        q_result[2] <- sequence
-        q_result[3] <- 0u8
-        q_result[4] <- Dimensions_Checksum(q_result[0].ref[u8&], 4)
+        Dimensions_WriteBlock(buffer[4], buffer[5], buffer[6].ref[u8&], sequence, q_result[0].ref[mutable u8&])
     elif command == 0xd4u8:
-        q_result[0] <- 0x55u8
-        q_result[1] <- 0x06u8
-        q_result[2] <- sequence
-        q_result[3] <- 0u8
-        q_result[4] <- 0u8
-        q_result[5] <- 0u8
-        q_result[6] <- 0u8
-        q_result[7] <- 0u8
-        q_result[8] <- Dimensions_Checksum(q_result[0].ref[u8&], 8)
+        Dimensions_GetModel(buffer[4].ref[u8&], sequence, q_result[0].ref[mutable u8&])
     else:
         Dimensions_Blank(0x01u8, sequence, q_result[0].ref[mutable u8&])
     Dimensions_QueuePush(q_result[0].ref[u8&])

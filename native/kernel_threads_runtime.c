@@ -40,6 +40,10 @@ typedef struct ElisaKernelSem {
     pthread_cond_t cond;
     int value;
     int max_value;
+    int waiters;
+    int canceled;
+    int deleted;
+    int destroy_requested;
 } ElisaKernelSem;
 
 typedef struct ElisaKernelEventFlag {
@@ -48,6 +52,8 @@ typedef struct ElisaKernelEventFlag {
     uint64_t bits;
     int waiters;
     int canceled;
+    int deleted;
+    int destroy_requested;
 } ElisaKernelEventFlag;
 
 static int elisa_kernel_make_deadline_from_usec(uint64_t usec, struct timespec *out) {
@@ -574,6 +580,9 @@ int elisa_kernel_sem_destroy(void *handle) {
     if (state == NULL) {
         return 22;
     }
+    if (state->waiters > 0) {
+        return 16;
+    }
     pthread_mutex_destroy(&state->mutex);
     pthread_cond_destroy(&state->cond);
     free(state);
@@ -586,10 +595,31 @@ int elisa_kernel_sem_wait(void *handle, int need_count) {
         return 22;
     }
     pthread_mutex_lock(&state->mutex);
+    state->waiters += 1;
     while (state->value < need_count) {
+        if (state->deleted) {
+            state->waiters -= 1;
+            const int should_finalize = state->destroy_requested && state->waiters == 0;
+            pthread_mutex_unlock(&state->mutex);
+            if (should_finalize) {
+                pthread_mutex_destroy(&state->mutex);
+                pthread_cond_destroy(&state->cond);
+                free(state);
+            }
+            return 13;
+        }
+        if (state->canceled) {
+            state->waiters -= 1;
+            if (state->waiters == 0) {
+                state->canceled = 0;
+            }
+            pthread_mutex_unlock(&state->mutex);
+            return 85;
+        }
         pthread_cond_wait(&state->cond, &state->mutex);
     }
     state->value -= need_count;
+    state->waiters -= 1;
     pthread_mutex_unlock(&state->mutex);
     return 0;
 }
@@ -620,18 +650,41 @@ int elisa_kernel_sem_timedwait(void *handle, int need_count, uint64_t usec) {
         return elisa_kernel_thread_errno(err);
     }
     pthread_mutex_lock(&state->mutex);
+    state->waiters += 1;
     while (state->value < need_count) {
+        if (state->deleted) {
+            state->waiters -= 1;
+            const int should_finalize = state->destroy_requested && state->waiters == 0;
+            pthread_mutex_unlock(&state->mutex);
+            if (should_finalize) {
+                pthread_mutex_destroy(&state->mutex);
+                pthread_cond_destroy(&state->cond);
+                free(state);
+            }
+            return 13;
+        }
+        if (state->canceled) {
+            state->waiters -= 1;
+            if (state->waiters == 0) {
+                state->canceled = 0;
+            }
+            pthread_mutex_unlock(&state->mutex);
+            return 85;
+        }
         err = pthread_cond_timedwait(&state->cond, &state->mutex, &deadline);
         if (err == ETIMEDOUT) {
+            state->waiters -= 1;
             pthread_mutex_unlock(&state->mutex);
             return 60;
         }
         if (err != 0) {
+            state->waiters -= 1;
             pthread_mutex_unlock(&state->mutex);
             return elisa_kernel_thread_errno(err);
         }
     }
     state->value -= need_count;
+    state->waiters -= 1;
     pthread_mutex_unlock(&state->mutex);
     return 0;
 }
@@ -677,6 +730,44 @@ int elisa_kernel_sem_set(void *handle, int value) {
     return 0;
 }
 
+int elisa_kernel_sem_cancel(void *handle, int set_value, int *out_waiters) {
+    ElisaKernelSem *state = (ElisaKernelSem *)handle;
+    if (state == NULL || set_value < 0 || set_value > state->max_value) {
+        return 22;
+    }
+    pthread_mutex_lock(&state->mutex);
+    if (out_waiters != NULL) {
+        *out_waiters = state->waiters;
+    }
+    state->value = set_value;
+    state->canceled = 1;
+    pthread_cond_broadcast(&state->cond);
+    pthread_mutex_unlock(&state->mutex);
+    return 0;
+}
+
+int elisa_kernel_sem_delete(void *handle, int *out_waiters) {
+    ElisaKernelSem *state = (ElisaKernelSem *)handle;
+    if (state == NULL) {
+        return 22;
+    }
+    pthread_mutex_lock(&state->mutex);
+    if (out_waiters != NULL) {
+        *out_waiters = state->waiters;
+    }
+    state->deleted = 1;
+    state->destroy_requested = 1;
+    pthread_cond_broadcast(&state->cond);
+    const int finalize_now = state->waiters == 0;
+    pthread_mutex_unlock(&state->mutex);
+    if (finalize_now) {
+        pthread_mutex_destroy(&state->mutex);
+        pthread_cond_destroy(&state->cond);
+        free(state);
+    }
+    return 0;
+}
+
 static int elisa_kernel_event_matches(uint64_t bits, uint64_t pattern, uint32_t wait_mode) {
     const uint32_t low = wait_mode & 0x0fU;
     if (low == 0x01U) {
@@ -719,9 +810,34 @@ int elisa_kernel_event_destroy(void *handle) {
     if (state == NULL) {
         return 22;
     }
+    if (state->waiters > 0) {
+        return 16;
+    }
     pthread_mutex_destroy(&state->mutex);
     pthread_cond_destroy(&state->cond);
     free(state);
+    return 0;
+}
+
+int elisa_kernel_event_delete(void *handle, int *out_waiters) {
+    ElisaKernelEventFlag *state = (ElisaKernelEventFlag *)handle;
+    if (state == NULL) {
+        return 22;
+    }
+    pthread_mutex_lock(&state->mutex);
+    if (out_waiters != NULL) {
+        *out_waiters = state->waiters;
+    }
+    state->deleted = 1;
+    state->destroy_requested = 1;
+    pthread_cond_broadcast(&state->cond);
+    const int finalize_now = state->waiters == 0;
+    pthread_mutex_unlock(&state->mutex);
+    if (finalize_now) {
+        pthread_mutex_destroy(&state->mutex);
+        pthread_cond_destroy(&state->cond);
+        free(state);
+    }
     return 0;
 }
 
@@ -800,7 +916,7 @@ int elisa_kernel_event_wait(void *handle, uint64_t pattern, uint32_t wait_mode, 
 
     pthread_mutex_lock(&state->mutex);
     state->waiters += 1;
-    while (!elisa_kernel_event_matches(state->bits, pattern, wait_mode) && !state->canceled) {
+    while (!elisa_kernel_event_matches(state->bits, pattern, wait_mode) && !state->canceled && !state->deleted) {
         if (usec == UINT64_MAX) {
             err = pthread_cond_wait(&state->cond, &state->mutex);
         } else {
@@ -826,6 +942,16 @@ int elisa_kernel_event_wait(void *handle, uint64_t pattern, uint32_t wait_mode, 
         state->canceled = 0;
         pthread_mutex_unlock(&state->mutex);
         return 85;
+    }
+    if (state->deleted) {
+        const int should_finalize = state->destroy_requested && state->waiters == 0;
+        pthread_mutex_unlock(&state->mutex);
+        if (should_finalize) {
+            pthread_mutex_destroy(&state->mutex);
+            pthread_cond_destroy(&state->cond);
+            free(state);
+        }
+        return 13;
     }
     elisa_kernel_event_apply_clear(state, pattern, wait_mode);
     pthread_mutex_unlock(&state->mutex);
