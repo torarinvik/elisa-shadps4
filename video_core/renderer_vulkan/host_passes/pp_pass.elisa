@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./common.elisa"
+
+struct PostProcessingPassSettings:
+    gamma: mutable f32
+    hdr: mutable u32
+
+def PostProcessingPassSettings_default() -> PostProcessingPassSettings:
+    return PostProcessingPassSettings(1.0, 0u32)
+
+struct PostProcessingPass:
+    pipeline: mutable u64
+    pipeline_layout: mutable u64
+    desc_set_layout: mutable u64
+    sampler: mutable u64
+
+def PostProcessingPass_new() -> PostProcessingPass:
+    return PostProcessingPass(0u64, 0u64, 0u64, 0u64)
+
+def PostProcessingPass_Create(self: mutable PostProcessingPass&, device: u64, surface_format: u32) -> void:
+    _ = device
+    _ = surface_format
+    self.desc_set_layout <- HostPass_AllocHandle()
+    self.pipeline_layout <- HostPass_AllocHandle()
+    self.pipeline <- HostPass_AllocHandle()
+    self.sampler <- HostPass_AllocHandle()
+
+def PostProcessingPass_Render(self: mutable PostProcessingPass&, cmdbuf: mutable HostPassCommandBuffer&, input: u64, input_size: VkExtent2D, frame: VkPresenterFrame, settings: PostProcessingPassSettings) -> void:
+    if HostPass_IsStrictRenderValidationEnabled():
+        can Abort.Panic:
+            assert input != 0u64
+            assert input_size.width > 0u32 and input_size.height > 0u32
+            assert frame.image != 0u64
+            assert frame.image_view != 0u64
+            assert frame.imgui_texture != 0u64
+            assert frame.width > 0u32 and frame.height > 0u32
+
+    if HostPass_IsVkHostMarkersEnabled():
+        HostPass_LogBeginLabel(cmdbuf, "Host/Post processing")
+
+    if HostPass_ShouldForcePostProcessColor():
+        if not HostPass_PostProcessForceColorLogged:
+            HostPass_PostProcessForceColorLogged <- true
+        HostPass_LogBeginRendering(cmdbuf, frame.width, frame.height, frame.image_view)
+        HostPass_LogEndRendering(cmdbuf)
+        HostPass_LogPipelineBarrier(cmdbuf, frame.image)
+        if HostPass_IsVkHostMarkersEnabled():
+            HostPass_LogEndLabel(cmdbuf)
+        return
+
+    HostPass_LogBindGraphicsPipeline(cmdbuf, self.pipeline)
+    HostPass_LogSetViewport(cmdbuf, frame.width, frame.height)
+    HostPass_LogSetScissor(cmdbuf, frame.width, frame.height)
+    HostPass_LogPushDescriptorSet(cmdbuf, input, frame.image_view)
+    HostPass_LogPushConstants(cmdbuf, 0u32, settings.gamma, settings.hdr)
+    HostPass_LogBeginRendering(cmdbuf, frame.width, frame.height, frame.image_view)
+    HostPass_LogDraw(cmdbuf, 3u32, 1u32)
+    HostPass_LogEndRendering(cmdbuf)
+    HostPass_LogPipelineBarrier(cmdbuf, frame.image)
+
+    if HostPass_IsVkHostMarkersEnabled():
+        HostPass_LogEndLabel(cmdbuf)

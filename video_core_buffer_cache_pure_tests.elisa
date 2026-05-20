@@ -1,0 +1,106 @@
+include "../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "./video_core/buffer_cache/region_definitions.elisa"
+include "./video_core/buffer_cache/range_set.elisa"
+include "./video_core/buffer_cache/region_manager.elisa"
+include "./video_core/buffer_cache/memory_tracker.elisa"
+include "./video_core/buffer_cache/buffer.elisa"
+include "./video_core/buffer_cache/fault_manager.elisa"
+include "./video_core/buffer_cache/buffer_cache.elisa"
+
+@test
+def video_core_buffer_cache_region_bits_and_manager_contracts() -> void:
+    can Abort.Panic, Memory.Allocate:
+        bits: mutable RegionBits = zeroed
+        RegionBits_Clear(bits.ref[mutable RegionBits&])
+        assert RegionBits_None(bits.ref[RegionBits&])
+        RegionBits_SetRange(bits.ref[mutable RegionBits&], 4u64, 8u64)
+        assert RegionBits_Any(bits.ref[RegionBits&])
+        assert RegionBits_IsSet(bits.ref[RegionBits&], 4u64)
+        assert RegionBits_IsSet(bits.ref[RegionBits&], 7u64)
+        assert not RegionBits_IsSet(bits.ref[RegionBits&], 8u64)
+        RegionBits_UnsetRange(bits.ref[mutable RegionBits&], 4u64, 8u64)
+        assert RegionBits_None(bits.ref[RegionBits&])
+
+        manager: mutable RegionManager = RegionManager_New(0x400000u64)
+        RegionManager_ChangeRegionState(manager.ref[mutable RegionManager&], REGION_TYPE_GPU, true, 0x401000u64, 0x3000u64)
+        assert RegionManager_IsRegionModified(manager.ref[RegionManager&], REGION_TYPE_GPU, 0x1000u64, 0x2000u64)
+        out: mutable RegionRangeList = RegionRangeList_New(scratch_arena.ref[mutable Arena&])
+        RegionManager_ForEachModifiedRange(manager.ref[mutable RegionManager&], REGION_TYPE_GPU, true, 0x401000u64, 0x4000i64, out.ref[mutable RegionRangeList&])
+        assert out.ranges.count == 1
+        assert out.ranges[0].begin == 0x401000u64
+        assert out.ranges[0].end == 0x404000u64
+        assert not RegionManager_IsRegionModified(manager.ref[RegionManager&], REGION_TYPE_GPU, 0x1000u64, 0x2000u64)
+
+@test
+def video_core_buffer_cache_range_set_contracts() -> void:
+    can Abort.Panic, Memory.Allocate:
+        set: mutable RangeSet = RangeSet_New(scratch_arena.ref[mutable Arena&])
+        RangeSet_Add(set.ref[mutable RangeSet&], 0x1000u64, 0x1000usize)
+        RangeSet_Add(set.ref[mutable RangeSet&], 0x2000u64, 0x1000usize)
+        assert RangeSet_Contains(set.ref[RangeSet&], 0x1000u64, 0x1800usize)
+        assert RangeSet_Intersects(set.ref[RangeSet&], 0x2800u64, 0x200usize)
+        RangeSet_Subtract(set.ref[mutable RangeSet&], 0x1800u64, 0x400usize)
+        assert not RangeSet_Contains(set.ref[RangeSet&], 0x1800u64, 0x300usize)
+        assert RangeSet_Intersects(set.ref[RangeSet&], 0x1000u64, 0x200usize)
+
+        map: mutable RangeMap[u32] = RangeMap_New[u32](scratch_arena.ref[mutable Arena&])
+        RangeMap_Add[u32](map.ref[mutable RangeMap[u32]&], 0x3000u64, 0x1000usize, 77u32)
+        assert RangeMap_Contains[u32](map.ref[RangeMap[u32]&], 0x3000u64, 0x800usize)
+        RangeMap_Subtract[u32](map.ref[mutable RangeMap[u32]&], 0x3400u64, 0x200usize)
+        assert not RangeMap_Contains[u32](map.ref[RangeMap[u32]&], 0x3400u64, 0x100usize)
+
+@test
+def video_core_buffer_cache_memory_tracker_contracts() -> void:
+    can Abort.Panic, Memory.Allocate:
+        tracker: mutable MemoryTracker = MemoryTracker_New(scratch_arena.ref[mutable Arena&])
+        base: u64 = 0x200000u64
+        size: u64 = 0x5000u64
+        MemoryTracker_MarkRegionAsCpuModified(tracker.ref[mutable MemoryTracker&], base, size)
+        assert MemoryTracker_IsRegionCpuModified(tracker.ref[mutable MemoryTracker&], base, size)
+        MemoryTracker_UnmarkRegionAsGpuModified(tracker.ref[mutable MemoryTracker&], base, size)
+        assert not MemoryTracker_IsRegionGpuModified(tracker.ref[mutable MemoryTracker&], base, size)
+
+@test
+def video_core_buffer_cache_buffer_and_stream_contracts() -> void:
+    can Abort.Panic, Memory.Allocate:
+        buf: mutable Buffer = Buffer_New(0x100000u64, 0x4000usize, MEMORY_USAGE_STREAM)
+        Buffer_IncreaseStreamScore(buf.ref[mutable Buffer&], 5)
+        assert Buffer_StreamScore(buf.ref[Buffer&]) == 5
+        assert Buffer_IsInBounds(buf.ref[Buffer&], 0x100000u64, 0x100u64)
+        assert not Buffer_IsInBounds(buf.ref[Buffer&], 0x0fffffu64, 0x100u64)
+        Buffer_SetLRUId(buf.ref[mutable Buffer&], 99u64)
+        assert Buffer_LRUId(buf.ref[Buffer&]) == 99u64
+        barrier: BufferBarrier = Buffer_GetBarrier(buf.ref[mutable Buffer&], BUFFER_ACCESS_MEMORY_READ, BUFFER_STAGE_ALL_COMMANDS, 0u32)
+        assert not barrier.valid
+        UniqueBuffer_Create(buf.buffer.ref[mutable UniqueBuffer&], 0x44u64, 0x88u64)
+        barrier2: BufferBarrier = Buffer_GetBarrier(buf.ref[mutable Buffer&], BUFFER_ACCESS_TRANSFER_WRITE, BUFFER_STAGE_TRANSFER, 16u32)
+        assert barrier2.valid
+
+        stream: mutable StreamBuffer = StreamBuffer_New(scratch_arena.ref[mutable Arena&], MEMORY_USAGE_STREAM, 4096u64)
+        mapped: StreamMapResult = StreamBuffer_Map(stream.ref[mutable StreamBuffer&], 256u64, 64u64, true)
+        assert mapped.ok
+        StreamBuffer_Commit(stream.ref[mutable StreamBuffer&], 7u64)
+        assert stream.offset >= 256u64
+
+@test
+def video_core_buffer_cache_surface_contracts() -> void:
+    can Abort.Panic, Memory.Allocate:
+        cache: mutable BufferCache = BufferCache_New(scratch_arena.ref[mutable Arena&])
+        assert cache.slot_buffers.count >= 1
+        assert cache.trigger_gc_memory == BUFFER_CACHE_DEFAULT_TRIGGER_GC_MEMORY.u64()
+        assert cache.critical_gc_memory == BUFFER_CACHE_DEFAULT_CRITICAL_GC_MEMORY.u64()
+
+        fill_addr: u64 = 0x300000u64
+        BufferCache_FillBuffer(cache.ref[mutable BufferCache&], fill_addr, 0x100u32, 0xdeadbeefu32, false)
+        assert BufferCache_IsRegionCpuModified(cache.ref[mutable BufferCache&], fill_addr, 0x100usize)
+
+        ref_info: BufferCacheBufferRef = BufferCache_ObtainBuffer(cache.ref[mutable BufferCache&], fill_addr, 0x100u32, true)
+        assert ref_info.valid
+
+        BufferCache_CopyBuffer(cache.ref[mutable BufferCache&], fill_addr + 0x200u64, fill_addr, 0x80u32, false, false)
+        assert BufferCache_IsRegionCpuModified(cache.ref[mutable BufferCache&], fill_addr + 0x200u64, 0x80usize)
+
+        BufferCache_ProcessFaultBuffer(cache.ref[mutable BufferCache&])
+        assert cache.fault_manager.process_count == 1u64
+        BufferCache_RunGarbageCollector(cache.ref[mutable BufferCache&])
+        assert cache.gc_run_count == 1u64

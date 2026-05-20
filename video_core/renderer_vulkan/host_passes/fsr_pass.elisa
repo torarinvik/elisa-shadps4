@@ -1,0 +1,281 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./common.elisa"
+
+extern exp2f(x: f32) -> f32
+
+const FSR_THREAD_GROUP_WORK_REGION_DIM: u32 = 16
+
+struct FSRConstants:
+    Const0: mutable u32[4]
+    Const1: mutable u32[4]
+    Const2: mutable u32[4]
+    Const3: mutable u32[4]
+    Sample: mutable u32[4]
+
+def FSRConstants_zero() -> FSRConstants:
+    return FSRConstants([0u32, 0u32, 0u32, 0u32], [0u32, 0u32, 0u32, 0u32], [0u32, 0u32, 0u32, 0u32], [0u32, 0u32, 0u32, 0u32], [0u32, 0u32, 0u32, 0u32])
+
+struct FsrPassSettings:
+    enable: mutable bool
+    use_rcas: mutable bool
+    rcas_attenuation: mutable f32
+
+def FsrPassSettings_default() -> FsrPassSettings:
+    return FsrPassSettings(true, true, 0.25)
+
+struct FsrPassImg:
+    id: mutable u8
+    dirty: mutable bool
+    intermediary_image: mutable u64
+    intermediary_image_view: mutable u64
+    output_image: mutable u64
+    output_image_view: mutable u64
+
+def FsrPassImg_new(id: u8) -> FsrPassImg:
+    return FsrPassImg(id, true, 0u64, 0u64, 0u64, 0u64)
+
+struct FsrPass:
+    device: mutable u64
+    num_images: mutable u32
+    descriptor_set_layout: mutable u64
+    easu_descriptor_set: mutable u64
+    rcas_descriptor_set: mutable u64
+    sampler: mutable u64
+    pipeline_layout: mutable u64
+    easu_pipeline: mutable u64
+    rcas_pipeline: mutable u64
+    cur_size: mutable VkExtent2D
+    cur_image: mutable u32
+    available_imgs: mutable darray[FsrPassImg]
+    last_easu_constants: mutable FSRConstants
+    last_rcas_constants: mutable FSRConstants
+    last_dispatch_x: mutable u32
+    last_dispatch_y: mutable u32
+    last_used_rcas: mutable bool
+
+def FsrPass_new() -> FsrPass:
+    return FsrPass(0u64, 0u32, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, VkExtent2D_new(0u32, 0u32), 0u32, [], FSRConstants_zero(), FSRConstants_zero(), 0u32, 0u32, false)
+
+global mutable DebugState_IsUsingFsr: bool = false
+
+def DebugState_GetIsUsingFsr() -> bool:
+    return DebugState_IsUsingFsr
+
+def DebugState_SetIsUsingFsr(enabled: bool) -> void:
+    DebugState_IsUsingFsr <- enabled
+
+def FsrPass_F32Bits(value: f32) -> u32:
+    return value.ref[f32&].cast[u32&][0]
+
+def FsrPass_F32ToHalfBits(value: f32) -> u16:
+    bits: u32 = FsrPass_F32Bits(value)
+    sign: u32 = (bits >> 16u32) & 0x8000u32
+    exp_i: mutable int = ((bits >> 23u32) & 0xffu32).int() - 127 + 15
+    mant: mutable u32 = bits & 0x007fffffu32
+
+    if exp_i <= 0:
+        if exp_i < -10:
+            return sign.u16()
+        shift: u32 = (1 - exp_i).u32()
+        mant <- (mant | 0x00800000u32) >> shift
+        if (mant & 0x00001000u32) != 0u32:
+            mant <- mant + 0x00002000u32
+        return (sign | (mant >> 13u32)).u16()
+
+    if exp_i >= 31:
+        return (sign | 0x7c00u32).u16()
+
+    mant <- mant + 0x00001000u32
+    if (mant & 0x00800000u32) != 0u32:
+        mant <- 0u32
+        exp_i <- exp_i + 1
+    if exp_i >= 31:
+        return (sign | 0x7c00u32).u16()
+    return (sign | (exp_i.u32() << 10u32) | (mant >> 13u32)).u16()
+
+def FsrPass_PackHalf2(x: f32, y: f32) -> u32:
+    lo: u32 = FsrPass_F32ToHalfBits(x).u32()
+    hi: u32 = FsrPass_F32ToHalfBits(y).u32()
+    return lo | (hi << 16u32)
+
+def FsrPass_BuildEasuConstants(input_size: VkExtent2D, output_size: VkExtent2D) -> FSRConstants:
+    constants: mutable FSRConstants = FSRConstants_zero()
+    if input_size.width == 0u32 or input_size.height == 0u32 or output_size.width == 0u32 or output_size.height == 0u32:
+        return constants
+
+    input_view_x: f32 = input_size.width.f32()
+    input_view_y: f32 = input_size.height.f32()
+    input_size_x: f32 = input_size.width.f32()
+    input_size_y: f32 = input_size.height.f32()
+    output_size_x: f32 = output_size.width.f32()
+    output_size_y: f32 = output_size.height.f32()
+
+    constants.Const0[0] <- FsrPass_F32Bits(input_view_x / output_size_x)
+    constants.Const0[1] <- FsrPass_F32Bits(input_view_y / output_size_y)
+    constants.Const0[2] <- FsrPass_F32Bits(0.5 * input_view_x / output_size_x - 0.5)
+    constants.Const0[3] <- FsrPass_F32Bits(0.5 * input_view_y / output_size_y - 0.5)
+
+    constants.Const1[0] <- FsrPass_F32Bits(1.0 / input_size_x)
+    constants.Const1[1] <- FsrPass_F32Bits(1.0 / input_size_y)
+    constants.Const1[2] <- FsrPass_F32Bits(1.0 / input_size_x)
+    constants.Const1[3] <- FsrPass_F32Bits(-1.0 / input_size_y)
+
+    constants.Const2[0] <- FsrPass_F32Bits(-1.0 / input_size_x)
+    constants.Const2[1] <- FsrPass_F32Bits(2.0 / input_size_y)
+    constants.Const2[2] <- FsrPass_F32Bits(1.0 / input_size_x)
+    constants.Const2[3] <- FsrPass_F32Bits(2.0 / input_size_y)
+
+    constants.Const3[0] <- FsrPass_F32Bits(0.0 / input_size_x)
+    constants.Const3[1] <- FsrPass_F32Bits(4.0 / input_size_y)
+    constants.Const3[2] <- 0u32
+    constants.Const3[3] <- 0u32
+    return constants
+
+def FsrPass_BuildRcasConstants(rcas_attenuation: f32) -> FSRConstants:
+    constants: mutable FSRConstants = FSRConstants_zero()
+    sharpness: f32 = exp2f(0.0 - rcas_attenuation)
+    constants.Const0[0] <- FsrPass_F32Bits(sharpness)
+    constants.Const0[1] <- FsrPass_PackHalf2(sharpness, sharpness)
+    constants.Const0[2] <- 0u32
+    constants.Const0[3] <- 0u32
+    return constants
+
+def FsrPass_Create(self: mutable FsrPass&, device: u64, allocator: u64, num_images: u32) -> void:
+    _ = allocator
+    self.device <- device
+    self.num_images <- num_images
+    self.descriptor_set_layout <- HostPass_AllocHandle()
+    self.easu_descriptor_set <- HostPass_AllocHandle()
+    self.rcas_descriptor_set <- HostPass_AllocHandle()
+    self.sampler <- HostPass_AllocHandle()
+    self.pipeline_layout <- HostPass_AllocHandle()
+    self.easu_pipeline <- HostPass_AllocHandle()
+    self.rcas_pipeline <- HostPass_AllocHandle()
+    self.cur_size <- VkExtent2D_new(0u32, 0u32)
+    self.cur_image <- 0u32
+    self.available_imgs.count <- 0
+    self.last_easu_constants <- FSRConstants_zero()
+    self.last_rcas_constants <- FSRConstants_zero()
+    self.last_dispatch_x <- 0u32
+    self.last_dispatch_y <- 0u32
+    self.last_used_rcas <- false
+
+    i: mutable u32 = 0u32
+    while i < num_images:
+        can Memory.Allocate, Abort.Panic:
+            owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+            in owner:
+                self.available_imgs.push(FsrPassImg_new(i.u8()))
+        i <- i + 1u32
+
+def FsrPass_ResizeAndInvalidate(self: mutable FsrPass&, width: u32, height: u32) -> void:
+    self.cur_size <- VkExtent2D_new(width, height)
+    i: mutable usize = 0
+    while i < self.available_imgs.count:
+        self.available_imgs[i].dirty <- true
+        i <- i + 1
+
+def FsrPass_CreateImages(self: mutable FsrPass&, img: mutable FsrPassImg&) -> void:
+    _ = self
+    img.dirty <- false
+    img.intermediary_image_view <- 0u64
+    img.output_image_view <- 0u64
+    img.intermediary_image <- 0u64
+    img.output_image <- 0u64
+    img.intermediary_image <- HostPass_AllocHandle()
+    img.output_image <- HostPass_AllocHandle()
+    img.intermediary_image_view <- HostPass_AllocHandle()
+    img.output_image_view <- HostPass_AllocHandle()
+
+def FsrPass_Render(self: mutable FsrPass&, cmdbuf: mutable HostPassCommandBuffer&, input: u64, input_size: VkExtent2D, output_size: VkExtent2D, settings: FsrPassSettings, hdr: bool) -> u64:
+    if HostPass_IsStrictRenderValidationEnabled():
+        can Abort.Panic:
+            assert input != 0u64
+            assert input_size.width > 0u32 and input_size.height > 0u32
+            assert output_size.width > 0u32 and output_size.height > 0u32
+
+    if not settings.enable:
+        DebugState_IsUsingFsr <- false
+        return input
+
+    if input_size.width >= output_size.width and input_size.height >= output_size.height:
+        DebugState_IsUsingFsr <- false
+        return input
+
+    if self.available_imgs.count == 0:
+        DebugState_IsUsingFsr <- false
+        return input
+
+    DebugState_IsUsingFsr <- true
+
+    if not VkExtent2D_eq(self.cur_size, output_size):
+        FsrPass_ResizeAndInvalidate(self, output_size.width, output_size.height)
+    width: u32 = self.cur_size.width
+    height: u32 = self.cur_size.height
+
+    index: usize = self.cur_image.usize()
+    img: mutable FsrPassImg& = self.available_imgs[index].ref[mutable FsrPassImg&]
+    self.cur_image <- self.cur_image + 1u32
+    if self.cur_image >= self.available_imgs.count.u32():
+        self.cur_image <- 0u32
+
+    if img.dirty:
+        FsrPass_CreateImages(self, img)
+
+    if HostPass_IsStrictRenderValidationEnabled():
+        can Abort.Panic:
+            assert img.intermediary_image != 0u64
+            assert img.output_image != 0u64
+            assert img.intermediary_image_view != 0u64
+            assert img.output_image_view != 0u64
+            assert width > 0u32 and height > 0u32
+
+    if HostPass_IsVkHostMarkersEnabled():
+        HostPass_LogBeginLabel(cmdbuf, "Host/FSR")
+
+    dispatch_x: u32 = (width + (FSR_THREAD_GROUP_WORK_REGION_DIM - 1u32)) / FSR_THREAD_GROUP_WORK_REGION_DIM
+    dispatch_y: u32 = (height + (FSR_THREAD_GROUP_WORK_REGION_DIM - 1u32)) / FSR_THREAD_GROUP_WORK_REGION_DIM
+    self.last_dispatch_x <- dispatch_x
+    self.last_dispatch_y <- dispatch_y
+
+    HostPass_LogPipelineBarrier(cmdbuf, img.intermediary_image)
+    HostPass_LogPipelineBarrier(cmdbuf, img.output_image)
+
+    constants: mutable FSRConstants = FsrPass_BuildEasuConstants(input_size, self.cur_size)
+    constants.Sample[0] <- 1u32 if hdr and not settings.use_rcas else 0u32
+    self.last_easu_constants <- constants
+
+    if settings.use_rcas:
+        self.last_used_rcas <- true
+
+        HostPass_LogBindComputePipeline(cmdbuf, self.easu_pipeline)
+        HostPass_LogPushDescriptorSet(cmdbuf, input, img.intermediary_image_view)
+        HostPass_LogPushConstants(cmdbuf, constants.Sample[0])
+        HostPass_LogDispatch(cmdbuf, dispatch_x, dispatch_y, 1u32)
+
+        HostPass_LogPipelineBarrier(cmdbuf, img.intermediary_image)
+
+        rcas_constants: mutable FSRConstants = FsrPass_BuildRcasConstants(settings.rcas_attenuation)
+        rcas_constants.Sample[0] <- 1u32 if hdr else 0u32
+        self.last_rcas_constants <- rcas_constants
+
+        HostPass_LogBindComputePipeline(cmdbuf, self.rcas_pipeline)
+        HostPass_LogPushDescriptorSet(cmdbuf, img.intermediary_image_view, img.output_image_view)
+        HostPass_LogPushConstants(cmdbuf, rcas_constants.Sample[0])
+        HostPass_LogDispatch(cmdbuf, dispatch_x, dispatch_y, 1u32)
+    else:
+        self.last_used_rcas <- false
+        self.last_rcas_constants <- FSRConstants_zero()
+        HostPass_LogBindComputePipeline(cmdbuf, self.easu_pipeline)
+        HostPass_LogPushDescriptorSet(cmdbuf, input, img.output_image_view)
+        HostPass_LogPushConstants(cmdbuf, constants.Sample[0])
+        HostPass_LogDispatch(cmdbuf, dispatch_x, dispatch_y, 1u32)
+
+    HostPass_LogPipelineBarrier(cmdbuf, img.output_image)
+
+    if HostPass_IsVkHostMarkersEnabled():
+        HostPass_LogEndLabel(cmdbuf)
+
+    return img.output_image_view

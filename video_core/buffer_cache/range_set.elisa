@@ -1,0 +1,334 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+const RANGESET_U64_MAX: u64 = 0xffffffffffffffffu64
+
+def RangeSet_SaturatingAdd(base: u64, delta: u64) -> u64:
+    if RANGESET_U64_MAX - base < delta:
+        return RANGESET_U64_MAX
+    return base + delta
+
+struct RangeInterval:
+    begin: mutable u64
+    end: mutable u64
+
+def RangeInterval_New(begin: u64, end: u64) -> RangeInterval:
+    return RangeInterval(begin, end)
+
+def RangeInterval_IsValid(interval: RangeInterval) -> bool:
+    return interval.end > interval.begin
+
+def RangeInterval_Contains(interval: RangeInterval, begin: u64, end: u64) -> bool:
+    return begin >= interval.begin and end <= interval.end and end >= begin
+
+def RangeInterval_Intersects(interval: RangeInterval, begin: u64, end: u64) -> bool:
+    if end <= begin:
+        return false
+    return interval.begin < end and begin < interval.end
+
+struct RangeSet:
+    owner: mutable Arena&?
+    ranges: mutable darray[RangeInterval]
+
+def RangeSet_New(owner: mutable Arena&) -> RangeSet:
+    out: mutable RangeSet = zeroed
+    out.owner as & <- owner
+    return out
+
+def RangeSet_Clear(self: mutable RangeSet&) -> void:
+    self.ranges.clear()
+
+def RangeSet_Normalize(self: mutable RangeSet&) -> void:
+    can Memory.Allocate, Abort.Panic:
+        if self.ranges.count <= 1:
+            return
+
+        i: mutable usize = 0
+        while i < self.ranges.count:
+            j: mutable usize = i + 1
+            while j < self.ranges.count:
+                if self.ranges[j].begin < self.ranges[i].begin:
+                    tmp: RangeInterval = self.ranges[i]
+                    self.ranges[i] <- self.ranges[j]
+                    self.ranges[j] <- tmp
+                j <- j + 1
+            i <- i + 1
+
+        merged: mutable darray[RangeInterval] = []
+        assert self.owner != null
+        owner: mutable Arena& = self.owner
+        in owner:
+            idx: mutable usize = 0
+            while idx < self.ranges.count:
+                current: RangeInterval = self.ranges[idx]
+                if not RangeInterval_IsValid(current):
+                    idx <- idx + 1
+                    continue
+                while idx + 1 < self.ranges.count:
+                    next: RangeInterval = self.ranges[idx + 1]
+                    if next.begin > current.end:
+                        break
+                    if next.end > current.end:
+                        current.end <- next.end
+                    idx <- idx + 1
+                merged.push(current)
+                idx <- idx + 1
+
+        self.ranges <- merged
+
+def RangeSet_Add(self: mutable RangeSet&, base_address: u64, size: usize) -> void:
+    can Memory.Allocate, Abort.Panic:
+        if size == 0:
+            return
+        end_address: u64 = RangeSet_SaturatingAdd(base_address, size.u64())
+        if end_address <= base_address:
+            return
+        assert self.owner != null
+        owner: mutable Arena& = self.owner
+        in owner:
+            self.ranges.push(RangeInterval_New(base_address, end_address))
+        RangeSet_Normalize(self.ref[mutable RangeSet&])
+
+def RangeSet_Subtract(self: mutable RangeSet&, base_address: u64, size: usize) -> void:
+    can Memory.Allocate, Abort.Panic:
+        if size == 0:
+            return
+        end_address: u64 = RangeSet_SaturatingAdd(base_address, size.u64())
+        if end_address <= base_address:
+            return
+
+        assert self.owner != null
+        owner: mutable Arena& = self.owner
+        remainder: mutable darray[RangeInterval] = []
+        in owner:
+            idx: mutable usize = 0
+            while idx < self.ranges.count:
+                interval: RangeInterval = self.ranges[idx]
+                if not RangeInterval_Intersects(interval, base_address, end_address):
+                    remainder.push(interval)
+                    idx <- idx + 1
+                    continue
+                if interval.begin < base_address:
+                    remainder.push(RangeInterval_New(interval.begin, base_address))
+                if interval.end > end_address:
+                    remainder.push(RangeInterval_New(end_address, interval.end))
+                idx <- idx + 1
+        self.ranges <- remainder
+        RangeSet_Normalize(self.ref[mutable RangeSet&])
+
+def RangeSet_Contains(self: RangeSet&, base_address: u64, size: usize) -> bool:
+    if size == 0:
+        return true
+    end_address: u64 = RangeSet_SaturatingAdd(base_address, size.u64())
+    if end_address <= base_address:
+        return false
+    i: mutable usize = 0
+    while i < self.ranges.count:
+        if RangeInterval_Contains(self.ranges[i], base_address, end_address):
+            return true
+        i <- i + 1
+    return false
+
+def RangeSet_Intersects(self: RangeSet&, base_address: u64, size: usize) -> bool:
+    if size == 0:
+        return false
+    end_address: u64 = RangeSet_SaturatingAdd(base_address, size.u64())
+    if end_address <= base_address:
+        return false
+    i: mutable usize = 0
+    while i < self.ranges.count:
+        if RangeInterval_Intersects(self.ranges[i], base_address, end_address):
+            return true
+        i <- i + 1
+    return false
+
+def RangeSet_CopyAll(self: RangeSet&, out: mutable darray[RangeInterval]&) -> void:
+    can Memory.Allocate, Abort.Panic:
+        out.clear()
+        i: mutable usize = 0
+        while i < self.ranges.count:
+            out.push(self.ranges[i])
+            i <- i + 1
+
+def RangeSet_CopyInRange(self: RangeSet&, base_address: u64, size: usize, out: mutable darray[RangeInterval]&) -> void:
+    can Memory.Allocate, Abort.Panic:
+        out.clear()
+        if size == 0:
+            return
+        end_address: u64 = RangeSet_SaturatingAdd(base_address, size.u64())
+        if end_address <= base_address:
+            return
+        i: mutable usize = 0
+        while i < self.ranges.count:
+            interval: RangeInterval = self.ranges[i]
+            if RangeInterval_Intersects(interval, base_address, end_address):
+                begin: u64 = interval.begin
+                end: u64 = interval.end
+                if begin < base_address:
+                    begin <- base_address
+                if end > end_address:
+                    end <- end_address
+                if end > begin:
+                    out.push(RangeInterval_New(begin, end))
+            i <- i + 1
+
+def RangeSet_CopyNotInRange(self: RangeSet&, base_address: u64, size: usize, out: mutable darray[RangeInterval]&) -> void:
+    can Memory.Allocate, Abort.Panic:
+        out.clear()
+        if size == 0:
+            return
+        end_address: u64 = RangeSet_SaturatingAdd(base_address, size.u64())
+        if end_address <= base_address:
+            return
+        in_range: mutable darray[RangeInterval] = []
+        RangeSet_CopyInRange(self, base_address, size, in_range.ref[mutable darray[RangeInterval]&])
+        cursor: mutable u64 = base_address
+        i: mutable usize = 0
+        while i < in_range.count:
+            it: RangeInterval = in_range[i]
+            if it.begin > cursor:
+                out.push(RangeInterval_New(cursor, it.begin))
+            cursor <- it.end
+            i <- i + 1
+        if cursor < end_address:
+            out.push(RangeInterval_New(cursor, end_address))
+
+struct RangeMapEntry[T]:
+    interval: mutable RangeInterval
+    value: mutable T
+
+struct RangeMap[T]:
+    owner: mutable Arena&?
+    entries: mutable darray[RangeMapEntry[T]]
+
+def RangeMap_New[T](owner: mutable Arena&) -> RangeMap[T]:
+    out: mutable RangeMap[T] = zeroed
+    out.owner as & <- owner
+    return out
+
+def RangeMap_Clear[T](self: mutable RangeMap[T]&) -> void:
+    self.entries.clear()
+
+def RangeMap_Add[T](self: mutable RangeMap[T]&, base_address: u64, size: usize, value: T) -> void:
+    can Memory.Allocate, Abort.Panic:
+        if size == 0:
+            return
+        end_address: u64 = RangeSet_SaturatingAdd(base_address, size.u64())
+        if end_address <= base_address:
+            return
+        assert self.owner != null
+        owner: mutable Arena& = self.owner
+        in owner:
+            self.entries.push(RangeMapEntry[T](RangeInterval_New(base_address, end_address), value))
+
+def RangeMap_Subtract[T](self: mutable RangeMap[T]&, base_address: u64, size: usize) -> void:
+    can Memory.Allocate, Abort.Panic:
+        if size == 0:
+            return
+        end_address: u64 = RangeSet_SaturatingAdd(base_address, size.u64())
+        if end_address <= base_address:
+            return
+        assert self.owner != null
+        owner: mutable Arena& = self.owner
+        out: mutable darray[RangeMapEntry[T]] = []
+        in owner:
+            i: mutable usize = 0
+            while i < self.entries.count:
+                entry: RangeMapEntry[T] = self.entries[i]
+                interval: RangeInterval = entry.interval
+                if not RangeInterval_Intersects(interval, base_address, end_address):
+                    out.push(entry)
+                    i <- i + 1
+                    continue
+                if interval.begin < base_address:
+                    out.push(RangeMapEntry[T](RangeInterval_New(interval.begin, base_address), entry.value))
+                if interval.end > end_address:
+                    out.push(RangeMapEntry[T](RangeInterval_New(end_address, interval.end), entry.value))
+                i <- i + 1
+        self.entries <- out
+
+def RangeMap_Contains[T](self: RangeMap[T]&, base_address: u64, size: usize) -> bool:
+    if size == 0:
+        return true
+    end_address: u64 = RangeSet_SaturatingAdd(base_address, size.u64())
+    if end_address <= base_address:
+        return false
+    i: mutable usize = 0
+    while i < self.entries.count:
+        if RangeInterval_Contains(self.entries[i].interval, base_address, end_address):
+            return true
+        i <- i + 1
+    return false
+
+def RangeMap_Intersects[T](self: RangeMap[T]&, base_address: u64, size: usize) -> bool:
+    if size == 0:
+        return false
+    end_address: u64 = RangeSet_SaturatingAdd(base_address, size.u64())
+    if end_address <= base_address:
+        return false
+    i: mutable usize = 0
+    while i < self.entries.count:
+        if RangeInterval_Intersects(self.entries[i].interval, base_address, end_address):
+            return true
+        i <- i + 1
+    return false
+
+def RangeMap_CopyAll[T](self: RangeMap[T]&, out: mutable darray[RangeMapEntry[T]]&) -> void:
+    can Memory.Allocate, Abort.Panic:
+        out.clear()
+        i: mutable usize = 0
+        while i < self.entries.count:
+            out.push(self.entries[i])
+            i <- i + 1
+
+def RangeMap_CopyInRange[T](self: RangeMap[T]&, base_address: u64, size: usize, out: mutable darray[RangeMapEntry[T]]&) -> void:
+    can Memory.Allocate, Abort.Panic:
+        out.clear()
+        if size == 0:
+            return
+        end_address: u64 = RangeSet_SaturatingAdd(base_address, size.u64())
+        if end_address <= base_address:
+            return
+        i: mutable usize = 0
+        while i < self.entries.count:
+            entry: RangeMapEntry[T] = self.entries[i]
+            interval: RangeInterval = entry.interval
+            if RangeInterval_Intersects(interval, base_address, end_address):
+                begin: u64 = interval.begin
+                end: u64 = interval.end
+                if begin < base_address:
+                    begin <- base_address
+                if end > end_address:
+                    end <- end_address
+                if end > begin:
+                    out.push(RangeMapEntry[T](RangeInterval_New(begin, end), entry.value))
+            i <- i + 1
+
+def SplitRangeMap_New[T](owner: mutable Arena&) -> RangeMap[T]:
+    return RangeMap_New[T](owner)
+
+def SplitRangeMap_Clear[T](self: mutable RangeMap[T]&) -> void:
+    RangeMap_Clear[T](self)
+
+def SplitRangeMap_Add[T](self: mutable RangeMap[T]&, base_address: u64, size: usize, value: T) -> void:
+    can Memory.Allocate, Abort.Panic:
+        RangeMap_Subtract[T](self, base_address, size)
+        RangeMap_Add[T](self, base_address, size, value)
+
+def SplitRangeMap_Subtract[T](self: mutable RangeMap[T]&, base_address: u64, size: usize) -> void:
+    can Memory.Allocate, Abort.Panic:
+        RangeMap_Subtract[T](self, base_address, size)
+
+def SplitRangeMap_Contains[T](self: RangeMap[T]&, base_address: u64, size: usize) -> bool:
+    return RangeMap_Contains[T](self, base_address, size)
+
+def SplitRangeMap_Intersects[T](self: RangeMap[T]&, base_address: u64, size: usize) -> bool:
+    return RangeMap_Intersects[T](self, base_address, size)
+
+def SplitRangeMap_CopyAll[T](self: RangeMap[T]&, out: mutable darray[RangeMapEntry[T]]&) -> void:
+    can Memory.Allocate, Abort.Panic:
+        RangeMap_CopyAll[T](self, out)
+
+def SplitRangeMap_CopyInRange[T](self: RangeMap[T]&, base_address: u64, size: usize, out: mutable darray[RangeMapEntry[T]]&) -> void:
+    can Memory.Allocate, Abort.Panic:
+        RangeMap_CopyInRange[T](self, base_address, size, out)

@@ -1,0 +1,211 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../../common/alignment.elisa"
+include "./buffer.elisa"
+include "./fault_manager.elisa"
+include "./memory_tracker.elisa"
+include "./range_set.elisa"
+
+const BUFFER_CACHE_CACHING_PAGEBITS: u32 = 14u32
+const BUFFER_CACHE_CACHING_PAGESIZE: u64 = 1u64 << BUFFER_CACHE_CACHING_PAGEBITS
+const BUFFER_CACHE_DEVICE_PAGESIZE: u64 = 16u64 * 1024u64
+const BUFFER_CACHE_CACHING_NUMPAGES: u64 = 1u64 << (40u64 - BUFFER_CACHE_CACHING_PAGEBITS.u64())
+const BUFFER_CACHE_BDA_PAGETABLE_SIZE: u64 = BUFFER_CACHE_CACHING_NUMPAGES * 8u64
+
+const BUFFER_CACHE_DEFAULT_TRIGGER_GC_MEMORY: i64 = 1024i64 * 1024i64 * 1024i64
+const BUFFER_CACHE_DEFAULT_CRITICAL_GC_MEMORY: i64 = 2i64 * 1024i64 * 1024i64 * 1024i64
+const BUFFER_CACHE_TARGET_GC_THRESHOLD: i64 = 8i64 * 1024i64 * 1024i64 * 1024i64
+
+const BUFFER_CACHE_NULL_BUFFER_ID: u32 = 0u32
+
+const BUFFER_CACHE_DATA_SHARE_BUFFER_SIZE: u64 = 64u64 * 1024u64
+const BUFFER_CACHE_STAGING_BUFFER_SIZE: u64 = 512u64 * 1024u64 * 1024u64
+const BUFFER_CACHE_DOWNLOAD_BUFFER_SIZE: u64 = 32u64 * 1024u64 * 1024u64
+const BUFFER_CACHE_UBO_STREAM_BUFFER_SIZE: u64 = 64u64 * 1024u64 * 1024u64
+const BUFFER_CACHE_DEVICE_BUFFER_SIZE: u64 = 128u64 * 1024u64 * 1024u64
+
+struct BufferCachePageData:
+    buffer_id: mutable u32
+
+struct BufferCacheOverlapResult:
+    owner: mutable Arena&?
+    ids: mutable darray[u32]
+    begin: mutable u64
+    end: mutable u64
+    has_stream_leap: mutable bool
+
+def BufferCacheOverlapResult_New(owner: mutable Arena&) -> BufferCacheOverlapResult:
+    out: mutable BufferCacheOverlapResult = zeroed
+    out.owner as & <- owner
+    return out
+
+struct BufferCacheBufferRef:
+    id: mutable u32
+    offset: mutable u32
+    valid: mutable bool
+
+struct BufferCache:
+    owner: mutable Arena&?
+    fault_manager: mutable FaultManager
+    memory_tracker: mutable MemoryTracker
+    staging_buffer: mutable StreamBuffer
+    stream_buffer: mutable StreamBuffer
+    download_buffer: mutable StreamBuffer
+    device_buffer: mutable StreamBuffer
+    gds_buffer: mutable Buffer
+    bda_pagetable_buffer: mutable Buffer
+    slot_buffers: mutable darray[Buffer]
+    buffer_ranges: mutable RangeMap[u32]
+    gpu_modified_ranges: mutable RangeSet
+    total_used_memory: mutable u64
+    trigger_gc_memory: mutable u64
+    critical_gc_memory: mutable u64
+    gc_tick: mutable u64
+    sync_count: mutable u64
+    dma_sync_count: mutable u64
+    gc_run_count: mutable u64
+
+def BufferCache_New(owner: mutable Arena&) -> BufferCache:
+    can Memory.Allocate, Abort.Panic:
+        out: mutable BufferCache = zeroed
+        out.owner as & <- owner
+        out.fault_manager <- FaultManager_New(owner, BUFFER_CACHE_CACHING_PAGEBITS, BUFFER_CACHE_CACHING_NUMPAGES)
+        out.memory_tracker <- MemoryTracker_New(owner)
+        out.staging_buffer <- StreamBuffer_New(owner, MEMORY_USAGE_UPLOAD, BUFFER_CACHE_STAGING_BUFFER_SIZE)
+        out.stream_buffer <- StreamBuffer_New(owner, MEMORY_USAGE_STREAM, BUFFER_CACHE_UBO_STREAM_BUFFER_SIZE)
+        out.download_buffer <- StreamBuffer_New(owner, MEMORY_USAGE_DOWNLOAD, BUFFER_CACHE_DOWNLOAD_BUFFER_SIZE)
+        out.device_buffer <- StreamBuffer_New(owner, MEMORY_USAGE_DEVICE_LOCAL, BUFFER_CACHE_DEVICE_BUFFER_SIZE)
+        out.gds_buffer <- Buffer_New(0u64, BUFFER_CACHE_DATA_SHARE_BUFFER_SIZE.usize(), MEMORY_USAGE_STREAM)
+        out.bda_pagetable_buffer <- Buffer_New(0u64, BUFFER_CACHE_BDA_PAGETABLE_SIZE.usize(), MEMORY_USAGE_DEVICE_LOCAL)
+        out.buffer_ranges <- RangeMap_New[u32](owner)
+        out.gpu_modified_ranges <- RangeSet_New(owner)
+        out.total_used_memory <- 0u64
+        out.trigger_gc_memory <- BUFFER_CACHE_DEFAULT_TRIGGER_GC_MEMORY.u64()
+        out.critical_gc_memory <- BUFFER_CACHE_DEFAULT_CRITICAL_GC_MEMORY.u64()
+        out.gc_tick <- 0u64
+        out.sync_count <- 0u64
+        out.dma_sync_count <- 0u64
+        out.gc_run_count <- 0u64
+
+        null_buffer: Buffer = Buffer_New(0u64, 16usize, MEMORY_USAGE_DEVICE_LOCAL)
+        out.slot_buffers.push(null_buffer)
+        return out
+
+def BufferCache_GetGdsBuffer(self: mutable BufferCache&) -> mutable Buffer&:
+    return self.gds_buffer.ref[mutable Buffer&]
+
+def BufferCache_GetBdaPageTableBuffer(self: mutable BufferCache&) -> mutable Buffer&:
+    return self.bda_pagetable_buffer.ref[mutable Buffer&]
+
+def BufferCache_GetFaultBuffer(self: mutable BufferCache&) -> mutable Buffer&:
+    return FaultManager_GetFaultBuffer(self.fault_manager.ref[mutable FaultManager&])
+
+def BufferCache_GetBuffer(self: mutable BufferCache&, id: u32) -> mutable Buffer&?:
+    if id.usize() >= self.slot_buffers.count:
+        return null
+    return self.slot_buffers[id.usize()].ref[mutable Buffer&]
+
+def BufferCache_GetUtilityBuffer(self: mutable BufferCache&, usage: u32) -> mutable StreamBuffer&:
+    if usage == MEMORY_USAGE_STREAM:
+        return self.stream_buffer.ref[mutable StreamBuffer&]
+    if usage == MEMORY_USAGE_DOWNLOAD:
+        return self.download_buffer.ref[mutable StreamBuffer&]
+    if usage == MEMORY_USAGE_DEVICE_LOCAL:
+        return self.device_buffer.ref[mutable StreamBuffer&]
+    return self.staging_buffer.ref[mutable StreamBuffer&]
+
+def BufferCache_IsBufferInvalid(self: BufferCache&, buffer_id: u32) -> bool:
+    if buffer_id == 0u32:
+        return true
+    if buffer_id.usize() >= self.slot_buffers.count:
+        return true
+    return self.slot_buffers[buffer_id.usize()].is_deleted
+
+def BufferCache_CreateBuffer(self: mutable BufferCache&, device_addr: u64, wanted_size: u32) -> u32:
+    can Memory.Allocate, Abort.Panic:
+        new_buffer: Buffer = Buffer_New(device_addr, wanted_size.usize(), MEMORY_USAGE_DEVICE_LOCAL)
+        self.slot_buffers.push(new_buffer)
+        id: u32 = (self.slot_buffers.count - 1usize).u32()
+        RangeMap_Add[u32](self.buffer_ranges.ref[mutable RangeMap[u32]&], device_addr, wanted_size.usize(), id)
+        self.total_used_memory <- self.total_used_memory + wanted_size.u64()
+        return id
+
+def BufferCache_FindBuffer(self: mutable BufferCache&, device_addr: u64, size: u32) -> u32:
+    matched: mutable darray[RangeMapEntry[u32]] = []
+    RangeMap_CopyInRange[u32](self.buffer_ranges.ref[RangeMap[u32]&], device_addr, size.usize(), matched.ref[mutable darray[RangeMapEntry[u32]]&])
+    if matched.count != 0:
+        return matched[0].value
+    return BufferCache_CreateBuffer(self, device_addr, size)
+
+def BufferCache_IsRegionRegistered(self: mutable BufferCache&, addr: u64, size: usize) -> bool:
+    return RangeMap_Intersects[u32](self.buffer_ranges.ref[RangeMap[u32]&], addr, size)
+
+def BufferCache_IsRegionCpuModified(self: mutable BufferCache&, addr: u64, size: usize) -> bool:
+    return MemoryTracker_IsRegionCpuModified(self.memory_tracker.ref[mutable MemoryTracker&], addr, size.u64())
+
+def BufferCache_IsRegionGpuModified(self: mutable BufferCache&, addr: u64, size: usize) -> bool:
+    return MemoryTracker_IsRegionGpuModified(self.memory_tracker.ref[mutable MemoryTracker&], addr, size.u64())
+
+def BufferCache_InvalidateMemory(self: mutable BufferCache&, device_addr: u64, size: u64) -> void:
+    if not BufferCache_IsRegionRegistered(self, device_addr, size.usize()):
+        return
+    MemoryTracker_MarkRegionAsCpuModified(self.memory_tracker.ref[mutable MemoryTracker&], device_addr, size)
+    self.sync_count <- self.sync_count + 1u64
+
+def BufferCache_ReadMemory(self: mutable BufferCache&, device_addr: u64, size: u64, is_write: bool = false) -> void:
+    _ = is_write
+    MemoryTracker_UnmarkRegionAsGpuModified(self.memory_tracker.ref[mutable MemoryTracker&], device_addr, size)
+    self.sync_count <- self.sync_count + 1u64
+
+def BufferCache_FillBuffer(self: mutable BufferCache&, address: u64, num_bytes: u32, value: u32, is_gds: bool) -> void:
+    _ = value
+    if num_bytes == 0u32:
+        return
+    if is_gds:
+        Buffer_Fill(self.gds_buffer.ref[mutable Buffer&], address, num_bytes, value)
+        return
+    RangeSet_Add(self.gpu_modified_ranges.ref[mutable RangeSet&], address, num_bytes.usize())
+    id: u32 = BufferCache_FindBuffer(self, address, num_bytes)
+    if id.usize() < self.slot_buffers.count:
+        Buffer_Fill(self.slot_buffers[id.usize()].ref[mutable Buffer&], address - self.slot_buffers[id.usize()].cpu_addr, num_bytes, value)
+    MemoryTracker_MarkRegionAsCpuModified(self.memory_tracker.ref[mutable MemoryTracker&], address, num_bytes.u64())
+
+def BufferCache_CopyBuffer(self: mutable BufferCache&, dst: u64, src: u64, num_bytes: u32, dst_gds: bool, src_gds: bool) -> void:
+    _ = src
+    _ = src_gds
+    if num_bytes == 0u32:
+        return
+    if dst_gds:
+        return
+    _ = BufferCache_FindBuffer(self, dst, num_bytes)
+    RangeSet_Add(self.gpu_modified_ranges.ref[mutable RangeSet&], dst, num_bytes.usize())
+    MemoryTracker_MarkRegionAsCpuModified(self.memory_tracker.ref[mutable MemoryTracker&], dst, num_bytes.u64())
+
+def BufferCache_ObtainBuffer(self: mutable BufferCache&, gpu_addr: u64, size: u32, is_written: bool, is_texel_buffer: bool = false, buffer_id: u32 = 0u32) -> BufferCacheBufferRef:
+    _ = is_written
+    _ = is_texel_buffer
+    id: u32 = buffer_id
+    if id == 0u32:
+        id <- BufferCache_FindBuffer(self, gpu_addr, size)
+    if id.usize() >= self.slot_buffers.count:
+        return BufferCacheBufferRef(0u32, 0u32, false)
+    offset: u32 = (gpu_addr - self.slot_buffers[id.usize()].cpu_addr).u32()
+    return BufferCacheBufferRef(id, offset, true)
+
+def BufferCache_ObtainBufferForImage(self: mutable BufferCache&, gpu_addr: u64, size: u32) -> BufferCacheBufferRef:
+    return BufferCache_ObtainBuffer(self, gpu_addr, size, false, false, 0u32)
+
+def BufferCache_ProcessFaultBuffer(self: mutable BufferCache&) -> void:
+    FaultManager_ProcessFaultBuffer(self.fault_manager.ref[mutable FaultManager&])
+
+def BufferCache_SynchronizeBuffersInRange(self: mutable BufferCache&, device_addr: u64, size: u64) -> void:
+    MemoryTracker_UnmarkRegionAsGpuModified(self.memory_tracker.ref[mutable MemoryTracker&], device_addr, size)
+    self.sync_count <- self.sync_count + 1u64
+
+def BufferCache_SynchronizeDmaBuffers(self: mutable BufferCache&) -> void:
+    self.dma_sync_count <- self.dma_sync_count + 1u64
+
+def BufferCache_RunGarbageCollector(self: mutable BufferCache&) -> void:
+    self.gc_run_count <- self.gc_run_count + 1u64
+    self.gc_tick <- self.gc_tick + 1u64

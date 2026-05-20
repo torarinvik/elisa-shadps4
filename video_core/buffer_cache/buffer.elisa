@@ -1,0 +1,240 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+const MEMORY_USAGE_DEVICE_LOCAL: u32 = 0u32
+const MEMORY_USAGE_UPLOAD: u32 = 1u32
+const MEMORY_USAGE_DOWNLOAD: u32 = 2u32
+const MEMORY_USAGE_STREAM: u32 = 3u32
+
+const VK_BUFFER_USAGE_TRANSFER_SRC: u64 = 0x00000001u64
+const VK_BUFFER_USAGE_TRANSFER_DST: u64 = 0x00000002u64
+const VK_BUFFER_USAGE_UNIFORM_BUFFER: u64 = 0x00000010u64
+const VK_BUFFER_USAGE_STORAGE_BUFFER: u64 = 0x00000020u64
+const VK_BUFFER_USAGE_INDEX_BUFFER: u64 = 0x00000040u64
+const VK_BUFFER_USAGE_VERTEX_BUFFER: u64 = 0x00000080u64
+const VK_BUFFER_USAGE_INDIRECT_BUFFER: u64 = 0x00000100u64
+
+const BUFFER_READ_FLAGS: u64 =
+    VK_BUFFER_USAGE_TRANSFER_SRC |
+    VK_BUFFER_USAGE_UNIFORM_BUFFER |
+    VK_BUFFER_USAGE_INDEX_BUFFER |
+    VK_BUFFER_USAGE_VERTEX_BUFFER |
+    VK_BUFFER_USAGE_INDIRECT_BUFFER
+
+const BUFFER_ALL_FLAGS: u64 =
+    BUFFER_READ_FLAGS |
+    VK_BUFFER_USAGE_TRANSFER_DST |
+    VK_BUFFER_USAGE_STORAGE_BUFFER
+
+const BUFFER_ACCESS_MEMORY_READ: u64 = 0x1u64
+const BUFFER_ACCESS_MEMORY_WRITE: u64 = 0x2u64
+const BUFFER_ACCESS_TRANSFER_READ: u64 = 0x4u64
+const BUFFER_ACCESS_TRANSFER_WRITE: u64 = 0x8u64
+
+const BUFFER_STAGE_ALL_COMMANDS: u64 = 0x1u64
+const BUFFER_STAGE_TRANSFER: u64 = 0x2u64
+
+struct UniqueBuffer:
+    handle: mutable u64
+    bda_addr: mutable u64
+    created: mutable bool
+
+def UniqueBuffer_New() -> UniqueBuffer:
+    return UniqueBuffer(0u64, 0u64, false)
+
+def UniqueBuffer_Destroy(self: mutable UniqueBuffer&) -> void:
+    self.handle <- 0u64
+    self.bda_addr <- 0u64
+    self.created <- false
+
+def UniqueBuffer_Create(self: mutable UniqueBuffer&, handle: u64, bda_addr: u64) -> void:
+    self.handle <- handle
+    self.bda_addr <- bda_addr
+    self.created <- true
+
+struct BufferBarrier:
+    src_stage: mutable u64
+    src_access: mutable u64
+    dst_stage: mutable u64
+    dst_access: mutable u64
+    offset: mutable u64
+    size: mutable u64
+    valid: mutable bool
+
+struct Buffer:
+    cpu_addr: mutable u64
+    is_picked: mutable bool
+    is_coherent: mutable bool
+    is_deleted: mutable bool
+    stream_score: mutable int
+    size_bytes: mutable usize
+    lru_id: mutable u64
+    usage: mutable u32
+    buffer: mutable UniqueBuffer
+    access_mask: mutable u64
+    stage: mutable u64
+    last_fill_offset: mutable u64
+    last_fill_size: mutable u32
+    last_fill_value: mutable u32
+
+def Buffer_New(cpu_addr: u64, size_bytes: usize, usage: u32) -> Buffer:
+    return Buffer(
+        cpu_addr,
+        false,
+        true,
+        false,
+        0,
+        size_bytes,
+        0u64,
+        usage,
+        UniqueBuffer_New(),
+        BUFFER_ACCESS_MEMORY_READ | BUFFER_ACCESS_MEMORY_WRITE | BUFFER_ACCESS_TRANSFER_READ | BUFFER_ACCESS_TRANSFER_WRITE,
+        BUFFER_STAGE_ALL_COMMANDS,
+        0u64,
+        0u32,
+        0u32
+    )
+
+def Buffer_IncreaseStreamScore(self: mutable Buffer&, score: int) -> void:
+    self.stream_score <- self.stream_score + score
+
+def Buffer_StreamScore(self: Buffer&) -> int:
+    return self.stream_score
+
+def Buffer_IsInBounds(self: Buffer&, addr: u64, size: u64) -> bool:
+    if addr < self.cpu_addr:
+        return false
+    if size > self.size_bytes.u64():
+        return false
+    if addr - self.cpu_addr > self.size_bytes.u64():
+        return false
+    return addr + size <= self.cpu_addr + self.size_bytes.u64()
+
+def Buffer_CpuAddr(self: Buffer&) -> u64:
+    return self.cpu_addr
+
+def Buffer_Offset(self: Buffer&, other_cpu_addr: u64) -> u64:
+    return other_cpu_addr - self.cpu_addr
+
+def Buffer_SizeBytes(self: Buffer&) -> usize:
+    return self.size_bytes
+
+def Buffer_SetLRUId(self: mutable Buffer&, id: u64) -> void:
+    self.lru_id <- id
+
+def Buffer_LRUId(self: Buffer&) -> u64:
+    return self.lru_id
+
+def Buffer_Handle(self: Buffer&) -> u64:
+    return self.buffer.handle
+
+def Buffer_BufferDeviceAddress(self: Buffer&) -> u64:
+    return self.buffer.bda_addr
+
+def Buffer_GetBarrier(self: mutable Buffer&, dst_access_mask: u64, dst_stage: u64, offset: u32 = 0u32) -> BufferBarrier:
+    if self.buffer.handle == 0u64:
+        return BufferBarrier(0u64, 0u64, 0u64, 0u64, 0u64, 0u64, false)
+    if offset.usize() >= self.size_bytes:
+        return BufferBarrier(0u64, 0u64, 0u64, 0u64, offset.u64(), 0u64, false)
+    if dst_access_mask == self.access_mask and dst_stage == self.stage:
+        return BufferBarrier(0u64, 0u64, 0u64, 0u64, offset.u64(), 0u64, false)
+    barrier_size: u64 = self.size_bytes.u64() - offset.u64()
+    out: BufferBarrier =
+        BufferBarrier(self.stage, self.access_mask, dst_stage, dst_access_mask, offset.u64(),
+                      barrier_size, true)
+    self.access_mask <- dst_access_mask
+    self.stage <- dst_stage
+    return out
+
+def Buffer_Fill(self: mutable Buffer&, offset: u64, num_bytes: u32, value: u32) -> void:
+    self.last_fill_offset <- offset
+    self.last_fill_size <- num_bytes
+    self.last_fill_value <- value
+    self.access_mask <- BUFFER_ACCESS_MEMORY_WRITE
+    self.stage <- BUFFER_STAGE_TRANSFER
+
+def Buffer_Invalidate(self: mutable Buffer&, offset: u64, size: u64) -> void:
+    _ = offset
+    _ = size
+    if self.usage == MEMORY_USAGE_DOWNLOAD:
+        self.access_mask <- BUFFER_ACCESS_MEMORY_READ
+
+struct StreamWatch:
+    tick: mutable u64
+    upper_bound: mutable u64
+
+struct StreamBuffer:
+    owner: mutable Arena&?
+    base: mutable Buffer
+    offset: mutable u64
+    mapped_size: mutable u64
+    current_watches: mutable darray[StreamWatch]
+    previous_watches: mutable darray[StreamWatch]
+    current_watch_cursor: mutable usize
+    wait_cursor: mutable usize
+    wait_bound: mutable u64
+    invalidation_mark_set: mutable bool
+    invalidation_mark: mutable usize
+
+def StreamBuffer_New(owner: mutable Arena&, usage: u32, size_bytes: u64) -> StreamBuffer:
+    out: mutable StreamBuffer = zeroed
+    out.owner as & <- owner
+    out.base <- Buffer_New(0u64, size_bytes.usize(), usage)
+    return out
+
+struct StreamMapResult:
+    ok: mutable bool
+    offset: mutable u64
+    size: mutable u64
+
+def StreamBuffer_WaitPendingOperations(self: mutable StreamBuffer&, requested_upper_bound: u64, allow_wait: bool) -> bool:
+    if not self.invalidation_mark_set:
+        return true
+    while requested_upper_bound > self.wait_bound and self.wait_cursor < self.invalidation_mark:
+        if not allow_wait:
+            return false
+        self.wait_bound <- self.previous_watches[self.wait_cursor].upper_bound
+        self.wait_cursor <- self.wait_cursor + 1
+    return true
+
+def StreamBuffer_Map(self: mutable StreamBuffer&, size: u64, alignment: u64 = 0u64, allow_wait: bool = true) -> StreamMapResult:
+    if size == 0u64:
+        return StreamMapResult(false, 0u64, 0u64)
+    requested_size: mutable u64 = size
+    if requested_size > self.base.size_bytes.u64():
+        return StreamMapResult(false, 0u64, 0u64)
+    if alignment > 0u64:
+        aligned: u64 = (self.offset + alignment - 1u64) / alignment * alignment
+        self.offset <- aligned
+    if self.offset + requested_size > self.base.size_bytes.u64():
+        self.invalidation_mark_set <- true
+        self.invalidation_mark <- self.current_watch_cursor
+        self.current_watch_cursor <- 0
+        self.offset <- 0u64
+        tmp: darray[StreamWatch] = self.previous_watches
+        self.previous_watches <- self.current_watches
+        self.current_watches <- tmp
+        self.wait_cursor <- 0usize
+        self.wait_bound <- 0u64
+    if not StreamBuffer_WaitPendingOperations(self, self.offset + requested_size, allow_wait):
+        return StreamMapResult(false, 0u64, 0u64)
+    self.mapped_size <- requested_size
+    return StreamMapResult(true, self.offset, requested_size)
+
+def StreamBuffer_Commit(self: mutable StreamBuffer&, tick: u64) -> void:
+    self.offset <- self.offset + self.mapped_size
+    if self.current_watch_cursor != 0usize and self.current_watches[self.current_watch_cursor - 1usize].tick == tick:
+        self.current_watches[self.current_watch_cursor - 1usize].upper_bound <- self.offset
+        return
+    assert self.owner != null
+    owner: mutable Arena& = self.owner
+    in owner:
+        self.current_watches.push(StreamWatch(tick, self.offset))
+    self.current_watch_cursor <- self.current_watches.count
+
+def StreamBuffer_Copy(self: mutable StreamBuffer&, size: usize, alignment: usize, tick: u64) -> u64:
+    mapped: StreamMapResult = StreamBuffer_Map(self, size.u64(), alignment.u64(), true)
+    if not mapped.ok:
+        return 0u64
+    StreamBuffer_Commit(self, tick)
+    return mapped.offset

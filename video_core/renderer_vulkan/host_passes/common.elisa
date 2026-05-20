@@ -1,0 +1,193 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+enum HostPassCommandKind:
+    BeginDebugLabel
+    EndDebugLabel
+    PipelineBarrier
+    BindComputePipeline
+    BindGraphicsPipeline
+    PushDescriptorSet
+    PushConstants
+    Dispatch
+    BeginRendering
+    Draw
+    EndRendering
+    SetViewport
+    SetScissor
+
+struct VkExtent2D:
+    width: mutable u32
+    height: mutable u32
+
+def VkExtent2D_new(width: u32, height: u32) -> VkExtent2D:
+    return VkExtent2D(width, height)
+
+def VkExtent2D_eq(left: VkExtent2D, right: VkExtent2D) -> bool:
+    return left.width == right.width and left.height == right.height
+
+struct VkPresenterFrame:
+    width: mutable u32
+    height: mutable u32
+    image: mutable u64
+    image_view: mutable u64
+    imgui_texture: mutable u64
+
+def VkPresenterFrame_new(width: u32, height: u32, image: u64, image_view: u64, imgui_texture: u64) -> VkPresenterFrame:
+    return VkPresenterFrame(width, height, image, image_view, imgui_texture)
+
+struct HostPassCommand:
+    kind: mutable HostPassCommandKind
+    label: mutable static u8&
+    pipeline: mutable u64
+    image: mutable u64
+    image_view: mutable u64
+    width: mutable u32
+    height: mutable u32
+    x: mutable u32
+    y: mutable u32
+    z: mutable u32
+    sample0: mutable u32
+    gamma: mutable f32
+    hdr: mutable u32
+
+def HostPassCommand_new(kind: HostPassCommandKind) -> HostPassCommand:
+    return HostPassCommand(kind, "", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0.0, 0u32)
+
+struct HostPassCommandBuffer:
+    commands: mutable darray[HostPassCommand]
+
+def HostPassCommandBuffer_new() -> HostPassCommandBuffer:
+    return HostPassCommandBuffer([])
+
+global mutable HostPass_StrictRenderValidation: bool = false
+global mutable HostPass_VkHostMarkersEnabled: bool = false
+global mutable HostPass_ForcePostProcessColor: bool = false
+global mutable HostPass_PostProcessForceColorLogged: bool = false
+global mutable HostPass_NextHandle: u64 = 1
+
+def HostPass_SetStrictRenderValidationEnabled(enabled: bool) -> void:
+    HostPass_StrictRenderValidation <- enabled
+
+def HostPass_IsStrictRenderValidationEnabled() -> bool:
+    return HostPass_StrictRenderValidation
+
+def HostPass_SetVkHostMarkersEnabled(enabled: bool) -> void:
+    HostPass_VkHostMarkersEnabled <- enabled
+
+def HostPass_IsVkHostMarkersEnabled() -> bool:
+    return HostPass_VkHostMarkersEnabled
+
+def HostPass_SetForcePostProcessColor(enabled: bool) -> void:
+    HostPass_ForcePostProcessColor <- enabled
+
+def HostPass_ShouldForcePostProcessColor() -> bool:
+    return HostPass_ForcePostProcessColor
+
+def HostPass_IsPostProcessForceColorLogged() -> bool:
+    return HostPass_PostProcessForceColorLogged
+
+def HostPass_ResetGlobalsForTests() -> void:
+    HostPass_StrictRenderValidation <- false
+    HostPass_VkHostMarkersEnabled <- false
+    HostPass_ForcePostProcessColor <- false
+    HostPass_PostProcessForceColorLogged <- false
+    HostPass_NextHandle <- 1
+
+def HostPass_AllocHandle() -> u64:
+    handle: u64 = HostPass_NextHandle
+    HostPass_NextHandle <- HostPass_NextHandle + 1
+    return handle
+
+def HostPassCommandBuffer_Clear(self: mutable HostPassCommandBuffer&) -> void:
+    self.commands.count <- 0
+
+def HostPassCommandBuffer_Push(self: mutable HostPassCommandBuffer&, cmd: HostPassCommand) -> void:
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            self.commands.push(cmd)
+
+def HostPassCommandBuffer_CountKind(self: HostPassCommandBuffer&, kind: HostPassCommandKind) -> usize:
+    total: mutable usize = 0
+    for i in 0..<self.commands.count:
+        if self.commands[i].kind == kind:
+            total <- total + 1
+    return total
+
+def HostPassCommandBuffer_FirstOfKind(self: HostPassCommandBuffer&, kind: HostPassCommandKind) -> HostPassCommand?:
+    for i in 0..<self.commands.count:
+        if self.commands[i].kind == kind:
+            return self.commands[i]
+    return null
+
+def HostPass_LogBeginLabel(cmdbuf: mutable HostPassCommandBuffer&, label: static u8&) -> void:
+    cmd: mutable HostPassCommand = HostPassCommand_new(HostPassCommandKind.BeginDebugLabel)
+    cmd.label <- label
+    HostPassCommandBuffer_Push(cmdbuf, cmd)
+
+def HostPass_LogEndLabel(cmdbuf: mutable HostPassCommandBuffer&) -> void:
+    HostPassCommandBuffer_Push(cmdbuf, HostPassCommand_new(HostPassCommandKind.EndDebugLabel))
+
+def HostPass_LogPipelineBarrier(cmdbuf: mutable HostPassCommandBuffer&, image: u64) -> void:
+    cmd: mutable HostPassCommand = HostPassCommand_new(HostPassCommandKind.PipelineBarrier)
+    cmd.image <- image
+    HostPassCommandBuffer_Push(cmdbuf, cmd)
+
+def HostPass_LogBindComputePipeline(cmdbuf: mutable HostPassCommandBuffer&, pipeline: u64) -> void:
+    cmd: mutable HostPassCommand = HostPassCommand_new(HostPassCommandKind.BindComputePipeline)
+    cmd.pipeline <- pipeline
+    HostPassCommandBuffer_Push(cmdbuf, cmd)
+
+def HostPass_LogBindGraphicsPipeline(cmdbuf: mutable HostPassCommandBuffer&, pipeline: u64) -> void:
+    cmd: mutable HostPassCommand = HostPassCommand_new(HostPassCommandKind.BindGraphicsPipeline)
+    cmd.pipeline <- pipeline
+    HostPassCommandBuffer_Push(cmdbuf, cmd)
+
+def HostPass_LogPushDescriptorSet(cmdbuf: mutable HostPassCommandBuffer&, input_view: u64, output_view: u64) -> void:
+    cmd: mutable HostPassCommand = HostPassCommand_new(HostPassCommandKind.PushDescriptorSet)
+    cmd.image <- input_view
+    cmd.image_view <- output_view
+    HostPassCommandBuffer_Push(cmdbuf, cmd)
+
+def HostPass_LogPushConstants(cmdbuf: mutable HostPassCommandBuffer&, sample0: u32 = 0u32, gamma: f32 = 0.0, hdr: u32 = 0u32) -> void:
+    cmd: mutable HostPassCommand = HostPassCommand_new(HostPassCommandKind.PushConstants)
+    cmd.sample0 <- sample0
+    cmd.gamma <- gamma
+    cmd.hdr <- hdr
+    HostPassCommandBuffer_Push(cmdbuf, cmd)
+
+def HostPass_LogDispatch(cmdbuf: mutable HostPassCommandBuffer&, x: u32, y: u32, z: u32) -> void:
+    cmd: mutable HostPassCommand = HostPassCommand_new(HostPassCommandKind.Dispatch)
+    cmd.x <- x
+    cmd.y <- y
+    cmd.z <- z
+    HostPassCommandBuffer_Push(cmdbuf, cmd)
+
+def HostPass_LogBeginRendering(cmdbuf: mutable HostPassCommandBuffer&, width: u32, height: u32, image_view: u64) -> void:
+    cmd: mutable HostPassCommand = HostPassCommand_new(HostPassCommandKind.BeginRendering)
+    cmd.width <- width
+    cmd.height <- height
+    cmd.image_view <- image_view
+    HostPassCommandBuffer_Push(cmdbuf, cmd)
+
+def HostPass_LogDraw(cmdbuf: mutable HostPassCommandBuffer&, vertex_count: u32, instance_count: u32) -> void:
+    cmd: mutable HostPassCommand = HostPassCommand_new(HostPassCommandKind.Draw)
+    cmd.x <- vertex_count
+    cmd.y <- instance_count
+    HostPassCommandBuffer_Push(cmdbuf, cmd)
+
+def HostPass_LogEndRendering(cmdbuf: mutable HostPassCommandBuffer&) -> void:
+    HostPassCommandBuffer_Push(cmdbuf, HostPassCommand_new(HostPassCommandKind.EndRendering))
+
+def HostPass_LogSetViewport(cmdbuf: mutable HostPassCommandBuffer&, width: u32, height: u32) -> void:
+    cmd: mutable HostPassCommand = HostPassCommand_new(HostPassCommandKind.SetViewport)
+    cmd.width <- width
+    cmd.height <- height
+    HostPassCommandBuffer_Push(cmdbuf, cmd)
+
+def HostPass_LogSetScissor(cmdbuf: mutable HostPassCommandBuffer&, width: u32, height: u32) -> void:
+    cmd: mutable HostPassCommand = HostPassCommand_new(HostPassCommandKind.SetScissor)
+    cmd.width <- width
+    cmd.height <- height
+    HostPassCommandBuffer_Push(cmdbuf, cmd)
