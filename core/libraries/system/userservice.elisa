@@ -34,11 +34,34 @@ global mutable g_userservice_initial_name_1: u8 = 115
 global mutable g_userservice_initial_name_2: u8 = 101
 global mutable g_userservice_initial_name_3: u8 = 114
 global mutable g_userservice_initial_name_4: u8 = 49
+global mutable g_userservice_slot_user_id: int[4] = [1, -1, -1, -1]
+global mutable g_userservice_slot_color: u32[4] = [0, 0, 0, 0]
 global mutable g_userservice_event_kind_q: u32[16] = zeroed
 global mutable g_userservice_event_user_q: int[16] = zeroed
 global mutable g_userservice_event_head: int = 0
 global mutable g_userservice_event_tail: int = 0
 global mutable g_userservice_event_count: int = 0
+
+def UserService_FindSlotById(user_id: int) -> int:
+    i: mutable int = 0
+    while i < ORBIS_USER_SERVICE_MAX_LOGIN_USERS:
+        if g_userservice_slot_user_id[i.usize()] == user_id:
+            return i
+        i <- i + 1
+    return -1
+
+def UserService_ResolveUserId(user_id: int, resolved_out: mutable int&?) -> bool:
+    if resolved_out == null:
+        return false
+    if user_id == ORBIS_USER_SERVICE_USER_ID_INVALID:
+        return false
+    if user_id == ORBIS_USER_SERVICE_USER_ID_SYSTEM:
+        resolved_out <- g_userservice_initial_user
+    else:
+        resolved_out <- user_id
+    if UserService_FindSlotById(resolved_out) < 0:
+        return false
+    return true
 
 def sceUserServiceInitializeForShellCore() -> int:
     return ORBIS_OK
@@ -98,10 +121,10 @@ def sceUserServiceGetDiscPlayerFlag() -> int:
     return ORBIS_OK
 
 def sceUserServiceGetEvent(event: mutable void&?) -> int:
-    if event == null:
-        return ORBIS_USER_SERVICE_ERROR_INVALID_ARGUMENT
     if g_userservice_event_count == 0:
         return ORBIS_USER_SERVICE_ERROR_NO_EVENT
+    if event == null:
+        return ORBIS_USER_SERVICE_ERROR_INVALID_ARGUMENT
     out_event: mutable OrbisUserServiceEvent& = event.cast[mutable OrbisUserServiceEvent&]
     out_event.event <- g_userservice_event_kind_q[g_userservice_event_head.usize()]
     out_event.user_id <- g_userservice_event_user_q[g_userservice_event_head.usize()]
@@ -384,7 +407,10 @@ def sceUserServiceGetLoginUserIdList(userIdList: mutable void&?) -> int:
     while i < ORBIS_USER_SERVICE_MAX_LOGIN_USERS:
         list.user_id[i.usize()] <- ORBIS_USER_SERVICE_USER_ID_INVALID
         i <- i + 1
-    list.user_id[0] <- g_userservice_initial_user
+    i <- 0
+    while i < ORBIS_USER_SERVICE_MAX_LOGIN_USERS:
+        list.user_id[i.usize()] <- g_userservice_slot_user_id[i.usize()]
+        i <- i + 1
     return ORBIS_OK
 
 def sceUserServiceGetMicLevel() -> int:
@@ -666,14 +692,13 @@ def sceUserServiceGetTraditionalChineseInputType() -> int:
 def sceUserServiceGetUserColor(user_id: int, color: mutable u32&?) -> int:
     if color == null:
         return ORBIS_USER_SERVICE_ERROR_INVALID_ARGUMENT
-    if user_id == ORBIS_USER_SERVICE_USER_ID_INVALID:
+    resolved: mutable int = ORBIS_USER_SERVICE_USER_ID_INVALID
+    if not UserService_ResolveUserId(user_id, resolved.ref[mutable int&]):
         return ORBIS_USER_SERVICE_ERROR_INVALID_ARGUMENT
-    resolved: mutable int = user_id
-    if user_id == ORBIS_USER_SERVICE_USER_ID_SYSTEM:
-        resolved <- g_userservice_initial_user
-    if resolved < 0:
+    slot: int = UserService_FindSlotById(resolved)
+    if slot < 0:
         return ORBIS_USER_SERVICE_ERROR_INVALID_ARGUMENT
-    color <- (resolved % 4).u32()
+    color <- g_userservice_slot_color[slot.usize()]
     return ORBIS_OK
 
 def sceUserServiceGetUserGroupName() -> int:
@@ -688,10 +713,8 @@ def sceUserServiceGetUserGroupNum() -> int:
 def sceUserServiceGetUserName(user_id: int, user_name: mutable u8&?, size: int) -> int:
     if user_name == null:
         return ORBIS_USER_SERVICE_ERROR_INVALID_ARGUMENT
-    resolved: mutable int = user_id
-    if user_id == ORBIS_USER_SERVICE_USER_ID_SYSTEM:
-        resolved <- g_userservice_initial_user
-    if resolved == ORBIS_USER_SERVICE_USER_ID_INVALID:
+    resolved: mutable int = ORBIS_USER_SERVICE_USER_ID_INVALID
+    if not UserService_ResolveUserId(user_id, resolved.ref[mutable int&]):
         return ORBIS_USER_SERVICE_ERROR_INVALID_ARGUMENT
     if size <= 5:
         return ORBIS_USER_SERVICE_ERROR_BUFFER_TOO_SHORT

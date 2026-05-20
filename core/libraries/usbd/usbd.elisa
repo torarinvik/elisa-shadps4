@@ -1,0 +1,178 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../error_codes.elisa"
+include "./emulated/skylander.elisa"
+include "./emulated/infinity.elisa"
+include "./emulated/dimensions.elisa"
+
+extern libusb_init(ctx: mutable void&?&) -> int
+extern libusb_exit(ctx: void&?) -> void
+extern libusb_get_device_list(ctx: void&?, list: mutable void&?&) -> s64
+extern libusb_free_device_list(list: void&?, unref_devices: int) -> void
+extern libusb_ref_device(device: void&?) -> void&?
+extern libusb_unref_device(device: void&?) -> void
+extern libusb_get_configuration(dev_handle: void&?, config: mutable s32&?) -> int
+extern libusb_get_device_descriptor(device: void&?, desc: void&?) -> int
+extern libusb_get_active_config_descriptor(device: void&?, config: mutable void&?&) -> int
+extern libusb_get_config_descriptor(device: void&?, config_index: u8, config: mutable void&?&) -> int
+extern libusb_get_config_descriptor_by_value(device: void&?, value: u8, config: mutable void&?&) -> int
+extern libusb_free_config_descriptor(config: void&?) -> void
+extern libusb_get_bus_number(device: void&?) -> u8
+extern libusb_get_device_address(device: void&?) -> u8
+extern libusb_get_device_speed(device: void&?) -> int
+extern libusb_get_max_packet_size(device: void&?, endpoint: u8) -> int
+extern libusb_get_max_iso_packet_size(device: void&?, endpoint: u8) -> int
+extern libusb_open(device: void&?, dev_handle: mutable void&?&) -> int
+extern libusb_close(dev_handle: void&?) -> void
+extern libusb_get_device(dev_handle: void&?) -> void&?
+extern libusb_set_configuration(dev_handle: void&?, config: int) -> int
+extern libusb_claim_interface(dev_handle: void&?, interface_number: int) -> int
+extern libusb_release_interface(dev_handle: void&?, interface_number: int) -> int
+extern libusb_open_device_with_vid_pid(ctx: void&?, vendor_id: u16, product_id: u16) -> void&?
+extern libusb_set_interface_alt_setting(dev_handle: void&?, interface_number: int, alternate_setting: int) -> int
+extern libusb_clear_halt(dev_handle: void&?, endpoint: u8) -> int
+extern libusb_reset_device(dev_handle: void&?) -> int
+extern libusb_kernel_driver_active(dev_handle: void&?, interface_number: int) -> int
+extern libusb_detach_kernel_driver(dev_handle: void&?, interface_number: int) -> int
+extern libusb_attach_kernel_driver(dev_handle: void&?, interface_number: int) -> int
+extern libusb_control_transfer_get_data(transfer: void&?) -> void&?
+extern libusb_control_transfer_get_setup(transfer: void&?) -> void&?
+extern libusb_fill_control_setup(buf: mutable u8&?, bmRequestType: u8, bRequest: u8, wValue: u16, wIndex: u16, wLength: u16) -> void
+extern libusb_alloc_transfer(iso_packets: int) -> void&?
+extern libusb_submit_transfer(transfer: void&?) -> int
+extern libusb_cancel_transfer(transfer: void&?) -> int
+extern libusb_free_transfer(transfer: void&?) -> void
+extern libusb_fill_control_transfer(transfer: void&?, dev_handle: void&?, buffer: mutable u8&?, callback: void&?, user_data: void&?, timeout: u32) -> void
+extern libusb_fill_bulk_transfer(transfer: void&?, dev_handle: void&?, endpoint: u8, buffer: mutable u8&?, length: s32, callback: void&?, user_data: void&?, timeout: u32) -> void
+extern libusb_fill_interrupt_transfer(transfer: void&?, dev_handle: void&?, endpoint: u8, buffer: mutable u8&?, length: s32, callback: void&?, user_data: void&?, timeout: u32) -> void
+extern libusb_fill_iso_transfer(transfer: void&?, dev_handle: void&?, endpoint: u8, buffer: mutable u8&?, length: s32, num_iso_packets: s32, callback: void&?, user_data: void&?, timeout: u32) -> void
+extern libusb_set_iso_packet_lengths(transfer: void&?, length: u32) -> void
+extern libusb_get_iso_packet_buffer(transfer: void&?, packet: u32) -> void&?
+extern libusb_control_transfer(dev_handle: void&?, request_type: u8, bRequest: u8, wValue: u16, wIndex: u16, data: mutable u8&?, wLength: u16, timeout: u32) -> int
+extern libusb_bulk_transfer(dev_handle: void&?, endpoint: u8, data: mutable u8&?, length: s32, actual_length: mutable s32&?, timeout: u32) -> int
+extern libusb_interrupt_transfer(dev_handle: void&?, endpoint: u8, data: mutable u8&?, length: s32, actual_length: mutable s32&?, timeout: u32) -> int
+extern libusb_get_descriptor(dev_handle: void&?, descType: u8, descIndex: u8, data: mutable u8&?, length: s32) -> int
+extern libusb_get_string_descriptor(dev_handle: void&?, desc_index: u8, langid: u16, data: mutable u8&?, length: s32) -> int
+extern libusb_get_string_descriptor_ascii(dev_handle: void&?, desc_index: u8, data: mutable u8&?, length: s32) -> int
+extern libusb_try_lock_events(ctx: void&?) -> int
+extern libusb_lock_events(ctx: void&?) -> void
+extern libusb_unlock_events(ctx: void&?) -> void
+extern libusb_event_handling_ok(ctx: void&?) -> int
+extern libusb_event_handler_active(ctx: void&?) -> int
+extern libusb_lock_event_waiters(ctx: void&?) -> void
+extern libusb_unlock_event_waiters(ctx: void&?) -> void
+extern libusb_wait_for_event(ctx: void&?, tv: void&?) -> int
+extern libusb_handle_events_timeout(ctx: void&?, tv: void&?) -> int
+extern libusb_handle_events(ctx: void&?) -> int
+extern libusb_handle_events_locked(ctx: void&?, tv: void&?) -> int
+
+global mutable g_libusb_context: void&? = null
+global mutable g_has_removed_driver: bool = false
+
+def usbd_libusb_to_orbis_error(retVal: int) -> s32:
+    if retVal == -99:
+        return 0x802400ff
+    if retVal < 0:
+        return 0x80240000 - retVal
+    return retVal.s32()
+
+def sceUsbdInit() -> s32:
+    return usbd_libusb_to_orbis_error(libusb_init(g_libusb_context as mutable void&?&))
+
+def sceUsbdExit() -> void:
+    libusb_exit(g_libusb_context)
+
+def sceUsbdGetDeviceList(list: mutable void&?&) -> s64:
+    count: s64 = libusb_get_device_list(g_libusb_context, list)
+    if count < 0:
+        return usbd_libusb_to_orbis_error(count.int()).s64()
+    return count
+
+def sceUsbdFreeDeviceList(list: void&?, unref_devices: s32) -> void: libusb_free_device_list(list, unref_devices.int())
+def sceUsbdRefDevice(device: void&?) -> void&?: return libusb_ref_device(device)
+def sceUsbdUnrefDevice(device: void&?) -> void: libusb_unref_device(device)
+def sceUsbdGetConfiguration(dev_handle: void&?, config: mutable s32&?) -> s32: return usbd_libusb_to_orbis_error(libusb_get_configuration(dev_handle, config))
+def sceUsbdGetDeviceDescriptor(device: void&?, desc: void&?) -> s32: return usbd_libusb_to_orbis_error(libusb_get_device_descriptor(device, desc))
+def sceUsbdGetActiveConfigDescriptor(device: void&?, config: mutable void&?&) -> s32: return usbd_libusb_to_orbis_error(libusb_get_active_config_descriptor(device, config))
+def sceUsbdGetConfigDescriptor(device: void&?, config_index: u8, config: mutable void&?&) -> s32: return usbd_libusb_to_orbis_error(libusb_get_config_descriptor(device, config_index, config))
+def sceUsbdGetConfigDescriptorByValue(device: void&?, bConfigurationValue: u8, config: mutable void&?&) -> s32: return usbd_libusb_to_orbis_error(libusb_get_config_descriptor_by_value(device, bConfigurationValue, config))
+def sceUsbdFreeConfigDescriptor(config: void&?) -> void: libusb_free_config_descriptor(config)
+def sceUsbdGetBusNumber(device: void&?) -> u8: return libusb_get_bus_number(device)
+def sceUsbdGetDeviceAddress(device: void&?) -> u8: return libusb_get_device_address(device)
+def sceUsbdGetDeviceSpeed(device: void&?) -> u32: return libusb_get_device_speed(device).u32()
+def sceUsbdGetMaxPacketSize(device: void&?, endpoint: u8) -> s32: return usbd_libusb_to_orbis_error(libusb_get_max_packet_size(device, endpoint))
+def sceUsbdGetMaxIsoPacketSize(device: void&?, endpoint: u8) -> s32: return usbd_libusb_to_orbis_error(libusb_get_max_iso_packet_size(device, endpoint))
+def sceUsbdOpen(device: void&?, dev_handle: mutable void&?&) -> s32: return usbd_libusb_to_orbis_error(libusb_open(device, dev_handle))
+def sceUsbdClose(dev_handle: void&?) -> void: libusb_close(dev_handle)
+def sceUsbdGetDevice(dev_handle: void&?) -> void&?: return libusb_get_device(dev_handle)
+def sceUsbdSetConfiguration(dev_handle: void&?, config: s32) -> s32: return usbd_libusb_to_orbis_error(libusb_set_configuration(dev_handle, config.int()))
+def sceUsbdClaimInterface(dev_handle: void&?, interface_number: s32) -> s32:
+    if sceUsbdKernelDriverActive(dev_handle, interface_number.int()) > 0:
+        _ = sceUsbdDetachKernelDriver(dev_handle, interface_number.int())
+    return usbd_libusb_to_orbis_error(libusb_claim_interface(dev_handle, interface_number.int()))
+def sceUsbdReleaseInterface(dev_handle: void&?, interface_number: s32) -> s32: return usbd_libusb_to_orbis_error(libusb_release_interface(dev_handle, interface_number.int()))
+def sceUsbdOpenDeviceWithVidPid(vendor_id: u16, product_id: u16) -> void&?: return libusb_open_device_with_vid_pid(g_libusb_context, vendor_id, product_id)
+def sceUsbdSetInterfaceAltSetting(dev_handle: void&?, interface_number: int, alternate_setting: int) -> s32: return usbd_libusb_to_orbis_error(libusb_set_interface_alt_setting(dev_handle, interface_number, alternate_setting))
+def sceUsbdClearHalt(dev_handle: void&?, endpoint: u8) -> s32: return usbd_libusb_to_orbis_error(libusb_clear_halt(dev_handle, endpoint))
+def sceUsbdResetDevice(dev_handle: void&?) -> s32: return usbd_libusb_to_orbis_error(libusb_reset_device(dev_handle))
+def sceUsbdKernelDriverActive(dev_handle: void&?, interface_number: int) -> s32:
+    static if PLATFORM_WINDOWS or PLATFORM_DARWIN:
+        _ = dev_handle
+        _ = interface_number
+        if g_has_removed_driver:
+            return 0
+        return 1
+    return usbd_libusb_to_orbis_error(libusb_kernel_driver_active(dev_handle, interface_number))
+def sceUsbdDetachKernelDriver(dev_handle: void&?, interface_number: int) -> s32:
+    static if PLATFORM_WINDOWS or PLATFORM_DARWIN:
+        _ = dev_handle
+        _ = interface_number
+        g_has_removed_driver <- true
+        return ORBIS_OK
+    return usbd_libusb_to_orbis_error(libusb_detach_kernel_driver(dev_handle, interface_number))
+def sceUsbdAttachKernelDriver(dev_handle: void&?, interface_number: int) -> s32:
+    static if PLATFORM_WINDOWS or PLATFORM_DARWIN:
+        _ = dev_handle
+        _ = interface_number
+        g_has_removed_driver <- false
+        return ORBIS_OK
+    return usbd_libusb_to_orbis_error(libusb_attach_kernel_driver(dev_handle, interface_number))
+def sceUsbdControlTransferGetData(transfer: void&?) -> void&?: return libusb_control_transfer_get_data(transfer)
+def sceUsbdControlTransferGetSetup(transfer: void&?) -> void&?: return libusb_control_transfer_get_setup(transfer)
+def sceUsbdFillControlSetup(buf: mutable u8&?, bmRequestType: u8, bRequest: u8, wValue: u16, wIndex: u16, wLength: u16) -> void: libusb_fill_control_setup(buf, bmRequestType, bRequest, wValue, wIndex, wLength)
+def sceUsbdAllocTransfer(iso_packets: int) -> void&?: return libusb_alloc_transfer(iso_packets)
+def sceUsbdSubmitTransfer(transfer: void&?) -> s32: return usbd_libusb_to_orbis_error(libusb_submit_transfer(transfer))
+def sceUsbdCancelTransfer(transfer: void&?) -> s32: return usbd_libusb_to_orbis_error(libusb_cancel_transfer(transfer))
+def sceUsbdFreeTransfer(transfer: void&?) -> void: libusb_free_transfer(transfer)
+def sceUsbdFillControlTransfer(transfer: void&?, dev_handle: void&?, buffer: mutable u8&?, callback: void&?, user_data: void&?, timeout: u32) -> void: libusb_fill_control_transfer(transfer, dev_handle, buffer, callback, user_data, timeout)
+def sceUsbdFillBulkTransfer(transfer: void&?, dev_handle: void&?, endpoint: u8, buffer: mutable u8&?, length: s32, callback: void&?, user_data: void&?, timeout: u32) -> void: libusb_fill_bulk_transfer(transfer, dev_handle, endpoint, buffer, length, callback, user_data, timeout)
+def sceUsbdFillInterruptTransfer(transfer: void&?, dev_handle: void&?, endpoint: u8, buffer: mutable u8&?, length: s32, callback: void&?, user_data: void&?, timeout: u32) -> void: libusb_fill_interrupt_transfer(transfer, dev_handle, endpoint, buffer, length, callback, user_data, timeout)
+def sceUsbdFillIsoTransfer(transfer: void&?, dev_handle: void&?, endpoint: u8, buffer: mutable u8&?, length: s32, num_iso_packets: s32, callback: void&?, user_data: void&?, timeout: u32) -> void: libusb_fill_iso_transfer(transfer, dev_handle, endpoint, buffer, length, num_iso_packets, callback, user_data, timeout)
+def sceUsbdSetIsoPacketLengths(transfer: void&?, length: u32) -> void: libusb_set_iso_packet_lengths(transfer, length)
+def sceUsbdGetIsoPacketBuffer(transfer: void&?, packet: u32) -> void&?: return libusb_get_iso_packet_buffer(transfer, packet)
+def sceUsbdControlTransfer(dev_handle: void&?, request_type: u8, bRequest: u8, wValue: u16, wIndex: u16, data: mutable u8&?, wLength: s32, timeout: u32) -> s32: return usbd_libusb_to_orbis_error(libusb_control_transfer(dev_handle, request_type, bRequest, wValue, wIndex, data, wLength.u16(), timeout))
+def sceUsbdBulkTransfer(dev_handle: void&?, endpoint: u8, data: mutable u8&?, length: s32, actual_length: mutable s32&?, timeout: u32) -> s32: return usbd_libusb_to_orbis_error(libusb_bulk_transfer(dev_handle, endpoint, data, length, actual_length, timeout))
+def sceUsbdInterruptTransfer(dev_handle: void&?, endpoint: u8, data: mutable u8&?, length: s32, actual_length: mutable s32&?, timeout: u32) -> s32: return usbd_libusb_to_orbis_error(libusb_interrupt_transfer(dev_handle, endpoint, data, length, actual_length, timeout))
+def sceUsbdGetDescriptor(dev_handle: void&?, descType: u8, descIndex: u8, data: mutable u8&?, length: s32) -> s32: return usbd_libusb_to_orbis_error(libusb_get_descriptor(dev_handle, descType, descIndex, data, length))
+def sceUsbdGetStringDescriptor(dev_handle: void&?, desc_index: u8, langid: u16, data: mutable u8&?, length: s32) -> s32: return usbd_libusb_to_orbis_error(libusb_get_string_descriptor(dev_handle, desc_index, langid, data, length))
+def sceUsbdGetStringDescriptorAscii(dev_handle: void&?, desc_index: u8, data: mutable u8&?, length: s32) -> s32: return usbd_libusb_to_orbis_error(libusb_get_string_descriptor_ascii(dev_handle, desc_index, data, length))
+def sceUsbdTryLockEvents() -> s32: return usbd_libusb_to_orbis_error(libusb_try_lock_events(g_libusb_context))
+def sceUsbdLockEvents() -> void: libusb_lock_events(g_libusb_context)
+def sceUsbdUnlockEvents() -> void: libusb_unlock_events(g_libusb_context)
+def sceUsbdEventHandlingOk() -> s32: return usbd_libusb_to_orbis_error(libusb_event_handling_ok(g_libusb_context))
+def sceUsbdEventHandlerActive() -> s32: return usbd_libusb_to_orbis_error(libusb_event_handler_active(g_libusb_context))
+def sceUsbdLockEventWaiters() -> void: libusb_lock_event_waiters(g_libusb_context)
+def sceUsbdUnlockEventWaiters() -> void: libusb_unlock_event_waiters(g_libusb_context)
+def sceUsbdWaitForEvent(tv: void&?) -> s32: return usbd_libusb_to_orbis_error(libusb_wait_for_event(g_libusb_context, tv))
+def sceUsbdHandleEventsTimeout(tv: void&?) -> s32: return usbd_libusb_to_orbis_error(libusb_handle_events_timeout(g_libusb_context, tv))
+def sceUsbdHandleEvents() -> s32: return usbd_libusb_to_orbis_error(libusb_handle_events(g_libusb_context))
+def sceUsbdHandleEventsLocked(tv: void&?) -> s32: return usbd_libusb_to_orbis_error(libusb_handle_events_locked(g_libusb_context, tv))
+def sceUsbdCheckConnected(dev_handle: void&?) -> s32: _ = dev_handle; return ORBIS_OK
+def Func_65F6EF33E38FFF50() -> int: return ORBIS_OK
+def Func_97F056BAD90AADE7() -> int: return ORBIS_OK
+def Func_C55104A33B35B264() -> int: return ORBIS_OK
+def Func_D56B43060720B1E0() -> int: return ORBIS_OK
+
+def Usbd_RegisterLib(sym: void&?) -> void:
+    _ = sym

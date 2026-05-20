@@ -1,0 +1,273 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../error_codes.elisa"
+include "./vr_tracker_error.elisa"
+
+const ORBIS_VR_TRACKER_MEMORY_ALIGNMENT: u32 = 0x10000u32
+const ORBIS_VR_TRACKER_BASE_ONION_SIZE: u32 = 0x400000u32
+const ORBIS_VR_TRACKER_GARLIC_SIZE: u32 = 0x3000000u32
+const ORBIS_VR_TRACKER_WORK_SIZE: u32 = 0x1000000u32
+
+const ORBIS_VR_TRACKER_PROFILE_000: u32 = 0u32
+const ORBIS_VR_TRACKER_PROFILE_100: u32 = 100u32
+const ORBIS_VR_TRACKER_CALIBRATION_MANUAL: u32 = 0u32
+const ORBIS_VR_TRACKER_CALIBRATION_AUTO: u32 = 1u32
+const ORBIS_VR_TRACKER_DEVICE_HMD: u32 = 0u32
+const ORBIS_VR_TRACKER_DEVICE_DUALSHOCK4: u32 = 1u32
+const ORBIS_VR_TRACKER_DEVICE_MOVE: u32 = 2u32
+const ORBIS_VR_TRACKER_DEVICE_GUN: u32 = 3u32
+
+struct OrbisVrTrackerCalibrationSettings:
+    hmd_position: mutable u32
+    pad_position: mutable u32
+    move_position: mutable u32
+    gun_position: mutable u32
+    reserved: mutable u32[4]
+
+struct OrbisVrTrackerQueryMemoryParam:
+    size: mutable u32
+    profile: mutable u32
+    reserved: mutable u32[6]
+    calibration_settings: mutable OrbisVrTrackerCalibrationSettings
+
+struct OrbisVrTrackerQueryMemoryResult:
+    size: mutable u32
+    direct_memory_onion_size: mutable u32
+    direct_memory_onion_alignment: mutable u32
+    direct_memory_garlic_size: mutable u32
+    direct_memory_garlic_alignment: mutable u32
+    work_memory_size: mutable u32
+    work_memory_alignment: mutable u32
+    reserved: mutable u32[9]
+
+struct OrbisVrTrackerInitParam:
+    size: mutable u32
+    profile: mutable u32
+    execution_mode: mutable u32
+    hmd_thread_priority: mutable int
+    pad_thread_priority: mutable int
+    move_thread_priority: mutable int
+    gun_thread_priority: mutable int
+    reserved0: mutable int
+    cpu_mask: mutable u64
+    calibration_settings: mutable OrbisVrTrackerCalibrationSettings
+    direct_memory_onion: mutable void&?
+    direct_memory_onion_size: mutable u32
+    direct_memory_onion_alignment: mutable u32
+    direct_memory_garlic: mutable void&?
+    direct_memory_garlic_size: mutable u32
+    direct_memory_garlic_alignment: mutable u32
+    work_memory: mutable void&?
+    work_memory_size: mutable u32
+    work_memory_alignment: mutable u32
+    gpu_pipe_id: mutable int
+    gpu_queue_id: mutable int
+
+struct OrbisVrTrackerGpuWaitParam:
+    size: mutable u32
+    reserved: mutable u32[7]
+
+struct OrbisVrTrackerRecalibrateParam:
+    size: mutable u32
+    device_type: mutable u32
+    calibration_type: mutable u32
+    reserved: mutable u32[5]
+
+global mutable g_library_initialized: bool = false
+global mutable g_pad_handle: int = -1
+global mutable g_move_handle: int = -1
+global mutable g_gun_handle: int = -1
+global mutable g_hmd_handle: int = -1
+global mutable g_time_counter: u64 = 1u64
+
+def vr_tracker_valid_calibration(settings: OrbisVrTrackerCalibrationSettings) -> bool:
+    if settings.pad_position > ORBIS_VR_TRACKER_CALIBRATION_AUTO:
+        return false
+    if settings.hmd_position > ORBIS_VR_TRACKER_CALIBRATION_MANUAL:
+        return false
+    if settings.move_position > ORBIS_VR_TRACKER_CALIBRATION_AUTO:
+        return false
+    if settings.gun_position > ORBIS_VR_TRACKER_CALIBRATION_AUTO:
+        return false
+    return true
+
+def sceVrTrackerQueryMemory(param: OrbisVrTrackerQueryMemoryParam&?, result: mutable OrbisVrTrackerQueryMemoryResult&?) -> int:
+    if param == null or result == null:
+        return ORBIS_VR_TRACKER_ERROR_ARGUMENT_INVALID
+    if param.size != size_of(OrbisVrTrackerQueryMemoryParam).u32():
+        return ORBIS_VR_TRACKER_ERROR_ARGUMENT_INVALID
+    if param.profile != ORBIS_VR_TRACKER_PROFILE_000 and param.profile != ORBIS_VR_TRACKER_PROFILE_100:
+        return ORBIS_VR_TRACKER_ERROR_ARGUMENT_INVALID
+    if not vr_tracker_valid_calibration(param.calibration_settings):
+        return ORBIS_VR_TRACKER_ERROR_ARGUMENT_INVALID
+
+    onion_size: mutable u32 = ORBIS_VR_TRACKER_BASE_ONION_SIZE
+    if param.calibration_settings.move_position == ORBIS_VR_TRACKER_CALIBRATION_AUTO:
+        onion_size <- onion_size * 2u32
+
+    result.direct_memory_onion_size <- onion_size
+    result.direct_memory_onion_alignment <- ORBIS_VR_TRACKER_MEMORY_ALIGNMENT
+    result.direct_memory_garlic_size <- ORBIS_VR_TRACKER_GARLIC_SIZE
+    result.direct_memory_garlic_alignment <- ORBIS_VR_TRACKER_MEMORY_ALIGNMENT
+    result.work_memory_size <- ORBIS_VR_TRACKER_WORK_SIZE
+    result.work_memory_alignment <- ORBIS_VR_TRACKER_MEMORY_ALIGNMENT
+    return ORBIS_OK
+
+def sceVrTrackerInit(param: OrbisVrTrackerInitParam&?) -> int:
+    if g_library_initialized:
+        return ORBIS_VR_TRACKER_ERROR_ALREADY_INITIALIZED
+    if param == null:
+        return ORBIS_VR_TRACKER_ERROR_ARGUMENT_INVALID
+    if param.size != size_of(OrbisVrTrackerInitParam).u32():
+        return ORBIS_VR_TRACKER_ERROR_ARGUMENT_INVALID
+    if not vr_tracker_valid_calibration(param.calibration_settings):
+        return ORBIS_VR_TRACKER_ERROR_ARGUMENT_INVALID
+    required_onion: mutable u32 = ORBIS_VR_TRACKER_BASE_ONION_SIZE
+    if param.calibration_settings.move_position == ORBIS_VR_TRACKER_CALIBRATION_AUTO:
+        required_onion <- required_onion * 2u32
+    if param.direct_memory_garlic == null or param.direct_memory_onion == null or param.work_memory == null:
+        return ORBIS_VR_TRACKER_ERROR_ARGUMENT_INVALID
+    if param.direct_memory_garlic_alignment != ORBIS_VR_TRACKER_MEMORY_ALIGNMENT or param.direct_memory_garlic_size != ORBIS_VR_TRACKER_GARLIC_SIZE:
+        return ORBIS_VR_TRACKER_ERROR_ARGUMENT_INVALID
+    if param.direct_memory_onion_alignment != ORBIS_VR_TRACKER_MEMORY_ALIGNMENT or param.direct_memory_onion_size != required_onion:
+        return ORBIS_VR_TRACKER_ERROR_ARGUMENT_INVALID
+    if param.work_memory_alignment != ORBIS_VR_TRACKER_MEMORY_ALIGNMENT or param.work_memory_size != ORBIS_VR_TRACKER_WORK_SIZE:
+        return ORBIS_VR_TRACKER_ERROR_ARGUMENT_INVALID
+    if param.gpu_pipe_id < 0 or param.gpu_pipe_id >= 8 or param.gpu_queue_id < 0 or param.gpu_queue_id >= 8:
+        return ORBIS_VR_TRACKER_ERROR_ARGUMENT_INVALID
+    g_library_initialized <- true
+    return ORBIS_OK
+
+def sceVrTrackerRegisterDevice(device_type: u32, handle: int) -> int:
+    return sceVrTrackerRegisterDeviceInternal(device_type, handle, -1, 0)
+
+def sceVrTrackerRegisterDevice2(device_type: u32, handle: int) -> int:
+    return sceVrTrackerRegisterDeviceInternal(device_type, handle, -1, 1)
+
+def sceVrTrackerRegisterDeviceInternal(device_type: u32, handle: int, unk0: int, unk1: int) -> int:
+    _ = unk1
+    if not g_library_initialized:
+        return ORBIS_VR_TRACKER_ERROR_NOT_INIT
+    if device_type > ORBIS_VR_TRACKER_DEVICE_GUN or unk0 > 4:
+        return ORBIS_VR_TRACKER_ERROR_ARGUMENT_INVALID
+    if device_type == ORBIS_VR_TRACKER_DEVICE_HMD:
+        if g_hmd_handle != -1:
+            return ORBIS_VR_TRACKER_ERROR_DEVICE_ALREADY_REGISTERED
+        g_hmd_handle <- handle
+    elif device_type == ORBIS_VR_TRACKER_DEVICE_DUALSHOCK4:
+        if g_pad_handle != -1:
+            return ORBIS_VR_TRACKER_ERROR_DEVICE_ALREADY_REGISTERED
+        g_pad_handle <- handle
+    elif device_type == ORBIS_VR_TRACKER_DEVICE_MOVE:
+        if g_move_handle != -1:
+            return ORBIS_VR_TRACKER_ERROR_DEVICE_ALREADY_REGISTERED
+        g_move_handle <- handle
+    else:
+        if g_gun_handle != -1:
+            return ORBIS_VR_TRACKER_ERROR_DEVICE_ALREADY_REGISTERED
+        g_gun_handle <- handle
+    return ORBIS_OK
+
+def sceVrTrackerGetTime(time: mutable u64&?) -> int:
+    if not g_library_initialized:
+        return ORBIS_VR_TRACKER_ERROR_NOT_INIT
+    if time == null:
+        return ORBIS_VR_TRACKER_ERROR_ARGUMENT_INVALID
+    time[] <- g_time_counter
+    g_time_counter <- g_time_counter + 1u64
+    return ORBIS_OK
+
+def sceVrTrackerGpuSubmit(param: void&?) -> int:
+    _ = param
+    if not g_library_initialized:
+        return ORBIS_VR_TRACKER_ERROR_NOT_INIT
+    return ORBIS_VR_TRACKER_ERROR_ARGUMENT_INVALID
+
+def sceVrTrackerGpuWait(param: OrbisVrTrackerGpuWaitParam&?) -> int:
+    if not g_library_initialized:
+        return ORBIS_VR_TRACKER_ERROR_NOT_INIT
+    if param == null or param.size != size_of(OrbisVrTrackerGpuWaitParam).u32():
+        return ORBIS_VR_TRACKER_ERROR_ARGUMENT_INVALID
+    return ORBIS_VR_TRACKER_ERROR_NOT_EXECUTE_GPU_SUBMIT
+
+def sceVrTrackerGpuWaitAndCpuProcess() -> int:
+    if not g_library_initialized:
+        return ORBIS_VR_TRACKER_ERROR_NOT_INIT
+    return ORBIS_VR_TRACKER_ERROR_NOT_EXECUTE_GPU_SUBMIT
+
+def sceVrTrackerRecalibrate(param: OrbisVrTrackerRecalibrateParam&?) -> int:
+    if not g_library_initialized:
+        return ORBIS_VR_TRACKER_ERROR_NOT_INIT
+    if param == null or param.size != size_of(OrbisVrTrackerRecalibrateParam).u32() or param.device_type > ORBIS_VR_TRACKER_DEVICE_GUN:
+        return ORBIS_VR_TRACKER_ERROR_ARGUMENT_INVALID
+    if param.device_type == ORBIS_VR_TRACKER_DEVICE_HMD:
+        return ORBIS_VR_TRACKER_ERROR_DEVICE_NOT_REGISTERED
+    if param.device_type == ORBIS_VR_TRACKER_DEVICE_DUALSHOCK4 and g_pad_handle == -1:
+        return ORBIS_VR_TRACKER_ERROR_DEVICE_NOT_REGISTERED
+    if param.device_type == ORBIS_VR_TRACKER_DEVICE_MOVE and g_move_handle == -1:
+        return ORBIS_VR_TRACKER_ERROR_DEVICE_NOT_REGISTERED
+    if param.device_type == ORBIS_VR_TRACKER_DEVICE_GUN and g_gun_handle == -1:
+        return ORBIS_VR_TRACKER_ERROR_DEVICE_NOT_REGISTERED
+    return ORBIS_OK
+
+def sceVrTrackerSetDurationUntilStatusNotTracking(device_type: u32, duration_camera_frames: u32) -> int:
+    _ = duration_camera_frames
+    if not g_library_initialized:
+        return ORBIS_VR_TRACKER_ERROR_NOT_INIT
+    if device_type > ORBIS_VR_TRACKER_DEVICE_GUN:
+        return ORBIS_VR_TRACKER_ERROR_ARGUMENT_INVALID
+    return ORBIS_OK
+
+def sceVrTrackerUnregisterDevice(handle: int) -> int:
+    if not g_library_initialized:
+        return ORBIS_VR_TRACKER_ERROR_NOT_INIT
+    if handle < 0:
+        return ORBIS_VR_TRACKER_ERROR_ARGUMENT_INVALID
+    if handle == g_hmd_handle:
+        g_hmd_handle <- -1
+    elif handle == g_pad_handle:
+        g_pad_handle <- -1
+    elif handle == g_move_handle:
+        g_move_handle <- -1
+    elif handle == g_gun_handle:
+        g_gun_handle <- -1
+    else:
+        return ORBIS_VR_TRACKER_ERROR_ARGUMENT_INVALID
+    return ORBIS_OK
+
+def sceVrTrackerTerm() -> int:
+    if not g_library_initialized:
+        return ORBIS_VR_TRACKER_ERROR_NOT_INIT
+    g_library_initialized <- false
+    return ORBIS_OK
+
+def sceVrTrackerCpuProcess(param: void&?) -> int: _ = param; return ORBIS_OK
+def sceVrTrackerGetPlayAreaWarningInfo(info: void&?) -> int: _ = info; return ORBIS_OK
+def sceVrTrackerGetResult(param: void&?, result: void&?) -> int: _ = param; _ = result; return ORBIS_OK
+def sceVrTrackerNotifyEndOfCpuProcess(param: void&?) -> int: _ = param; return ORBIS_OK
+def sceVrTrackerResetAll() -> int: return ORBIS_OK
+def sceVrTrackerResetOrientationRelative(device_type: u32, handle: int) -> int: _ = device_type; _ = handle; return ORBIS_OK
+def sceVrTrackerSaveInternalBuffers() -> int: return ORBIS_OK
+def sceVrTrackerSetExtendedMode() -> int: return ORBIS_OK
+def sceVrTrackerSetLEDBrightness() -> int: return ORBIS_OK
+def sceVrTrackerSetRestingMode() -> int: return ORBIS_OK
+def sceVrTrackerUpdateMotionSensorData(param: void&?) -> int: _ = param; return ORBIS_OK
+def Func_0FA4C949F8D3024E() -> int: return ORBIS_OK
+def Func_285C6AFC09C42F7E() -> int: return ORBIS_OK
+def Func_9A6CDB2103664F8A() -> int: return ORBIS_OK
+def Func_B4D26B7D8B18DF06() -> int: return ORBIS_OK
+def sceVrTrackerSetDeviceRejection() -> int: return ORBIS_OK
+def Func_1119B0BE399F37E7() -> int: return ORBIS_OK
+def Func_4928B43816BC440D() -> int: return ORBIS_OK
+def Func_863EF32EFCB0FA9C() -> int: return ORBIS_OK
+def Func_E6E726CBC85C48F9() -> int: return ORBIS_OK
+def Func_F6407E46C66DF383() -> int: return ORBIS_OK
+def sceVrTrackerCpuPopMarker() -> int: return ORBIS_OK
+def sceVrTrackerCpuPushMarker() -> int: return ORBIS_OK
+def sceVrTrackerGetLiveCaptureId() -> int: return ORBIS_OK
+def sceVrTrackerStartLiveCapture() -> int: return ORBIS_OK
+def sceVrTrackerStopLiveCapture() -> int: return ORBIS_OK
+
+def RegisterLib(sym: void&?) -> void:
+    _ = sym

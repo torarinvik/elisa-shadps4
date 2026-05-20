@@ -33,6 +33,16 @@ Status values:
 - Existing parity suites currently passing for covered behavior: `Exact`
 - Functions intentionally returning success/no-op in the C++ surface remain mirrored: `Exact` (stub parity where applicable)
 
+## system (userservice / systemservice / commondialog / msgdialog)
+- Stateful common-dialog/msg-dialog lifecycle and error contracts: `Exact` (covered subset)
+- User-service event/user lookup behaviors in pure Elisa model: `Exact` (covered subset)
+- Runtime-coupled host behaviors (`LoadExec`, host user manager details): `Deferred`
+  - Optional FFI bridge contracts added in:
+    - `core/libraries/system/userservice_ffi_bridge.elisa`
+    - `core/libraries/system/systemservice_ffi_bridge.elisa`
+  - Integration notes:
+    - `core/libraries/system/FFI_INTEGRATION.md`
+
 ## random
 - `sceRandomGetRandomNumber` size gating and byte-fill behavior: `Exact`
 - Export registration (`libSceRandom`): `Exact`

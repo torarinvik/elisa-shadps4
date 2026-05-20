@@ -12,6 +12,7 @@ extern elisa_kernel_sem_trywait(handle: void&?, need_count: int) -> int
 extern elisa_kernel_sem_timedwait(handle: void&?, need_count: int, usec: u64) -> int
 extern elisa_kernel_sem_post(handle: void&?, signal_count: int) -> int
 extern elisa_kernel_sem_getvalue(handle: void&?, out_value: mutable int&?) -> int
+extern elisa_kernel_sem_set(handle: void&?, value: int) -> int
 
 const ORBIS_KERNEL_SEM_VALUE_MAX: int = 0x7fffffff
 const PTHREAD_KEYS_MAX: int = 256
@@ -76,10 +77,14 @@ def sceKernelWaitSema(sem: int, need_count: int, p_timeout: mutable u32&?) -> in
                 return threads_posix_to_orbis_errno(r_wait)
             g_orbis_sems[sem].token_count <- g_orbis_sems[sem].token_count - need_count
             return ORBIS_OK
-        r_timeout: int = elisa_kernel_sem_timedwait(g_orbis_sems[sem].native_handle, need_count, p_timeout as u64)
+        r_timeout: int = elisa_kernel_sem_timedwait(g_orbis_sems[sem].native_handle, need_count, p_timeout[0] as u64)
         if r_timeout != 0:
             p_timeout <- 0u32
             return threads_posix_to_orbis_errno(r_timeout)
+    else:
+        r_poll: int = elisa_kernel_sem_trywait(g_orbis_sems[sem].native_handle, need_count)
+        if r_poll != 0:
+            return threads_posix_to_orbis_errno(r_poll)
     g_orbis_sems[sem].token_count <- g_orbis_sems[sem].token_count - need_count
     return ORBIS_OK
 
@@ -93,6 +98,8 @@ def sceKernelSignalSema(sem: int, signal_count: int) -> int:
         if r != 0:
             return threads_posix_to_orbis_errno(r)
     g_orbis_sems[sem].token_count <- g_orbis_sems[sem].token_count + signal_count
+    if signal_count < 0:
+        _ = elisa_kernel_sem_set(g_orbis_sems[sem].native_handle, g_orbis_sems[sem].token_count)
     return ORBIS_OK
 
 def sceKernelPollSema(sem: int, need_count: int) -> int:
@@ -115,6 +122,7 @@ def sceKernelCancelSema(sem: int, set_count: int, p_num_wait_threads: mutable in
         g_orbis_sems[sem].token_count <- g_orbis_sems[sem].init_count
     else:
         g_orbis_sems[sem].token_count <- set_count
+    _ = elisa_kernel_sem_set(g_orbis_sems[sem].native_handle, g_orbis_sems[sem].token_count)
     return ORBIS_OK
 
 def sceKernelDeleteSema(sem: int) -> int:
