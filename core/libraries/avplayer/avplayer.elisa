@@ -6,9 +6,9 @@ include "./avplayer_impl.elisa"
 include "./avplayer_state.elisa"
 include "./avplayer_source.elisa"
 
-extern pthread_create(thread: mutable void&?&, attr: void&?, start_routine: void&?, arg: void&?) -> int
-extern pthread_join(thread: void&?, thread_return: mutable void&?&) -> int
-extern usleep(usec: u32) -> int
+extern pthread_create(thread: mutable uintptr&, attr: void&?, start_routine: void&, arg: void&?) -> int effects[Thread.Spawn]
+extern pthread_join(thread: uintptr, thread_return: mutable void&?) -> int effects[Thread.Join]
+extern usleep(usec: u32) -> int effects[Thread.Sleep]
 
 const AVPLAYER_MAX_HANDLES: int = 64
 
@@ -123,15 +123,15 @@ struct AvPlayerMemAllocator:
     deallocate_texture: mutable AvPlayerDeallocateTexture
 
 struct AvPlayerFileReplacement:
-    object_ptr: void&?
-    open: void&?
-    close: void&?
-    read_offset: void&?
-    size: void&?
+    object_ptr: mutable void&?
+    open: mutable void&?
+    close: mutable void&?
+    read_offset: mutable void&?
+    size: mutable void&?
 
 struct AvPlayerEventReplacement:
-    object_ptr: void&?
-    event_callback: void&?
+    object_ptr: mutable void&?
+    event_callback: mutable void&?
 
 type AvPlayerEventCallback = func(void&?, i32, i32, void&?) -> void
 
@@ -210,22 +210,22 @@ def avplayer_null_event_callback(object_ptr: void&?, event_id: i32, source_id: i
     _ = source_id
     _ = event_data
 
-global mutable g_avplayer_mem_allocate: AvPlayerAllocate = avplayer_null_allocate
-global mutable g_avplayer_mem_deallocate: AvPlayerDeallocate = avplayer_null_deallocate
-global mutable g_avplayer_mem_allocate_texture: AvPlayerAllocateTexture = avplayer_null_allocate
-global mutable g_avplayer_mem_deallocate_texture: AvPlayerDeallocateTexture = avplayer_null_deallocate
+global mutable g_handle_mem_allocate: AvPlayerAllocate[AVPLAYER_MAX_HANDLES] = zeroed
+global mutable g_handle_mem_deallocate: AvPlayerDeallocate[AVPLAYER_MAX_HANDLES] = zeroed
+global mutable g_handle_mem_allocate_texture: AvPlayerAllocateTexture[AVPLAYER_MAX_HANDLES] = zeroed
+global mutable g_handle_mem_deallocate_texture: AvPlayerDeallocateTexture[AVPLAYER_MAX_HANDLES] = zeroed
 global mutable g_avplayer_log_callback: void&? = null
 global mutable g_avplayer_log_user_data: void&? = null
-global mutable g_avplayer_controller_thread: void&? = null
+global mutable g_avplayer_controller_thread: uintptr = 0.uintptr()
 global mutable g_avplayer_controller_stop: bool = false
 global mutable g_avplayer_controller_running: bool = false
 
 def avplayer_store_allocator(slot: int, allocator: AvPlayerMemAllocator&):
     g_handle_mem_object[slot] <- allocator.object_ptr
-    g_avplayer_mem_allocate <- allocator.allocate
-    g_avplayer_mem_deallocate <- allocator.deallocate
-    g_avplayer_mem_allocate_texture <- allocator.allocate_texture
-    g_avplayer_mem_deallocate_texture <- allocator.deallocate_texture
+    g_handle_mem_allocate[slot] <- allocator.allocate
+    g_handle_mem_deallocate[slot] <- allocator.deallocate
+    g_handle_mem_allocate_texture[slot] <- allocator.allocate_texture
+    g_handle_mem_deallocate_texture[slot] <- allocator.deallocate_texture
 
 def avplayer_video_payload_idx(slot: int, pool_index: int) -> int:
     return (slot * AVPLAYER_VIDEO_PAYLOAD_POOL_MAX) + pool_index
@@ -239,7 +239,8 @@ def avplayer_release_payloads(slot: int):
         vidx: int = avplayer_video_payload_idx(slot, i)
         video_ptr: void&? = g_handle_video_payload[vidx]
         if video_ptr != null:
-            g_avplayer_mem_deallocate_texture(g_handle_mem_object[slot], video_ptr)
+            dealloc_texture: AvPlayerDeallocateTexture = g_handle_mem_deallocate_texture[slot]
+            dealloc_texture(g_handle_mem_object[slot], video_ptr)
         g_handle_video_payload[vidx] <- null
         g_handle_video_payload_size[vidx] <- 0
         i <- i + 1
@@ -248,7 +249,8 @@ def avplayer_release_payloads(slot: int):
         aidx: int = avplayer_audio_payload_idx(slot, i)
         audio_ptr: void&? = g_handle_audio_payload[aidx]
         if audio_ptr != null:
-            g_avplayer_mem_deallocate(g_handle_mem_object[slot], audio_ptr)
+            dealloc_audio: AvPlayerDeallocate = g_handle_mem_deallocate[slot]
+            dealloc_audio(g_handle_mem_object[slot], audio_ptr)
         g_handle_audio_payload[aidx] <- null
         g_handle_audio_payload_size[aidx] <- 0
         i <- i + 1
@@ -281,10 +283,12 @@ def avplayer_ensure_video_payload(slot: int, width: u32, height: u32) -> void&?:
         g_handle_video_payload_cursor[slot] <- (slot_cursor + 1) % pool_count
         return existing
     if existing != null:
-        g_avplayer_mem_deallocate_texture(g_handle_mem_object[slot], existing)
+        dealloc_texture: AvPlayerDeallocateTexture = g_handle_mem_deallocate_texture[slot]
+        dealloc_texture(g_handle_mem_object[slot], existing)
         g_handle_video_payload[idx] <- null
         g_handle_video_payload_size[idx] <- 0
-    allocated: void&? = g_avplayer_mem_allocate_texture(g_handle_mem_object[slot], 0x100.u32(), required)
+    alloc_texture: AvPlayerAllocateTexture = g_handle_mem_allocate_texture[slot]
+    allocated: void&? = alloc_texture(g_handle_mem_object[slot], 0x100.u32(), required)
     if allocated != null:
         g_handle_video_payload[idx] <- allocated
         g_handle_video_payload_size[idx] <- required
@@ -305,10 +309,12 @@ def avplayer_ensure_audio_payload(slot: int, size: u32) -> void&?:
         g_handle_audio_payload_cursor[slot] <- (slot_cursor + 1) % pool_count
         return existing
     if existing != null:
-        g_avplayer_mem_deallocate(g_handle_mem_object[slot], existing)
+        dealloc_audio: AvPlayerDeallocate = g_handle_mem_deallocate[slot]
+        dealloc_audio(g_handle_mem_object[slot], existing)
         g_handle_audio_payload[idx] <- null
         g_handle_audio_payload_size[idx] <- 0
-    allocated: void&? = g_avplayer_mem_allocate(g_handle_mem_object[slot], 0x100.u32(), size)
+    alloc_audio: AvPlayerAllocate = g_handle_mem_allocate[slot]
+    allocated: void&? = alloc_audio(g_handle_mem_object[slot], 0x100.u32(), size)
     if allocated != null:
         g_handle_audio_payload[idx] <- allocated
         g_handle_audio_payload_size[idx] <- size
@@ -471,21 +477,21 @@ def avplayer_controller_thread_entry(arg: void&?) -> void&?:
     return null
 
 def avplayer_controller_thread_start():
-    if g_avplayer_controller_thread != null:
+    if g_avplayer_controller_thread != 0.uintptr():
         return
     g_avplayer_controller_stop <- false
-    created: mutable void&? = null
+    created: mutable uintptr = 0.uintptr()
     if pthread_create(created, null, avplayer_controller_thread_entry.cast[void&], null) == 0:
         g_avplayer_controller_thread <- created
 
 def avplayer_controller_thread_stop():
-    thread: void&? = g_avplayer_controller_thread
-    if thread == null:
+    thread: uintptr = g_avplayer_controller_thread
+    if thread == 0.uintptr():
         return
     g_avplayer_controller_stop <- true
     thread_ret: mutable void&? = null
     _ = pthread_join(thread, thread_ret)
-    g_avplayer_controller_thread <- null
+    g_avplayer_controller_thread <- 0.uintptr()
     g_avplayer_controller_running <- false
 
 def avplayer_controller_tick(slot: int):

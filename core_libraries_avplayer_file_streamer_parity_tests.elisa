@@ -3,7 +3,22 @@ include "./core/libraries/avplayer/avplayer_harness.elisa"
 
 global mutable g_avp_open_calls: i32 = 0
 global mutable g_avp_close_calls: i32 = 0
+global mutable g_avp_size_calls: i32 = 0
+global mutable g_avp_read_calls: i32 = 0
+global mutable g_avp_last_read_pos: u64 = 0u64
+global mutable g_avp_last_read_len: u32 = 0u32
+global mutable g_avp_short_read_limit: i32 = -1
 global mutable g_avp_force_open_fail: bool = false
+
+def avp_reset_file_probe():
+    g_avp_open_calls <- 0
+    g_avp_close_calls <- 0
+    g_avp_size_calls <- 0
+    g_avp_read_calls <- 0
+    g_avp_last_read_pos <- 0u64
+    g_avp_last_read_len <- 0u32
+    g_avp_short_read_limit <- -1
+    g_avp_force_open_fail <- false
 
 def avp_file_open(obj: void&?, name: i8&?) -> i32:
     _ = obj
@@ -20,21 +35,26 @@ def avp_file_close(obj: void&?) -> i32:
 
 def avp_file_read_offset(obj: void&?, buf: mutable u8&, pos: u64, length: u32) -> i32:
     _ = obj
-    _ = buf
-    _ = pos
-    _ = length
-    return 0
+    g_avp_read_calls <- g_avp_read_calls + 1
+    g_avp_last_read_pos <- pos
+    g_avp_last_read_len <- length
+    i: mutable u32 = 0u32
+    while i < length:
+        buf[i.usize()] <- (pos + i.u64()).u8()
+        i <- i + 1u32
+    if g_avp_short_read_limit >= 0 and length > g_avp_short_read_limit.u32():
+        return g_avp_short_read_limit
+    return length.i32()
 
 def avp_file_size(obj: void&?) -> u64:
     _ = obj
-    return 4096u64
+    g_avp_size_calls <- g_avp_size_calls + 1
+    return 16u64
 
 @test
 def avplayer_file_replacement_open_close_contract() -> void:
-    can Abort.Panic:
-        g_avp_open_calls <- 0
-        g_avp_close_calls <- 0
-        g_avp_force_open_fail <- false
+    can Thread.Spawn, Thread.Join, Abort.Panic:
+        avp_reset_file_probe()
 
         init_data: AvPlayerInitData = build_init_data()
         init_data.file_replacement.object_ptr <- null
@@ -45,17 +65,17 @@ def avplayer_file_replacement_open_close_contract() -> void:
 
         handle: AvPlayerHandle = sceAvPlayerInit(init_data.ref[mutable AvPlayerInitData&])
         assert handle != 0
-        assert sceAvPlayerAddSource(handle, "elisa://avplayer-callback") == ORBIS_OK
+        assert sceAvPlayerAddSource(handle, "elisa://avplayer-callback".cast[i8&?]) == ORBIS_OK
         assert g_avp_open_calls == 1
+        assert g_avp_size_calls == 1
         assert g_avp_close_calls == 0
         assert sceAvPlayerClose(handle) == ORBIS_OK
         assert g_avp_close_calls == 1
 
 @test
 def avplayer_file_replacement_open_failure_propagates() -> void:
-    can Abort.Panic:
-        g_avp_open_calls <- 0
-        g_avp_close_calls <- 0
+    can Thread.Spawn, Thread.Join, Abort.Panic:
+        avp_reset_file_probe()
         g_avp_force_open_fail <- true
 
         init_data: AvPlayerInitData = build_init_data()
@@ -67,8 +87,73 @@ def avplayer_file_replacement_open_failure_propagates() -> void:
 
         handle: AvPlayerHandle = sceAvPlayerInit(init_data.ref[mutable AvPlayerInitData&])
         assert handle != 0
-        assert sceAvPlayerAddSource(handle, "elisa://avplayer-callback-fail") == ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
+        assert sceAvPlayerAddSource(handle, "elisa://avplayer-callback-fail".cast[i8&?]) == ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
         assert g_avp_open_calls == 1
+        assert g_avp_size_calls == 0
         assert g_avp_close_calls == 0
         assert sceAvPlayerClose(handle) == ORBIS_OK
         assert g_avp_close_calls == 0
+
+@test
+def avplayer_file_replacement_read_seek_reset_contract() -> void:
+    can Thread.Spawn, Thread.Join, Abort.Panic:
+        avp_reset_file_probe()
+
+        init_data: AvPlayerInitData = build_init_data()
+        init_data.file_replacement.object_ptr <- null
+        init_data.file_replacement.open <- avp_file_open.cast[void&?]
+        init_data.file_replacement.close <- avp_file_close.cast[void&?]
+        init_data.file_replacement.read_offset <- avp_file_read_offset.cast[void&?]
+        init_data.file_replacement.size <- avp_file_size.cast[void&?]
+
+        handle: AvPlayerHandle = sceAvPlayerInit(init_data.ref[mutable AvPlayerInitData&])
+        assert handle != 0
+        assert sceAvPlayerAddSource(handle, "elisa://avplayer-read".cast[i8&?]) == ORBIS_OK
+        slot: int = handle - 1
+
+        buf: u8[8] = zeroed
+        assert avsrc_file_read_packet(slot, buf[0].ref[mutable u8&], 6) == 6
+        assert g_avp_read_calls == 1
+        assert g_avp_last_read_pos == 0u64
+        assert g_avp_last_read_len == 6u32
+        assert avsrc_file_position[slot] == 6u64
+        assert buf[0] == 0u8
+        assert buf[5] == 5u8
+
+        assert avsrc_file_seek(slot, 4, AVSRC_SEEK_SET) == 4
+        assert avsrc_file_read_packet(slot, buf[0].ref[mutable u8&], 20) == 12
+        assert g_avp_last_read_pos == 4u64
+        assert g_avp_last_read_len == 12u32
+        assert avsrc_file_position[slot] == 16u64
+        assert avsrc_file_read_packet(slot, buf[0].ref[mutable u8&], 1) == -1
+
+        assert avsrc_file_seek(slot, -5, AVSRC_SEEK_CUR) == 11
+        assert avsrc_file_seek(slot, -100, AVSRC_SEEK_CUR) == 0
+        assert avsrc_file_seek(slot, -3, AVSRC_SEEK_END) == 13
+        assert avsrc_file_seek(slot, 0, AVSRC_AVSEEK_SIZE) == 16
+        assert avsrc_file_seek(slot, 0, 99) == -1
+
+        avsrc_file_reset(slot)
+        assert avsrc_file_position[slot] == 0u64
+        assert sceAvPlayerClose(handle) == ORBIS_OK
+
+@test
+def avplayer_file_replacement_replacing_source_closes_previous_fd() -> void:
+    can Thread.Spawn, Thread.Join, Abort.Panic:
+        avp_reset_file_probe()
+
+        init_data: AvPlayerInitData = build_init_data()
+        init_data.file_replacement.object_ptr <- null
+        init_data.file_replacement.open <- avp_file_open.cast[void&?]
+        init_data.file_replacement.close <- avp_file_close.cast[void&?]
+        init_data.file_replacement.read_offset <- avp_file_read_offset.cast[void&?]
+        init_data.file_replacement.size <- avp_file_size.cast[void&?]
+
+        handle: AvPlayerHandle = sceAvPlayerInit(init_data.ref[mutable AvPlayerInitData&])
+        assert handle != 0
+        assert sceAvPlayerAddSource(handle, "elisa://first".cast[i8&?]) == ORBIS_OK
+        assert sceAvPlayerAddSource(handle, "elisa://second".cast[i8&?]) == ORBIS_OK
+        assert g_avp_open_calls == 2
+        assert g_avp_close_calls == 1
+        assert sceAvPlayerClose(handle) == ORBIS_OK
+        assert g_avp_close_calls == 2

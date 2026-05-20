@@ -21,6 +21,10 @@ const AVPLAYER_AV_SYNC_MODE_NONE: i32 = 1
 const AVSRC_PREFETCH_TARGET: int = 2
 const AVSRC_DEFAULT_VIDEO_FRAMEBUFFERS: i32 = 2
 const AVSRC_MAX_VIDEO_FRAMEBUFFERS: i32 = 16
+const AVSRC_SEEK_SET: i32 = 0
+const AVSRC_SEEK_CUR: i32 = 1
+const AVSRC_SEEK_END: i32 = 2
+const AVSRC_AVSEEK_SIZE: i32 = 0x10000
 
 type AvsrcOpenFile = func(void&?, i8&?) -> i32
 type AvsrcCloseFile = func(void&?) -> i32
@@ -91,6 +95,8 @@ global mutable avsrc_file_close: AvsrcCloseFile[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_file_read_offset: AvsrcReadOffsetFile[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_file_size: AvsrcSizeFile[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_file_fd: i32[AVSRC_MAX_HANDLES] = zeroed
+global mutable avsrc_file_position: u64[AVSRC_MAX_HANDLES] = zeroed
+global mutable avsrc_file_size_bytes: u64[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_file_replacement_enabled: bool[AVSRC_MAX_HANDLES] = zeroed
 
 def avsrc_null_open_file(obj: void&?, path: i8&?) -> i32:
@@ -116,6 +122,8 @@ def avsrc_null_size_file(obj: void&?) -> u64:
 def avsrc_set_file_replacement(slot: int, object_ptr: void&?, open_cb: void&?, close_cb: void&?, read_offset_cb: void&?, size_cb: void&?):
     avsrc_file_object[slot] <- object_ptr
     avsrc_file_fd[slot] <- -1
+    avsrc_file_position[slot] <- 0u64
+    avsrc_file_size_bytes[slot] <- 0u64
     if open_cb == null:
         avsrc_file_replacement_enabled[slot] <- false
         avsrc_file_open[slot] <- avsrc_null_open_file
@@ -128,6 +136,59 @@ def avsrc_set_file_replacement(slot: int, object_ptr: void&?, open_cb: void&?, c
     avsrc_file_close[slot] <- avsrc_null_close_file if close_cb == null else close_cb.cast[AvsrcCloseFile]
     avsrc_file_read_offset[slot] <- avsrc_null_read_offset_file if read_offset_cb == null else read_offset_cb.cast[AvsrcReadOffsetFile]
     avsrc_file_size[slot] <- avsrc_null_size_file if size_cb == null else size_cb.cast[AvsrcSizeFile]
+
+def avsrc_file_close_if_open(slot: int):
+    if avsrc_file_replacement_enabled[slot] and avsrc_file_fd[slot] >= 0:
+        close_cb: AvsrcCloseFile = avsrc_file_close[slot]
+        _ = close_cb(avsrc_file_object[slot])
+    avsrc_file_fd[slot] <- -1
+    avsrc_file_position[slot] <- 0u64
+    avsrc_file_size_bytes[slot] <- 0u64
+
+def avsrc_file_reset(slot: int):
+    avsrc_file_position[slot] <- 0u64
+
+def avsrc_file_read_packet(slot: int, buffer: mutable u8&?, requested_size: i32) -> i32:
+    if not avsrc_file_replacement_enabled[slot] or avsrc_file_fd[slot] < 0 or buffer == null:
+        return -1
+    if requested_size <= 0:
+        return 0
+    if avsrc_file_position[slot] >= avsrc_file_size_bytes[slot]:
+        return -1
+    remaining: u64 = avsrc_file_size_bytes[slot] - avsrc_file_position[slot]
+    size: mutable u32 = requested_size.u32()
+    if size.u64() > remaining:
+        size <- remaining.u32()
+    read_cb: AvsrcReadOffsetFile = avsrc_file_read_offset[slot]
+    bytes_read: i32 = read_cb(avsrc_file_object[slot], buffer.ref[mutable u8&], avsrc_file_position[slot], size)
+    if bytes_read == 0 and size != 0:
+        return -1
+    if bytes_read > 0:
+        avsrc_file_position[slot] <- avsrc_file_position[slot] + bytes_read.u64()
+    return bytes_read
+
+def avsrc_file_clamp_position(value: i64, max_value: u64) -> u64:
+    if value <= 0:
+        return 0u64
+    if value.u64() > max_value:
+        return max_value
+    return value.u64()
+
+def avsrc_file_seek(slot: int, offset: i64, whence: i32) -> i64:
+    if not avsrc_file_replacement_enabled[slot] or avsrc_file_fd[slot] < 0:
+        return -1
+    if (whence & AVSRC_AVSEEK_SIZE) != 0:
+        return avsrc_file_size_bytes[slot].i64()
+    if whence == AVSRC_SEEK_CUR:
+        avsrc_file_position[slot] <- avsrc_file_clamp_position(avsrc_file_position[slot].i64() + offset, avsrc_file_size_bytes[slot])
+        return avsrc_file_position[slot].i64()
+    if whence == AVSRC_SEEK_SET:
+        avsrc_file_position[slot] <- avsrc_file_clamp_position(offset, avsrc_file_size_bytes[slot])
+        return avsrc_file_position[slot].i64()
+    if whence == AVSRC_SEEK_END:
+        avsrc_file_position[slot] <- avsrc_file_clamp_position(avsrc_file_size_bytes[slot].i64() + offset, avsrc_file_size_bytes[slot])
+        return avsrc_file_position[slot].i64()
+    return -1
 
 def avsrc_video_q_idx(slot: int, q_index: int) -> int:
     return slot * AVSRC_TS_QUEUE_CAP + q_index
@@ -301,6 +362,8 @@ def avsrc_init_handle(slot: int):
     avsrc_file_read_offset[slot] <- avsrc_null_read_offset_file
     avsrc_file_size[slot] <- avsrc_null_size_file
     avsrc_file_fd[slot] <- -1
+    avsrc_file_position[slot] <- 0u64
+    avsrc_file_size_bytes[slot] <- 0u64
     avsrc_file_replacement_enabled[slot] <- false
 
 def avsrc_add_source(slot: int) -> bool:
@@ -357,12 +420,16 @@ def avsrc_add_source(slot: int) -> bool:
     return true
 
 def avsrc_add_source_path(slot: int, path: i8&?) -> bool:
+    avsrc_file_close_if_open(slot)
     if avsrc_file_replacement_enabled[slot]:
-        fd: i32 = avsrc_file_open[slot](avsrc_file_object[slot], path)
+        open_cb: AvsrcOpenFile = avsrc_file_open[slot]
+        fd: i32 = open_cb(avsrc_file_object[slot], path)
         if fd < 0:
             return false
         avsrc_file_fd[slot] <- fd
-        _ = avsrc_file_size[slot](avsrc_file_object[slot])
+        avsrc_file_position[slot] <- 0u64
+        size_cb: AvsrcSizeFile = avsrc_file_size[slot]
+        avsrc_file_size_bytes[slot] <- size_cb(avsrc_file_object[slot])
         return avsrc_add_source(slot)
     if path != null:
         h: i32 = avplayer_ffmpeg_open(path)
@@ -856,7 +923,8 @@ def avsrc_start(slot: int) -> bool:
             if avplayer_ffmpeg_copy_stream_params_to_codec_ctx(avsrc_ffmpeg_handle[slot], avsrc_video_stream_index[slot].u32(), codec_ctx) < 0:
                 avcodec_free_context(codec_ctx.ref[mutable void&?&])
                 return false
-            if avcodec_open2(codec_ctx, decoder, null.ref[mutable void&?&]) < 0:
+            video_options: mutable void&? = null
+            if avcodec_open2(codec_ctx, decoder, video_options.ref[mutable void&?&]) < 0:
                 avcodec_free_context(codec_ctx.ref[mutable void&?&])
                 return false
             avsrc_video_codec_ctx[slot] <- codec_ctx
@@ -872,7 +940,8 @@ def avsrc_start(slot: int) -> bool:
             if avplayer_ffmpeg_copy_stream_params_to_codec_ctx(avsrc_ffmpeg_handle[slot], avsrc_audio_stream_index[slot].u32(), codec_ctx) < 0:
                 avcodec_free_context(codec_ctx.ref[mutable void&?&])
                 return false
-            if avcodec_open2(codec_ctx, decoder, null.ref[mutable void&?&]) < 0:
+            audio_options: mutable void&? = null
+            if avcodec_open2(codec_ctx, decoder, audio_options.ref[mutable void&?&]) < 0:
                 avcodec_free_context(codec_ctx.ref[mutable void&?&])
                 return false
             avsrc_audio_codec_ctx[slot] <- codec_ctx
@@ -1099,9 +1168,7 @@ def avsrc_release(slot: int):
     avsrc_audio_pkt_q_size[slot] <- 0
     if ffmpeg_enabled and ffmpeg_handle > 0:
         avplayer_ffmpeg_close(ffmpeg_handle)
-    if avsrc_file_replacement_enabled[slot] and avsrc_file_fd[slot] >= 0:
-        _ = avsrc_file_close[slot](avsrc_file_object[slot])
-        avsrc_file_fd[slot] <- -1
+    avsrc_file_close_if_open(slot)
     avsrc_init_handle(slot)
 
 def avsrc_is_active(slot: int) -> bool:

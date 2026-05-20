@@ -82,6 +82,7 @@ Current validated prefix structs:
 - `Implemented`: FFmpeg 8 `AVFrame` prefix binding now follows the public `data[8]` layout and validates with `c-bind-check`
 - `Implemented`: successful `GetAudioData`, `GetVideoData`, and `GetVideoDataEx` now allocate stable frame payload buffers through the player memory callbacks instead of returning metadata-only frames with `p_data = null`
 - `Implemented`: FFmpeg decode now has an Elisa-side copy path that copies live decoded frame data into caller-provided payload buffers before `AVFrame` release
+- `Implemented`: callback-backed file replacement now tracks open fd, file size, position, read-packet EOF/short-read behavior, seek/reset clamping, close-on-replace, and close-on-release in Elisa
 - `Partial`: decoded payload copying currently handles direct plane copies for already-compatible frame data; non-NV12 video and non-S16 audio still need swscale/swresample conversion parity
 - `Different`: Elisa currently cannot model nullable function-pointer fields directly, so `AvPlayerMemAllocator` callback fields are represented as callable function values; this preserves callback invocation and function-pointer-sized ABI shape, but null-callback validation is deferred to compiler nullable-function support
 - `Implemented`: source caches stream start-time/duration for active audio/video and frame getters now apply cached stream start-time offset to output timestamps
@@ -133,13 +134,13 @@ Current validated prefix structs:
 - `Implemented`: seek/flush accessors for source-level replay handling
 - `Implemented`: ABI prefix layout checks for core structs
 - `Missing`: swscale/swresample conversion helpers for frame formats that are not already directly copy-compatible with the expected guest output
+- `Implemented`: swscale/swresample declarations and conversion helper paths are present for non-NV12 video and non-S16 audio; they are covered by binding checks but still need media-fixture runtime coverage
 
 ## Remaining Gaps To Reach 100% C++ Parity
 
 - Port full source pipeline behaviors from `avplayer_source.cpp`:
   demux loop, decoder loops, frame buffering, and frame conversion metadata parity.
 - Port controller-thread event processing behavior from `avplayer_state.cpp`.
-- Extend FFmpeg FFI to cover swscale/swresample conversion APIs and
-  validate any new layout prefixes with `c-bind-check`.
+- Add media-fixture runtime tests for swscale/swresample conversion outputs and decoded payload parity.
 - Expand parity harness scenarios for EOF/loop, buffering transitions, and
   invalid-state edge behavior.
