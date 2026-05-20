@@ -22,6 +22,11 @@ const AVSRC_PREFETCH_TARGET: int = 2
 const AVSRC_DEFAULT_VIDEO_FRAMEBUFFERS: i32 = 2
 const AVSRC_MAX_VIDEO_FRAMEBUFFERS: i32 = 16
 
+type AvsrcOpenFile = func(void&?, i8&?) -> i32
+type AvsrcCloseFile = func(void&?) -> i32
+type AvsrcReadOffsetFile = func(void&?, mutable u8&, u64, u32) -> i32
+type AvsrcSizeFile = func(void&?) -> u64
+
 global mutable avsrc_has_source: bool[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_started: bool[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_is_paused: bool[AVSRC_MAX_HANDLES] = zeroed
@@ -80,6 +85,49 @@ global mutable avsrc_audio_pkt_q_head: int[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_audio_pkt_q_tail: int[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_audio_pkt_q_size: int[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_audio_pkt_q_ts: u64[AVSRC_MAX_HANDLES * AVSRC_TS_QUEUE_CAP] = zeroed
+global mutable avsrc_file_object: void&?[AVSRC_MAX_HANDLES] = zeroed
+global mutable avsrc_file_open: AvsrcOpenFile[AVSRC_MAX_HANDLES] = zeroed
+global mutable avsrc_file_close: AvsrcCloseFile[AVSRC_MAX_HANDLES] = zeroed
+global mutable avsrc_file_read_offset: AvsrcReadOffsetFile[AVSRC_MAX_HANDLES] = zeroed
+global mutable avsrc_file_size: AvsrcSizeFile[AVSRC_MAX_HANDLES] = zeroed
+global mutable avsrc_file_fd: i32[AVSRC_MAX_HANDLES] = zeroed
+global mutable avsrc_file_replacement_enabled: bool[AVSRC_MAX_HANDLES] = zeroed
+
+def avsrc_null_open_file(obj: void&?, path: i8&?) -> i32:
+    _ = obj
+    _ = path
+    return -1
+
+def avsrc_null_close_file(obj: void&?) -> i32:
+    _ = obj
+    return 0
+
+def avsrc_null_read_offset_file(obj: void&?, buf: mutable u8&, pos: u64, length: u32) -> i32:
+    _ = obj
+    _ = buf
+    _ = pos
+    _ = length
+    return 0
+
+def avsrc_null_size_file(obj: void&?) -> u64:
+    _ = obj
+    return 0u64
+
+def avsrc_set_file_replacement(slot: int, object_ptr: void&?, open_cb: void&?, close_cb: void&?, read_offset_cb: void&?, size_cb: void&?):
+    avsrc_file_object[slot] <- object_ptr
+    avsrc_file_fd[slot] <- -1
+    if open_cb == null:
+        avsrc_file_replacement_enabled[slot] <- false
+        avsrc_file_open[slot] <- avsrc_null_open_file
+        avsrc_file_close[slot] <- avsrc_null_close_file
+        avsrc_file_read_offset[slot] <- avsrc_null_read_offset_file
+        avsrc_file_size[slot] <- avsrc_null_size_file
+        return
+    avsrc_file_replacement_enabled[slot] <- true
+    avsrc_file_open[slot] <- open_cb.cast[AvsrcOpenFile]
+    avsrc_file_close[slot] <- avsrc_null_close_file if close_cb == null else close_cb.cast[AvsrcCloseFile]
+    avsrc_file_read_offset[slot] <- avsrc_null_read_offset_file if read_offset_cb == null else read_offset_cb.cast[AvsrcReadOffsetFile]
+    avsrc_file_size[slot] <- avsrc_null_size_file if size_cb == null else size_cb.cast[AvsrcSizeFile]
 
 def avsrc_video_q_idx(slot: int, q_index: int) -> int:
     return slot * AVSRC_TS_QUEUE_CAP + q_index
@@ -247,6 +295,13 @@ def avsrc_init_handle(slot: int):
     avsrc_audio_pkt_q_head[slot] <- 0
     avsrc_audio_pkt_q_tail[slot] <- 0
     avsrc_audio_pkt_q_size[slot] <- 0
+    avsrc_file_object[slot] <- null
+    avsrc_file_open[slot] <- avsrc_null_open_file
+    avsrc_file_close[slot] <- avsrc_null_close_file
+    avsrc_file_read_offset[slot] <- avsrc_null_read_offset_file
+    avsrc_file_size[slot] <- avsrc_null_size_file
+    avsrc_file_fd[slot] <- -1
+    avsrc_file_replacement_enabled[slot] <- false
 
 def avsrc_add_source(slot: int) -> bool:
     avsrc_has_source[slot] <- true
@@ -302,6 +357,13 @@ def avsrc_add_source(slot: int) -> bool:
     return true
 
 def avsrc_add_source_path(slot: int, path: i8&?) -> bool:
+    if avsrc_file_replacement_enabled[slot]:
+        fd: i32 = avsrc_file_open[slot](avsrc_file_object[slot], path)
+        if fd < 0:
+            return false
+        avsrc_file_fd[slot] <- fd
+        _ = avsrc_file_size[slot](avsrc_file_object[slot])
+        return avsrc_add_source(slot)
     if path != null:
         h: i32 = avplayer_ffmpeg_open(path)
         if h <= 0:
@@ -1037,6 +1099,9 @@ def avsrc_release(slot: int):
     avsrc_audio_pkt_q_size[slot] <- 0
     if ffmpeg_enabled and ffmpeg_handle > 0:
         avplayer_ffmpeg_close(ffmpeg_handle)
+    if avsrc_file_replacement_enabled[slot] and avsrc_file_fd[slot] >= 0:
+        _ = avsrc_file_close[slot](avsrc_file_object[slot])
+        avsrc_file_fd[slot] <- -1
     avsrc_init_handle(slot)
 
 def avsrc_is_active(slot: int) -> bool:

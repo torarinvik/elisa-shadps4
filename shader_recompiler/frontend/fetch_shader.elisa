@@ -1,0 +1,140 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+# Elisa port of shader_recompiler/frontend/fetch_shader.{h,cpp}
+
+include "./instruction.elisa"
+include "./decode.elisa"
+
+const FETCH_SHADER_MAX_WORDS: u32 = 4096u32
+const FETCH_SHADER_MAX_ATTRS: u32 = 64u32
+const FETCH_SHADER_MAX_LOADS: u32 = 104u32
+
+const OPCODE_TBUFFER_LOAD_FORMAT_X: u32 = 1988u32
+const OPCODE_TBUFFER_LOAD_FORMAT_XY: u32 = 1989u32
+const OPCODE_TBUFFER_LOAD_FORMAT_XYZ: u32 = 1990u32
+const OPCODE_TBUFFER_LOAD_FORMAT_XYZW: u32 = 1991u32
+
+struct VertexAttribute:
+    semantic: mutable u8
+    dest_vgpr: mutable u8
+    num_elements: mutable u8
+    sgpr_base: mutable u8
+    dword_offset: mutable u8
+    instance_data: mutable u8
+    inst_offset: mutable u8
+    data_format: mutable u8
+    num_format: mutable u8
+
+struct FetchShaderData:
+    size: mutable u32
+    attributes: mutable VertexAttribute[64]
+    attribute_count: mutable u32
+    vertex_offset_sgpr: mutable int
+    instance_offset_sgpr: mutable int
+
+struct FetchShaderDataOptional:
+    has_value: mutable bool
+    value: mutable FetchShaderData
+
+struct ShaderInfoLite:
+    has_fetch_shader: mutable bool
+    fetch_shader_sgpr_base: mutable u32
+    fetch_shader_code: mutable u32[4096]
+    fetch_shader_word_count: mutable u32
+
+struct _VsharpLoad:
+    dword_offset: mutable u32
+    base_sgpr: mutable u32
+
+
+def VertexAttribute_GetStepRate(attr: VertexAttribute&) -> u8:
+    return attr.instance_data
+
+
+def VertexAttribute_GetSharpSgprBase(attr: VertexAttribute&) -> u32:
+    return attr.sgpr_base.u32()
+
+
+def FetchShaderData_Default() -> FetchShaderData:
+    out: mutable FetchShaderData = zeroed
+    out.size <- 0u32
+    out.attribute_count <- 0u32
+    out.vertex_offset_sgpr <- -1
+    out.instance_offset_sgpr <- -1
+    return out
+
+
+def FetchShaderDataOptional_None() -> FetchShaderDataOptional:
+    out: mutable FetchShaderDataOptional = zeroed
+    out.has_value <- false
+    out.value <- FetchShaderData_Default()
+    return out
+
+
+def _is_typed_buffer_load(inst: GcnInst&) -> bool:
+    return inst.opcode == OPCODE_TBUFFER_LOAD_FORMAT_X or inst.opcode == OPCODE_TBUFFER_LOAD_FORMAT_XY or inst.opcode == OPCODE_TBUFFER_LOAD_FORMAT_XYZ or inst.opcode == OPCODE_TBUFFER_LOAD_FORMAT_XYZW
+
+
+def GetFetchShaderCode(info: ShaderInfoLite&, sgpr_base: u32) -> u32&:
+    _ = sgpr_base
+    return info.fetch_shader_code[0].ref[u32&]
+
+
+def ParseFetchShader(info: ShaderInfoLite&) -> FetchShaderDataOptional:
+    if not info.has_fetch_shader:
+        return FetchShaderDataOptional_None()
+
+    out: mutable FetchShaderDataOptional = zeroed
+    out.has_value <- true
+    out.value <- FetchShaderData_Default()
+
+    slice: mutable GcnCodeSlice = zeroed
+    GcnCodeSlice_Init(slice, info.fetch_shader_code[0].ref[u32&], info.fetch_shader_word_count)
+    decoder: mutable GcnDecodeContext = zeroed
+
+    loads: mutable _VsharpLoad[104] = zeroed
+    semantic_index: mutable u32 = 0u32
+
+    while not GcnCodeSlice_atEnd(slice):
+        inst: GcnInst = GcnDecodeContext_decodeInstruction(decoder, slice.ref[mutable GcnCodeSlice&])
+        out.value.size <- out.value.size + inst.length
+
+        if inst.opcode == OPCODE_S_SETPC_B64:
+            break
+
+        if inst.inst_class == INST_CLASS_SCALAR_MEM_RD:
+            if inst.dst[0].code < FETCH_SHADER_MAX_LOADS:
+                loads[inst.dst[0].code.usize()].dword_offset <- inst.control_smrd_offset
+                loads[inst.dst[0].code.usize()].base_sgpr <- inst.src[0].code * 2u32
+            continue
+
+        if inst.opcode == OPCODE_V_ADD_I32:
+            vgpr: u32 = inst.dst[0].code
+            sgpr: int = inst.src[0].code.int()
+            if vgpr == 0u32:
+                out.value.vertex_offset_sgpr <- sgpr
+            else:
+                if vgpr == 3u32:
+                out.value.instance_offset_sgpr <- sgpr
+
+        if inst.inst_class == INST_CLASS_VECTOR_MEM_BUF_FMT:
+            if out.value.attribute_count < FETCH_SHADER_MAX_ATTRS:
+                idx: u32 = out.value.attribute_count
+                out.value.attribute_count <- out.value.attribute_count + 1u32
+                base_sgpr: u32 = inst.src[2].code * 4u32
+
+                out.value.attributes[idx.usize()].semantic <- semantic_index.u8()
+                out.value.attributes[idx.usize()].dest_vgpr <- inst.src[1].code.u8()
+                out.value.attributes[idx.usize()].num_elements <- inst.control_mubuf_count.u8()
+                if base_sgpr < FETCH_SHADER_MAX_LOADS:
+                    out.value.attributes[idx.usize()].sgpr_base <- loads[base_sgpr.usize()].base_sgpr.u8()
+                    out.value.attributes[idx.usize()].dword_offset <- loads[base_sgpr.usize()].dword_offset.u8()
+                out.value.attributes[idx.usize()].inst_offset <- inst.control_mtbuf_offset.u8()
+                out.value.attributes[idx.usize()].instance_data <- inst.src[0].code.u8()
+                if _is_typed_buffer_load(inst):
+                    out.value.attributes[idx.usize()].data_format <- inst.control_mtbuf_dfmt.u8()
+                    out.value.attributes[idx.usize()].num_format <- inst.control_mtbuf_nfmt.u8()
+                semantic_index <- semantic_index + 1u32
+
+    return out

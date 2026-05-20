@@ -1,0 +1,206 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+const ORBIS_NGS2_SYSTEM_NAME_LENGTH: int = 16
+const ORBIS_NGS2_RACK_NAME_LENGTH: int = 16
+
+@fixed_layout
+struct StackBuffer:
+    top: mutable void&?&?
+    base: mutable void&?
+    size: mutable usize
+    current_offset: mutable usize
+    used_size: mutable usize
+    total_size: mutable usize
+    alignment: mutable usize
+    flags: mutable u8
+    padding: mutable u8[7]
+
+@fixed_layout
+struct SystemInternalRackList:
+    prev: mutable void&?
+    next: mutable void&?
+    unknown: mutable void&?
+
+@fixed_layout
+struct SystemInternal:
+    name: mutable u8[ORBIS_NGS2_SYSTEM_NAME_LENGTH]
+    buffer_info: mutable OrbisNgs2ContextBufferInfo
+    host_free: mutable OrbisNgs2BufferFreeHandler
+    system_handle: mutable OrbisNgs2Handle
+    unknown1: mutable void&?
+    unknown2: mutable void&?
+    rack_handle: mutable OrbisNgs2Handle
+    user_data: mutable usize&?
+    system_list: mutable SystemInternal&?
+    stack_buffer: mutable StackBuffer&?
+    owner_system_info: mutable OrbisNgs2SystemInfo
+    rack_list_preset: mutable SystemInternalRackList
+    rack_list_normal: mutable SystemInternalRackList
+    rack_list_master: mutable SystemInternalRackList
+    unknown3: mutable void&?
+    system_list_prev: mutable void&?
+    unknown4: mutable void&?
+    system_list_next: mutable void&?
+    rack_function: mutable void&?
+    process_lock: mutable u8[176]
+    has_process_mutex: mutable u32
+    unknown5: mutable u32
+    flush_lock: mutable u8[176]
+    has_flush_mutex: mutable u32
+    unknown6: mutable u32
+    last_render_tick: mutable u64
+    render_count: mutable u64
+    is_active: mutable u32
+    lock_count: mutable s32
+    uid: mutable u32
+    system_type: mutable u32
+    flags_bits: mutable u16
+    current_max_grain_samples: mutable u16
+    min_grain_samples: mutable u16
+    max_grain_samples: mutable u16
+    num_grain_samples: mutable u16
+    current_num_grain_samples: mutable u32
+    sample_rate: mutable u32
+    current_sample_rate: mutable u32
+    rack_count: mutable u32
+    last_render_ratio: mutable f32
+    cpu_load: mutable f32
+
+@fixed_layout
+struct HandleInternal:
+    self_ptr: mutable HandleInternal&?
+    system_data: mutable SystemInternal&?
+    ref_count: mutable s32
+    ref_count_padding: mutable u32
+    handle_type: mutable u32
+    handle_id: mutable u32
+
+def HandleReportInvalid(handle: OrbisNgs2Handle, handle_type: u32) -> s32:
+    _ = handle
+    if handle_type == 1u32:
+        return ORBIS_NGS2_ERROR_INVALID_SYSTEM_HANDLE
+    if handle_type == 2u32:
+        return ORBIS_NGS2_ERROR_INVALID_RACK_HANDLE
+    if handle_type == 4u32:
+        return ORBIS_NGS2_ERROR_INVALID_VOICE_HANDLE
+    if handle_type == 8u32:
+        return ORBIS_NGS2_ERROR_INVALID_REPORT_HANDLE
+    return ORBIS_NGS2_ERROR_INVALID_HANDLE
+
+def MemoryClear(buffer: mutable void&?, size: usize) -> mutable void&?:
+    if buffer != null and size > 0:
+        _ = cxx_zero_memory(buffer, size)
+    return buffer
+
+def StackBufferClose(stack_buffer: mutable StackBuffer&?, out_total_size: mutable usize&?) -> s32:
+    if stack_buffer == null:
+        return ORBIS_NGS2_ERROR_INVALID_BUFFER_INFO
+    if out_total_size != null:
+        out_total_size <- stack_buffer.used_size + stack_buffer.alignment
+    return ORBIS_OK
+
+def StackBufferOpen(stack_buffer: mutable StackBuffer&?, buffer_start: void&?, buffer_size: usize, out_buffer: mutable void&?&?, flags: u8) -> s32:
+    if stack_buffer == null:
+        return ORBIS_NGS2_ERROR_INVALID_BUFFER_INFO
+    stack_buffer.top <- out_buffer
+    stack_buffer.base <- buffer_start
+    stack_buffer.size <- 0
+    stack_buffer.current_offset <- 0
+    stack_buffer.used_size <- 0
+    stack_buffer.total_size <- buffer_size
+    stack_buffer.alignment <- 8
+    stack_buffer.flags <- flags
+    stack_buffer.padding <- zeroed
+    if out_buffer != null:
+        out_buffer[0] <- null
+    return ORBIS_OK
+
+def SystemCleanup(system_handle: OrbisNgs2Handle, out_info: mutable OrbisNgs2ContextBufferInfo&?) -> s32:
+    _ = out_info
+    if system_handle == 0:
+        return ORBIS_NGS2_ERROR_INVALID_HANDLE
+    return ORBIS_OK
+
+def SystemSetupCore(stack_buffer: mutable StackBuffer&?, option: OrbisNgs2SystemOption&?, out_system: mutable SystemInternal&?) -> s32:
+    _ = stack_buffer
+    max_grain_samples: mutable u32 = 512u32
+    num_grain_samples: mutable u32 = 256u32
+    sample_rate: mutable u32 = 48000u32
+
+    if option != null:
+        sample_rate <- option.sample_rate
+        max_grain_samples <- option.max_grain_samples
+        num_grain_samples <- option.num_grain_samples
+
+    if max_grain_samples < 64u32 or max_grain_samples > 1024u32 or (max_grain_samples & 63u32) != 0u32:
+        return ORBIS_NGS2_ERROR_INVALID_MAX_GRAIN_SAMPLES
+
+    if num_grain_samples < 64u32 or num_grain_samples > 1024u32 or (num_grain_samples & 63u32) != 0u32:
+        return ORBIS_NGS2_ERROR_INVALID_NUM_GRAIN_SAMPLES
+
+    if sample_rate != 11025u32 and sample_rate != 12000u32 and sample_rate != 22050u32 and sample_rate != 24000u32 and sample_rate != 44100u32 and sample_rate != 48000u32 and sample_rate != 88200u32 and sample_rate != 96000u32 and sample_rate != 176400u32 and sample_rate != 192000u32:
+        return ORBIS_NGS2_ERROR_INVALID_SAMPLE_RATE
+
+    if out_system != null:
+        out_system.system_handle <- 1
+
+    return ORBIS_OK
+
+def SystemSetup(option: OrbisNgs2SystemOption&?, host_buffer_info: mutable OrbisNgs2ContextBufferInfo&?, host_free: OrbisNgs2BufferFreeHandler, out_handle: mutable OrbisNgs2Handle&?) -> s32:
+    option_flags: mutable u8 = 0u8
+    stack_buffer: mutable StackBuffer = zeroed
+    setup_result: mutable SystemInternal = zeroed
+    system_list: mutable void&? = null
+    required_buffer_size: mutable usize = 0
+    result: mutable s32 = ORBIS_NGS2_ERROR_INVALID_BUFFER_SIZE
+
+    if option != null:
+        if option.size != 64:
+            return ORBIS_NGS2_ERROR_INVALID_OPTION_SIZE
+        option_flags <- (option.flags >> 31u32).u8()
+
+    _ = StackBufferOpen(stack_buffer.ref[mutable StackBuffer&], null, 0, null, option_flags)
+    result <- SystemSetupCore(stack_buffer.ref[mutable StackBuffer&], option, null)
+    if result < 0:
+        return result
+    _ = StackBufferClose(stack_buffer.ref[mutable StackBuffer&], required_buffer_size.ref[mutable usize&])
+
+    if out_handle == null:
+        if host_buffer_info == null:
+            return ORBIS_NGS2_ERROR_INVALID_BUFFER_INFO
+        host_buffer_info.host_buffer <- null
+        host_buffer_info.host_buffer_size <- required_buffer_size
+        host_buffer_info.reserved0 <- 0
+        host_buffer_info.reserved1 <- 0
+        host_buffer_info.reserved2 <- 0
+        host_buffer_info.reserved3 <- 0
+        host_buffer_info.reserved4 <- 0
+        return ORBIS_OK
+
+    if host_buffer_info == null:
+        return ORBIS_NGS2_ERROR_INVALID_BUFFER_INFO
+
+    if host_buffer_info.host_buffer == null:
+        return ORBIS_NGS2_ERROR_INVALID_BUFFER_ADDRESS
+
+    if host_buffer_info.host_buffer_size < required_buffer_size:
+        return ORBIS_NGS2_ERROR_INVALID_BUFFER_SIZE
+
+    _ = StackBufferOpen(stack_buffer.ref[mutable StackBuffer&], host_buffer_info.host_buffer, host_buffer_info.host_buffer_size, system_list.ref[mutable void&?&], option_flags)
+    result <- SystemSetupCore(stack_buffer.ref[mutable StackBuffer&], option, setup_result.ref[mutable SystemInternal&])
+    if result < 0:
+        return result
+
+    _ = StackBufferClose(stack_buffer.ref[mutable StackBuffer&], required_buffer_size.ref[mutable usize&])
+
+    setup_result.buffer_info <- host_buffer_info
+    setup_result.host_free <- host_free
+
+    system_handle: OrbisNgs2Handle = setup_result.system_handle
+    if host_buffer_info.host_buffer_size >= required_buffer_size:
+        out_handle <- system_handle
+        return ORBIS_OK
+
+    _ = SystemCleanup(system_handle, null)
+    return ORBIS_NGS2_ERROR_INVALID_BUFFER_SIZE

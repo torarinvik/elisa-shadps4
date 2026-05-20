@@ -1,0 +1,73 @@
+include "../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "./core/libraries/ime/error_dialog.elisa"
+include "./core/libraries/ime/ime_dialog.elisa"
+
+def ime_dialog_make_valid_param(buf: mutable u16&, max_len: u32) -> OrbisImeDialogParam:
+    p: mutable OrbisImeDialogParam = zeroed
+    p.user_id <- 1
+    p.type_ <- ORBIS_IME_TYPE_DEFAULT
+    p.supported_languages <- 0x3ff1fffffu64
+    p.enter_label <- ORBIS_IME_ENTER_LABEL_GO
+    p.input_method <- ORBIS_IME_INPUT_METHOD_DEFAULT
+    p.option <- 0u32
+    p.max_text_length <- max_len
+    p.input_text_buffer <- buf
+    p.posx <- 100.0
+    p.posy <- 200.0
+    p.horizontal_alignment <- 0u32
+    p.vertical_alignment <- 0u32
+    return p
+
+@test
+def error_dialog_lifecycle() -> void:
+    can Abort.Panic:
+        assert sceErrorDialogGetStatus() == ORBIS_COMMON_DIALOG_STATUS_NONE
+        assert sceErrorDialogInitialize() == ORBIS_OK.u32()
+        assert sceErrorDialogGetStatus() == ORBIS_COMMON_DIALOG_STATUS_INITIALIZED
+
+        assert sceErrorDialogOpen(null) == ORBIS_COMMON_DIALOG_ERROR_ARG_NULL.u32()
+
+        p: mutable ErrorDialogParam = zeroed
+        p.size <- 16
+        p.errorCode <- 0x80bc0001
+        p.userId <- 1
+        assert sceErrorDialogOpen(p.ref[ErrorDialogParam&]) == ORBIS_OK.u32()
+        assert sceErrorDialogGetStatus() == ORBIS_COMMON_DIALOG_STATUS_RUNNING
+
+        assert sceErrorDialogClose() == ORBIS_OK.u32()
+        assert sceErrorDialogGetStatus() == ORBIS_COMMON_DIALOG_STATUS_FINISHED
+        assert sceErrorDialogTerminate() == ORBIS_OK.u32()
+        assert sceErrorDialogGetStatus() == ORBIS_COMMON_DIALOG_STATUS_NONE
+        assert sceErrorDialogTerminate() == ORBIS_COMMON_DIALOG_ERROR_NOT_INITIALIZED.u32()
+
+@test
+def ime_dialog_lifecycle_and_panel_size() -> void:
+    can Abort.Panic:
+        txt: mutable u16[64] = zeroed
+        p: mutable OrbisImeDialogParam = ime_dialog_make_valid_param(txt.ref[mutable u16&], 64u32)
+
+        w: mutable u32 = 0u32
+        h: mutable u32 = 0u32
+        assert sceImeDialogGetPanelSize(p.ref[OrbisImeDialogParam&], w.ref[mutable u32&], h.ref[mutable u32&]) == ORBIS_OK
+        assert w == 0x319u32
+        assert h == 0x210u32
+
+        p.type_ <- ORBIS_IME_TYPE_NUMBER
+        assert sceImeDialogGetPanelSize(p.ref[OrbisImeDialogParam&], w.ref[mutable u32&], h.ref[mutable u32&]) == ORBIS_OK
+        assert w == 0x172u32
+        assert h == 0x20au32
+
+        assert sceImeDialogInit(p.ref[mutable OrbisImeDialogParam&], null) == ORBIS_OK
+        assert sceImeDialogGetStatus() == ORBIS_IME_DIALOG_STATUS_RUNNING
+        assert sceImeDialogSetPanelPosition(10, 20) == ORBIS_IME_ERROR_IME_SUSPENDING
+
+        result: mutable OrbisImeDialogResult = zeroed
+        assert sceImeDialogGetResult(result.ref[mutable OrbisImeDialogResult&]) == ORBIS_IME_ERROR_DIALOG_NOT_FINISHED
+
+        assert sceImeDialogAbort() == ORBIS_OK
+        assert sceImeDialogGetStatus() == ORBIS_IME_DIALOG_STATUS_FINISHED
+        assert sceImeDialogGetResult(result.ref[mutable OrbisImeDialogResult&]) == ORBIS_OK
+        assert result.endstatus == ORBIS_IME_DIALOG_END_STATUS_ABORTED
+        assert sceImeDialogTerm() == ORBIS_OK
+        assert sceImeDialogGetStatus() == ORBIS_IME_DIALOG_STATUS_NONE
+        assert sceImeDialogTerm() == ORBIS_IME_ERROR_DIALOG_NOT_IN_USE

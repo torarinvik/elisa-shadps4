@@ -1,0 +1,235 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../renderdoc.elisa"
+include "./vk_instance.elisa"
+include "./vk_rasterizer.elisa"
+include "./vk_scheduler.elisa"
+include "./vk_swapchain.elisa"
+
+struct Frame:
+    width: mutable u32
+    height: mutable u32
+    format: mutable u32
+    image: mutable u64
+    image_view: mutable u64
+    present_done: mutable u64
+    ready_semaphore: mutable u64
+    ready_tick: mutable u64
+    is_hdr: mutable bool
+    id: mutable u8
+    imgui_texture: mutable u64
+
+struct PresenterFsrSettings:
+    enable: mutable bool
+    use_rcas: mutable bool
+
+struct PresenterPostProcessSettings:
+    hdr: mutable u32
+    gamma: mutable f32
+
+struct VideoOutBufferAttributeGroup:
+    width: mutable u32
+    height: mutable u32
+    pitch: mutable u32
+    pixel_format: mutable u32
+
+struct Presenter:
+    expected_ratio: mutable f32
+    expected_frame_width: mutable u32
+    expected_frame_height: mutable u32
+    instance: mutable Instance
+    draw_scheduler: mutable Scheduler
+    present_scheduler: mutable Scheduler
+    flip_scheduler: mutable Scheduler
+    swapchain: mutable Swapchain
+    rasterizer: mutable Rasterizer
+    fsr_settings: mutable PresenterFsrSettings
+    pp_settings: mutable PresenterPostProcessSettings
+    present_frames: mutable darray[Frame]
+    free_queue: mutable darray[u32]
+    last_submit_index: mutable u32
+    has_last_submit: mutable bool
+    vo_buffers_addr: mutable darray[u64]
+
+
+def Frame_New(width: u32, height: u32, frame_id: u8, format: u32, hdr: bool) -> Frame:
+    return Frame(
+        width,
+        height,
+        format,
+        Vk_AllocHandle(),
+        Vk_AllocHandle(),
+        Vk_AllocHandle(),
+        Vk_AllocHandle(),
+        0u64,
+        hdr,
+        frame_id,
+        Vk_AllocHandle()
+    )
+
+def Presenter_New(window_type: WindowSystemType,
+                  width: u32,
+                  height: u32,
+                  supports_hdr: bool = true) -> Presenter:
+    can Memory.Allocate, Abort.Panic:
+        instance: Instance = Instance_NewWithWindow(window_type, 0, false, false, supports_hdr)
+        draw_scheduler: Scheduler = Scheduler_New(instance)
+        present_scheduler: Scheduler = Scheduler_New(instance)
+        flip_scheduler: Scheduler = Scheduler_New(instance)
+        swapchain: Swapchain = Swapchain_New(instance, instance.surface_handle, width, height,
+                                             supports_hdr)
+        rasterizer: Rasterizer = Rasterizer_New(instance, draw_scheduler.ref[mutable Scheduler&])
+
+        frames: mutable darray[Frame] = []
+        free_queue: mutable darray[u32] = []
+        i: mutable u8 = 0u8
+        while i < 3u8:
+            frames.push(Frame_New(width, height, i, VK_FORMAT_R8G8B8A8_UNORM, false))
+            free_queue.push(i.u32())
+            i <- i + 1u8
+
+        return Presenter(
+            1920.0 / 1080.0,
+            1920u32,
+            1080u32,
+            instance,
+            draw_scheduler,
+            present_scheduler,
+            flip_scheduler,
+            swapchain,
+            rasterizer,
+            PresenterFsrSettings(false, false),
+            PresenterPostProcessSettings(0u32, 1.0),
+            frames,
+            free_queue,
+            0u32,
+            false,
+            []
+        )
+
+def Presenter_GetPPSettingsRef(self: mutable Presenter&) -> mutable PresenterPostProcessSettings&:
+    return self.pp_settings.ref[mutable PresenterPostProcessSettings&]
+
+def Presenter_GetFsrSettingsRef(self: mutable Presenter&) -> mutable PresenterFsrSettings&:
+    return self.fsr_settings.ref[mutable PresenterFsrSettings&]
+
+def Presenter_IsHDRSupported(self: Presenter) -> bool:
+    return self.swapchain.supports_hdr
+
+def Presenter_SetHDR(self: mutable Presenter&, enable: bool) -> void:
+    can Memory.Allocate, Abort.Panic:
+        if not Presenter_IsHDRSupported(self):
+            return
+        Swapchain_SetHDR(self.swapchain.ref[mutable Swapchain&], enable)
+        self.pp_settings.hdr <- enable ? 1u32 : 0u32
+
+
+def Presenter_RegisterVideoOutSurface(self: mutable Presenter&,
+                                      attribute: VideoOutBufferAttributeGroup,
+                                      cpu_address: u64) -> u32:
+    _ = attribute
+    can Memory.Allocate, Abort.Panic:
+        i: mutable usize = 0usize
+        while i < self.vo_buffers_addr.count:
+            if self.vo_buffers_addr[i] == cpu_address:
+                return i.u32()
+            i <- i + 1usize
+        self.vo_buffers_addr.push(cpu_address)
+        return (self.vo_buffers_addr.count - 1usize).u32()
+
+def Presenter_UnregisterVideoOutSurface(self: mutable Presenter&, cpu_address: u64) -> void:
+    i: mutable usize = 0usize
+    while i < self.vo_buffers_addr.count:
+        if self.vo_buffers_addr[i] == cpu_address:
+            self.vo_buffers_addr[i] <- self.vo_buffers_addr[self.vo_buffers_addr.count - 1usize]
+            self.vo_buffers_addr.count <- self.vo_buffers_addr.count - 1usize
+            continue
+        i <- i + 1usize
+
+def Presenter_IsVideoOutSurface(self: Presenter, cpu_address: u64) -> bool:
+    i: mutable usize = 0usize
+    while i < self.vo_buffers_addr.count:
+        if self.vo_buffers_addr[i] == cpu_address:
+            return true
+        i <- i + 1usize
+    return false
+
+def Presenter_GetRenderFrame(self: mutable Presenter&) -> Frame?:
+    can Memory.Allocate, Abort.Panic:
+        if self.free_queue.count == 0usize:
+            return null
+        idx: u32 = self.free_queue[self.free_queue.count - 1usize]
+        self.free_queue.count <- self.free_queue.count - 1usize
+        return self.present_frames[idx.usize()]
+
+
+def Presenter_RecreateFrame(self: mutable Presenter&, frame_index: u32,
+                            width: u32, height: u32) -> void:
+    if frame_index.usize() >= self.present_frames.count:
+        return
+    frame: mutable Frame& = self.present_frames[frame_index.usize()].ref[mutable Frame&]
+    frame.width <- width
+    frame.height <- height
+    frame.image <- Vk_AllocHandle()
+    frame.image_view <- Vk_AllocHandle()
+    frame.imgui_texture <- Vk_AllocHandle()
+
+def Presenter_PrepareFrame(self: mutable Presenter&,
+                           attribute: VideoOutBufferAttributeGroup,
+                           cpu_address: u64) -> Frame?:
+    can Memory.Allocate, Abort.Panic:
+        _ = Presenter_RegisterVideoOutSurface(self, attribute, cpu_address)
+        frame: Frame = Presenter_GetRenderFrame(self) else return null
+        idx: usize = frame.id.usize()
+        self.present_frames[idx].width <- attribute.width
+        self.present_frames[idx].height <- attribute.height
+        self.present_frames[idx].format <- attribute.pixel_format
+        return self.present_frames[idx]
+
+
+def Presenter_PrepareBlankFrame(self: mutable Presenter&, present_thread: bool) -> Frame?:
+    can Memory.Allocate, Abort.Panic:
+        _ = present_thread
+        blank_attr: VideoOutBufferAttributeGroup =
+            VideoOutBufferAttributeGroup(self.expected_frame_width, self.expected_frame_height,
+                                         self.expected_frame_width, VK_FORMAT_R8G8B8A8_UNORM)
+        return Presenter_PrepareFrame(self, blank_attr, 0u64)
+
+
+def Presenter_Present(self: mutable Presenter&, frame: Frame?,
+                      is_reusing_frame: bool = false) -> bool:
+    can Memory.Allocate, Abort.Panic:
+        _ = is_reusing_frame
+        frame_value: Frame = frame else return false
+
+        if not Swapchain_AcquireNextImage(self.swapchain.ref[mutable Swapchain&]):
+            return false
+
+        self.last_submit_index <- frame_value.id.u32()
+        self.has_last_submit <- true
+        present_ok: bool = Swapchain_Present(self.swapchain.ref[mutable Swapchain&])
+
+        self.free_queue.push(frame_value.id.u32())
+
+        request_counts: ScreenshotRequests = ConsumeScreenshotRequests()
+        if request_counts.game_only_count > 0u32 or request_counts.with_overlays_count > 0u32:
+            self.pp_settings.gamma <- self.pp_settings.gamma
+
+        return present_ok
+
+
+def Presenter_PrepareLastFrame(self: mutable Presenter&) -> Frame?:
+    if not self.has_last_submit:
+        return null
+    if self.last_submit_index.usize() >= self.present_frames.count:
+        return null
+    return self.present_frames[self.last_submit_index.usize()]
+
+
+def Presenter_SetExpectedGameSize(self: mutable Presenter&, width: s32, height: s32) -> void:
+    if width <= 0 or height <= 0:
+        return
+    self.expected_frame_width <- width.u32()
+    self.expected_frame_height <- height.u32()
+    self.expected_ratio <- width.f32() / height.f32()

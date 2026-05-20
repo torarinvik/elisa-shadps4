@@ -1,0 +1,87 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./vk_pipeline_common.elisa"
+
+struct ComputePipelineKey:
+    value: mutable usize
+
+def ComputePipelineKey_eq(lhs: ComputePipelineKey, rhs: ComputePipelineKey) -> bool:
+    return lhs.value == rhs.value
+
+struct ComputePipelineSerializationSupport:
+    dummy: mutable u32
+
+
+def ComputePipelineSerializationSupport_Default() -> ComputePipelineSerializationSupport:
+    return ComputePipelineSerializationSupport(0u32)
+
+struct ComputePipeline:
+    base: mutable Pipeline
+    compute_key: mutable ComputePipelineKey
+    shader_module: mutable u64
+
+
+def ComputePipeline_New(instance: Instance, scheduler: mutable Scheduler&, desc_heap: mutable DescriptorHeap&,
+                        profile: VkShaderProfile, compute_key: ComputePipelineKey,
+                        info: VkShaderInfo, shader_module: u64,
+                        sdata: ComputePipelineSerializationSupport,
+                        preloading: bool = false) -> ComputePipeline:
+    _ = sdata
+    _ = preloading
+    can Memory.Allocate, Abort.Panic:
+        base: mutable Pipeline = Pipeline_New(instance, scheduler, desc_heap, profile, true)
+        Pipeline_AddStage(base.ref[mutable Pipeline&], info)
+        base.uses_push_descriptors <- info.buffers_count + info.images_count + info.samplers_count < Instance_MaxPushDescriptors(instance)
+        base.pipeline_handle <- Vk_AllocHandle()
+        base.pipeline_layout_handle <- Vk_AllocHandle()
+        base.desc_layout_handle <- Vk_AllocHandle()
+        return ComputePipeline(base, compute_key, shader_module)
+
+
+def ComputePipeline_Handle(self: ComputePipeline) -> u64:
+    return Pipeline_Handle(self.base)
+
+def ComputePipeline_GetLayout(self: ComputePipeline) -> u64:
+    return Pipeline_GetLayout(self.base)
+
+def ComputePipeline_GetStage(self: ComputePipeline, logical_stage: LogicalStage) -> VkShaderInfo?:
+    return Pipeline_GetStage(self.base, logical_stage)
+
+def ComputePipelineKey_Serialize(self: ComputePipelineKey, out: mutable darray[u8]&) -> void:
+    can Memory.Allocate, Abort.Panic:
+        raw: u64 = self.value.u64()
+        i: mutable u32 = 0u32
+        while i < 8u32:
+            out.push(((raw >> (i * 8u32)) & 0xffu64).u8())
+            i <- i + 1u32
+
+def ComputePipelineKey_Deserialize(data: darray[u8], offset: mutable usize&) -> ComputePipelineKey?:
+    if offset + 8usize > data.count:
+        return null
+    raw: mutable u64 = 0u64
+    i: mutable u32 = 0u32
+    while i < 8u32:
+        raw <- raw | (data[offset + i.usize()].u64() << (i * 8u32))
+        i <- i + 1u32
+    offset <- offset + 8usize
+    return ComputePipelineKey(raw.usize())
+
+def ComputePipelineSerializationSupport_Serialize(self: ComputePipelineSerializationSupport,
+                                                  out: mutable darray[u8]&) -> void:
+    can Memory.Allocate, Abort.Panic:
+        out.push((self.dummy & 0xffu32).u8())
+        out.push(((self.dummy >> 8u32) & 0xffu32).u8())
+        out.push(((self.dummy >> 16u32) & 0xffu32).u8())
+        out.push(((self.dummy >> 24u32) & 0xffu32).u8())
+
+def ComputePipelineSerializationSupport_Deserialize(data: darray[u8],
+                                                    offset: mutable usize&) -> ComputePipelineSerializationSupport?:
+    if offset + 4usize > data.count:
+        return null
+    d0: u32 = data[offset].u32()
+    d1: u32 = data[offset + 1usize].u32() << 8u32
+    d2: u32 = data[offset + 2usize].u32() << 16u32
+    d3: u32 = data[offset + 3usize].u32() << 24u32
+    offset <- offset + 4usize
+    return ComputePipelineSerializationSupport(d0 | d1 | d2 | d3)

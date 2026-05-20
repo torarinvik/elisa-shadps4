@@ -5,95 +5,356 @@ include "../error_codes.elisa"
 include "./orbis_error.elisa"
 include "./posix_error.elisa"
 include "./lib_function_stub.elisa"
+include "./file_system.elisa"
+include "./time.elisa"
 
-def sceKernelAioCancelRequest(id: int, state: void&?) -> int:
-    _ = id
-    _ = state
-    return ORBIS_OK
+const AIO_MAX_QUEUE: int = 512
 
-def sceKernelAioCancelRequests(id: void&?, num: int, state: void&?) -> int:
-    _ = id
-    _ = num
-    _ = state
-    return ORBIS_OK
+const ORBIS_KERNEL_AIO_STATE_SUBMITTED: int = 1
+const ORBIS_KERNEL_AIO_STATE_PROCESSING: int = 2
+const ORBIS_KERNEL_AIO_STATE_COMPLETED: int = 3
+const ORBIS_KERNEL_AIO_STATE_ABORTED: int = 4
 
-def sceKernelAioDeleteRequest(id: int, ret: void&?) -> int:
-    _ = id
-    _ = ret
-    return ORBIS_OK
+@fixed_layout
+struct OrbisKernelAioResult:
+    returnValue: mutable i64
+    state: mutable u32
 
-def sceKernelAioDeleteRequests(id: void&?, num: int, ret: void&?) -> int:
-    _ = id
-    _ = num
-    _ = ret
-    return ORBIS_OK
+@fixed_layout
+struct OrbisKernelAioRWRequest:
+    offset: mutable i64
+    nbyte: mutable i64
+    buf: mutable void&?
+    result: mutable void&?
+    fd: mutable int
+
+global mutable aio_id_state: int[512] = zeroed
+global mutable aio_id_index: int = 1
+
+def aio_is_valid_submit_id(id: int) -> bool:
+    return id > 0 and id < AIO_MAX_QUEUE
+
+def aio_next_submit_id() -> int:
+    id: int = aio_id_index
+    aio_id_index <- (aio_id_index + 1) % AIO_MAX_QUEUE
+    if aio_id_index == 0:
+        aio_id_index <- 1
+    return id
 
 def sceKernelAioInitializeImpl(p: void&?, size: int) -> int:
     _ = p
     _ = size
+    return 0
+
+def sceKernelAioDeleteRequest(id: int, ret: void&?) -> int:
+    out_ret: mutable int&? = ret as mutable int&?
+    if out_ret == null:
+        return ORBIS_KERNEL_ERROR_EFAULT
+    if not aio_is_valid_submit_id(id):
+        return ORBIS_KERNEL_ERROR_EINVAL
+    r: mutable int& = out_ret
+    aio_id_state[id.usize()] <- ORBIS_KERNEL_AIO_STATE_ABORTED
+    r[0] <- 0
+    return 0
+
+def sceKernelAioDeleteRequests(id: void&?, num: int, ret: void&?) -> int:
+    out_ret: mutable int&? = ret as mutable int&?
+    ids: int&? = id as int&?
+    if out_ret == null:
+        return ORBIS_KERNEL_ERROR_EFAULT
+    if ids == null:
+        return ORBIS_KERNEL_ERROR_EFAULT
+    r: mutable int& = out_ret
+    ids_ref: int& = ids
+    i: mutable int = 0
+    while i < num:
+        sid: int = ids_ref[i.usize()]
+        if not aio_is_valid_submit_id(sid):
+            r[i.usize()] <- ORBIS_KERNEL_ERROR_EINVAL
+        else:
+            aio_id_state[sid.usize()] <- ORBIS_KERNEL_AIO_STATE_ABORTED
+            r[i.usize()] <- 0
+        i <- i + 1
+    return 0
+
+def sceKernelAioPollRequest(id: int, state: void&?) -> int:
+    out_state: mutable int&? = state as mutable int&?
+    if out_state == null:
+        return ORBIS_KERNEL_ERROR_EFAULT
+    if not aio_is_valid_submit_id(id):
+        return ORBIS_KERNEL_ERROR_EINVAL
+    s: mutable int& = out_state
+    s[0] <- aio_id_state[id.usize()]
+    return 0
+
+def sceKernelAioPollRequests(id: void&?, num: int, state: void&?) -> int:
+    out_state: mutable int&? = state as mutable int&?
+    ids: int&? = id as int&?
+    if out_state == null:
+        return ORBIS_KERNEL_ERROR_EFAULT
+    if ids == null:
+        return ORBIS_KERNEL_ERROR_EFAULT
+    s: mutable int& = out_state
+    ids_ref: int& = ids
+    i: mutable int = 0
+    while i < num:
+        sid: int = ids_ref[i.usize()]
+        if not aio_is_valid_submit_id(sid):
+            s[i.usize()] <- ORBIS_KERNEL_AIO_STATE_ABORTED
+        else:
+            s[i.usize()] <- aio_id_state[sid.usize()]
+        i <- i + 1
+    return 0
+
+def sceKernelAioCancelRequest(id: int, state: void&?) -> int:
+    out_state: mutable int&? = state as mutable int&?
+    if out_state == null:
+        return ORBIS_KERNEL_ERROR_EFAULT
+    s: mutable int& = out_state
+    if aio_is_valid_submit_id(id):
+        aio_id_state[id.usize()] <- ORBIS_KERNEL_AIO_STATE_ABORTED
+        s[0] <- ORBIS_KERNEL_AIO_STATE_ABORTED
+    else:
+        s[0] <- ORBIS_KERNEL_AIO_STATE_PROCESSING
+    return 0
+
+def sceKernelAioCancelRequests(id: void&?, num: int, state: void&?) -> int:
+    out_state: mutable int&? = state as mutable int&?
+    ids: int&? = id as int&?
+    if out_state == null:
+        return ORBIS_KERNEL_ERROR_EFAULT
+    if ids == null:
+        return ORBIS_KERNEL_ERROR_EFAULT
+    s: mutable int& = out_state
+    ids_ref: int& = ids
+    i: mutable int = 0
+    while i < num:
+        sid: int = ids_ref[i.usize()]
+        if aio_is_valid_submit_id(sid):
+            aio_id_state[sid.usize()] <- ORBIS_KERNEL_AIO_STATE_ABORTED
+            s[i.usize()] <- ORBIS_KERNEL_AIO_STATE_ABORTED
+        else:
+            s[i.usize()] <- ORBIS_KERNEL_AIO_STATE_PROCESSING
+        i <- i + 1
+    return 0
+
+def sceKernelAioWaitRequest(id: int, state: void&?, usec: void&?) -> int:
+    out_state: mutable int&? = state as mutable int&?
+    timeout_us: u32&? = usec as u32&?
+    if out_state == null:
+        return ORBIS_KERNEL_ERROR_EFAULT
+    if not aio_is_valid_submit_id(id):
+        return ORBIS_KERNEL_ERROR_EINVAL
+    s: mutable int& = out_state
+
+    timer: mutable u32 = 0
+    timeout: mutable int = 0
+    while aio_id_state[id.usize()] == ORBIS_KERNEL_AIO_STATE_PROCESSING and timeout == 0:
+        _ = sceKernelUsleep(10)
+        timer <- timer + 10
+        if timeout_us != null and timeout_us[0] != 0 and timer > timeout_us[0]:
+            timeout <- 1
+    s[0] <- aio_id_state[id.usize()]
+    if timeout != 0:
+        return ORBIS_KERNEL_ERROR_ETIMEDOUT
+    return 0
+
+def sceKernelAioWaitRequests(id: void&?, num: int, state: void&?, mode: u32, usec: void&?) -> int:
+    out_state: mutable int&? = state as mutable int&?
+    ids: int&? = id as int&?
+    timeout_us: u32&? = usec as u32&?
+    if out_state == null:
+        return ORBIS_KERNEL_ERROR_EFAULT
+    if ids == null:
+        return ORBIS_KERNEL_ERROR_EFAULT
+    s: mutable int& = out_state
+    ids_ref: int& = ids
+
+    timer: mutable u32 = 0
+    timeout: mutable int = 0
+    completion: mutable int = 0
+
+    i: mutable int = 0
+    while i < num:
+        sid: int = ids_ref[i.usize()]
+        if not aio_is_valid_submit_id(sid):
+            s[i.usize()] <- ORBIS_KERNEL_AIO_STATE_ABORTED
+        else:
+            if completion == 0 and timeout == 0:
+                while aio_id_state[sid.usize()] == ORBIS_KERNEL_AIO_STATE_PROCESSING and timeout == 0:
+                    _ = sceKernelUsleep(10)
+                    timer <- timer + 10
+                    if timeout_us != null and timeout_us[0] != 0 and timer > timeout_us[0]:
+                        timeout <- 1
+            if mode == 0x02 and aio_id_state[sid.usize()] == ORBIS_KERNEL_AIO_STATE_COMPLETED:
+                completion <- 1
+            s[i.usize()] <- aio_id_state[sid.usize()]
+        i <- i + 1
+
+    if timeout != 0:
+        return ORBIS_KERNEL_ERROR_ETIMEDOUT
+    return 0
+
+def sceKernelAioSubmitReadCommands(req: void&?, size: int, prio: int, id: void&?) -> int:
+    _ = prio
+    requests: mutable OrbisKernelAioRWRequest&? = req as mutable OrbisKernelAioRWRequest&?
+    out_id: mutable int&? = id as mutable int&?
+    if requests == null:
+        return ORBIS_KERNEL_ERROR_EFAULT
+    if out_id == null:
+        return ORBIS_KERNEL_ERROR_EFAULT
+    if size < 0:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    out: mutable int& = out_id
+
+    submit_id: int = aio_next_submit_id()
+    aio_id_state[submit_id.usize()] <- ORBIS_KERNEL_AIO_STATE_PROCESSING
+
+    i: mutable int = 0
+    while i < size:
+        item: OrbisKernelAioRWRequest = requests[i.usize()]
+        if item.result == null:
+            aio_id_state[submit_id.usize()] <- ORBIS_KERNEL_AIO_STATE_ABORTED
+            return ORBIS_KERNEL_ERROR_EFAULT
+        retv: i64 = sceKernelPread(item.fd, item.buf, item.nbyte.u64(), item.offset)
+        out_result: mutable OrbisKernelAioResult&? = item.result as mutable OrbisKernelAioResult&?
+        if out_result != null:
+            r: mutable OrbisKernelAioResult& = out_result
+            if retv < 0:
+                r.state <- ORBIS_KERNEL_AIO_STATE_ABORTED.u32()
+                r.returnValue <- retv
+            else:
+                r.state <- ORBIS_KERNEL_AIO_STATE_COMPLETED.u32()
+                r.returnValue <- retv
+        i <- i + 1
+
+    aio_id_state[submit_id.usize()] <- ORBIS_KERNEL_AIO_STATE_COMPLETED
+    out[0] <- submit_id
+    return 0
+
+def sceKernelAioSubmitReadCommandsMultiple(req: void&?, size: int, prio: int, id: void&?) -> int:
+    _ = prio
+    requests: mutable OrbisKernelAioRWRequest&? = req as mutable OrbisKernelAioRWRequest&?
+    out_ids: mutable int&? = id as mutable int&?
+    if requests == null:
+        return ORBIS_KERNEL_ERROR_EFAULT
+    if out_ids == null:
+        return ORBIS_KERNEL_ERROR_EFAULT
+    if size < 0:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    out: mutable int& = out_ids
+
+    i: mutable int = 0
+    while i < size:
+        item: OrbisKernelAioRWRequest = requests[i.usize()]
+        if item.result == null:
+            return ORBIS_KERNEL_ERROR_EFAULT
+        submit_id: int = aio_next_submit_id()
+        aio_id_state[submit_id.usize()] <- ORBIS_KERNEL_AIO_STATE_PROCESSING
+
+        retv: i64 = sceKernelPread(item.fd, item.buf, item.nbyte.u64(), item.offset)
+        out_result: mutable OrbisKernelAioResult&? = item.result as mutable OrbisKernelAioResult&?
+        if out_result != null:
+            r: mutable OrbisKernelAioResult& = out_result
+            if retv < 0:
+                r.state <- ORBIS_KERNEL_AIO_STATE_ABORTED.u32()
+                r.returnValue <- retv
+                aio_id_state[submit_id.usize()] <- ORBIS_KERNEL_AIO_STATE_ABORTED
+            else:
+                r.state <- ORBIS_KERNEL_AIO_STATE_COMPLETED.u32()
+                r.returnValue <- retv
+                aio_id_state[submit_id.usize()] <- ORBIS_KERNEL_AIO_STATE_COMPLETED
+        out[i.usize()] <- submit_id
+        i <- i + 1
+    return 0
+
+def sceKernelAioSubmitWriteCommands(req: void&?, size: int, prio: int, id: void&?) -> int:
+    _ = prio
+    requests: mutable OrbisKernelAioRWRequest&? = req as mutable OrbisKernelAioRWRequest&?
+    out_id: mutable int&? = id as mutable int&?
+    if requests == null:
+        return ORBIS_KERNEL_ERROR_EFAULT
+    if out_id == null:
+        return ORBIS_KERNEL_ERROR_EFAULT
+    if size < 0:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    out: mutable int& = out_id
+
+    submit_id: int = aio_next_submit_id()
+    aio_id_state[submit_id.usize()] <- ORBIS_KERNEL_AIO_STATE_PROCESSING
+
+    i: mutable int = 0
+    while i < size:
+        item: OrbisKernelAioRWRequest = requests[i.usize()]
+        if item.result == null:
+            aio_id_state[submit_id.usize()] <- ORBIS_KERNEL_AIO_STATE_ABORTED
+            return ORBIS_KERNEL_ERROR_EFAULT
+        retv: i64 = sceKernelPwrite(item.fd, item.buf, item.nbyte.u64(), item.offset)
+        out_result: mutable OrbisKernelAioResult&? = item.result as mutable OrbisKernelAioResult&?
+        if out_result != null:
+            r: mutable OrbisKernelAioResult& = out_result
+            if retv < 0:
+                r.state <- ORBIS_KERNEL_AIO_STATE_ABORTED.u32()
+                r.returnValue <- retv
+            else:
+                r.state <- ORBIS_KERNEL_AIO_STATE_COMPLETED.u32()
+                r.returnValue <- retv
+        i <- i + 1
+
+    aio_id_state[submit_id.usize()] <- ORBIS_KERNEL_AIO_STATE_COMPLETED
+    out[0] <- submit_id
+    return 0
+
+def sceKernelAioSubmitWriteCommandsMultiple(req: void&?, size: int, prio: int, id: void&?) -> int:
+    _ = prio
+    requests: mutable OrbisKernelAioRWRequest&? = req as mutable OrbisKernelAioRWRequest&?
+    out_ids: mutable int&? = id as mutable int&?
+    if requests == null:
+        return ORBIS_KERNEL_ERROR_EFAULT
+    if out_ids == null:
+        return ORBIS_KERNEL_ERROR_EFAULT
+    if size < 0:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    out: mutable int& = out_ids
+
+    i: mutable int = 0
+    while i < size:
+        item: OrbisKernelAioRWRequest = requests[i.usize()]
+        if item.result == null:
+            return ORBIS_KERNEL_ERROR_EFAULT
+        submit_id: int = aio_next_submit_id()
+        aio_id_state[submit_id.usize()] <- ORBIS_KERNEL_AIO_STATE_PROCESSING
+
+        retv: i64 = sceKernelPwrite(item.fd, item.buf, item.nbyte.u64(), item.offset)
+        out_result: mutable OrbisKernelAioResult&? = item.result as mutable OrbisKernelAioResult&?
+        if out_result != null:
+            r: mutable OrbisKernelAioResult& = out_result
+            if retv < 0:
+                r.state <- ORBIS_KERNEL_AIO_STATE_ABORTED.u32()
+                r.returnValue <- retv
+                aio_id_state[submit_id.usize()] <- ORBIS_KERNEL_AIO_STATE_ABORTED
+            else:
+                r.state <- ORBIS_KERNEL_AIO_STATE_COMPLETED.u32()
+                r.returnValue <- retv
+                aio_id_state[submit_id.usize()] <- ORBIS_KERNEL_AIO_STATE_COMPLETED
+        out[i.usize()] <- submit_id
+        i <- i + 1
+    return 0
+
+def sceKernelAioSetParam() -> int:
     return ORBIS_OK
 
 def sceKernelAioInitializeParam() -> int:
     return ORBIS_OK
 
-def sceKernelAioPollRequest(id: int, state: void&?) -> int:
-    _ = id
-    _ = state
-    return ORBIS_OK
-
-def sceKernelAioPollRequests(id: void&?, num: int, state: void&?) -> int:
-    _ = id
-    _ = num
-    _ = state
-    return ORBIS_OK
-
-def sceKernelAioSetParam() -> int:
-    return ORBIS_OK
-
-def sceKernelAioSubmitReadCommands(req: void&?, size: int, prio: int, id: void&?) -> int:
-    _ = req
-    _ = size
-    _ = prio
-    _ = id
-    return ORBIS_OK
-
-def sceKernelAioSubmitReadCommandsMultiple(req: void&?, size: int, prio: int, id: void&?) -> int:
-    _ = req
-    _ = size
-    _ = prio
-    _ = id
-    return ORBIS_OK
-
-def sceKernelAioSubmitWriteCommands(req: void&?, size: int, prio: int, id: void&?) -> int:
-    _ = req
-    _ = size
-    _ = prio
-    _ = id
-    return ORBIS_OK
-
-def sceKernelAioSubmitWriteCommandsMultiple(req: void&?, size: int, prio: int, id: void&?) -> int:
-    _ = req
-    _ = size
-    _ = prio
-    _ = id
-    return ORBIS_OK
-
-def sceKernelAioWaitRequest(id: int, state: void&?, usec: void&?) -> int:
-    _ = id
-    _ = state
-    _ = usec
-    return ORBIS_OK
-
-def sceKernelAioWaitRequests(id: void&?, num: int, state: void&?, mode: u32, usec: void&?) -> int:
-    _ = id
-    _ = num
-    _ = state
-    _ = mode
-    _ = usec
-    return ORBIS_OK
-
 def RegisterAio(sym: void&?) -> void:
     _ = sym
+    aio_id_index <- 1
+    i: mutable int = 0
+    while i < AIO_MAX_QUEUE:
+        aio_id_state[i.usize()] <- 0
+        i <- i + 1
+
     LIB_FUNCTION("fR521KIGgb8", "libkernel", 1, "libkernel", sceKernelAioCancelRequest)
     LIB_FUNCTION("3Lca1XBrQdY", "libkernel", 1, "libkernel", sceKernelAioCancelRequests)
     LIB_FUNCTION("5TgME6AYty4", "libkernel", 1, "libkernel", sceKernelAioDeleteRequest)

@@ -1,0 +1,110 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./common/types.elisa"
+include "./core/memory.elisa"
+include "./core/linker.elisa"
+include "./core/emulator_state.elisa"
+
+struct SysModuleEntry:
+    module_name: mutable static u8&
+    callback_ptr: mutable uintptr
+
+struct Emulator:
+    executable_name: mutable static u8&
+    wait_for_debugger_before_run: mutable bool
+    memory_ptr: mutable uintptr
+    linker_ptr: mutable uintptr
+    start_tick: mutable u64
+    pending_restart: mutable bool
+    pending_restart_path: mutable static u8&
+    pending_restart_args: mutable darray[static u8&]
+    last_run_path: mutable static u8&
+    last_run_argc: mutable usize
+    last_game_folder: mutable static u8&
+    play_time_updates: mutable darray[static u8&]
+
+global mutable emulator_singleton: Emulator = Emulator(
+    "",
+    false,
+    0.uintptr(),
+    0.uintptr(),
+    0.u64(),
+    false,
+    "",
+    [],
+    "",
+    0,
+    "",
+    []
+)
+
+def Emulator_New() -> Emulator:
+    return Emulator(
+        "",
+        false,
+        Memory_Instance().ref[mutable MemoryManager&].cast[uintptr],
+        Linker_GetInstance().ref[mutable Linker&].cast[uintptr],
+        0.u64(),
+        false,
+        "",
+        [],
+        "",
+        0,
+        "",
+        []
+    )
+
+def Emulator_GetInstance() -> mutable Emulator&:
+    if emulator_singleton.memory_ptr == 0.uintptr():
+        emulator_singleton <- Emulator_New()
+    return emulator_singleton.ref[mutable Emulator&]
+
+def Emulator_Reset() -> void:
+    emulator_singleton <- Emulator_New()
+
+def Emulator_Run(self: mutable Emulator&, file: static u8&, args: darray[static u8&], game_folder: static u8&?) -> void:
+    self.last_run_path <- file
+    self.last_run_argc <- args.count
+    if game_folder != null:
+        self.last_game_folder <- game_folder
+    else:
+        self.last_game_folder <- ""
+    self.start_tick <- self.start_tick + 1
+    state: mutable EmulatorState& = EmulatorState_GetInstance()
+    EmulatorState_SetGameRunning(state, true)
+    self.pending_restart <- false
+
+def Emulator_UpdatePlayTime(self: mutable Emulator&, serial: static u8&) -> void:
+    if serial.len == 0:
+        return
+    self.play_time_updates.push(serial)
+
+def Emulator_Restart(self: mutable Emulator&, eboot_path: static u8&, guest_args: darray[static u8&]) -> void:
+    self.pending_restart <- true
+    self.pending_restart_path <- eboot_path
+    self.pending_restart_args <- guest_args
+
+def Emulator_TakePendingRestartArgs(self: mutable Emulator&) -> darray[static u8&]:
+    if not self.pending_restart:
+        return []
+    out: mutable darray[static u8&] = []
+    out.push(self.pending_restart_path)
+    for i in 0..<self.pending_restart_args.count:
+        out.push(self.pending_restart_args[i])
+    self.pending_restart <- false
+    self.pending_restart_path <- ""
+    self.pending_restart_args.clear()
+    return out
+
+def Emulator_ExecuteRestartArgs(self: mutable Emulator&, args: darray[static u8&]) -> void:
+    if args.count == 0:
+        return
+    eboot: static u8& = args[0]
+    passthrough: mutable darray[static u8&] = []
+    for i in 1..<args.count:
+        passthrough.push(args[i])
+    Emulator_Run(self.ref[mutable Emulator&], eboot, passthrough, null)
+
+def Emulator_GetLastRunPath(self: Emulator&) -> static u8&:
+    return self.last_run_path

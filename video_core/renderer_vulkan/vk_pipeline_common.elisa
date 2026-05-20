@@ -1,0 +1,133 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./vk_common.elisa"
+include "./vk_instance.elisa"
+include "./vk_scheduler.elisa"
+include "./vk_resource_pool.elisa"
+
+enum ShaderStage:
+    Fragment
+    TessellationControl
+    TessellationEvaluation
+    Vertex
+    Geometry
+    Compute
+
+enum LogicalStage:
+    Fragment
+    TessellationControl
+    TessellationEval
+    Vertex
+    Geometry
+    Compute
+
+struct VkShaderInfo:
+    stage: mutable ShaderStage
+    l_stage: mutable LogicalStage
+    pgm_hash: mutable u64
+    mrt_mask: mutable u32
+    has_bitwise_xor: mutable bool
+    buffers_count: mutable u32
+    images_count: mutable u32
+    samplers_count: mutable u32
+
+struct VkPushData:
+    xoffset: mutable f32
+    xscale: mutable f32
+    yoffset: mutable f32
+    yscale: mutable f32
+
+def VkPushData_Default() -> VkPushData:
+    return VkPushData(0.0, 1.0, 0.0, 1.0)
+
+struct VkShaderProfile:
+    max_ubo_size: mutable u64
+    max_shared_memory_size: mutable u32
+    subgroup_size: mutable u32
+    support_int8: mutable bool
+    support_float16: mutable bool
+
+
+def VkShaderProfile_Default() -> VkShaderProfile:
+    return VkShaderProfile(65536u64, 65536u32, 64u32, true, true)
+
+struct VkDescriptorWrite:
+    binding: mutable u32
+    descriptor_type: mutable u32
+    dst_set: mutable u64
+
+struct VkBufferBarrier:
+    src_access_mask: mutable u32
+    dst_access_mask: mutable u32
+    src_stage_mask: mutable u32
+    dst_stage_mask: mutable u32
+
+struct Pipeline:
+    instance: mutable Instance
+    scheduler: mutable Scheduler&?
+    desc_heap: mutable DescriptorHeap&?
+    profile: mutable VkShaderProfile
+    pipeline_handle: mutable u64
+    pipeline_layout_handle: mutable u64
+    desc_layout_handle: mutable u64
+    uses_push_descriptors: mutable bool
+    is_compute: mutable bool
+    stages: mutable darray[VkShaderInfo]
+    bind_count: mutable u64
+
+
+def Pipeline_New(instance: Instance, scheduler: mutable Scheduler&, desc_heap: mutable DescriptorHeap&,
+                 profile: VkShaderProfile, is_compute: bool = false) -> Pipeline:
+    can Memory.Allocate, Abort.Panic:
+        out: mutable Pipeline = Pipeline(instance, null, null, profile, Vk_AllocHandle(),
+                                        Vk_AllocHandle(), Vk_AllocHandle(), false,
+                                        is_compute, [], 0u64)
+        out.scheduler as & <- scheduler
+        out.desc_heap as & <- desc_heap
+        return out
+
+
+def Pipeline_Handle(self: Pipeline) -> u64:
+    return self.pipeline_handle
+
+def Pipeline_GetLayout(self: Pipeline) -> u64:
+    return self.pipeline_layout_handle
+
+def Pipeline_IsCompute(self: Pipeline) -> bool:
+    return self.is_compute
+
+def Pipeline_AddStage(self: mutable Pipeline&, stage: VkShaderInfo) -> void:
+    can Memory.Allocate, Abort.Panic:
+        self.stages.push(stage)
+
+
+def Pipeline_GetStage(self: Pipeline, logical_stage: LogicalStage) -> VkShaderInfo?:
+    i: mutable usize = 0usize
+    while i < self.stages.count:
+        if self.stages[i].l_stage == logical_stage:
+            return self.stages[i]
+        i <- i + 1usize
+    return null
+
+def Pipeline_BindResources(self: mutable Pipeline&, set_writes: mutable darray[VkDescriptorWrite]&,
+                           buffer_barriers: darray[VkBufferBarrier],
+                           push_data: VkPushData) -> void:
+    can Memory.Allocate, Abort.Panic:
+        _ = push_data
+        _ = buffer_barriers
+        self.bind_count <- self.bind_count + 1u64
+        if set_writes.count == 0usize:
+            return
+        if self.uses_push_descriptors:
+            return
+        desc_heap: mutable DescriptorHeap& = self.desc_heap.value()
+        desc_set: u64 = DescriptorHeap_Commit(desc_heap, self.desc_layout_handle)
+        i: mutable usize = 0usize
+        while i < set_writes.count:
+            set_writes[i].dst_set <- desc_set
+            i <- i + 1usize
+
+def Pipeline_GetDebugString(self: Pipeline) -> static u8&:
+    _ = self
+    return "pipeline"

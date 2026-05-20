@@ -1,0 +1,288 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+# Elisa port of shader_recompiler/frontend/control_flow_graph.{h,cpp}
+
+include "./instruction.elisa"
+
+const CFG_MAX_INSTS: u32 = 1024u32
+const CFG_MAX_LABELS: u32 = 1024u32
+const CFG_MAX_BLOCKS: u32 = 1024u32
+
+struct Block:
+    begin: mutable u32
+    end: mutable u32
+    begin_index: mutable u32
+    end_index: mutable u32
+    cond: mutable u32
+    end_inst: mutable GcnInst
+    end_class: mutable u32
+    branch_true: mutable int
+    branch_false: mutable int
+    is_dummy: mutable bool
+    valid: mutable bool
+
+struct CFG:
+    inst_count: mutable u32
+    inst_list: mutable GcnInst[1024]
+    index_to_pc: mutable u32[1025]
+
+    labels: mutable u32[1024]
+    label_count: mutable u32
+
+    blocks: mutable Block[1024]
+    block_count: mutable u32
+
+
+def Block_Default() -> Block:
+    out: mutable Block = zeroed
+    out.cond <- IR_CONDITION_TRUE
+    out.end_inst <- GcnInst_Default()
+    out.end_class <- END_CLASS_EXIT
+    out.branch_true <- -1
+    out.branch_false <- -1
+    out.is_dummy <- false
+    out.valid <- false
+    return out
+
+
+def CFG_Default() -> CFG:
+    out: mutable CFG = zeroed
+    out.inst_count <- 0u32
+    out.label_count <- 0u32
+    out.block_count <- 0u32
+    return out
+
+
+def Block_Contains(block: Block&, pc: u32) -> bool:
+    return pc >= block.begin and pc < block.end
+
+
+def _cfg_add_label(cfg: mutable CFG&, address: u32) -> void:
+    i: mutable u32 = 0u32
+    while i < cfg.label_count:
+        if cfg.labels[i.usize()] == address:
+            return
+        i <- i + 1u32
+    if cfg.label_count < CFG_MAX_LABELS:
+        cfg.labels[cfg.label_count.usize()] <- address
+        cfg.label_count <- cfg.label_count + 1u32
+
+
+def _cfg_sort_labels(cfg: mutable CFG&) -> void:
+    i: mutable u32 = 1u32
+    while i < cfg.label_count:
+        key: u32 = cfg.labels[i.usize()]
+        j: int = i.int() - 1
+        while j >= 0 and cfg.labels[j.usize()] > key:
+            cfg.labels[(j + 1).usize()] <- cfg.labels[j.usize()]
+            j <- j - 1
+        cfg.labels[(j + 1).usize()] <- key
+        i <- i + 1u32
+
+
+def _cfg_get_index(cfg: CFG&, label: u32) -> u32:
+    if label == 0u32:
+        return 0u32
+    i: mutable u32 = 0u32
+    while i <= cfg.inst_count:
+        if cfg.index_to_pc[i.usize()] >= label:
+            return i
+        i <- i + 1u32
+    return cfg.inst_count
+
+
+def _cfg_make_condition(inst: GcnInst&) -> u32:
+    if GcnInst_IsCmpx(inst):
+        return IR_CONDITION_EXECNZ
+    if inst.opcode == OPCODE_S_CBRANCH_SCC0:
+        return IR_CONDITION_SCC0
+    if inst.opcode == OPCODE_S_CBRANCH_SCC1:
+        return IR_CONDITION_SCC1
+    if inst.opcode == OPCODE_S_CBRANCH_VCCZ:
+        return IR_CONDITION_VCCZ
+    if inst.opcode == OPCODE_S_CBRANCH_VCCNZ:
+        return IR_CONDITION_VCCNZ
+    if inst.opcode == OPCODE_S_CBRANCH_EXECZ:
+        return IR_CONDITION_EXECZ
+    if inst.opcode == OPCODE_S_CBRANCH_EXECNZ:
+        return IR_CONDITION_EXECNZ
+    return IR_CONDITION_TRUE
+
+
+def _cfg_get_block_index(cfg: CFG&, address: u32) -> int:
+    i: mutable u32 = 0u32
+    while i < cfg.block_count:
+        if cfg.blocks[i.usize()].valid and cfg.blocks[i.usize()].begin == address:
+            return i.int()
+        i <- i + 1u32
+    return -1
+
+
+def _cfg_emit_labels(cfg: mutable CFG&) -> void:
+    pc: mutable u32 = 0u32
+    _cfg_add_label(cfg, pc)
+
+    i: mutable u32 = 0u32
+    while i < cfg.inst_count:
+        cfg.index_to_pc[i.usize()] <- pc
+        inst: GcnInst = cfg.inst_list[i.usize()]
+
+        if GcnInst_IsUnconditionalBranch(inst):
+            target: u32 = GcnInst_BranchTarget(inst, pc)
+            _cfg_add_label(cfg, target)
+            _cfg_add_label(cfg, pc + inst.length)
+        else:
+            if GcnInst_IsConditionalBranch(inst):
+            true_label: u32 = GcnInst_BranchTarget(inst, pc)
+            false_label: u32 = pc + inst.length
+            if true_label != false_label:
+                _cfg_add_label(cfg, true_label)
+                _cfg_add_label(cfg, false_label)
+        else:
+            if inst.opcode == OPCODE_S_ENDPGM:
+            _cfg_add_label(cfg, pc + inst.length)
+
+        pc <- pc + inst.length
+        i <- i + 1u32
+
+    cfg.index_to_pc[cfg.inst_count.usize()] <- pc
+    _cfg_add_label(cfg, pc)
+    _cfg_sort_labels(cfg)
+
+
+def _cfg_emit_blocks(cfg: mutable CFG&) -> void:
+    i: mutable u32 = 0u32
+    while i + 1u32 < cfg.label_count and cfg.block_count < CFG_MAX_BLOCKS:
+        start: u32 = cfg.labels[i.usize()]
+        end: u32 = cfg.labels[(i + 1u32).usize()]
+        end_index: u32 = _cfg_get_index(cfg, end)
+        if end_index == 0u32:
+            i <- i + 1u32
+            continue
+        end_index <- end_index - 1u32
+
+        block: mutable Block = Block_Default()
+        block.begin <- start
+        block.end <- end
+        block.begin_index <- _cfg_get_index(cfg, start)
+        block.end_index <- end_index
+        block.end_inst <- cfg.inst_list[end_index.usize()]
+        block.cond <- _cfg_make_condition(block.end_inst)
+        block.end_class <- END_CLASS_EXIT
+        block.valid <- true
+
+        cfg.blocks[cfg.block_count.usize()] <- block
+        cfg.block_count <- cfg.block_count + 1u32
+        i <- i + 1u32
+
+
+def _cfg_link_blocks(cfg: mutable CFG&) -> void:
+    i: mutable u32 = 0u32
+    while i < cfg.block_count:
+        block: mutable Block = cfg.blocks[i.usize()]
+        end_inst: GcnInst = block.end_inst
+
+        if not GcnInst_IsTerminateInstruction(end_inst):
+            if block.end == cfg.index_to_pc[cfg.inst_count.usize()]:
+                block.end_class <- END_CLASS_EXIT
+            else:
+                next_index: int = _cfg_get_block_index(cfg, block.end)
+                if next_index == -1:
+                    block.end_class <- END_CLASS_EXIT
+                else:
+                    block.end_class <- END_CLASS_BRANCH
+                    block.branch_true <- next_index
+            cfg.blocks[i.usize()] <- block
+            i <- i + 1u32
+            continue
+
+        branch_pc: u32 = block.end - end_inst.length
+        target_pc: u32 = GcnInst_BranchTarget(end_inst, branch_pc)
+
+        if GcnInst_IsUnconditionalBranch(end_inst):
+            target_idx: int = _cfg_get_block_index(cfg, target_pc)
+            if target_idx == -1:
+                block.end_class <- END_CLASS_EXIT
+            else:
+                block.end_class <- END_CLASS_BRANCH
+                block.branch_true <- target_idx
+
+        else:
+            if GcnInst_IsConditionalBranch(end_inst):
+            target_idx: int = _cfg_get_block_index(cfg, target_pc)
+            fallthrough_idx: int = _cfg_get_block_index(cfg, block.end)
+            if target_idx == -1 and fallthrough_idx == -1:
+                block.end_class <- END_CLASS_EXIT
+            else:
+                block.end_class <- END_CLASS_BRANCH
+                block.branch_true <- target_idx
+                block.branch_false <- fallthrough_idx
+
+        else:
+            if end_inst.opcode == OPCODE_S_ENDPGM:
+            block.end_class <- END_CLASS_EXIT
+
+        cfg.blocks[i.usize()] <- block
+        i <- i + 1u32
+
+
+def _cfg_prune_unreachable_blocks(cfg: mutable CFG&) -> void:
+    if cfg.block_count == 0u32:
+        return
+
+    reachable: mutable bool[1024] = zeroed
+    pending: mutable int[1024] = zeroed
+    pending_count: mutable int = 0
+
+    reachable[0] <- true
+    pending[0] <- 0
+    pending_count <- 1
+
+    while pending_count > 0:
+        pending_count <- pending_count - 1
+        bi: int = pending[pending_count.usize()]
+        if bi < 0 or bi >= cfg.block_count.int():
+            continue
+        block: mutable Block = cfg.blocks[bi.usize()]
+        if block.end_class == END_CLASS_BRANCH:
+            if block.branch_true >= 0 and block.branch_true < cfg.block_count.int() and not reachable[block.branch_true.usize()]:
+                reachable[block.branch_true.usize()] <- true
+                pending[pending_count.usize()] <- block.branch_true
+                pending_count <- pending_count + 1
+            if block.branch_false >= 0 and block.branch_false < cfg.block_count.int() and not reachable[block.branch_false.usize()]:
+                reachable[block.branch_false.usize()] <- true
+                pending[pending_count.usize()] <- block.branch_false
+                pending_count <- pending_count + 1
+
+    i: mutable u32 = 0u32
+    while i < cfg.block_count:
+        if not reachable[i.usize()]:
+            cfg.blocks[i.usize()].valid <- false
+        i <- i + 1u32
+
+
+def CFG_Build(insts: GcnInst&, inst_count: u32) -> CFG:
+    cfg: mutable CFG = CFG_Default()
+    cfg.inst_count <- inst_count
+
+    copy_count: u32 = inst_count
+    if copy_count > CFG_MAX_INSTS:
+        copy_count <- CFG_MAX_INSTS
+        cfg.inst_count <- CFG_MAX_INSTS
+
+    i: mutable u32 = 0u32
+    while i < copy_count:
+        cfg.inst_list[i.usize()] <- insts[i.usize()]
+        i <- i + 1u32
+
+    _cfg_emit_labels(cfg)
+    _cfg_emit_blocks(cfg)
+    _cfg_link_blocks(cfg)
+    _cfg_prune_unreachable_blocks(cfg)
+    return cfg
+
+
+def CFG_Dot(cfg: CFG&) -> u8&:
+    _ = cfg
+    return "digraph shader {\n}\n"

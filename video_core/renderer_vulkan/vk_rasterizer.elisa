@@ -1,0 +1,276 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../page_manager.elisa"
+include "./liverpool_to_vk.elisa"
+include "./vk_pipeline_cache.elisa"
+include "./vk_shader_hle.elisa"
+
+const COLOR_CONTROL_MODE_DISABLE: u32 = 0u32
+const COLOR_CONTROL_MODE_ELIMINATE_FAST_CLEAR: u32 = 1u32
+const COLOR_CONTROL_MODE_FMASK_DECOMPRESS: u32 = 2u32
+const COLOR_CONTROL_MODE_RESOLVE: u32 = 3u32
+
+struct AddressRange:
+    begin: mutable u64
+    end: mutable u64
+
+struct Rasterizer:
+    instance: mutable Instance
+    scheduler: mutable Scheduler&?
+    page_manager: mutable PageManager
+    pipeline_cache: mutable PipelineCache
+    shader_hle_state: mutable ShaderHleDispatchState
+    mapped_ranges: mutable darray[AddressRange]
+    draw_count: mutable u64
+    draw_indirect_count: mutable u64
+    dispatch_count: mutable u64
+    dispatch_indirect_count: mutable u64
+    fill_buffer_count: mutable u64
+    copy_buffer_count: mutable u64
+    cp_sync_count: mutable u64
+    on_submit_count: mutable u64
+    fault_process_pending: mutable bool
+    color_control_mode: mutable u32
+    primitive_type: mutable AmdPrimitiveType
+    num_indices: mutable u32
+    num_instances: mutable u32
+    cs_program: mutable ComputeProgram
+
+
+def Rasterizer_New(instance: Instance, scheduler: mutable Scheduler&) -> Rasterizer:
+    can Memory.Allocate, Abort.Panic:
+        page_manager: PageManager = PageManager_New()
+        pipeline_cache: PipelineCache = PipelineCache_New(instance, scheduler)
+        out: mutable Rasterizer = Rasterizer(
+            instance,
+            null,
+            page_manager,
+            pipeline_cache,
+            ShaderHleDispatchState_New(),
+            [],
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+            false,
+            COLOR_CONTROL_MODE_DISABLE,
+            AMD_PRIM_TRIANGLE_LIST,
+            3u32,
+            1u32,
+            ComputeProgram(1u32, 1u32, 1u32)
+        )
+        out.scheduler as & <- scheduler
+        return out
+
+
+def Rasterizer_GetScheduler(self: mutable Rasterizer&) -> mutable Scheduler&:
+    return self.scheduler.value()
+
+def Rasterizer_GetPipelineCache(self: mutable Rasterizer&) -> mutable PipelineCache&:
+    return self.pipeline_cache.ref[mutable PipelineCache&]
+
+
+def Rasterizer_FilterDraw(self: mutable Rasterizer&) -> bool:
+    if self.color_control_mode == COLOR_CONTROL_MODE_ELIMINATE_FAST_CLEAR:
+        return false
+    if self.color_control_mode == COLOR_CONTROL_MODE_FMASK_DECOMPRESS:
+        return false
+    if self.color_control_mode == COLOR_CONTROL_MODE_RESOLVE:
+        return false
+    if self.primitive_type == AMD_PRIM_NONE:
+        return false
+    return true
+
+
+def Rasterizer_Draw(self: mutable Rasterizer&, is_indexed: bool, index_offset: u32 = 0u32) -> void:
+    can Memory.Allocate, Abort.Panic:
+        _ = is_indexed
+        _ = index_offset
+        scheduler: mutable Scheduler& = self.scheduler.value()
+        Scheduler_PopPendingOperations(scheduler)
+        if not Rasterizer_FilterDraw(self):
+            return
+        pipeline: GraphicsPipeline = PipelineCache_GetGraphicsPipeline(self.pipeline_cache.ref[mutable PipelineCache&]) else return
+        write_list: mutable darray[VkDescriptorWrite] = []
+        barrier_list: mutable darray[VkBufferBarrier] = []
+        Pipeline_BindResources(pipeline.base.ref[mutable Pipeline&], write_list.ref[mutable darray[VkDescriptorWrite]&],
+                               barrier_list, VkPushData_Default())
+        self.draw_count <- self.draw_count + 1u64
+        Scheduler_BeginRendering(scheduler, RenderState_Default())
+
+
+def Rasterizer_DrawIndirect(self: mutable Rasterizer&, is_indexed: bool,
+                            arg_address: u64, offset: u32, size: u32,
+                            max_count: u32, count_address: u64) -> void:
+    can Memory.Allocate, Abort.Panic:
+        _ = is_indexed
+        _ = arg_address
+        _ = offset
+        _ = size
+        _ = max_count
+        _ = count_address
+        scheduler: mutable Scheduler& = self.scheduler.value()
+        Scheduler_PopPendingOperations(scheduler)
+        if not Rasterizer_FilterDraw(self):
+            return
+        self.draw_indirect_count <- self.draw_indirect_count + 1u64
+
+
+def Rasterizer_DispatchDirect(self: mutable Rasterizer&) -> void:
+    can Memory.Allocate, Abort.Panic:
+        scheduler: mutable Scheduler& = self.scheduler.value()
+        Scheduler_PopPendingOperations(scheduler)
+        pipeline: ComputePipeline = PipelineCache_GetComputePipeline(self.pipeline_cache.ref[mutable PipelineCache&]) else return
+        info: VkShaderInfo = Pipeline_GetStage(pipeline.base, LogicalStage.Compute) else return
+        if ExecuteShaderHLE(info, VkRegs(0u32), self.cs_program, self.shader_hle_state.ref[mutable ShaderHleDispatchState&]):
+            self.dispatch_count <- self.dispatch_count + 1u64
+            return
+        write_list: mutable darray[VkDescriptorWrite] = []
+        barrier_list: mutable darray[VkBufferBarrier] = []
+        Pipeline_BindResources(pipeline.base.ref[mutable Pipeline&], write_list.ref[mutable darray[VkDescriptorWrite]&],
+                               barrier_list, VkPushData_Default())
+        self.dispatch_count <- self.dispatch_count + 1u64
+
+
+def Rasterizer_DispatchIndirect(self: mutable Rasterizer&, address: u64,
+                                offset: u32, size: u32) -> void:
+    _ = address
+    _ = offset
+    _ = size
+    self.dispatch_indirect_count <- self.dispatch_indirect_count + 1u64
+
+
+def Rasterizer_ScopeMarkerBegin(self: mutable Rasterizer&, label: static u8&, from_guest: bool = false) -> void:
+    _ = self
+    _ = label
+    _ = from_guest
+
+def Rasterizer_ScopeMarkerEnd(self: mutable Rasterizer&, from_guest: bool = false) -> void:
+    _ = self
+    _ = from_guest
+
+def Rasterizer_ScopedMarkerInsert(self: mutable Rasterizer&, label: static u8&, from_guest: bool = false) -> void:
+    _ = self
+    _ = label
+    _ = from_guest
+
+def Rasterizer_ScopedMarkerInsertColor(self: mutable Rasterizer&, label: static u8&, color: u32,
+                                       from_guest: bool = false) -> void:
+    _ = self
+    _ = label
+    _ = color
+    _ = from_guest
+
+def Rasterizer_FillBuffer(self: mutable Rasterizer&, address: u64, num_bytes: u32,
+                          value: u32, is_gds: bool) -> void:
+    _ = address
+    _ = num_bytes
+    _ = value
+    _ = is_gds
+    self.fill_buffer_count <- self.fill_buffer_count + 1u64
+
+
+def Rasterizer_CopyBuffer(self: mutable Rasterizer&, dst: u64, src: u64,
+                          num_bytes: u32, dst_gds: bool, src_gds: bool) -> void:
+    _ = dst
+    _ = src
+    _ = num_bytes
+    _ = dst_gds
+    _ = src_gds
+    self.copy_buffer_count <- self.copy_buffer_count + 1u64
+
+
+def Rasterizer_ReadDataFromGds(self: Rasterizer, gds_offset: u32) -> u32:
+    _ = self
+    return gds_offset ^ 0x5a5au32
+
+def Rasterizer_InvalidateMemory(self: mutable Rasterizer&, addr: u64, size: u64) -> bool:
+    can Memory.Allocate, Abort.Panic:
+        if not Rasterizer_IsMapped(self, addr, size):
+            return false
+        PageManager_UpdatePageWatchers_TrackWrite(self.page_manager.ref[mutable PageManager&], addr, size)
+        return true
+
+
+def Rasterizer_ReadMemory(self: mutable Rasterizer&, addr: u64, size: u64) -> bool:
+    if not Rasterizer_IsMapped(self, addr, size):
+        return false
+    return true
+
+def Rasterizer_IsMapped(self: Rasterizer, addr: u64, size: u64) -> bool:
+    if size == 0u64:
+        return false
+    end_addr: u64 = addr + size
+    i: mutable usize = 0usize
+    while i < self.mapped_ranges.count:
+        if self.mapped_ranges[i].begin <= addr and self.mapped_ranges[i].end >= end_addr:
+            return true
+        i <- i + 1usize
+    return false
+
+def Rasterizer_MapMemory(self: mutable Rasterizer&, addr: u64, size: u64) -> void:
+    can Memory.Allocate, Abort.Panic:
+        self.mapped_ranges.push(AddressRange(addr, addr + size))
+        PageManager_OnGpuMap(self.page_manager.ref[mutable PageManager&], addr, size.usize())
+
+
+def Rasterizer_UnmapMemory(self: mutable Rasterizer&, addr: u64, size: u64) -> void:
+    PageManager_OnGpuUnmap(self.page_manager.ref[mutable PageManager&], addr, size.usize())
+    end_addr: u64 = addr + size
+    i: mutable usize = 0usize
+    while i < self.mapped_ranges.count:
+        if self.mapped_ranges[i].begin == addr and self.mapped_ranges[i].end == end_addr:
+            self.mapped_ranges[i] <- self.mapped_ranges[self.mapped_ranges.count - 1usize]
+            self.mapped_ranges.count <- self.mapped_ranges.count - 1usize
+            continue
+        i <- i + 1usize
+
+
+def Rasterizer_CpSync(self: mutable Rasterizer&) -> void:
+    self.cp_sync_count <- self.cp_sync_count + 1u64
+
+
+def Rasterizer_Flush(self: mutable Rasterizer&) -> u64:
+    can Memory.Allocate, Abort.Panic:
+        scheduler: mutable Scheduler& = self.scheduler.value()
+        current_tick: u64 = Scheduler_CurrentTick(scheduler)
+        _ = Scheduler_FlushNoInfo(scheduler)
+        return current_tick
+
+
+def Rasterizer_Finish(self: mutable Rasterizer&) -> void:
+    can Memory.Allocate, Abort.Panic:
+        scheduler: mutable Scheduler& = self.scheduler.value()
+        Scheduler_Finish(scheduler)
+
+
+def Rasterizer_OnSubmit(self: mutable Rasterizer&) -> void:
+    self.on_submit_count <- self.on_submit_count + 1u64
+    self.fault_process_pending <- false
+
+
+def Rasterizer_BindResources(self: mutable Rasterizer&, pipeline: Pipeline) -> bool:
+    _ = self
+    _ = pipeline
+    return true
+
+
+def Rasterizer_IsComputeMetaClear(self: Rasterizer, pipeline: Pipeline) -> bool:
+    _ = self
+    _ = pipeline
+    return false
+
+def Rasterizer_IsComputeImageCopy(self: Rasterizer, pipeline: Pipeline) -> bool:
+    _ = self
+    _ = pipeline
+    return false
+
+def Rasterizer_IsComputeImageClear(self: Rasterizer, pipeline: Pipeline) -> bool:
+    _ = self
+    _ = pipeline
+    return false

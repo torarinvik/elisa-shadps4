@@ -1,0 +1,85 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../cache_storage.elisa"
+include "./vk_pipeline_cache.elisa"
+
+const ShaderBinaryVersion: u32 = 1u32
+const ShaderMetaVersion: u32 = 1u32
+const PipelineKeyVersion: u32 = 1u32
+
+
+def Serialization_WriteU32(out: mutable darray[u8]&, value: u32) -> void:
+    can Memory.Allocate, Abort.Panic:
+        out.push((value & 0xffu32).u8())
+        out.push(((value >> 8u32) & 0xffu32).u8())
+        out.push(((value >> 16u32) & 0xffu32).u8())
+        out.push(((value >> 24u32) & 0xffu32).u8())
+
+def Serialization_WriteU64(out: mutable darray[u8]&, value: u64) -> void:
+    can Memory.Allocate, Abort.Panic:
+        i: mutable u32 = 0u32
+        while i < 8u32:
+            out.push(((value >> (i * 8u32)) & 0xffu64).u8())
+            i <- i + 1u32
+
+def RegisterPipelineDataCompute(key: ComputePipelineKey,
+                                sdata: ComputePipelineSerializationSupport) -> void:
+    can Memory.Allocate, Abort.Panic:
+        db: mutable DataBase& = DataBase_Instance()
+        if not DataBase_IsOpened(db):
+            return
+        blob: mutable darray[u8] = []
+        Serialization_WriteU32(blob.ref[mutable darray[u8]&], PipelineKeyVersion)
+        Serialization_WriteU32(blob.ref[mutable darray[u8]&], 1u32)
+        ComputePipelineKey_Serialize(key, blob.ref[mutable darray[u8]&])
+        ComputePipelineSerializationSupport_Serialize(sdata, blob.ref[mutable darray[u8]&])
+        _ = DataBase_SaveBytes(db, BlobType.PipelineKey, "compute_pipeline", blob)
+
+
+def RegisterPipelineDataGraphics(key: GraphicsPipelineKey, hash: u64,
+                                 sdata: GraphicsPipelineSerializationSupport) -> void:
+    can Memory.Allocate, Abort.Panic:
+        _ = hash
+        db: mutable DataBase& = DataBase_Instance()
+        if not DataBase_IsOpened(db):
+            return
+        blob: mutable darray[u8] = []
+        Serialization_WriteU32(blob.ref[mutable darray[u8]&], PipelineKeyVersion)
+        Serialization_WriteU32(blob.ref[mutable darray[u8]&], 0u32)
+        GraphicsPipelineKey_Serialize(key, blob.ref[mutable darray[u8]&])
+        GraphicsPipelineSerializationSupport_Serialize(sdata, blob.ref[mutable darray[u8]&])
+        _ = DataBase_SaveBytes(db, BlobType.PipelineKey, "graphics_pipeline", blob)
+
+
+def RegisterShaderMeta(info: VkShaderInfo,
+                       fetch_shader_data: VkFetchShaderData?,
+                       perm_hash: u64,
+                       perm_idx: usize) -> void:
+    can Memory.Allocate, Abort.Panic:
+        db: mutable DataBase& = DataBase_Instance()
+        if not DataBase_IsOpened(db):
+            return
+        blob: mutable darray[u8] = []
+        Serialization_WriteU32(blob.ref[mutable darray[u8]&], ShaderMetaVersion)
+        Serialization_WriteU32(blob.ref[mutable darray[u8]&], ShaderBinaryVersion)
+        Serialization_WriteU64(blob.ref[mutable darray[u8]&], perm_hash)
+        Serialization_WriteU64(blob.ref[mutable darray[u8]&], perm_idx.u64())
+        Serialization_WriteU64(blob.ref[mutable darray[u8]&], info.pgm_hash)
+        Serialization_WriteU32(blob.ref[mutable darray[u8]&], info.stage.u32())
+        Serialization_WriteU32(blob.ref[mutable darray[u8]&], info.l_stage.u32())
+        if fetch_shader_data == null:
+            Serialization_WriteU32(blob.ref[mutable darray[u8]&], 0u32)
+        else:
+            Serialization_WriteU32(blob.ref[mutable darray[u8]&], fetch_shader_data.value().attribute_count)
+        _ = DataBase_SaveBytes(db, BlobType.ShaderMeta, "shader_meta", blob)
+
+
+def RegisterShaderBinary(spv: darray[u32], pgm_hash: u64, perm_idx: usize) -> void:
+    can Memory.Allocate, Abort.Panic:
+        _ = pgm_hash
+        _ = perm_idx
+        db: mutable DataBase& = DataBase_Instance()
+        if not DataBase_IsOpened(db):
+            return
+        _ = DataBase_SaveWords(db, BlobType.ShaderBinary, "shader_binary", spv)

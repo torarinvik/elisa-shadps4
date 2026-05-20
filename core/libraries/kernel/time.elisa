@@ -6,112 +6,341 @@ include "./orbis_error.elisa"
 include "./posix_error.elisa"
 include "./lib_function_stub.elisa"
 
+@fixed_layout
+struct OrbisKernelTimeval:
+    tv_sec: mutable i64
+    tv_usec: mutable i64
+
+@fixed_layout
+struct OrbisKernelTimezone:
+    tz_minuteswest: mutable int
+    tz_dsttime: mutable int
+
+@fixed_layout
+struct OrbisKernelTimespec:
+    tv_sec: mutable i64
+    tv_nsec: mutable i64
+
+@fixed_layout
+struct OrbisTimesec:
+    t: mutable i64
+    west_sec: mutable u32
+    dst_sec: mutable u32
+
+const ORBIS_CLOCK_REALTIME: u32 = 0
+const ORBIS_CLOCK_VIRTUAL: u32 = 1
+const ORBIS_CLOCK_PROF: u32 = 2
+const ORBIS_CLOCK_MONOTONIC: u32 = 4
+const ORBIS_CLOCK_UPTIME: u32 = 5
+const ORBIS_CLOCK_UPTIME_PRECISE: u32 = 7
+const ORBIS_CLOCK_UPTIME_FAST: u32 = 8
+const ORBIS_CLOCK_REALTIME_PRECISE: u32 = 9
+const ORBIS_CLOCK_REALTIME_FAST: u32 = 10
+const ORBIS_CLOCK_MONOTONIC_PRECISE: u32 = 11
+const ORBIS_CLOCK_MONOTONIC_FAST: u32 = 12
+const ORBIS_CLOCK_SECOND: u32 = 13
+const ORBIS_CLOCK_THREAD_CPUTIME_ID: u32 = 14
+const ORBIS_CLOCK_PROCTIME: u32 = 15
+const ORBIS_CLOCK_EXT_NETWORK: u32 = 16
+const ORBIS_CLOCK_EXT_DEBUG_NETWORK: u32 = 17
+const ORBIS_CLOCK_EXT_AD_NETWORK: u32 = 18
+const ORBIS_CLOCK_EXT_RAW_NETWORK: u32 = 19
+
+extern high_resolution_now_ns() -> i64
+extern nanosleep(rqtp: OrbisKernelTimespec&, rmtp: mutable OrbisKernelTimespec&?) -> int
+extern gettimeofday(tv: mutable OrbisKernelTimeval&?, tz: mutable OrbisKernelTimezone&?) -> int
+extern posix_errno() -> int
+extern __Error() -> void&?
+extern SetPosixErrno(e: int) -> void
+extern ErrnoToSceKernelError(err: int) -> int
+
+global mutable time_initial_ptc_ns: i64 = 0
+global mutable time_tsc_frequency: u64 = 1000000000u64
+
+def time_now_ns() -> i64:
+    return high_resolution_now_ns()
+
+def sceKernelGetTscFrequency() -> u64:
+    return time_tsc_frequency
+
+def sceKernelGetProcessTime() -> u64:
+    delta: i64 = time_now_ns() - time_initial_ptc_ns
+    if delta < 0:
+        return 0
+    return (delta / 1000).u64()
+
+def sceKernelGetProcessTimeCounter() -> u64:
+    delta: i64 = time_now_ns() - time_initial_ptc_ns
+    if delta < 0:
+        return 0
+    return delta.u64()
+
+def sceKernelGetProcessTimeCounterFrequency() -> u64:
+    return time_tsc_frequency
+
+def sceKernelReadTsc() -> u64:
+    now: i64 = time_now_ns()
+    if now < 0:
+        return 0
+    return now.u64()
+
+def posix_nanosleep_impl(rqtp: void&?, rmtp: void&?, interruptible: bool) -> int:
+    req: OrbisKernelTimespec&? = rqtp as OrbisKernelTimespec&?
+    rem_out: mutable OrbisKernelTimespec&? = rmtp as mutable OrbisKernelTimespec&?
+    if req == null or req.tv_sec < 0 or req.tv_nsec < 0 or req.tv_nsec >= 1000000000:
+        SetPosixErrno(POSIX_EINVAL)
+        return -1
+
+    if interruptible:
+        rem_tmp: mutable OrbisKernelTimespec = zeroed
+        rem_ptr: mutable OrbisKernelTimespec&? = rem_tmp.ref[mutable OrbisKernelTimespec&]
+        if rem_out != null:
+            rem_ptr <- rem_out
+        if nanosleep(req, rem_ptr) < 0:
+            SetPosixErrno(posix_errno())
+            return -1
+        return 0
+
+    remaining: mutable OrbisKernelTimespec = zeroed
+    remaining.tv_sec <- req.tv_sec
+    remaining.tv_nsec <- req.tv_nsec
+    rem_loop: mutable OrbisKernelTimespec = zeroed
+    while true:
+        if nanosleep(remaining.ref[OrbisKernelTimespec&], rem_loop.ref[mutable OrbisKernelTimespec&]) == 0:
+            if rem_out != null:
+                rem_out.tv_sec <- 0
+                rem_out.tv_nsec <- 0
+            return 0
+        err: int = posix_errno()
+        if err == POSIX_EINTR:
+            remaining.tv_sec <- rem_loop.tv_sec
+            remaining.tv_nsec <- rem_loop.tv_nsec
+            if rem_out != null:
+                rem_out.tv_sec <- rem_loop.tv_sec
+                rem_out.tv_nsec <- rem_loop.tv_nsec
+        else:
+            SetPosixErrno(err)
+            return -1
+
 def posix_nanosleep(rqtp: void&?, rmtp: void&?) -> int:
-    _ = rqtp
-    _ = rmtp
-    return -1
+    return posix_nanosleep_impl(rqtp, rmtp, true)
+
+def sceKernelNanosleep(rqtp: void&?, rmtp: void&?) -> int:
+    ret: int = posix_nanosleep_impl(rqtp, rmtp, false)
+    if ret < 0:
+        err_ref: int&? = __Error() as int&?
+        if err_ref == null:
+            return ORBIS_KERNEL_ERROR_EFAULT
+        return ErrnoToSceKernelError(err_ref[0])
+    return ORBIS_OK
 
 def posix_usleep(microseconds: u32) -> int:
-    _ = microseconds
-    return -1
+    ts: mutable OrbisKernelTimespec = zeroed
+    ts.tv_sec <- (microseconds / 1000000).i64()
+    ts.tv_nsec <- ((microseconds % 1000000) * 1000).i64()
+    return posix_nanosleep(ts.ref[OrbisKernelTimespec&], null)
+
+def sceKernelUsleep(microseconds: u32) -> int:
+    ts: mutable OrbisKernelTimespec = zeroed
+    ts.tv_sec <- (microseconds / 1000000).i64()
+    ts.tv_nsec <- ((microseconds % 1000000) * 1000).i64()
+    return sceKernelNanosleep(ts.ref[OrbisKernelTimespec&], null)
 
 def posix_sleep(seconds: u32) -> u32:
-    _ = seconds
-    return 0u32
+    ts: mutable OrbisKernelTimespec = zeroed
+    rm: mutable OrbisKernelTimespec = zeroed
+    ts.tv_sec <- seconds.i64()
+    ts.tv_nsec <- 0
+    ret: int = posix_nanosleep(ts.ref[OrbisKernelTimespec&], rm.ref[mutable OrbisKernelTimespec&])
+    if ret < 0:
+        err_ref: int&? = __Error() as int&?
+        if err_ref != null and err_ref[0] == POSIX_EINTR:
+            return (rm.tv_sec + (0 if rm.tv_nsec == 0 else 1)).u32()
+        return seconds
+    return 0
+
+def sceKernelSleep(seconds: u32) -> int:
+    return sceKernelUsleep(seconds * 1000000)
+
+def time_fill_realtime(ts: mutable OrbisKernelTimespec&) -> int:
+    tv: mutable OrbisKernelTimeval = zeroed
+    ret: int = gettimeofday(tv.ref[mutable OrbisKernelTimeval&], null)
+    if ret < 0:
+        SetPosixErrno(posix_errno())
+        return -1
+    ts.tv_sec <- tv.tv_sec
+    ts.tv_nsec <- tv.tv_usec * 1000
+    return 0
+
+def time_fill_monotonic(ts: mutable OrbisKernelTimespec&) -> int:
+    now: i64 = time_now_ns()
+    if now < 0:
+        SetPosixErrno(POSIX_EFAULT)
+        return -1
+    ts.tv_sec <- now / 1000000000
+    ts.tv_nsec <- now % 1000000000
+    return 0
 
 def posix_clock_gettime(clock_id: u32, ts: void&?) -> int:
-    _ = clock_id
-    _ = ts
+    out_ts: mutable OrbisKernelTimespec&? = ts as mutable OrbisKernelTimespec&?
+    if out_ts == null:
+        SetPosixErrno(POSIX_EFAULT)
+        return -1
+
+    cid: mutable u32 = clock_id
+    if cid == ORBIS_CLOCK_PROCTIME:
+        us: u64 = sceKernelGetProcessTime()
+        out_ts.tv_sec <- (us / 1000000u64).i64()
+        out_ts.tv_nsec <- ((us % 1000000u64) * 1000u64).i64()
+        return 0
+    if cid == ORBIS_CLOCK_EXT_NETWORK or cid == ORBIS_CLOCK_EXT_DEBUG_NETWORK or cid == ORBIS_CLOCK_EXT_AD_NETWORK or cid == ORBIS_CLOCK_EXT_RAW_NETWORK:
+        cid <- ORBIS_CLOCK_MONOTONIC
+
+    if cid == ORBIS_CLOCK_REALTIME or cid == ORBIS_CLOCK_REALTIME_PRECISE or cid == ORBIS_CLOCK_SECOND or cid == ORBIS_CLOCK_REALTIME_FAST:
+        return time_fill_realtime(out_ts)
+
+    if cid == ORBIS_CLOCK_UPTIME or cid == ORBIS_CLOCK_UPTIME_PRECISE or cid == ORBIS_CLOCK_MONOTONIC or cid == ORBIS_CLOCK_MONOTONIC_PRECISE or cid == ORBIS_CLOCK_UPTIME_FAST or cid == ORBIS_CLOCK_MONOTONIC_FAST or cid == ORBIS_CLOCK_THREAD_CPUTIME_ID:
+        return time_fill_monotonic(out_ts)
+
+    if cid == ORBIS_CLOCK_VIRTUAL or cid == ORBIS_CLOCK_PROF:
+        us2: u64 = sceKernelGetProcessTime()
+        out_ts.tv_sec <- (us2 / 1000000u64).i64()
+        out_ts.tv_nsec <- ((us2 % 1000000u64) * 1000u64).i64()
+        return 0
+
+    SetPosixErrno(POSIX_EFAULT)
     return -1
+
+def sceKernelClockGettime(clock_id: u32, ts: void&?) -> int:
+    ret: int = posix_clock_gettime(clock_id, ts)
+    if ret < 0:
+        err_ref: int&? = __Error() as int&?
+        if err_ref == null:
+            return ORBIS_KERNEL_ERROR_EFAULT
+        return ErrnoToSceKernelError(err_ref[0])
+    return ORBIS_OK
 
 def posix_clock_getres(clock_id: u32, res: void&?) -> int:
-    _ = clock_id
-    _ = res
+    out_res: mutable OrbisKernelTimespec&? = res as mutable OrbisKernelTimespec&?
+    if out_res == null:
+        SetPosixErrno(POSIX_EFAULT)
+        return -1
+
+    cid: mutable u32 = clock_id
+    if cid == ORBIS_CLOCK_EXT_NETWORK or cid == ORBIS_CLOCK_EXT_DEBUG_NETWORK or cid == ORBIS_CLOCK_EXT_AD_NETWORK or cid == ORBIS_CLOCK_EXT_RAW_NETWORK:
+        cid <- ORBIS_CLOCK_MONOTONIC
+
+    if cid == ORBIS_CLOCK_SECOND or cid == ORBIS_CLOCK_REALTIME_FAST:
+        out_res.tv_sec <- 0
+        out_res.tv_nsec <- 1000000
+        return 0
+
+    if cid == ORBIS_CLOCK_REALTIME or cid == ORBIS_CLOCK_REALTIME_PRECISE or cid == ORBIS_CLOCK_UPTIME or cid == ORBIS_CLOCK_UPTIME_PRECISE or cid == ORBIS_CLOCK_MONOTONIC or cid == ORBIS_CLOCK_MONOTONIC_PRECISE or cid == ORBIS_CLOCK_UPTIME_FAST or cid == ORBIS_CLOCK_MONOTONIC_FAST:
+        out_res.tv_sec <- 0
+        out_res.tv_nsec <- 1
+        return 0
+
+    SetPosixErrno(POSIX_EFAULT)
     return -1
+
+def sceKernelClockGetres(clock_id: u32, res: void&?) -> int:
+    ret: int = posix_clock_getres(clock_id, res)
+    if ret < 0:
+        err_ref: int&? = __Error() as int&?
+        if err_ref == null:
+            return ORBIS_KERNEL_ERROR_EFAULT
+        return ErrnoToSceKernelError(err_ref[0])
+    return ORBIS_OK
 
 def posix_gettimeofday(tp: void&?, tz: void&?) -> int:
-    _ = tp
-    _ = tz
-    return -1
+    out_tp: mutable OrbisKernelTimeval&? = tp as mutable OrbisKernelTimeval&?
+    out_tz: mutable OrbisKernelTimezone&? = tz as mutable OrbisKernelTimezone&?
+    tv: mutable OrbisKernelTimeval = zeroed
+    tzz: mutable OrbisKernelTimezone = zeroed
+    ret: int = gettimeofday(tv.ref[mutable OrbisKernelTimeval&], tzz.ref[mutable OrbisKernelTimezone&])
+    if out_tp != null:
+        out_tp.tv_sec <- tv.tv_sec
+        out_tp.tv_usec <- tv.tv_usec
+    if out_tz != null:
+        out_tz.tz_minuteswest <- tzz.tz_minuteswest
+        out_tz.tz_dsttime <- tzz.tz_dsttime
+    if ret < 0:
+        SetPosixErrno(posix_errno())
+        return -1
+    return 0
 
-def sceKernelSettimeofday(_tv: void&?, _tz: void&?) -> int:
-    _ = _tv
-    _ = _tz
+def sceKernelGettimeofday(tp: void&?) -> int:
+    ret: int = posix_gettimeofday(tp, null)
+    if ret < 0:
+        err_ref: int&? = __Error() as int&?
+        if err_ref == null:
+            return ORBIS_KERNEL_ERROR_EFAULT
+        return ErrnoToSceKernelError(err_ref[0])
+    return ORBIS_OK
+
+def sceKernelGettimezone(tz: void&?) -> int:
+    ret: int = posix_gettimeofday(null, tz)
+    if ret < 0:
+        err_ref: int&? = __Error() as int&?
+        if err_ref == null:
+            return ORBIS_KERNEL_ERROR_EFAULT
+        return ErrnoToSceKernelError(err_ref[0])
+    return ORBIS_OK
+
+def sceKernelConvertLocaltimeToUtc(param_1: i64, param_2: i64, seconds: void&?, timezone: void&?, dst_seconds: void&?) -> int:
+    _ = param_2
+    tz: mutable OrbisKernelTimezone&? = timezone as mutable OrbisKernelTimezone&?
+    out_seconds: mutable i64&? = seconds as mutable i64&?
+    out_dst: mutable int&? = dst_seconds as mutable int&?
+    if tz == null:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    _ = sceKernelGettimezone(tz.ref[mutable OrbisKernelTimezone&])
+    value: i64 = param_1 - ((tz.tz_minuteswest + tz.tz_dsttime) * 60).i64()
+    if out_seconds != null:
+        out_seconds[0] <- value
+    if out_dst != null:
+        out_dst[0] <- tz.tz_dsttime * 60
+    return ORBIS_OK
+
+def sceKernelConvertUtcToLocaltime(utc_time: i64, local_time: void&?, st: void&?, dst_sec: void&?) -> int:
+    out_local: mutable i64&? = local_time as mutable i64&?
+    out_st: mutable OrbisTimesec&? = st as mutable OrbisTimesec&?
+    out_dst: mutable u64&? = dst_sec as mutable u64&?
+    tz: mutable OrbisKernelTimezone = zeroed
+    _ = posix_gettimeofday(null, tz.ref[mutable OrbisKernelTimezone&])
+    local: i64 = utc_time + ((tz.tz_minuteswest + tz.tz_dsttime) * 60).i64()
+
+    if out_local != null:
+        out_local[0] <- local
+    if out_st != null:
+        out_st.t <- utc_time
+        out_st.west_sec <- (tz.tz_minuteswest * 60).u32()
+        out_st.dst_sec <- (tz.tz_dsttime * 60).u32()
+    if out_dst != null:
+        out_dst[0] <- (tz.tz_dsttime * 60).u64()
+    return ORBIS_OK
+
+def posix_clock_settime(clock_id: int, tp: void&?) -> int:
+    _ = clock_id
+    _ = tp
     return ORBIS_OK
 
 def posix_settimeofday(_tv: void&?, _tz: void&?) -> int:
     _ = _tv
     _ = _tz
-    return -1
-
-def posix_clock_settime(clock_id: int, tp: void&?) -> int:
-    _ = clock_id
-    _ = tp
-    return -1
-
-def sceKernelGetProcessTime() -> u64:
-    return 0u64
-
-def sceKernelGetProcessTimeCounter() -> u64:
-    return 0u64
-
-def sceKernelGetProcessTimeCounterFrequency() -> u64:
-    return 0u64
-
-def sceKernelReadTsc() -> u64:
-    return 0u64
-
-def sceKernelGetTscFrequency() -> u64:
-    return 0u64
-
-def sceKernelNanosleep(rqtp: void&?, rmtp: void&?) -> int:
-    _ = rqtp
-    _ = rmtp
     return ORBIS_OK
 
-def sceKernelUsleep(microseconds: u32) -> int:
-    _ = microseconds
-    return ORBIS_OK
-
-def sceKernelSleep(seconds: u32) -> int:
-    _ = seconds
-    return ORBIS_OK
-
-def sceKernelClockGettime(clock_id: u32, ts: void&?) -> int:
-    _ = clock_id
-    _ = ts
-    return ORBIS_OK
-
-def sceKernelClockGetres(clock_id: u32, res: void&?) -> int:
-    _ = clock_id
-    _ = res
-    return ORBIS_OK
-
-def sceKernelGettimeofday(tp: void&?) -> int:
-    _ = tp
-    return ORBIS_OK
-
-def sceKernelGettimezone(tz: void&?) -> int:
-    _ = tz
-    return ORBIS_OK
-
-def sceKernelConvertLocaltimeToUtc(param_1: i64, param_2: i64, seconds: void&?, timezone: void&?, dst_seconds: void&?) -> int:
-    _ = param_1
-    _ = param_2
-    _ = seconds
-    _ = timezone
-    _ = dst_seconds
-    return ORBIS_OK
-
-def sceKernelConvertUtcToLocaltime(time: i64, local_time: void&?, st: void&?, dst_sec: void&?) -> int:
-    _ = time
-    _ = local_time
-    _ = st
-    _ = dst_sec
-    return ORBIS_OK
+def sceKernelSettimeofday(_tv: void&?, _tz: void&?) -> int:
+    ret: int = posix_settimeofday(_tv, _tz)
+    if ret < 0:
+        return ErrnoToSceKernelError(ret)
+    return ret
 
 def RegisterTime(sym: void&?) -> void:
     _ = sym
+    time_initial_ptc_ns <- time_now_ns()
+    time_tsc_frequency <- 1000000000u64
+
     LIB_FUNCTION("NhpspxdjEKU", "libkernel", 1, "libkernel", posix_nanosleep)
     LIB_FUNCTION("NhpspxdjEKU", "libScePosix", 1, "libkernel", posix_nanosleep)
     LIB_FUNCTION("yS8U2TGCe1A", "libkernel", 1, "libkernel", posix_nanosleep)

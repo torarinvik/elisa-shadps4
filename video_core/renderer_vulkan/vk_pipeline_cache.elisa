@@ -1,0 +1,311 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../cache_storage.elisa"
+include "./vk_compute_pipeline.elisa"
+include "./vk_graphics_pipeline.elisa"
+
+struct ProgramModule:
+    module: mutable u64
+    perm_hash: mutable u64
+
+struct Program:
+    info: mutable VkShaderInfo
+    modules: mutable darray[ProgramModule]
+
+struct ProgramKey:
+    hash: mutable u64
+    stage: mutable ShaderStage
+    logical_stage: mutable LogicalStage
+
+struct ProgramResult:
+    info: mutable VkShaderInfo
+    module: mutable u64
+    has_fetch_shader: mutable bool
+    fetch_shader: mutable VkFetchShaderData
+    perm_hash: mutable u64
+
+struct GraphicsPipelineEntry:
+    key: mutable GraphicsPipelineKey
+    pipeline: mutable GraphicsPipeline
+
+struct ComputePipelineEntry:
+    key: mutable ComputePipelineKey
+    pipeline: mutable ComputePipeline
+
+struct ProgramEntry:
+    key: mutable ProgramKey
+    program: mutable Program
+
+struct PipelineCache:
+    instance: mutable Instance
+    scheduler: mutable Scheduler&?
+    desc_heap: mutable DescriptorHeap
+    profile: mutable VkShaderProfile
+    programs: mutable darray[ProgramEntry]
+    compute_pipelines: mutable darray[ComputePipelineEntry]
+    graphics_pipelines: mutable darray[GraphicsPipelineEntry]
+    graphics_key: mutable GraphicsPipelineKey
+    compute_key: mutable ComputePipelineKey
+    num_new_pipelines: mutable u32
+    pipeline_cache_handle: mutable u64
+
+
+def ProgramKey_eq(lhs: ProgramKey, rhs: ProgramKey) -> bool:
+    return lhs.hash == rhs.hash and lhs.stage == rhs.stage and lhs.logical_stage == rhs.logical_stage
+
+
+def PipelineCache_New(instance: Instance, scheduler: mutable Scheduler&) -> PipelineCache:
+    can Memory.Allocate, Abort.Panic:
+        master: mutable MasterSemaphore& = Scheduler_GetMasterSemaphore(scheduler)
+        heap: DescriptorHeap = DescriptorHeap_New(master)
+        out: mutable PipelineCache = PipelineCache(
+            instance,
+            null,
+            heap,
+            VkShaderProfile_Default(),
+            [],
+            [],
+            [],
+            GraphicsPipelineKey_Default(),
+            ComputePipelineKey(0usize),
+            0u32,
+            Vk_AllocHandle()
+        )
+        out.scheduler as & <- scheduler
+        PipelineCache_WarmUp(out.ref[mutable PipelineCache&])
+        return out
+
+
+def PipelineCache_SetGraphicsKey(self: mutable PipelineCache&, key: GraphicsPipelineKey) -> void:
+    self.graphics_key <- key
+
+
+def PipelineCache_SetComputeKey(self: mutable PipelineCache&, key: ComputePipelineKey) -> void:
+    self.compute_key <- key
+
+
+def PipelineCache_IsPipelineCacheDirty(self: PipelineCache) -> bool:
+    return self.num_new_pipelines > 0u32
+
+
+def PipelineCache_BuildRuntimeInfo(self: mutable PipelineCache&, stage: ShaderStage,
+                                   logical_stage: LogicalStage) -> u32:
+    _ = self
+    _ = stage
+    _ = logical_stage
+    return 1u32
+
+def PipelineCache_FindGraphicsPipeline(self: PipelineCache, key: GraphicsPipelineKey) -> usize?:
+    i: mutable usize = 0usize
+    while i < self.graphics_pipelines.count:
+        if GraphicsPipelineKey_eq(self.graphics_pipelines[i].key, key):
+            return i
+        i <- i + 1usize
+    return null
+
+def PipelineCache_FindComputePipeline(self: PipelineCache, key: ComputePipelineKey) -> usize?:
+    i: mutable usize = 0usize
+    while i < self.compute_pipelines.count:
+        if ComputePipelineKey_eq(self.compute_pipelines[i].key, key):
+            return i
+        i <- i + 1usize
+    return null
+
+def PipelineCache_RefreshGraphicsKey(self: mutable PipelineCache&) -> bool:
+    if self.graphics_key.stage_hashes[0usize] == 0u64 and self.graphics_key.stage_hashes[3usize] == 0u64:
+        return false
+    return true
+
+
+def PipelineCache_RefreshComputeKey(self: mutable PipelineCache&) -> bool:
+    return self.compute_key.value != 0usize
+
+
+def PipelineCache_RefreshGraphicsStages(self: mutable PipelineCache&) -> bool:
+    return PipelineCache_RefreshGraphicsKey(self)
+
+
+def PipelineCache_GetGraphicsPipeline(self: mutable PipelineCache&) -> GraphicsPipeline?:
+    can Memory.Allocate, Abort.Panic:
+        if not PipelineCache_RefreshGraphicsKey(self):
+            return null
+        found_index: usize = PipelineCache_FindGraphicsPipeline(self, self.graphics_key) else 0xffffffffffffffffusize
+        if found_index != 0xffffffffffffffffusize:
+            return self.graphics_pipelines[found_index].pipeline
+
+        scheduler: mutable Scheduler& = self.scheduler.value()
+        stage_infos: mutable darray[VkShaderInfo] = []
+        stage_index: mutable u32 = 0u32
+        while stage_index < MaxShaderStages:
+            stage_hash: u64 = self.graphics_key.stage_hashes[stage_index.usize()]
+            if stage_hash != 0u64:
+                stage_infos.push(VkShaderInfo(
+                    stage_index == 0u32 ? ShaderStage.Fragment : stage_index == 3u32 ? ShaderStage.Vertex : ShaderStage.Geometry,
+                    stage_index == 0u32 ? LogicalStage.Fragment : stage_index == 3u32 ? LogicalStage.Vertex : LogicalStage.Geometry,
+                    stage_hash,
+                    self.graphics_key.mrt_mask,
+                    false,
+                    2u32,
+                    2u32,
+                    1u32
+                ))
+            stage_index <- stage_index + 1u32
+
+        fetch_data: VkFetchShaderData = VkFetchShaderData(2u32)
+        sdata: GraphicsPipelineSerializationSupport = GraphicsPipelineSerializationSupport_Default()
+        pipeline: GraphicsPipeline = GraphicsPipeline_New(
+            self.instance,
+            scheduler,
+            self.desc_heap.ref[mutable DescriptorHeap&],
+            self.profile,
+            self.graphics_key,
+            stage_infos,
+            stage_infos.count.u32(),
+            fetch_data,
+            [],
+            sdata,
+            false
+        )
+        self.graphics_pipelines.push(GraphicsPipelineEntry(self.graphics_key, pipeline))
+        self.num_new_pipelines <- self.num_new_pipelines + 1u32
+        return pipeline
+
+
+def PipelineCache_GetComputePipeline(self: mutable PipelineCache&) -> ComputePipeline?:
+    can Memory.Allocate, Abort.Panic:
+        if not PipelineCache_RefreshComputeKey(self):
+            return null
+        found_index: usize = PipelineCache_FindComputePipeline(self, self.compute_key) else 0xffffffffffffffffusize
+        if found_index != 0xffffffffffffffffusize:
+            return self.compute_pipelines[found_index].pipeline
+
+        scheduler: mutable Scheduler& = self.scheduler.value()
+        info: VkShaderInfo = VkShaderInfo(ShaderStage.Compute, LogicalStage.Compute,
+                                          self.compute_key.value.u64(), 0u32, false,
+                                          3u32, 2u32, 1u32)
+        sdata: ComputePipelineSerializationSupport = ComputePipelineSerializationSupport_Default()
+        pipeline: ComputePipeline = ComputePipeline_New(
+            self.instance,
+            scheduler,
+            self.desc_heap.ref[mutable DescriptorHeap&],
+            self.profile,
+            self.compute_key,
+            info,
+            Vk_AllocHandle(),
+            sdata,
+            false
+        )
+        self.compute_pipelines.push(ComputePipelineEntry(self.compute_key, pipeline))
+        self.num_new_pipelines <- self.num_new_pipelines + 1u32
+        return pipeline
+
+
+def PipelineCache_CompileModule(self: mutable PipelineCache&, info: VkShaderInfo,
+                                runtime_info_count: u32, code: darray[u32],
+                                perm_idx: usize, binding_seed: u64) -> u64:
+    _ = self
+    _ = info
+    _ = runtime_info_count
+    _ = code
+    _ = perm_idx
+    _ = binding_seed
+    return Vk_AllocHandle()
+
+def PipelineCache_FindProgram(self: PipelineCache, key: ProgramKey) -> usize?:
+    i: mutable usize = 0usize
+    while i < self.programs.count:
+        if ProgramKey_eq(self.programs[i].key, key):
+            return i
+        i <- i + 1usize
+    return null
+
+def PipelineCache_GetProgram(self: mutable PipelineCache&, stage: ShaderStage,
+                             logical_stage: LogicalStage, hash: u64,
+                             binding_seed: u64 = 0u64) -> ProgramResult:
+    can Memory.Allocate, Abort.Panic:
+        _ = binding_seed
+        key: ProgramKey = ProgramKey(hash, stage, logical_stage)
+        found: usize = PipelineCache_FindProgram(self, key) else 0xffffffffffffffffusize
+        if found != 0xffffffffffffffffusize:
+            program: Program = self.programs[found].program
+            last_module: ProgramModule = program.modules[program.modules.count - 1usize]
+            return ProgramResult(program.info, last_module.module, false, VkFetchShaderData(0u32),
+                                 last_module.perm_hash)
+
+        info: VkShaderInfo = VkShaderInfo(stage, logical_stage, hash, 0u32, false, 2u32, 1u32, 1u32)
+        program: Program = Program(info, [])
+        module: u64 = Vk_AllocHandle()
+        perm_hash: u64 = hash
+        program.modules.push(ProgramModule(module, perm_hash))
+        self.programs.push(ProgramEntry(key, program))
+        return ProgramResult(info, module, false, VkFetchShaderData(0u32), perm_hash)
+
+
+def PipelineCache_ReplaceShader(self: mutable PipelineCache&, module: u64,
+                                spv_code: darray[u32]) -> u64?:
+    _ = spv_code
+    i: mutable usize = 0usize
+    while i < self.programs.count:
+        j: mutable usize = 0usize
+        while j < self.programs[i].program.modules.count:
+            if self.programs[i].program.modules[j].module == module:
+                new_module: u64 = Vk_AllocHandle()
+                self.programs[i].program.modules[j].module <- new_module
+                return new_module
+            j <- j + 1usize
+        i <- i + 1usize
+    return null
+
+def PipelineCache_GetShaderName(stage: ShaderStage, hash: u64, perm: usize = 0usize) -> static u8&:
+    _ = stage
+    _ = hash
+    _ = perm
+    return "shader"
+
+def PipelineCache_DumpShader(self: mutable PipelineCache&, code: darray[u32],
+                             hash: u64, stage: ShaderStage,
+                             perm_idx: usize, ext: static u8&) -> void:
+    _ = self
+    _ = code
+    _ = hash
+    _ = stage
+    _ = perm_idx
+    _ = ext
+
+
+def PipelineCache_GetShaderPatch(self: PipelineCache&, hash: u64,
+                                 stage: ShaderStage,
+                                 perm_idx: usize,
+                                 ext: static u8&) -> darray[u32]?:
+    _ = self
+    _ = hash
+    _ = stage
+    _ = perm_idx
+    _ = ext
+    return null
+
+def PipelineCache_LoadComputePipeline(self: mutable PipelineCache&, blob: darray[u8]) -> bool:
+    _ = self
+    return blob.count > 0usize
+
+def PipelineCache_LoadGraphicsPipeline(self: mutable PipelineCache&, blob: darray[u8]) -> bool:
+    _ = self
+    return blob.count > 0usize
+
+def PipelineCache_LoadPipelineStage(self: mutable PipelineCache&, blob: darray[u8],
+                                    stage: usize) -> bool:
+    _ = self
+    _ = stage
+    return blob.count > 0usize
+
+
+def PipelineCache_WarmUp(self: mutable PipelineCache&) -> void:
+    db: mutable DataBase& = DataBase_Instance()
+    DataBase_Open(db, "pipeline_cache", true)
+    DataBase_FinishPreload(db)
+
+
+def PipelineCache_Sync(self: mutable PipelineCache&) -> void:
+    db: mutable DataBase& = DataBase_Instance()
+    DataBase_Close(db)

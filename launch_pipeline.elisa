@@ -1,0 +1,107 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./common/types.elisa"
+include "./core/emulator_settings.elisa"
+include "./core/emulator_state.elisa"
+include "./core/user_settings.elisa"
+include "./core/debugger.elisa"
+include "./launch_cli.elisa"
+include "./emulator.elisa"
+
+def InitializeRuntimeSettings() -> void:
+    settings: mutable EmulatorSettingsImpl& = EmulatorSettings_GetInstance()
+    _ = EmulatorSettings_Load(settings, "")
+    user_settings: mutable UserSettingsImpl& = UserSettings_GetInstance()
+    _ = UserSettings_Load(user_settings)
+
+def HandleUtilityCommand(big_picture: bool, executable_name: static u8&, add_game_folder: static u8&?, set_addon_folder: static u8&?) -> bool:
+    _ = executable_name
+    if big_picture:
+        return true
+    settings: mutable EmulatorSettingsImpl& = EmulatorSettings_GetInstance()
+    if add_game_folder != null:
+        _ = EmulatorSettings_AddGameInstallDir(settings, add_game_folder, true)
+        _ = EmulatorSettings_Save(settings, "")
+        return true
+    if set_addon_folder != null:
+        EmulatorSettings_SetAddonInstallDir(settings, set_addon_folder)
+        _ = EmulatorSettings_Save(settings, "")
+        return true
+    return false
+
+def NormalizeGamePathAndArgs(game_path: mutable static u8&?, game_args: mutable darray[static u8&]) -> bool:
+    if game_path == null:
+        if game_args.count == 0:
+            return false
+        game_path <- game_args[0]
+        if game_args.count > 1:
+            out: mutable darray[static u8&] = []
+            for i in 1..<game_args.count:
+                out.push(game_args[i])
+            game_args <- out
+        else:
+            game_args.clear()
+    if game_args.count > 0 and streq(game_args[0], "--") == 1:
+        out2: mutable darray[static u8&] = []
+        for i in 1..<game_args.count:
+            out2.push(game_args[i])
+        game_args <- out2
+    return true
+
+def ApplyLaunchFlags(patch_file: static u8&?, ignore_game_patch: bool, fullscreen: static u8&?, show_fps: bool, config_clean: bool, config_global: bool) -> bool:
+    _ = patch_file
+    _ = ignore_game_patch
+    settings: mutable EmulatorSettingsImpl& = EmulatorSettings_GetInstance()
+    if fullscreen != null:
+        if streq(fullscreen, "true") == 1:
+            EmulatorSettings_SetFullScreen(settings, true)
+        else:
+            if streq(fullscreen, "false") == 1:
+                EmulatorSettings_SetFullScreen(settings, false)
+            else:
+                return false
+    if show_fps:
+        EmulatorSettings_SetShowFpsCounter(settings, true)
+    if config_clean:
+        EmulatorSettings_SetConfigMode(settings, ConfigMode.Clean)
+    if config_global:
+        EmulatorSettings_SetConfigMode(settings, ConfigMode.Global)
+    return true
+
+def ResolveGamePathOrId(game_path: static u8&) -> static u8&?:
+    if game_path.len == 0:
+        return null
+    if game_path[0] == '/'.u8() or game_path[0] == '.'.u8():
+        return game_path
+    settings: mutable EmulatorSettingsImpl& = EmulatorSettings_GetInstance()
+    install_dirs: darray[static u8&] = EmulatorSettings_GetGameInstallDirs(settings)
+    if install_dirs.count > 0:
+        return game_path
+    return game_path
+
+def RunEmulator(executable_name: static u8&, wait_for_debugger: bool, eboot_path: static u8&, game_args: darray[static u8&], override_root: static u8&?) -> void:
+    emu: mutable Emulator& = Emulator_GetInstance()
+    emu.executable_name <- executable_name
+    emu.wait_for_debugger_before_run <- wait_for_debugger
+    Emulator_Run(emu, eboot_path, game_args, override_root)
+
+def RunParsedLaunch(executable_name: static u8&, state: CliState) -> int:
+    if state.has_wait_pid:
+        WaitForPid(state.wait_pid)
+    InitializeRuntimeSettings()
+    if HandleUtilityCommand(state.big_picture, executable_name, state.add_game_folder, state.set_addon_folder):
+        return 0
+    game_path: mutable static u8&? = state.game_path
+    game_args: mutable darray[static u8&] = state.game_args
+    if not NormalizeGamePathAndArgs(game_path.ref[mutable static u8&?], game_args.ref[mutable darray[static u8&]]):
+        return 1
+    if game_path == null:
+        return 1
+    if not ApplyLaunchFlags(state.patch_file, state.ignore_game_patch, state.fullscreen, state.show_fps, state.config_clean, state.config_global):
+        return 1
+    resolved: static u8&? = ResolveGamePathOrId(game_path)
+    if resolved == null:
+        return 1
+    RunEmulator(executable_name, state.wait_for_debugger, resolved, game_args, state.override_root)
+    return 0

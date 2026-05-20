@@ -1,0 +1,132 @@
+include "./common/types.elisa"
+include "./core/address_space.elisa"
+include "./core/cpu_patches.elisa"
+include "./core/debug_state.elisa"
+include "./core/debugger.elisa"
+include "./core/emulator_settings.elisa"
+include "./core/linker.elisa"
+include "./core/memory.elisa"
+include "./core/module.elisa"
+include "./core/signals.elisa"
+include "./core/thread.elisa"
+include "./core/tls.elisa"
+include "./core/user_manager.elisa"
+include "./core/user_settings.elisa"
+include "./emulator.elisa"
+include "./launch_cli.elisa"
+include "./launch_pipeline.elisa"
+include "./main.elisa"
+include "./sdl_window.elisa"
+
+@test
+def core_runtime_address_space_and_memory_contracts() -> void:
+    can Abort.Panic:
+        space: mutable AddressSpace = AddressSpace_New()
+        mapped: VAddr = AddressSpace_Map(space.ref[mutable AddressSpace&], 0.uintptr(), 0x2000, 0.uintptr(), false)
+        assert mapped == AddressSpace_SystemManagedVirtualBase(space.ref[AddressSpace&])
+        AddressSpace_Protect(space.ref[mutable AddressSpace&], mapped, 0x2000, MemoryPermission_Read)
+        manager: mutable MemoryManager = MemoryManager_New()
+        out_addr: mutable VAddr = 0.uintptr()
+        assert MemoryManager_MapMemory(
+            manager.ref[mutable MemoryManager&],
+            out_addr.ref[mutable VAddr&],
+            0.uintptr(),
+            0x4000,
+            MemoryProt_CpuReadWrite,
+            MemoryMapFlags_Anon,
+            VMAType_Direct,
+            "anon",
+            false,
+            0.uintptr(),
+            0
+        ) == 0
+        assert MemoryManager_IsValidMapping(manager.ref[MemoryManager&], out_addr, 0x1000)
+        clamped: u64 = MemoryManager_ClampRangeSize(manager.ref[MemoryManager&], out_addr, 0x8000)
+        assert clamped >= 0x1000
+
+@test
+def core_runtime_cpu_patch_and_debug_state_contracts() -> void:
+    can Abort.Panic:
+        CpuPatches_Reset()
+        RegisterPatchModule(0x1000.u64().cast[void&], 0x2000, 0x9000.u64().cast[void&], 0x1000)
+        assert CpuPatches_ModuleCount() == 1
+        PrePatchInstructions(0xA000, 0x80)
+        assert CpuPatches_PrePatchCount() == 1
+        DebugState_Reset()
+        DebugState_RequestFrameDump(2)
+        DebugState_PushQueueDump(QueueDump(DEBUG_QUEUE_DCB, 1, 0, 0x4400.uintptr(), 4))
+        assert DebugState_FrameDumpCount() == 1
+        assert DebugState_QueueDumpCount() == 1
+
+@test
+def core_runtime_debugger_signals_thread_tls_contracts() -> void:
+    can Abort.Panic:
+        Debugger_SetCurrentPid(1337)
+        Debugger_SetAttached(true)
+        assert GetCurrentPid() == 1337
+        assert IsDebuggerAttached()
+        WaitForPid(42)
+        assert Debugger_GetLastWaitPid() == 42
+
+        Signals_Reset()
+        dispatcher: mutable SignalDispatch& = Signals_GetInstance()
+        SignalDispatch_RegisterAccessViolationHandler(dispatcher, 0x100.uintptr(), 2)
+        SignalDispatch_RegisterAccessViolationHandler(dispatcher, 0x200.uintptr(), 1)
+        SignalDispatch_RegisterIllegalInstructionHandler(dispatcher, 0x300.uintptr(), 5)
+        assert SignalDispatch_AccessHandlerCount(dispatcher) == 2
+        assert SignalDispatch_DispatchAccessViolation(dispatcher, null, null)
+        assert SignalDispatch_DispatchIllegalInstruction(dispatcher, null)
+
+        th: mutable NativeThread = NativeThread_New()
+        assert NativeThread_Create(th.ref[mutable NativeThread&], 0x123.uintptr(), null) == 0
+        assert NativeThread_GetTid(th.ref[NativeThread&]) > 0
+        TLS_ResetForTests()
+        InitializeTLS()
+        tcb: mutable Tcb& = GetTcbBase()
+        assert tcb.tcb_self != 0.uintptr()
+
+@test
+def core_runtime_user_settings_and_linker_contracts() -> void:
+    can Abort.Panic:
+        users: mutable UserManager = UserManager_New()
+        assert UserManager_AddUser(users.ref[mutable UserManager&], User_New(10, "Alice", 1, 0))
+        assert UserManager_AddUser(users.ref[mutable UserManager&], User_New(11, "Bob", 2, 1))
+        assert not UserManager_AddUser(users.ref[mutable UserManager&], User_New(10, "Other", 3, 2))
+        UserManager_LoginUser(users.ref[mutable UserManager&], 10, 0)
+        logged: LoggedInUsers = UserManager_GetLoggedInUsers(users.ref[UserManager&])
+        assert logged.user_id[0] == 10
+        assert UserManager_SetDefaultUser(users.ref[mutable UserManager&], 10.u32())
+        assert UserManager_GetDefaultUser(users.ref[UserManager&]).user_id == 10
+
+        UserSettings_Reset()
+        us: mutable UserSettingsImpl& = UserSettings_GetInstance()
+        assert UserSettings_Load(us)
+
+        linker: mutable Linker = Linker_New()
+        idx: s32 = Linker_LoadModule(linker.ref[mutable Linker&], "eboot.bin", false)
+        assert idx == 0
+        found: mutable Module&? = Linker_GetModule(linker.ref[mutable Linker&], 0)
+        assert found != null
+        assert Linker_FindByName(linker.ref[Linker&], "eboot.bin") == 0
+
+@test
+def core_runtime_launch_pipeline_and_window_contracts() -> void:
+    can Abort.Panic:
+        settings: mutable EmulatorSettingsImpl& = EmulatorSettings_GetInstance()
+        EmulatorSettings_SetDefaultValues(settings)
+
+        args: mutable darray[static u8&] = ["shadps4", "--show-fps", "--fullscreen", "true", "CUSA00000"]
+        parsed: ParseResult = Parse(args)
+        assert not parsed.should_exit
+        assert parsed.state.show_fps
+        assert parsed.state.fullscreen != null
+        assert parsed.state.game_path != null
+
+        assert RunParsedLaunch("shadps4", parsed.state) == 0
+        emu: mutable Emulator& = Emulator_GetInstance()
+        assert streq(Emulator_GetLastRunPath(emu), "CUSA00000") == 1
+
+        wnd: mutable WindowSDL = WindowSDL_New(1280, 720, "Test")
+        assert WindowSDL_IsOpen(wnd.ref[WindowSDL&])
+        WindowSDL_RequestClose(wnd.ref[mutable WindowSDL&])
+        assert not WindowSDL_IsOpen(wnd.ref[WindowSDL&])

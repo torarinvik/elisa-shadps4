@@ -1,0 +1,1744 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./microinstruction.elisa"
+
+struct ShaderIrEmitter:
+    block_index: mutable u32
+    insertion_index: mutable u32
+
+def ShaderIrEmitter_New(block_index: u32) -> ShaderIrEmitter:
+    return ShaderIrEmitter(block_index, 0u32)
+
+def ShaderIrEmitter_NewAt(block_index: u32, insertion_index: u32) -> ShaderIrEmitter:
+    return ShaderIrEmitter(block_index, insertion_index)
+
+def ShaderIrEmitter_Emit(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, opcode: u32, flags_u64: u64, args: ShaderIrValue[6], arg_count: u32) -> ShaderIrValue:
+    block_index: u32 = emitter.block_index
+    assert block_index < program.block_count
+    block: mutable ShaderIrBlock& = program.blocks[block_index.usize()].ref[mutable ShaderIrBlock&]
+    insert_at: u32 = emitter.insertion_index
+    if insert_at > block.inst_count:
+        insert_at <- block.inst_count
+    _ = ShaderIrProgram_PrependInst(program.ref[mutable ShaderIrProgram&], block_index, insert_at, opcode, args, arg_count, flags_u64)
+    emitter.insertion_index <- insert_at + 1u32
+    if ShaderIrOpcode_TypeOf(opcode) == IR_TYPE_VOID:
+        return ShaderIrValue_Empty()
+    return ShaderIrValue_FromInst(block_index, insert_at)
+
+def ShaderIrEmitter_EmitNoFlags(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, opcode: u32, args: ShaderIrValue[6], arg_count: u32) -> ShaderIrValue:
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], opcode, 0u64, args, arg_count)
+
+def ShaderIrEmitter_Imm1(value: bool) -> ShaderIrValue:
+    return ShaderIrValue_FromU1(value)
+
+def ShaderIrEmitter_Imm8(value: u8) -> ShaderIrValue:
+    return ShaderIrValue_FromU8(value)
+
+def ShaderIrEmitter_Imm16(value: u16) -> ShaderIrValue:
+    return ShaderIrValue_FromU16(value)
+
+def ShaderIrEmitter_Imm32FromU32(value: u32) -> ShaderIrValue:
+    return ShaderIrValue_FromU32(value)
+
+def ShaderIrEmitter_Imm32FromI32(value: i32) -> ShaderIrValue:
+    return ShaderIrValue_FromU32(value.u32())
+
+def ShaderIrEmitter_Imm32FromF32(value: f32) -> ShaderIrValue:
+    return ShaderIrValue_FromF32(value)
+
+def ShaderIrEmitter_Imm64FromU64(value: u64) -> ShaderIrValue:
+    return ShaderIrValue_FromU64(value)
+
+def ShaderIrEmitter_Imm64FromI64(value: i64) -> ShaderIrValue:
+    return ShaderIrValue_FromU64(value.u64())
+
+def ShaderIrEmitter_Imm64FromF64(value: f64) -> ShaderIrValue:
+    return ShaderIrValue_FromF64(value)
+
+def ShaderIrEmitter_Imm32(value: ShaderIrValue) -> ShaderIrValue:
+    if value.type_bits == IR_TYPE_U32:
+        return value
+    if value.type_bits == IR_TYPE_U1:
+        if value.imm_u1:
+            return ShaderIrValue_FromU32(1u32)
+        return ShaderIrValue_FromU32(0u32)
+    if value.type_bits == IR_TYPE_F32:
+        return ShaderIrValue_FromF32(value.imm_f32)
+    return ShaderIrValue_FromU32(0u32)
+
+def ShaderIrEmitter_Imm64(value: ShaderIrValue) -> ShaderIrValue:
+    if value.type_bits == IR_TYPE_U64:
+        return value
+    if value.type_bits == IR_TYPE_F64:
+        return ShaderIrValue_FromF64(value.imm_f64)
+    return ShaderIrValue_FromU64(0u64)
+
+def ShaderIrEmitter_ConditionRef(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_CONDITIONREF, 0u64, args, 1u32)
+
+def ShaderIrEmitter_Reference(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_REFERENCE, 0u64, args, 1u32)
+
+def ShaderIrEmitter_PhiMove(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, phi: ShaderIrValue, value: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_PHIMOVE, 0u64, args, 1u32)
+
+def ShaderIrEmitter_Prologue(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_PROLOGUE, 0u64, args, 0u32)
+
+def ShaderIrEmitter_Epilogue(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_EPILOGUE, 0u64, args, 0u32)
+
+def ShaderIrEmitter_Discard(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_DISCARD, 0u64, args, 0u32)
+
+def ShaderIrEmitter_Discard_2(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, cond: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- cond
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_DISCARDCOND, 0u64, args, 1u32)
+
+def ShaderIrEmitter_Barrier(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_BARRIER, 0u64, args, 0u32)
+
+def ShaderIrEmitter_WorkgroupMemoryBarrier(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_WORKGROUPMEMORYBARRIER, 0u64, args, 0u32)
+
+def ShaderIrEmitter_DeviceMemoryBarrier(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_DEVICEMEMORYBARRIER, 0u64, args, 0u32)
+
+def ShaderIrEmitter_GetUserData(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, reg: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = reg
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_GetThreadBitScalarReg(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, reg: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = reg
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_SetThreadBitScalarReg(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, reg: ShaderIrValue, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = reg
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_GetScalarReg(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, reg: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = reg
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_GetScalarReg_2(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, reg: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = reg
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_GetVectorReg(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, reg: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = reg
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_GetVectorReg_2(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, reg: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = reg
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_SetScalarReg(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, reg: ShaderIrValue, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = reg
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_SetVectorReg(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, reg: ShaderIrValue, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = reg
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_GetGotoVariable(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, id: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- id
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_GETGOTOVARIABLE, 0u64, args, 1u32)
+
+def ShaderIrEmitter_Condition(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, cond: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = cond
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_SetGotoVariable(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, id: ShaderIrValue, value: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- id
+    args[1] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_SETGOTOVARIABLE, 0u64, args, 2u32)
+
+def ShaderIrEmitter_GetScc(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_GETSCC, 0u64, args, 0u32)
+
+def ShaderIrEmitter_GetExec(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_GETEXEC, 0u64, args, 0u32)
+
+def ShaderIrEmitter_GetVcc(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_GETVCC, 0u64, args, 0u32)
+
+def ShaderIrEmitter_GetVccLo(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_GETVCCLO, 0u64, args, 0u32)
+
+def ShaderIrEmitter_GetVccHi(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_GETVCCHI, 0u64, args, 0u32)
+
+def ShaderIrEmitter_GetM0(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_GETM0, 0u64, args, 0u32)
+
+def ShaderIrEmitter_SetScc(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_SETSCC, 0u64, args, 1u32)
+
+def ShaderIrEmitter_SetExec(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_SETEXEC, 0u64, args, 1u32)
+
+def ShaderIrEmitter_SetVcc(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_SETVCC, 0u64, args, 1u32)
+
+def ShaderIrEmitter_SetSccLo(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_SETSCCLO, 0u64, args, 1u32)
+
+def ShaderIrEmitter_SetVccLo(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_SETVCCLO, 0u64, args, 1u32)
+
+def ShaderIrEmitter_SetVccHi(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_SETVCCHI, 0u64, args, 1u32)
+
+def ShaderIrEmitter_SetM0(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_SETM0, 0u64, args, 1u32)
+
+def ShaderIrEmitter_GetAttribute(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, attribute: ShaderIrValue, comp: ShaderIrValue, index: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- attribute
+    args[1] <- comp
+    args[2] <- index
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_GETATTRIBUTE, 0u64, args, 3u32)
+
+def ShaderIrEmitter_GetAttributeU32(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, attribute: ShaderIrValue, comp: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- attribute
+    args[1] <- comp
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_GETATTRIBUTEU32, 0u64, args, 2u32)
+
+def ShaderIrEmitter_SetAttribute(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, attribute: ShaderIrValue, value: ShaderIrValue, comp: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- attribute
+    args[1] <- value
+    args[2] <- comp
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_SETATTRIBUTE, 0u64, args, 3u32)
+
+def ShaderIrEmitter_GetTessGenericAttribute(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, vertex_index: ShaderIrValue, attr_index: ShaderIrValue, comp_index: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- vertex_index
+    args[1] <- attr_index
+    args[2] <- comp_index
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_GETTESSGENERICATTRIBUTE, 0u64, args, 3u32)
+
+def ShaderIrEmitter_SetTcsGenericAttribute(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue, attr_index: ShaderIrValue, comp_index: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- value
+    args[1] <- attr_index
+    args[2] <- comp_index
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_SETTCSGENERICATTRIBUTE, 0u64, args, 3u32)
+
+def ShaderIrEmitter_ReadTcsGenericOuputAttribute(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, vertex_index: ShaderIrValue, attr_index: ShaderIrValue, comp_index: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- vertex_index
+    args[1] <- attr_index
+    args[2] <- comp_index
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_READTCSGENERICOUPUTATTRIBUTE, 0u64, args, 3u32)
+
+def ShaderIrEmitter_GetPatch(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, patch: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- patch
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_GETPATCH, 0u64, args, 1u32)
+
+def ShaderIrEmitter_SetPatch(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, patch: ShaderIrValue, value: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- patch
+    args[1] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_SETPATCH, 0u64, args, 2u32)
+
+def ShaderIrEmitter_LoadShared(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, bit_size: ShaderIrValue, is_signed: ShaderIrValue, offset: ShaderIrValue, is_gds: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = bit_size
+    _ = is_signed
+    _ = offset
+    _ = is_gds
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_WriteShared(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, bit_size: ShaderIrValue, value: ShaderIrValue, offset: ShaderIrValue, is_gds: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = bit_size
+    _ = value
+    _ = offset
+    _ = is_gds
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_SharedAtomicIAdd(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, address: ShaderIrValue, data: ShaderIrValue, is_gds: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = address
+    _ = data
+    _ = is_gds
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_SharedAtomicIMin(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, address: ShaderIrValue, data: ShaderIrValue, is_signed: ShaderIrValue, is_gds: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = address
+    _ = data
+    _ = is_signed
+    _ = is_gds
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_SharedAtomicIMax(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, address: ShaderIrValue, data: ShaderIrValue, is_signed: ShaderIrValue, is_gds: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = address
+    _ = data
+    _ = is_signed
+    _ = is_gds
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_SharedAtomicAnd(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, address: ShaderIrValue, data: ShaderIrValue, is_gds: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = address
+    _ = data
+    _ = is_gds
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_SharedAtomicOr(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, address: ShaderIrValue, data: ShaderIrValue, is_gds: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = address
+    _ = data
+    _ = is_gds
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_SharedAtomicXor(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, address: ShaderIrValue, data: ShaderIrValue, is_gds: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = address
+    _ = data
+    _ = is_gds
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_SharedAtomicISub(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, address: ShaderIrValue, data: ShaderIrValue, is_gds: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = address
+    _ = data
+    _ = is_gds
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_SharedAtomicInc(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, address: ShaderIrValue, is_gds: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- address
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_SHAREDATOMICINC32, 0u64, args, 1u32)
+
+def ShaderIrEmitter_SharedAtomicInc_2(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, address: ShaderIrValue, is_gds: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- address
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_SHAREDATOMICINC64, 0u64, args, 1u32)
+
+def ShaderIrEmitter_SharedAtomicDec(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, address: ShaderIrValue, is_gds: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- address
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_SHAREDATOMICDEC32, 0u64, args, 1u32)
+
+def ShaderIrEmitter_SharedAtomicDec_2(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, address: ShaderIrValue, is_gds: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- address
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_SHAREDATOMICDEC64, 0u64, args, 1u32)
+
+def ShaderIrEmitter_ReadConst(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, base: ShaderIrValue, offset: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- base
+    args[1] <- offset
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_READCONST, 0u64, args, 2u32)
+
+def ShaderIrEmitter_ReadConstBuffer(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, index: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- index
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_READCONSTBUFFER, 0u64, args, 2u32)
+
+def ShaderIrEmitter_LoadBufferU8(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, address: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- address
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_LOADBUFFERU8, 0u64, args, 2u32)
+
+def ShaderIrEmitter_LoadBufferU16(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, address: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- address
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_LOADBUFFERU16, 0u64, args, 2u32)
+
+def ShaderIrEmitter_LoadBufferU32(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, num_dwords: ShaderIrValue, handle: ShaderIrValue, address: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = num_dwords
+    _ = handle
+    _ = address
+    _ = info
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_LoadBufferU64(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, address: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- address
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_LOADBUFFERU64, 0u64, args, 2u32)
+
+def ShaderIrEmitter_LoadBufferF32(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, num_dwords: ShaderIrValue, handle: ShaderIrValue, address: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = num_dwords
+    _ = handle
+    _ = address
+    _ = info
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_LoadBufferFormat(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, address: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- address
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_LOADBUFFERFORMATF32, 0u64, args, 2u32)
+
+def ShaderIrEmitter_StoreBufferU8(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, address: ShaderIrValue, data: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- address
+    args[2] <- data
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_STOREBUFFERU8, 0u64, args, 3u32)
+
+def ShaderIrEmitter_StoreBufferU16(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, address: ShaderIrValue, data: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- address
+    args[2] <- data
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_STOREBUFFERU16, 0u64, args, 3u32)
+
+def ShaderIrEmitter_StoreBufferU32(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, num_dwords: ShaderIrValue, handle: ShaderIrValue, address: ShaderIrValue, data: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = num_dwords
+    _ = handle
+    _ = address
+    _ = data
+    _ = info
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_StoreBufferU64(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, address: ShaderIrValue, data: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- address
+    args[2] <- data
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_STOREBUFFERU64, 0u64, args, 3u32)
+
+def ShaderIrEmitter_StoreBufferF32(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, num_dwords: ShaderIrValue, handle: ShaderIrValue, address: ShaderIrValue, data: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = num_dwords
+    _ = handle
+    _ = address
+    _ = data
+    _ = info
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_StoreBufferFormat(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, address: ShaderIrValue, data: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- address
+    args[2] <- data
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_STOREBUFFERFORMATF32, 0u64, args, 3u32)
+
+def ShaderIrEmitter_BufferAtomicIAdd(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, address: ShaderIrValue, value: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = handle
+    _ = address
+    _ = value
+    _ = info
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_BufferAtomicISub(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, address: ShaderIrValue, value: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- address
+    args[2] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_BUFFERATOMICISUB32, 0u64, args, 3u32)
+
+def ShaderIrEmitter_BufferAtomicIMin(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, address: ShaderIrValue, value: ShaderIrValue, is_signed: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = handle
+    _ = address
+    _ = value
+    _ = is_signed
+    _ = info
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_BufferAtomicFMin(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, address: ShaderIrValue, value: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- address
+    args[2] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_BUFFERATOMICFMIN32, 0u64, args, 3u32)
+
+def ShaderIrEmitter_BufferAtomicIMax(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, address: ShaderIrValue, value: ShaderIrValue, is_signed: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = handle
+    _ = address
+    _ = value
+    _ = is_signed
+    _ = info
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_BufferAtomicFMax(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, address: ShaderIrValue, value: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- address
+    args[2] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_BUFFERATOMICFMAX32, 0u64, args, 3u32)
+
+def ShaderIrEmitter_BufferAtomicInc(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, address: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- address
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_BUFFERATOMICINC32, 0u64, args, 2u32)
+
+def ShaderIrEmitter_BufferAtomicDec(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, address: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- address
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_BUFFERATOMICDEC32, 0u64, args, 2u32)
+
+def ShaderIrEmitter_BufferAtomicAnd(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, address: ShaderIrValue, value: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- address
+    args[2] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_BUFFERATOMICAND32, 0u64, args, 3u32)
+
+def ShaderIrEmitter_BufferAtomicOr(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, address: ShaderIrValue, value: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- address
+    args[2] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_BUFFERATOMICOR32, 0u64, args, 3u32)
+
+def ShaderIrEmitter_BufferAtomicXor(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, address: ShaderIrValue, value: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- address
+    args[2] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_BUFFERATOMICXOR32, 0u64, args, 3u32)
+
+def ShaderIrEmitter_BufferAtomicSwap(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, address: ShaderIrValue, value: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- address
+    args[2] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_BUFFERATOMICSWAP32, 0u64, args, 3u32)
+
+def ShaderIrEmitter_BufferAtomicCmpSwap(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, address: ShaderIrValue, vdata: ShaderIrValue, cmp_value: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- address
+    args[2] <- vdata
+    args[3] <- cmp_value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_BUFFERATOMICCMPSWAP32, 0u64, args, 4u32)
+
+def ShaderIrEmitter_BufferAtomicFCmpSwap(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, address: ShaderIrValue, vdata: ShaderIrValue, cmp_value: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- address
+    args[2] <- vdata
+    args[3] <- cmp_value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_BUFFERATOMICFCMPSWAP32, 0u64, args, 4u32)
+
+def ShaderIrEmitter_DataAppend(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, counter: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- counter
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_DATAAPPEND, 0u64, args, 1u32)
+
+def ShaderIrEmitter_DataConsume(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, counter: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- counter
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_DATACONSUME, 0u64, args, 1u32)
+
+def ShaderIrEmitter_LaneId(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_LANEID, 0u64, args, 0u32)
+
+def ShaderIrEmitter_WarpId(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_WARPID, 0u64, args, 0u32)
+
+def ShaderIrEmitter_QuadShuffle(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue, index: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- value
+    args[1] <- index
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_QUADSHUFFLE, 0u64, args, 2u32)
+
+def ShaderIrEmitter_ReadFirstLane(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_READFIRSTLANE, 0u64, args, 1u32)
+
+def ShaderIrEmitter_ReadLane(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue, lane: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- value
+    args[1] <- lane
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_READLANE, 0u64, args, 2u32)
+
+def ShaderIrEmitter_WriteLane(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue, write_value: ShaderIrValue, lane: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- value
+    args[1] <- write_value
+    args[2] <- lane
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_WRITELANE, 0u64, args, 3u32)
+
+def ShaderIrEmitter_Ballot(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, bit: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- bit
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_BALLOT, 0u64, args, 1u32)
+
+def ShaderIrEmitter_BallotFindLsb(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, mask: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- mask
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_BALLOTFINDLSB, 0u64, args, 1u32)
+
+def ShaderIrEmitter_GroupAny(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, bit: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- bit
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_GROUPANY, 0u64, args, 1u32)
+
+def ShaderIrEmitter_FPAdd(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = a
+    _ = b
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FPSub(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = a
+    _ = b
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_CompositeConstruct(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, e1: ShaderIrValue, e2: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = e1
+    _ = e2
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_CompositeConstruct_2(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, e1: ShaderIrValue, e2: ShaderIrValue, e3: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = e1
+    _ = e2
+    _ = e3
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_CompositeConstruct_3(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, e1: ShaderIrValue, e2: ShaderIrValue, e3: ShaderIrValue, e4: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = e1
+    _ = e2
+    _ = e3
+    _ = e4
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_CompositeConstruct_4(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, elements: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = elements
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_CompositeExtract(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, vector: ShaderIrValue, element: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = vector
+    _ = element
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_CompositeInsert(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, vector: ShaderIrValue, object: ShaderIrValue, element: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = vector
+    _ = object
+    _ = element
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_CompositeShuffle(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, vector1: ShaderIrValue, vector2: ShaderIrValue, comp0: ShaderIrValue, comp1: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = vector1
+    _ = vector2
+    _ = comp0
+    _ = comp1
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_CompositeShuffle_2(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, vector1: ShaderIrValue, vector2: ShaderIrValue, comp0: ShaderIrValue, comp1: ShaderIrValue, comp2: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = vector1
+    _ = vector2
+    _ = comp0
+    _ = comp1
+    _ = comp2
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_CompositeShuffle_3(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, vector1: ShaderIrValue, vector2: ShaderIrValue, comp0: ShaderIrValue, comp1: ShaderIrValue, comp2: ShaderIrValue, comp3: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = vector1
+    _ = vector2
+    _ = comp0
+    _ = comp1
+    _ = comp2
+    _ = comp3
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_Select(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, condition: ShaderIrValue, true_value: ShaderIrValue, false_value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = condition
+    _ = true_value
+    _ = false_value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_PackUint2x32(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, vector: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- vector
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_PACKUINT2X32, 0u64, args, 1u32)
+
+def ShaderIrEmitter_UnpackUint2x32(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_UNPACKUINT2X32, 0u64, args, 1u32)
+
+def ShaderIrEmitter_PackDouble2x32(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, vector: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- vector
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_PACKDOUBLE2X32, 0u64, args, 1u32)
+
+def ShaderIrEmitter_UnpackDouble2x32(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_UNPACKDOUBLE2X32, 0u64, args, 1u32)
+
+def ShaderIrEmitter_Pack2x16(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, number_format: ShaderIrValue, vector: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = number_format
+    _ = vector
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_Unpack2x16(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, number_format: ShaderIrValue, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = number_format
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_Pack4x8(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, number_format: ShaderIrValue, vector: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = number_format
+    _ = vector
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_Unpack4x8(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, number_format: ShaderIrValue, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = number_format
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_Pack10_11_11(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, number_format: ShaderIrValue, vector: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = number_format
+    _ = vector
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_Pack2_10_10_10(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, number_format: ShaderIrValue, vector: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = number_format
+    _ = vector
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_Unpack2_10_10_10(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, number_format: ShaderIrValue, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = number_format
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_Unpack10_11_11(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, number_format: ShaderIrValue, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = number_format
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FPMul(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = a
+    _ = b
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FPDiv(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = a
+    _ = b
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FPFma(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue, c: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = a
+    _ = b
+    _ = c
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FPAbs(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FPNeg(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FPAbsNeg(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue, abs: ShaderIrValue, neg: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = value
+    _ = abs
+    _ = neg
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FPCos(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_FPCOS, 0u64, args, 1u32)
+
+def ShaderIrEmitter_FPSin(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_FPSIN, 0u64, args, 1u32)
+
+def ShaderIrEmitter_FPExp2(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_FPEXP2, 0u64, args, 1u32)
+
+def ShaderIrEmitter_FPLdexp(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue, exp: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- value
+    args[1] <- exp
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_FPLDEXP, 0u64, args, 2u32)
+
+def ShaderIrEmitter_FPLog2(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_FPLOG2, 0u64, args, 1u32)
+
+def ShaderIrEmitter_FPPow(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, x: ShaderIrValue, y: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- x
+    args[1] <- y
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_FPPOW, 0u64, args, 2u32)
+
+def ShaderIrEmitter_FPRecip(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FPRecipSqrt(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FPSqrt(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_FPSQRT, 0u64, args, 1u32)
+
+def ShaderIrEmitter_FPSaturate(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FPClamp(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue, min_value: ShaderIrValue, max_value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = value
+    _ = min_value
+    _ = max_value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FPRoundEven(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FPFloor(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FPCeil(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FPTrunc(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FPFract(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FPFrexpSig(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FPFrexpExp(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FPEqual(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, lhs: ShaderIrValue, rhs: ShaderIrValue, ordered: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = lhs
+    _ = rhs
+    _ = ordered
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FPNotEqual(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, lhs: ShaderIrValue, rhs: ShaderIrValue, ordered: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = lhs
+    _ = rhs
+    _ = ordered
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FPLessThan(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, lhs: ShaderIrValue, rhs: ShaderIrValue, ordered: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = lhs
+    _ = rhs
+    _ = ordered
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FPGreaterThan(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, lhs: ShaderIrValue, rhs: ShaderIrValue, ordered: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = lhs
+    _ = rhs
+    _ = ordered
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FPLessThanEqual(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, lhs: ShaderIrValue, rhs: ShaderIrValue, ordered: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = lhs
+    _ = rhs
+    _ = ordered
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FPGreaterThanEqual(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, lhs: ShaderIrValue, rhs: ShaderIrValue, ordered: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = lhs
+    _ = rhs
+    _ = ordered
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FPIsNan(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FPIsInf(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FPCmpClass32(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue, op: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- value
+    args[1] <- op
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_FPCMPCLASS32, 0u64, args, 2u32)
+
+def ShaderIrEmitter_FPOrdered(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, lhs: ShaderIrValue, rhs: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = lhs
+    _ = rhs
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FPUnordered(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, lhs: ShaderIrValue, rhs: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = lhs
+    _ = rhs
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FPMax(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, lhs: ShaderIrValue, rhs: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = lhs
+    _ = rhs
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FPMin(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, lhs: ShaderIrValue, rhs: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = lhs
+    _ = rhs
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FPMinTri(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue, c: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- a
+    args[1] <- b
+    args[2] <- c
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_FPMINTRI32, 0u64, args, 3u32)
+
+def ShaderIrEmitter_FPMaxTri(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue, c: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- a
+    args[1] <- b
+    args[2] <- c
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_FPMAXTRI32, 0u64, args, 3u32)
+
+def ShaderIrEmitter_FPMedTri(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue, c: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- a
+    args[1] <- b
+    args[2] <- c
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_FPMEDTRI32, 0u64, args, 3u32)
+
+def ShaderIrEmitter_IAdd(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = a
+    _ = b
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_IAddCarry(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = a
+    _ = b
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_ISub(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = a
+    _ = b
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_IMulHi(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue, is_signed: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- a
+    args[1] <- b
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_SMULHI : OPCODE::UMULHI, 0u64, args, 2u32)
+
+def ShaderIrEmitter_IMul(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = a
+    _ = b
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_IDiv(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue, is_signed: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- a
+    args[1] <- b
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_SDIV32 : OPCODE::UDIV32, 0u64, args, 2u32)
+
+def ShaderIrEmitter_IMod(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue, is_signed: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- a
+    args[1] <- b
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_SMOD32 : OPCODE::UMOD32, 0u64, args, 2u32)
+
+def ShaderIrEmitter_INeg(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_IAbs(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_IABS32, 0u64, args, 1u32)
+
+def ShaderIrEmitter_ShiftLeftLogical(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, base: ShaderIrValue, shift: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = base
+    _ = shift
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_ShiftRightLogical(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, base: ShaderIrValue, shift: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = base
+    _ = shift
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_ShiftRightArithmetic(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, base: ShaderIrValue, shift: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = base
+    _ = shift
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_BitwiseAnd(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = a
+    _ = b
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_BitwiseOr(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = a
+    _ = b
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_BitwiseXor(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- a
+    args[1] <- b
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_BITWISEXOR32, 0u64, args, 2u32)
+
+def ShaderIrEmitter_BitFieldInsert(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, base: ShaderIrValue, insert: ShaderIrValue, offset: ShaderIrValue, count: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- base
+    args[1] <- insert
+    args[2] <- offset
+    args[3] <- count
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_BITFIELDINSERT, 0u64, args, 4u32)
+
+def ShaderIrEmitter_BitFieldExtract(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, base: ShaderIrValue, offset: ShaderIrValue, count: ShaderIrValue, is_signed: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- base
+    args[1] <- offset
+    args[2] <- count
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_BITFIELDSEXTRACT : OPCODE::BITFIELDUEXTRACT, 0u64, args, 3u32)
+
+def ShaderIrEmitter_BitReverse(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_BITREVERSE32, 0u64, args, 1u32)
+
+def ShaderIrEmitter_BitCount(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_BitwiseNot(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_BITWISENOT32, 0u64, args, 1u32)
+
+def ShaderIrEmitter_FindSMsb(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_FINDSMSB32, 0u64, args, 1u32)
+
+def ShaderIrEmitter_FindUMsb(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FindILsb(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_SMin(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- a
+    args[1] <- b
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_SMIN32, 0u64, args, 2u32)
+
+def ShaderIrEmitter_UMin(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- a
+    args[1] <- b
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_UMIN32, 0u64, args, 2u32)
+
+def ShaderIrEmitter_IMin(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue, is_signed: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = a
+    _ = b
+    _ = is_signed
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_SMax(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- a
+    args[1] <- b
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_SMAX32, 0u64, args, 2u32)
+
+def ShaderIrEmitter_UMax(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- a
+    args[1] <- b
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_UMAX32, 0u64, args, 2u32)
+
+def ShaderIrEmitter_IMax(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue, is_signed: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = a
+    _ = b
+    _ = is_signed
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_SMinTri(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue, c: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- a
+    args[1] <- b
+    args[2] <- c
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_SMINTRI32, 0u64, args, 3u32)
+
+def ShaderIrEmitter_UMinTri(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue, c: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- a
+    args[1] <- b
+    args[2] <- c
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_UMINTRI32, 0u64, args, 3u32)
+
+def ShaderIrEmitter_IMinTri(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue, c: ShaderIrValue, is_signed: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = a
+    _ = b
+    _ = c
+    _ = is_signed
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_SMaxTri(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue, c: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- a
+    args[1] <- b
+    args[2] <- c
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_SMAXTRI32, 0u64, args, 3u32)
+
+def ShaderIrEmitter_UMaxTri(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue, c: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- a
+    args[1] <- b
+    args[2] <- c
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_UMAXTRI32, 0u64, args, 3u32)
+
+def ShaderIrEmitter_IMaxTri(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue, c: ShaderIrValue, is_signed: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = a
+    _ = b
+    _ = c
+    _ = is_signed
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_SMedTri(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue, c: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- a
+    args[1] <- b
+    args[2] <- c
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_SMEDTRI32, 0u64, args, 3u32)
+
+def ShaderIrEmitter_UMedTri(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue, c: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- a
+    args[1] <- b
+    args[2] <- c
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_UMEDTRI32, 0u64, args, 3u32)
+
+def ShaderIrEmitter_IMedTri(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue, c: ShaderIrValue, is_signed: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = a
+    _ = b
+    _ = c
+    _ = is_signed
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_SClamp(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue, min: ShaderIrValue, max: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- value
+    args[1] <- min
+    args[2] <- max
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_SCLAMP32, 0u64, args, 3u32)
+
+def ShaderIrEmitter_UClamp(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue, min: ShaderIrValue, max: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- value
+    args[1] <- min
+    args[2] <- max
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_UCLAMP32, 0u64, args, 3u32)
+
+def ShaderIrEmitter_ILessThan(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, lhs: ShaderIrValue, rhs: ShaderIrValue, is_signed: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = lhs
+    _ = rhs
+    _ = is_signed
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_IEqual(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, lhs: ShaderIrValue, rhs: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = lhs
+    _ = rhs
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_ILessThanEqual(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, lhs: ShaderIrValue, rhs: ShaderIrValue, is_signed: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = lhs
+    _ = rhs
+    _ = is_signed
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_IGreaterThan(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, lhs: ShaderIrValue, rhs: ShaderIrValue, is_signed: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = lhs
+    _ = rhs
+    _ = is_signed
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_INotEqual(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, lhs: ShaderIrValue, rhs: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = lhs
+    _ = rhs
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_IGreaterThanEqual(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, lhs: ShaderIrValue, rhs: ShaderIrValue, is_signed: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = lhs
+    _ = rhs
+    _ = is_signed
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_LogicalOr(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- a
+    args[1] <- b
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_LOGICALOR, 0u64, args, 2u32)
+
+def ShaderIrEmitter_LogicalAnd(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- a
+    args[1] <- b
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_LOGICALAND, 0u64, args, 2u32)
+
+def ShaderIrEmitter_LogicalXor(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, a: ShaderIrValue, b: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- a
+    args[1] <- b
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_LOGICALXOR, 0u64, args, 2u32)
+
+def ShaderIrEmitter_LogicalNot(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_LOGICALNOT, 0u64, args, 1u32)
+
+def ShaderIrEmitter_ConvertFToS(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, bitsize: ShaderIrValue, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = bitsize
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_ConvertFToU(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, bitsize: ShaderIrValue, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = bitsize
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_ConvertFToI(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, bitsize: ShaderIrValue, is_signed: ShaderIrValue, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = bitsize
+    _ = is_signed
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_ConvertSToF(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, dest_bitsize: ShaderIrValue, src_bitsize: ShaderIrValue, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = dest_bitsize
+    _ = src_bitsize
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_ConvertUToF(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, dest_bitsize: ShaderIrValue, src_bitsize: ShaderIrValue, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = dest_bitsize
+    _ = src_bitsize
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_ConvertIToF(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, dest_bitsize: ShaderIrValue, src_bitsize: ShaderIrValue, is_signed: ShaderIrValue, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = dest_bitsize
+    _ = src_bitsize
+    _ = is_signed
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_UConvert(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, result_bitsize: ShaderIrValue, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = result_bitsize
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_SConvert(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, result_bitsize: ShaderIrValue, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = result_bitsize
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_FPConvert(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, result_bitsize: ShaderIrValue, value: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = result_bitsize
+    _ = value
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_ImageAtomicIAdd(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, coords: ShaderIrValue, value: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- coords
+    args[2] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_IMAGEATOMICIADD32, 0u64, args, 3u32)
+
+def ShaderIrEmitter_ImageAtomicSMin(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, coords: ShaderIrValue, value: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- coords
+    args[2] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_IMAGEATOMICSMIN32, 0u64, args, 3u32)
+
+def ShaderIrEmitter_ImageAtomicUMin(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, coords: ShaderIrValue, value: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- coords
+    args[2] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_IMAGEATOMICUMIN32, 0u64, args, 3u32)
+
+def ShaderIrEmitter_ImageAtomicIMin(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, coords: ShaderIrValue, value: ShaderIrValue, is_signed: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = handle
+    _ = coords
+    _ = value
+    _ = is_signed
+    _ = info
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_ImageAtomicSMax(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, coords: ShaderIrValue, value: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- coords
+    args[2] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_IMAGEATOMICSMAX32, 0u64, args, 3u32)
+
+def ShaderIrEmitter_ImageAtomicUMax(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, coords: ShaderIrValue, value: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- coords
+    args[2] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_IMAGEATOMICUMAX32, 0u64, args, 3u32)
+
+def ShaderIrEmitter_ImageAtomicFMax(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, coords: ShaderIrValue, value: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- coords
+    args[2] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_IMAGEATOMICFMAX32, 0u64, args, 3u32)
+
+def ShaderIrEmitter_ImageAtomicFMin(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, coords: ShaderIrValue, value: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- coords
+    args[2] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_IMAGEATOMICFMIN32, 0u64, args, 3u32)
+
+def ShaderIrEmitter_ImageAtomicIMax(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, coords: ShaderIrValue, value: ShaderIrValue, is_signed: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = handle
+    _ = coords
+    _ = value
+    _ = is_signed
+    _ = info
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_ImageAtomicInc(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, coords: ShaderIrValue, value: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- coords
+    args[2] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_IMAGEATOMICINC32, 0u64, args, 3u32)
+
+def ShaderIrEmitter_ImageAtomicDec(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, coords: ShaderIrValue, value: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- coords
+    args[2] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_IMAGEATOMICDEC32, 0u64, args, 3u32)
+
+def ShaderIrEmitter_ImageAtomicAnd(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, coords: ShaderIrValue, value: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- coords
+    args[2] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_IMAGEATOMICAND32, 0u64, args, 3u32)
+
+def ShaderIrEmitter_ImageAtomicOr(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, coords: ShaderIrValue, value: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- coords
+    args[2] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_IMAGEATOMICOR32, 0u64, args, 3u32)
+
+def ShaderIrEmitter_ImageAtomicXor(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, coords: ShaderIrValue, value: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- coords
+    args[2] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_IMAGEATOMICXOR32, 0u64, args, 3u32)
+
+def ShaderIrEmitter_ImageAtomicExchange(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, coords: ShaderIrValue, value: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- coords
+    args[2] <- value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_IMAGEATOMICEXCHANGE32, 0u64, args, 3u32)
+
+def ShaderIrEmitter_ImageAtomicCmpSwap(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, coords: ShaderIrValue, value: ShaderIrValue, cmp_value: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- coords
+    args[2] <- value
+    args[3] <- cmp_value
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_IMAGEATOMICCMPSWAP32, 0u64, args, 4u32)
+
+def ShaderIrEmitter_ImageSampleRaw(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, image_handle: ShaderIrValue, sampler_handle: ShaderIrValue, address1: ShaderIrValue, address2: ShaderIrValue, address3: ShaderIrValue, address4: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- image_handle
+    args[1] <- sampler_handle
+    args[2] <- address1
+    args[3] <- address2
+    args[4] <- address3
+    args[5] <- address4
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_IMAGESAMPLERAW, 0u64, args, 6u32)
+
+def ShaderIrEmitter_ImageSampleImplicitLod(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, coords: ShaderIrValue, bias: ShaderIrValue, offset: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- coords
+    args[2] <- bias
+    args[3] <- offset
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_IMAGESAMPLEIMPLICITLOD, 0u64, args, 4u32)
+
+def ShaderIrEmitter_ImageSampleExplicitLod(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, coords: ShaderIrValue, lod: ShaderIrValue, offset: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- coords
+    args[2] <- lod
+    args[3] <- offset
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_IMAGESAMPLEEXPLICITLOD, 0u64, args, 4u32)
+
+def ShaderIrEmitter_ImageSampleDrefImplicitLod(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, coords: ShaderIrValue, dref: ShaderIrValue, bias: ShaderIrValue, offset: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- coords
+    args[2] <- dref
+    args[3] <- bias
+    args[4] <- offset
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_IMAGESAMPLEDREFIMPLICITLOD, 0u64, args, 5u32)
+
+def ShaderIrEmitter_ImageSampleDrefExplicitLod(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, coords: ShaderIrValue, dref: ShaderIrValue, lod: ShaderIrValue, offset: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- coords
+    args[2] <- dref
+    args[3] <- lod
+    args[4] <- offset
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_IMAGESAMPLEDREFEXPLICITLOD, 0u64, args, 5u32)
+
+def ShaderIrEmitter_ImageGather(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, coords: ShaderIrValue, offset: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- coords
+    args[2] <- offset
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_IMAGEGATHER, 0u64, args, 3u32)
+
+def ShaderIrEmitter_ImageGatherDref(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, coords: ShaderIrValue, offset: ShaderIrValue, dref: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- coords
+    args[2] <- offset
+    args[3] <- dref
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_IMAGEGATHERDREF, 0u64, args, 4u32)
+
+def ShaderIrEmitter_ImageQueryDimension(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, lod: ShaderIrValue, skip_mips: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- lod
+    args[2] <- skip_mips
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_IMAGEQUERYDIMENSIONS, 0u64, args, 3u32)
+
+def ShaderIrEmitter_ImageQueryLod(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, coords: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- coords
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_IMAGEQUERYLOD, 0u64, args, 2u32)
+
+def ShaderIrEmitter_ImageGradient(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, coords: ShaderIrValue, derivatives_dx: ShaderIrValue, derivatives_dy: ShaderIrValue, offset: ShaderIrValue, lod_clamp: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- coords
+    args[2] <- derivatives_dx
+    args[3] <- derivatives_dy
+    args[4] <- offset
+    args[5] <- lod_clamp
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_IMAGEGRADIENT, 0u64, args, 6u32)
+
+def ShaderIrEmitter_ImageRead(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, coords: ShaderIrValue, lod: ShaderIrValue, multisampling: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- coords
+    args[2] <- lod
+    args[3] <- multisampling
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_IMAGEREAD, 0u64, args, 4u32)
+
+def ShaderIrEmitter_ImageWrite(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, handle: ShaderIrValue, coords: ShaderIrValue, lod: ShaderIrValue, multisampling: ShaderIrValue, color: ShaderIrValue, info: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- handle
+    args[1] <- coords
+    args[2] <- lod
+    args[3] <- multisampling
+    args[4] <- color
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_IMAGEWRITE, 0u64, args, 5u32)
+
+def ShaderIrEmitter_CubeFaceIndex(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, cube_coords: ShaderIrValue) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    args[0] <- cube_coords
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_CUBEFACEINDEX, 0u64, args, 1u32)
+
+def ShaderIrEmitter_DebugPrint(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, fmt: ShaderIrValue, format_args: ShaderIrValue) -> ShaderIrValue:
+    _ = program
+    _ = emitter
+    _ = fmt
+    _ = format_args
+    return ShaderIrValue_Empty()
+
+def ShaderIrEmitter_EmitVertex(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_EMITVERTEX, 0u64, args, 0u32)
+
+def ShaderIrEmitter_EmitPrimitive(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&) -> ShaderIrValue:
+    args: mutable ShaderIrValue[6] = zeroed
+    return ShaderIrEmitter_Emit(program.ref[mutable ShaderIrProgram&], emitter.ref[mutable ShaderIrEmitter&], IR_OPCODE_EMITPRIMITIVE, 0u64, args, 0u32)

@@ -1,0 +1,210 @@
+include "../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "./video_core/cache_storage.elisa"
+include "./video_core/page_manager.elisa"
+include "./video_core/renderdoc.elisa"
+include "./video_core/renderer_vulkan/vk_common.elisa"
+include "./video_core/renderer_vulkan/liverpool_to_vk.elisa"
+include "./video_core/renderer_vulkan/vk_platform.elisa"
+include "./video_core/renderer_vulkan/vk_instance.elisa"
+include "./video_core/renderer_vulkan/vk_master_semaphore.elisa"
+include "./video_core/renderer_vulkan/vk_resource_pool.elisa"
+include "./video_core/renderer_vulkan/vk_scheduler.elisa"
+include "./video_core/renderer_vulkan/vk_pipeline_common.elisa"
+include "./video_core/renderer_vulkan/vk_compute_pipeline.elisa"
+include "./video_core/renderer_vulkan/vk_graphics_pipeline.elisa"
+include "./video_core/renderer_vulkan/vk_pipeline_cache.elisa"
+include "./video_core/renderer_vulkan/vk_pipeline_serialization.elisa"
+include "./video_core/renderer_vulkan/vk_shader_util.elisa"
+include "./video_core/renderer_vulkan/vk_shader_hle.elisa"
+include "./video_core/renderer_vulkan/vk_rasterizer.elisa"
+include "./video_core/renderer_vulkan/vk_swapchain.elisa"
+include "./video_core/renderer_vulkan/vk_presenter.elisa"
+
+@test
+def video_core_cache_storage_and_renderdoc_contracts() -> void:
+    can Abort.Panic, Memory.Allocate:
+        db: mutable DataBase& = DataBase_Instance()
+        DataBase_Open(db, "cache", false)
+        assert DataBase_IsOpened(db)
+
+        bytes: darray[u8] = [1u8, 2u8, 3u8]
+        words: darray[u32] = [11u32, 22u32, 33u32]
+        assert DataBase_SaveBytes(db, BlobType.ShaderMeta, "meta_a", bytes)
+        assert DataBase_SaveWords(db, BlobType.ShaderBinary, "bin_a", words)
+
+        loaded_bytes: darray[u8] = DataBase_LoadBytes(db, BlobType.ShaderMeta, "meta_a")
+        loaded_words: darray[u32] = DataBase_LoadWords(db, BlobType.ShaderBinary, "bin_a")
+        assert loaded_bytes.count == 3usize
+        assert loaded_words.count == 3usize
+
+        bucket: mutable darray[darray[u8]] = []
+        DataBase_ForEachBlob(db, BlobType.ShaderMeta, bucket.ref[mutable darray[darray[u8]]&])
+        assert bucket.count == 1usize
+
+        DataBase_FinishPreload(db)
+        assert db.preload_finished
+        DataBase_Close(db)
+        assert not DataBase_IsOpened(db)
+
+        LoadRenderDoc()
+        assert IsRenderDocLoaded()
+        TriggerCapture()
+        StartCapture()
+        assert g_capture_state == CaptureState.InProgress
+        EndCapture()
+        assert g_capture_state == CaptureState.Idle
+        RequestScreenshot(ScreenshotRequest.GameOnly)
+        RequestScreenshot(ScreenshotRequest.WithOverlays)
+        counts: ScreenshotRequests = ConsumeScreenshotRequests()
+        assert counts.game_only_count == 1u32
+        assert counts.with_overlays_count == 1u32
+
+@test
+def video_core_page_manager_and_mapping_contracts() -> void:
+    can Abort.Panic, Memory.Allocate:
+        pm: mutable PageManager = PageManager_New()
+        PageManager_OnGpuMap(pm.ref[mutable PageManager&], 0x10000u64, 0x5000usize)
+        assert PageManager_IsMapped(pm, 0x10000u64, 0x1000u64)
+
+        PageManager_UpdatePageWatchers_TrackWrite(pm.ref[mutable PageManager&], 0x10000u64, 0x3000u64)
+        assert pm.protect_events.count > 0usize
+
+        bits: mutable RegionBits = zeroed
+        RegionBits_Clear(bits.ref[mutable RegionBits&])
+        RegionBits_SetRange(bits.ref[mutable RegionBits&], 1u64, 4u64)
+        PageManager_UpdatePageWatchersForRegion(pm.ref[mutable PageManager&], 0x10000u64, bits, true, true)
+        assert pm.states.count >= 3usize
+
+        PageManager_OnGpuUnmap(pm.ref[mutable PageManager&], 0x10000u64, 0x5000usize)
+        assert not PageManager_IsMapped(pm, 0x10000u64, 0x1000u64)
+
+@test
+def video_core_liverpool_and_instance_contracts() -> void:
+    can Abort.Panic, Memory.Allocate:
+        assert PrimitiveType(AMD_PRIM_TRIANGLE_LIST) == 3u32
+        assert IsDualSourceBlendFactor(AMD_BLEND_SRC1_ALPHA)
+        fmt: u32 = SurfaceFormat(AMD_DATA_FORMAT_8_8_8_8, AMD_NUMBER_UNORM)
+        assert fmt == VK_FORMAT_R8G8B8A8_UNORM
+        depth_fmt: u32 = DepthFormat(AMD_Z_32, AMD_STENCIL_8)
+        assert depth_fmt == VK_FORMAT_D32_SFLOAT_S8_UINT
+        assert NumSamples(4u32, VK_SAMPLE_COUNT_4 | VK_SAMPLE_COUNT_1) == VK_SAMPLE_COUNT_4
+
+        inst: mutable Instance = Instance_NewWithWindow(WindowSystemType.X11, 0, true, false, true)
+        assert inst.instance_handle != 0u64
+        assert Instance_IsShaderInt16Supported(inst)
+        assert Instance_IsDynamicColorWriteMaskSupported(inst)
+        assert Instance_IsFormatSupported(inst, VK_FORMAT_R8G8B8A8_UNORM, 0xffffu64)
+
+        fallback: u32 = Instance_GetSupportedFormat(inst, VK_FORMAT_R8G8B8A8_SRGB, 0xffffu64)
+        assert fallback == VK_FORMAT_R8G8B8A8_SRGB or fallback == VK_FORMAT_R8G8B8A8_UNORM
+
+@test
+def video_core_sync_pool_scheduler_contracts() -> void:
+    can Abort.Panic, Memory.Allocate:
+        sem: mutable MasterSemaphore = MasterSemaphore_New()
+        tick0: u64 = MasterSemaphore_CurrentTick(sem)
+        tick1: u64 = MasterSemaphore_NextTick(sem.ref[mutable MasterSemaphore&])
+        assert tick1 == tick0
+        MasterSemaphore_Refresh(sem.ref[mutable MasterSemaphore&], tick1)
+        assert MasterSemaphore_IsFree(sem, tick1)
+
+        cmd_pool: mutable CommandPool = CommandPool_New(sem.ref[mutable MasterSemaphore&], 2usize)
+        cmd_a: u64 = CommandPool_Commit(cmd_pool.ref[mutable CommandPool&])
+        cmd_b: u64 = CommandPool_Commit(cmd_pool.ref[mutable CommandPool&])
+        assert cmd_a != 0u64
+        assert cmd_b != 0u64
+
+        heap: mutable DescriptorHeap = DescriptorHeap_New(sem.ref[mutable MasterSemaphore&], 64u32)
+        set_a: u64 = DescriptorHeap_Commit(heap.ref[mutable DescriptorHeap&], 0x11u64)
+        set_b: u64 = DescriptorHeap_Commit(heap.ref[mutable DescriptorHeap&], 0x11u64)
+        assert set_a != set_b
+
+        inst: Instance = Instance_New()
+        sched: mutable Scheduler = Scheduler_New(inst)
+        ds: mutable DynamicState& = sched.dynamic_state.ref[mutable DynamicState&]
+        DynamicState_SetDepthTestEnabled(ds, true)
+        committed: u32 = DynamicState_Commit(ds, inst, sched.current_cmdbuf)
+        assert committed > 0u32
+
+        submit: mutable SubmitInfo = SubmitInfo_New()
+        submitted_tick: u64 = Scheduler_Flush(sched.ref[mutable Scheduler&], submit.ref[mutable SubmitInfo&])
+        assert submitted_tick >= 1u64
+        Scheduler_Wait(sched.ref[mutable Scheduler&], submitted_tick)
+
+@test
+def video_core_pipeline_cache_and_shader_contracts() -> void:
+    can Abort.Panic, Memory.Allocate:
+        inst: Instance = Instance_New()
+        sched: mutable Scheduler = Scheduler_New(inst)
+        cache: mutable PipelineCache = PipelineCache_New(inst, sched.ref[mutable Scheduler&])
+
+        gkey: mutable GraphicsPipelineKey = GraphicsPipelineKey_Default()
+        gkey.stage_hashes[0usize] <- 0x1111u64
+        gkey.stage_hashes[3usize] <- 0x2222u64
+        gkey.mrt_mask <- 0x1u32
+        PipelineCache_SetGraphicsKey(cache.ref[mutable PipelineCache&], gkey)
+        gp: GraphicsPipeline = PipelineCache_GetGraphicsPipeline(cache.ref[mutable PipelineCache&]) else panic("missing gp")
+        assert GraphicsPipeline_Handle(gp) != 0u64
+
+        ckey: ComputePipelineKey = ComputePipelineKey(0x55usize)
+        PipelineCache_SetComputeKey(cache.ref[mutable PipelineCache&], ckey)
+        cp: ComputePipeline = PipelineCache_GetComputePipeline(cache.ref[mutable PipelineCache&]) else panic("missing cp")
+        assert ComputePipeline_Handle(cp) != 0u64
+
+        pr: ProgramResult = PipelineCache_GetProgram(cache.ref[mutable PipelineCache&], ShaderStage.Compute, LogicalStage.Compute, 0xabcdefu64)
+        assert pr.module != 0u64
+
+        spv_module: u64 = CompileSPV([0x07230203u32, 0u32, 0u32, 0u32], inst.device_handle)
+        assert spv_module != 0u64
+        glsl_module: u64 = Compile("void main(){}", ShaderStage.Fragment.u32(), inst.device_handle)
+        assert glsl_module != 0u64
+
+        replaced: u64 = PipelineCache_ReplaceShader(cache.ref[mutable PipelineCache&], pr.module, [1u32, 2u32]) else 0u64
+        assert replaced != 0u64
+
+        RegisterPipelineDataCompute(ckey, ComputePipelineSerializationSupport_Default())
+        RegisterPipelineDataGraphics(gkey, 0x1234u64, GraphicsPipelineSerializationSupport_Default())
+        RegisterShaderMeta(pr.info, null, pr.perm_hash, 0usize)
+        RegisterShaderBinary([1u32, 2u32, 3u32], pr.info.pgm_hash, 0usize)
+
+        PipelineCache_Sync(cache.ref[mutable PipelineCache&])
+
+@test
+def video_core_rasterizer_and_presenter_contracts() -> void:
+    can Abort.Panic, Memory.Allocate:
+        inst: Instance = Instance_NewWithWindow(WindowSystemType.X11, 0, false, false, true)
+        sched: mutable Scheduler = Scheduler_New(inst)
+        rast: mutable Rasterizer = Rasterizer_New(inst, sched.ref[mutable Scheduler&])
+
+        gkey: mutable GraphicsPipelineKey = GraphicsPipelineKey_Default()
+        gkey.stage_hashes[0usize] <- 0x10u64
+        gkey.stage_hashes[3usize] <- 0x20u64
+        PipelineCache_SetGraphicsKey(rast.pipeline_cache.ref[mutable PipelineCache&], gkey)
+
+        ckey: ComputePipelineKey = ComputePipelineKey(0x40usize)
+        PipelineCache_SetComputeKey(rast.pipeline_cache.ref[mutable PipelineCache&], ckey)
+
+        Rasterizer_MapMemory(rast.ref[mutable Rasterizer&], 0x800000u64, 0x2000u64)
+        assert Rasterizer_IsMapped(rast, 0x800000u64, 0x1000u64)
+        assert Rasterizer_InvalidateMemory(rast.ref[mutable Rasterizer&], 0x800000u64, 0x1000u64)
+
+        Rasterizer_Draw(rast.ref[mutable Rasterizer&], false)
+        Rasterizer_DrawIndirect(rast.ref[mutable Rasterizer&], true, 0x900000u64, 0u32, 16u32, 1u32, 0u64)
+
+        rast.cs_program <- ComputeProgram(4u32, 1u32, 1u32)
+        Rasterizer_DispatchDirect(rast.ref[mutable Rasterizer&])
+        Rasterizer_DispatchIndirect(rast.ref[mutable Rasterizer&], 0x810000u64, 0u32, 12u32)
+        tick: u64 = Rasterizer_Flush(rast.ref[mutable Rasterizer&])
+        assert tick >= 1u64
+        Rasterizer_OnSubmit(rast.ref[mutable Rasterizer&])
+
+        presenter: mutable Presenter = Presenter_New(WindowSystemType.X11, 1280u32, 720u32, true)
+        attr: VideoOutBufferAttributeGroup = VideoOutBufferAttributeGroup(1280u32, 720u32, 1280u32, VK_FORMAT_R8G8B8A8_UNORM)
+        frame: Frame = Presenter_PrepareFrame(presenter.ref[mutable Presenter&], attr, 0x12340000u64) else panic("missing frame")
+        assert frame.width == 1280u32
+        assert Presenter_Present(presenter.ref[mutable Presenter&], frame, false)
+
+        last_frame: Frame = Presenter_PrepareLastFrame(presenter.ref[mutable Presenter&]) else panic("missing last frame")
+        assert last_frame.id == frame.id
+        Presenter_SetHDR(presenter.ref[mutable Presenter&], true)
+        Presenter_SetExpectedGameSize(presenter.ref[mutable Presenter&], 1920, 1080)

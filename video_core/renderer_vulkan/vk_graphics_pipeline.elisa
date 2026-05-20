@@ -1,0 +1,190 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./vk_pipeline_common.elisa"
+include "./liverpool_to_vk.elisa"
+
+const MaxShaderStages: u32 = 6u32
+const MaxVertexBufferCount: u32 = 32u32
+
+struct GraphicsPipelineKey:
+    stage_hashes: mutable u64[6]
+    vertex_buffer_formats: mutable u32[32]
+    patch_control_points: mutable u32
+    num_color_attachments: mutable u32
+    num_samples: mutable u8
+    depth_samples: mutable u8
+    mrt_mask: mutable u32
+    z_format: mutable AmdDepthZFormat
+    stencil_format: mutable AmdDepthStencilFormat
+    prim_type: mutable AmdPrimitiveType
+    polygon_mode: mutable AmdPolygonMode
+    depth_clip_enable: mutable bool
+
+
+def GraphicsPipelineKey_Default() -> GraphicsPipelineKey:
+    return GraphicsPipelineKey(
+        [0u64, 0u64, 0u64, 0u64, 0u64, 0u64],
+        [
+            0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32,
+            0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32,
+            0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32,
+            0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32
+        ],
+        0u32,
+        0u32,
+        1u8,
+        1u8,
+        0u32,
+        AMD_Z_INVALID,
+        AMD_STENCIL_INVALID,
+        AMD_PRIM_NONE,
+        0u32,
+        false
+    )
+
+def GraphicsPipelineKey_eq(lhs: GraphicsPipelineKey, rhs: GraphicsPipelineKey) -> bool:
+    i: mutable usize = 0usize
+    while i < 6usize:
+        if lhs.stage_hashes[i] != rhs.stage_hashes[i]:
+            return false
+        i <- i + 1usize
+    i <- 0usize
+    while i < 32usize:
+        if lhs.vertex_buffer_formats[i] != rhs.vertex_buffer_formats[i]:
+            return false
+        i <- i + 1usize
+    return lhs.patch_control_points == rhs.patch_control_points and
+           lhs.num_color_attachments == rhs.num_color_attachments and
+           lhs.num_samples == rhs.num_samples and
+           lhs.depth_samples == rhs.depth_samples and
+           lhs.mrt_mask == rhs.mrt_mask and
+           lhs.z_format == rhs.z_format and
+           lhs.stencil_format == rhs.stencil_format and
+           lhs.prim_type == rhs.prim_type and
+           lhs.polygon_mode == rhs.polygon_mode and
+           lhs.depth_clip_enable == rhs.depth_clip_enable
+
+struct GraphicsPipelineSerializationSupport:
+    vertex_attribute_count: mutable u32
+    vertex_binding_count: mutable u32
+    divisor_count: mutable u32
+    tcs_word_count: mutable u32
+    tes_word_count: mutable u32
+    multisample_count: mutable u32
+
+
+def GraphicsPipelineSerializationSupport_Default() -> GraphicsPipelineSerializationSupport:
+    return GraphicsPipelineSerializationSupport(0u32, 0u32, 0u32, 0u32, 0u32, 1u32)
+
+struct VkFetchShaderData:
+    attribute_count: mutable u32
+
+struct GraphicsPipeline:
+    base: mutable Pipeline
+    key: mutable GraphicsPipelineKey
+    has_fetch_shader: mutable bool
+    fetch_shader: mutable VkFetchShaderData
+
+
+def GraphicsPipeline_New(instance: Instance, scheduler: mutable Scheduler&, desc_heap: mutable DescriptorHeap&,
+                         profile: VkShaderProfile, key: GraphicsPipelineKey,
+                         stage_infos: darray[VkShaderInfo], runtime_infos_count: u32,
+                         fetch_shader_data: VkFetchShaderData?, modules: darray[u64],
+                         sdata: GraphicsPipelineSerializationSupport,
+                         preloading: bool = false) -> GraphicsPipeline:
+    _ = runtime_infos_count
+    _ = modules
+    _ = sdata
+    _ = preloading
+    can Memory.Allocate, Abort.Panic:
+        base: mutable Pipeline = Pipeline_New(instance, scheduler, desc_heap, profile, false)
+        i: mutable usize = 0usize
+        while i < stage_infos.count:
+            Pipeline_AddStage(base.ref[mutable Pipeline&], stage_infos[i])
+            i <- i + 1usize
+        GraphicsPipeline_BuildDescSetLayout(base.ref[mutable Pipeline&], preloading)
+        base.pipeline_handle <- Vk_AllocHandle()
+        base.pipeline_layout_handle <- Vk_AllocHandle()
+        base.desc_layout_handle <- Vk_AllocHandle()
+
+        if fetch_shader_data == null:
+            return GraphicsPipeline(base, key, false, VkFetchShaderData(0u32))
+        return GraphicsPipeline(base, key, true, fetch_shader_data.value())
+
+
+def GraphicsPipeline_Handle(self: GraphicsPipeline) -> u64:
+    return Pipeline_Handle(self.base)
+
+def GraphicsPipeline_GetLayout(self: GraphicsPipeline) -> u64:
+    return Pipeline_GetLayout(self.base)
+
+def GraphicsPipeline_GetFetchShader(self: GraphicsPipeline) -> VkFetchShaderData?:
+    if not self.has_fetch_shader:
+        return null
+    return self.fetch_shader
+
+def GraphicsPipeline_GetGraphicsKey(self: GraphicsPipeline) -> GraphicsPipelineKey:
+    return self.key
+
+def GraphicsPipeline_GetVertexInputs(self: GraphicsPipeline,
+                                     out_formats: mutable darray[u32]&,
+                                     out_divisors: mutable darray[u32]&,
+                                     step_rate_0: u32,
+                                     step_rate_1: u32) -> void:
+    can Memory.Allocate, Abort.Panic:
+        _ = step_rate_1
+        if not self.has_fetch_shader:
+            return
+        max_attrs: u32 = self.fetch_shader.attribute_count
+        if max_attrs > MaxVertexBufferCount:
+            max_attrs <- MaxVertexBufferCount
+        i: mutable u32 = 0u32
+        while i < max_attrs:
+            out_formats.push(self.key.vertex_buffer_formats[i.usize()])
+            out_divisors.push(step_rate_0)
+            i <- i + 1u32
+
+def GraphicsPipeline_BuildDescSetLayout(base: mutable Pipeline&, preloading: bool) -> void:
+    _ = preloading
+    descriptor_count: mutable u32 = 0u32
+    i: mutable usize = 0usize
+    while i < base.stages.count:
+        descriptor_count <- descriptor_count + base.stages[i].buffers_count +
+                            base.stages[i].images_count + base.stages[i].samplers_count
+        i <- i + 1usize
+    base.uses_push_descriptors <- descriptor_count < Instance_MaxPushDescriptors(base.instance)
+
+
+def GraphicsPipelineKey_Serialize(self: GraphicsPipelineKey, out: mutable darray[u8]&) -> void:
+    can Memory.Allocate, Abort.Panic:
+        i: mutable usize = 0usize
+        while i < 6usize:
+            hash_value: u64 = self.stage_hashes[i]
+            b: mutable u32 = 0u32
+            while b < 8u32:
+                out.push(((hash_value >> (b * 8u32)) & 0xffu64).u8())
+                b <- b + 1u32
+            i <- i + 1usize
+        i <- 0usize
+        while i < 32usize:
+            fmt_value: u32 = self.vertex_buffer_formats[i]
+            out.push((fmt_value & 0xffu32).u8())
+            out.push(((fmt_value >> 8u32) & 0xffu32).u8())
+            out.push(((fmt_value >> 16u32) & 0xffu32).u8())
+            out.push(((fmt_value >> 24u32) & 0xffu32).u8())
+            i <- i + 1usize
+
+
+def GraphicsPipelineSerializationSupport_Serialize(self: GraphicsPipelineSerializationSupport,
+                                                   out: mutable darray[u8]&) -> void:
+    can Memory.Allocate, Abort.Panic:
+        values: u32[6] = [self.vertex_attribute_count, self.vertex_binding_count, self.divisor_count,
+                          self.tcs_word_count, self.tes_word_count, self.multisample_count]
+        i: mutable usize = 0usize
+        while i < 6usize:
+            out.push((values[i] & 0xffu32).u8())
+            out.push(((values[i] >> 8u32) & 0xffu32).u8())
+            out.push(((values[i] >> 16u32) & 0xffu32).u8())
+            out.push(((values[i] >> 24u32) & 0xffu32).u8())
+            i <- i + 1usize

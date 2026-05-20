@@ -59,9 +59,8 @@ int VideoOutElisa_sceVideoOutSetFlipRate(long long a0, long long a1) {
     return static_cast<int>(Libraries::VideoOut::sceVideoOutSetFlipRate(static_cast<int>(a0), static_cast<int>(a1)));
 }
 
-int VideoOutElisa_sceVideoOutSetBufferAttribute(void* a0, long long a1, long long a2, long long a3, long long a4, long long a5, long long a6) {
+void VideoOutElisa_sceVideoOutSetBufferAttribute(void* a0, long long a1, long long a2, long long a3, long long a4, long long a5, long long a6) {
     Libraries::VideoOut::sceVideoOutSetBufferAttribute(static_cast<Libraries::VideoOut::BufferAttribute*>(a0), static_cast<Libraries::VideoOut::PixelFormat>(a1), static_cast<int>(a2), static_cast<int>(a3), static_cast<int>(a4), static_cast<int>(a5), static_cast<int>(a6));
-    return 0;
 }
 
 int VideoOutElisa_sceVideoOutGetResolutionStatus(long long a0, void* a1) {
@@ -128,9 +127,8 @@ int VideoOutElisa_sceVideoOutDeleteVblankEvent(long long a0, long long a1) {
     return static_cast<int>(Libraries::VideoOut::sceVideoOutDeleteVblankEvent(static_cast<int>(a0), static_cast<int>(a1)));
 }
 
-int VideoOutElisa_sceVideoOutModeSetAny_(void* a0, long long a1) {
+void VideoOutElisa_sceVideoOutModeSetAny_(void* a0, long long a1) {
     Libraries::VideoOut::sceVideoOutModeSetAny_(static_cast<Libraries::VideoOut::Mode*>(a0), static_cast<int>(a1));
-    return 0;
 }
 
 int VideoOutElisa_sceVideoOutConfigureOutputMode_(long long a0, long long a1, void* a2, void* a3, long long a4, long long a5) {

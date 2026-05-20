@@ -1,0 +1,341 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./vk_common.elisa"
+include "./vk_platform.elisa"
+include "./liverpool_to_vk.elisa"
+
+struct Instance:
+    instance_handle: mutable u64
+    physical_device_handle: mutable u64
+    device_handle: mutable u64
+    allocator_handle: mutable u64
+    surface_handle: mutable u64
+    debug_callback_handle: mutable u64
+    queue_family_index: mutable u32
+    graphics_queue: mutable u64
+    present_queue: mutable u64
+    driver_id: mutable u32
+    driver_version: mutable u32
+    api_version: mutable u32
+    vendor_name: mutable static u8&
+    model_name: mutable static u8&
+    available_extensions: mutable darray[static u8&]
+    format_features: mutable darray[VkFormatFeatureEntry]
+    total_memory_budget: mutable u64
+    device_memory_usage: mutable u64
+    max_push_descriptors: mutable u32
+    color_sample_counts: mutable u32
+    depth_sample_counts: mutable u32
+    max_viewport_width: mutable u32
+    max_viewport_height: mutable u32
+    max_framebuffer_width: mutable u32
+    max_framebuffer_height: mutable u32
+    uniform_min_alignment: mutable u64
+    uniform_max_size: mutable u64
+    storage_min_alignment: mutable u64
+    non_coherent_atom_size: mutable u64
+    subgroup_size: mutable u32
+    max_compute_shared_memory_size: mutable u32
+    max_sampler_lod_bias: mutable f32
+    max_sampler_anisotropy: mutable f32
+    shader_float16: mutable bool
+    shader_float64: mutable bool
+    shader_int16: mutable bool
+    shader_int64: mutable bool
+    shader_int8: mutable bool
+    depth_bounds: mutable bool
+    dynamic_state_3: mutable bool
+    dynamic_color_write_mask: mutable bool
+    vertex_input_dynamic_state: mutable bool
+    attachment_feedback_loop: mutable bool
+    maintenance_8: mutable bool
+    depth_clip_control: mutable bool
+    depth_clip_enable: mutable bool
+    mixed_depth_samples: mutable bool
+    mixed_any_samples: mutable bool
+    logic_op: mutable bool
+    memory_budget_supported: mutable bool
+    block_texel_view_supported: mutable bool
+    image_2d_view_of_3d_supported: mutable bool
+    portability_subset: mutable bool
+
+
+def Instance_Default() -> Instance:
+    can Memory.Allocate, Abort.Panic:
+        return Instance(
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+            0u64,
+            0u32,
+            0u64,
+            0u64,
+            VK_DRIVER_UNKNOWN,
+            0u32,
+            0u32,
+            "Unknown",
+            "Unknown",
+            [],
+            [],
+            0u64,
+            0u64,
+            96u32,
+            VK_SAMPLE_COUNT_8 | VK_SAMPLE_COUNT_4 | VK_SAMPLE_COUNT_2 | VK_SAMPLE_COUNT_1,
+            VK_SAMPLE_COUNT_8 | VK_SAMPLE_COUNT_4 | VK_SAMPLE_COUNT_2 | VK_SAMPLE_COUNT_1,
+            16384u32,
+            16384u32,
+            16384u32,
+            16384u32,
+            256u64,
+            65536u64,
+            16u64,
+            256u64,
+            64u32,
+            65536u32,
+            16.0,
+            16.0,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true,
+            true
+        )
+
+def Instance_CreateDevice(self: mutable Instance&) -> bool:
+    self.device_handle <- Vk_AllocHandle()
+    self.graphics_queue <- Vk_AllocHandle()
+    self.present_queue <- Vk_AllocHandle()
+    return true
+
+def Instance_CreateAllocator(self: mutable Instance&) -> void:
+    self.allocator_handle <- Vk_AllocHandle()
+
+def Instance_CollectDeviceParameters(self: mutable Instance&) -> void:
+    if self.driver_id == VK_DRIVER_UNKNOWN:
+        self.driver_id <- VK_DRIVER_AMD
+    if self.driver_version == 0u32:
+        self.driver_version <- 0x010203u32
+    if self.api_version == 0u32:
+        self.api_version <- 0x00403000u32
+
+
+def Instance_CollectPhysicalMemoryInfo(self: mutable Instance&) -> void:
+    if self.total_memory_budget == 0u64:
+        self.total_memory_budget <- 6u64 * 1024u64 * 1024u64 * 1024u64
+    if self.device_memory_usage > self.total_memory_budget:
+        self.device_memory_usage <- self.total_memory_budget
+
+def Instance_CollectImageFormatInfo(self: mutable Instance&) -> void:
+    can Memory.Allocate, Abort.Panic:
+        self.format_features.count <- 0usize
+        surface_formats: darray[SurfaceFormatInfo] = SurfaceFormats()
+        i: mutable usize = 0usize
+        while i < surface_formats.count:
+            self.format_features.push(VkFormatFeatureEntry(surface_formats[i].vk_format,
+                                                           surface_formats[i].flags))
+            i <- i + 1usize
+
+        depth_formats: darray[DepthFormatInfo] = DepthFormats()
+        i <- 0usize
+        while i < depth_formats.count:
+            self.format_features.push(VkFormatFeatureEntry(depth_formats[i].vk_format,
+                                                           depth_formats[i].flags))
+            i <- i + 1usize
+
+
+def Instance_CollectToolingInfo(self: mutable Instance&) -> void:
+    _ = self
+
+
+def Instance_New(enable_validation: bool = false, enable_crash_diagnostic: bool = false) -> Instance:
+    can Memory.Allocate, Abort.Panic:
+        out: mutable Instance = Instance_Default()
+        platform_instance: VkPlatformInstance = CreateInstance(WindowSystemType.Headless, enable_validation, enable_crash_diagnostic, false)
+        out.instance_handle <- platform_instance.handle
+        out.available_extensions <- platform_instance.extensions
+        out.surface_handle <- 0u64
+        out.queue_family_index <- 0u32
+        _ = Instance_CreateDevice(out.ref[mutable Instance&])
+        Instance_CreateAllocator(out.ref[mutable Instance&])
+        Instance_CollectDeviceParameters(out.ref[mutable Instance&])
+        Instance_CollectPhysicalMemoryInfo(out.ref[mutable Instance&])
+        Instance_CollectImageFormatInfo(out.ref[mutable Instance&])
+        return out
+
+def Instance_NewWithWindow(window_type: WindowSystemType, physical_device_index: s32,
+                           enable_validation: bool = false,
+                           enable_crash_diagnostic: bool = false,
+                           hdr_allowed: bool = false) -> Instance:
+    can Memory.Allocate, Abort.Panic:
+        _ = physical_device_index
+        out: mutable Instance = Instance_Default()
+        platform_instance: VkPlatformInstance = CreateInstance(window_type, enable_validation, enable_crash_diagnostic, hdr_allowed)
+        out.instance_handle <- platform_instance.handle
+        out.available_extensions <- platform_instance.extensions
+        out.surface_handle <- CreateSurface(out.instance_handle, window_type)
+        out.debug_callback_handle <- CreateDebugCallback(out.instance_handle)
+        out.queue_family_index <- 0u32
+        _ = Instance_CreateDevice(out.ref[mutable Instance&])
+        Instance_CreateAllocator(out.ref[mutable Instance&])
+        Instance_CollectDeviceParameters(out.ref[mutable Instance&])
+        Instance_CollectPhysicalMemoryInfo(out.ref[mutable Instance&])
+        Instance_CollectImageFormatInfo(out.ref[mutable Instance&])
+        return out
+
+def Instance_GetDriverVersionName(self: Instance) -> static u8&:
+    if self.driver_id == VK_DRIVER_MOLTENVK:
+        return "MoltenVK"
+    if self.driver_id == VK_DRIVER_NVIDIA:
+        return "NVIDIA"
+    if self.driver_id == VK_DRIVER_INTEL:
+        return "Intel"
+    if self.driver_id == VK_DRIVER_AMD:
+        return "AMD"
+    return "Unknown"
+
+def Instance_GetDeviceMemoryUsage(self: Instance) -> u64:
+    return self.device_memory_usage
+
+def Instance_GetFormatFeatureFlags(self: Instance, format: u32) -> u64:
+    i: mutable usize = 0usize
+    while i < self.format_features.count:
+        if self.format_features[i].format == format:
+            return self.format_features[i].flags
+        i <- i + 1usize
+    return 0u64
+
+def Instance_IsFormatSupported(self: Instance, format: u32, flags: u64) -> bool:
+    if format == VK_FORMAT_UNDEFINED:
+        return true
+    format_flags: u64 = Instance_GetFormatFeatureFlags(self, format)
+    return (format_flags & flags) == flags
+
+def Instance_GetSupportedFormat(self: Instance, format: u32, flags: u64) -> u32:
+    if Instance_IsFormatSupported(self, format, flags):
+        return format
+    if format == VK_FORMAT_D24_UNORM_S8_UINT:
+        if Instance_IsFormatSupported(self, VK_FORMAT_D32_SFLOAT_S8_UINT, flags):
+            return VK_FORMAT_D32_SFLOAT_S8_UINT
+    if format == VK_FORMAT_R8G8B8A8_SRGB:
+        if Instance_IsFormatSupported(self, VK_FORMAT_R8G8B8A8_UNORM, flags):
+            return VK_FORMAT_R8G8B8A8_UNORM
+    return format
+
+def Instance_IsDepthBoundsSupported(self: Instance) -> bool:
+    return self.depth_bounds
+
+def Instance_IsDynamicColorWriteMaskSupported(self: Instance) -> bool:
+    return self.dynamic_state_3 and self.dynamic_color_write_mask
+
+def Instance_IsVertexInputDynamicState(self: Instance) -> bool:
+    return self.vertex_input_dynamic_state
+
+def Instance_IsExtendedDynamicState3Supported(self: Instance) -> bool:
+    return self.dynamic_state_3
+
+def Instance_IsAttachmentFeedbackLoopLayoutSupported(self: Instance) -> bool:
+    return self.attachment_feedback_loop
+
+def Instance_IsMaintenance8Supported(self: Instance) -> bool:
+    return self.maintenance_8
+
+def Instance_IsDepthClipControlSupported(self: Instance) -> bool:
+    return self.depth_clip_control
+
+def Instance_IsDepthClipEnableSupported(self: Instance) -> bool:
+    return self.depth_clip_enable
+
+def Instance_IsMixedDepthSamplesSupported(self: Instance) -> bool:
+    return self.mixed_depth_samples
+
+def Instance_IsMixedAnySamplesSupported(self: Instance) -> bool:
+    return self.mixed_any_samples
+
+def Instance_IsLogicOpSupported(self: Instance) -> bool:
+    return self.logic_op
+
+def Instance_IsShaderFloat16Supported(self: Instance) -> bool:
+    return self.shader_float16
+
+def Instance_IsShaderFloat64Supported(self: Instance) -> bool:
+    return self.shader_float64
+
+def Instance_IsShaderInt16Supported(self: Instance) -> bool:
+    return self.shader_int16
+
+def Instance_IsShaderInt64Supported(self: Instance) -> bool:
+    return self.shader_int64
+
+def Instance_IsShaderInt8Supported(self: Instance) -> bool:
+    return self.shader_int8
+
+def Instance_IsSubgroupSize64Supported(self: Instance) -> bool:
+    return self.subgroup_size >= 64u32
+
+def Instance_MaxPushDescriptors(self: Instance) -> u32:
+    if self.driver_id == VK_DRIVER_MOLTENVK:
+        return 0u32
+    return self.max_push_descriptors
+
+def Instance_GetColorSampleCounts(self: Instance) -> u32:
+    return self.color_sample_counts
+
+def Instance_GetDepthSampleCounts(self: Instance) -> u32:
+    return self.depth_sample_counts
+
+def Instance_UniformMinAlignment(self: Instance) -> u64:
+    return self.uniform_min_alignment
+
+def Instance_UniformMaxSize(self: Instance) -> u64:
+    return self.uniform_max_size
+
+def Instance_StorageMinAlignment(self: Instance) -> u64:
+    return self.storage_min_alignment
+
+def Instance_NonCoherentAtomSize(self: Instance) -> u64:
+    return self.non_coherent_atom_size
+
+def Instance_SubgroupSize(self: Instance) -> u32:
+    return self.subgroup_size
+
+def Instance_MaxComputeSharedMemorySize(self: Instance) -> u32:
+    return self.max_compute_shared_memory_size
+
+def Instance_GetMaxViewportWidth(self: Instance) -> u32:
+    return self.max_viewport_width
+
+def Instance_GetMaxViewportHeight(self: Instance) -> u32:
+    return self.max_viewport_height
+
+def Instance_GetMaxFramebufferWidth(self: Instance) -> u32:
+    return self.max_framebuffer_width
+
+def Instance_GetMaxFramebufferHeight(self: Instance) -> u32:
+    return self.max_framebuffer_height
+
+def Instance_CanReportMemoryUsage(self: Instance) -> bool:
+    return self.memory_budget_supported
+
+def Instance_GetTotalMemoryBudget(self: Instance) -> u64:
+    return self.total_memory_budget

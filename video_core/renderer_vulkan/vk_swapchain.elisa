@@ -1,0 +1,190 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./vk_common.elisa"
+include "./vk_instance.elisa"
+
+struct Swapchain:
+    instance: mutable Instance
+    surface: mutable u64
+    swapchain_handle: mutable u64
+    surface_format: mutable VkSurfaceFormat
+    present_mode: mutable u32
+    extent: mutable VkExtent2D
+    width: mutable u32
+    height: mutable u32
+    image_count: mutable u32
+    image_index: mutable u32
+    frame_index: mutable u32
+    needs_recreation: mutable bool
+    needs_hdr: mutable bool
+    supports_hdr: mutable bool
+    images: mutable darray[u64]
+    image_views: mutable darray[u64]
+    image_acquired: mutable darray[u64]
+    present_ready: mutable darray[u64]
+    next_acquire_result: mutable u32
+    next_present_result: mutable u32
+
+def Swapchain_New(instance: Instance, surface: u64, width: u32, height: u32,
+                  supports_hdr: bool = false) -> Swapchain:
+    can Memory.Allocate, Abort.Panic:
+        out: mutable Swapchain = Swapchain(
+            instance,
+            surface,
+            0u64,
+            VkSurfaceFormat_new(VK_FORMAT_R8G8B8A8_UNORM, VK_COLORSPACE_SRGB_NONLINEAR),
+            VK_PRESENT_MODE_FIFO,
+            VkExtent2D_new(width, height),
+            width,
+            height,
+            0u32,
+            0u32,
+            0u32,
+            true,
+            false,
+            supports_hdr,
+            [],
+            [],
+            [],
+            [],
+            VK_RESULT_SUCCESS,
+            VK_RESULT_SUCCESS
+        )
+        Swapchain_FindPresentFormat(out.ref[mutable Swapchain&])
+        Swapchain_FindPresentMode(out.ref[mutable Swapchain&], "Mailbox")
+        Swapchain_Create(out.ref[mutable Swapchain&], width, height)
+        return out
+
+def Swapchain_GetCurrentSurfaceFormat(self: Swapchain) -> VkSurfaceFormat:
+    if self.needs_hdr:
+        return VkSurfaceFormat_new(VK_FORMAT_A2B10G10R10_UNORM_PACK32, VK_COLORSPACE_HDR10_ST2084)
+    return self.surface_format
+
+def Swapchain_GetCurrentImageFormat(self: Swapchain) -> u32:
+    return Swapchain_GetCurrentSurfaceFormat(self).format
+
+def Swapchain_Create(self: mutable Swapchain&, width: u32, height: u32) -> void:
+    can Memory.Allocate, Abort.Panic:
+        self.width <- width
+        self.height <- height
+        self.needs_recreation <- false
+        self.swapchain_handle <- Vk_AllocHandle()
+        Swapchain_SetSurfaceProperties(self)
+        Swapchain_SetupImages(self)
+        Swapchain_RefreshSemaphores(self)
+
+
+def Swapchain_Recreate(self: mutable Swapchain&, width: u32, height: u32) -> void:
+    can Memory.Allocate, Abort.Panic:
+        Swapchain_Create(self, width, height)
+
+
+def Swapchain_SetHDR(self: mutable Swapchain&, hdr: bool) -> void:
+    can Memory.Allocate, Abort.Panic:
+        if self.needs_hdr == hdr:
+            return
+        self.needs_hdr <- hdr and self.supports_hdr
+        Swapchain_Recreate(self, self.width, self.height)
+
+
+def Swapchain_AcquireNextImage(self: mutable Swapchain&) -> bool:
+    if self.next_acquire_result == VK_RESULT_SUCCESS:
+        if self.image_count == 0u32:
+            self.needs_recreation <- true
+            return false
+        self.image_index <- (self.image_index + 1u32) % self.image_count
+        return true
+    if self.next_acquire_result == VK_RESULT_TIMEOUT:
+        self.needs_recreation <- true
+        return false
+    if self.next_acquire_result == VK_RESULT_SUBOPTIMAL or
+       self.next_acquire_result == VK_RESULT_OUT_OF_DATE:
+        self.needs_recreation <- true
+        return false
+    self.needs_recreation <- true
+    return false
+
+def Swapchain_Present(self: mutable Swapchain&) -> bool:
+    if self.next_present_result == VK_RESULT_SUCCESS:
+        if self.image_count != 0u32:
+            self.frame_index <- (self.frame_index + 1u32) % self.image_count
+        return true
+    self.needs_recreation <- true
+    return false
+
+def Swapchain_FindPresentFormat(self: mutable Swapchain&) -> void:
+    if self.supports_hdr and self.needs_hdr:
+        self.surface_format <- VkSurfaceFormat_new(VK_FORMAT_A2B10G10R10_UNORM_PACK32,
+                                                   VK_COLORSPACE_HDR10_ST2084)
+        return
+    self.surface_format <- VkSurfaceFormat_new(VK_FORMAT_R8G8B8A8_UNORM,
+                                               VK_COLORSPACE_SRGB_NONLINEAR)
+
+def Swapchain_FindPresentMode(self: mutable Swapchain&, requested_mode: static u8&) -> void:
+    if VkPlatform_IsMoltenVkSafeModeEnabled() or VkPlatform_IsForceFifoPresentEnabled():
+        self.present_mode <- VK_PRESENT_MODE_FIFO
+        return
+    if requested_mode == "Mailbox":
+        self.present_mode <- VK_PRESENT_MODE_MAILBOX
+        return
+    if requested_mode == "Fifo":
+        self.present_mode <- VK_PRESENT_MODE_FIFO
+        return
+    if requested_mode == "Immediate":
+        self.present_mode <- VK_PRESENT_MODE_IMMEDIATE
+        return
+    self.present_mode <- VK_PRESENT_MODE_FIFO
+
+def Swapchain_SetSurfaceProperties(self: mutable Swapchain&) -> void:
+    self.extent.width <- self.width
+    self.extent.height <- self.height
+    self.image_count <- 3u32
+
+def Swapchain_Destroy(self: mutable Swapchain&) -> void:
+    self.swapchain_handle <- 0u64
+    self.images.count <- 0usize
+    self.image_views.count <- 0usize
+    self.image_acquired.count <- 0usize
+    self.present_ready.count <- 0usize
+
+def Swapchain_RefreshSemaphores(self: mutable Swapchain&) -> void:
+    can Memory.Allocate, Abort.Panic:
+        self.image_acquired.count <- 0usize
+        self.present_ready.count <- 0usize
+        i: mutable u32 = 0u32
+        while i < self.image_count:
+            self.image_acquired.push(Vk_AllocHandle())
+            self.present_ready.push(Vk_AllocHandle())
+            i <- i + 1u32
+
+def Swapchain_SetupImages(self: mutable Swapchain&) -> void:
+    can Memory.Allocate, Abort.Panic:
+        self.images.count <- 0usize
+        self.image_views.count <- 0usize
+        i: mutable u32 = 0u32
+        while i < self.image_count:
+            self.images.push(Vk_AllocHandle())
+            self.image_views.push(Vk_AllocHandle())
+            i <- i + 1u32
+
+
+def Swapchain_Image(self: Swapchain) -> u64:
+    if self.images.count == 0usize:
+        return 0u64
+    return self.images[self.image_index.usize()]
+
+def Swapchain_ImageView(self: Swapchain) -> u64:
+    if self.image_views.count == 0usize:
+        return 0u64
+    return self.image_views[self.image_index.usize()]
+
+def Swapchain_GetImageAcquiredSemaphore(self: Swapchain) -> u64:
+    if self.image_acquired.count == 0usize:
+        return 0u64
+    return self.image_acquired[self.frame_index.usize()]
+
+def Swapchain_GetPresentReadySemaphore(self: Swapchain) -> u64:
+    if self.present_ready.count == 0usize:
+        return 0u64
+    return self.present_ready[self.image_index.usize()]

@@ -1,0 +1,159 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+# Elisa port of shader_recompiler/frontend/copy_shader.{h,cpp}
+
+include "./instruction.elisa"
+include "./decode.elisa"
+
+const IR_ATTRIBUTE_POSITION0: u32 = 12u32
+const IR_ATTRIBUTE_PARAM0: u32 = 32u32
+
+const COPY_SHADER_MAX_ATTRS: u32 = 256u32
+
+struct CopyShaderData:
+    attr_map_offsets: mutable u32[256]
+    attr_map_semantics: mutable u32[256]
+    attr_map_components: mutable u32[256]
+    attr_map_count: mutable u32
+    num_attrs: mutable u32
+    output_vertices: mutable u32
+    num_comps: mutable u32
+
+
+def CopyShaderData_Default() -> CopyShaderData:
+    out: mutable CopyShaderData = zeroed
+    out.attr_map_count <- 0u32
+    out.num_attrs <- 0u32
+    out.output_vertices <- 0u32
+    out.num_comps <- 0u32
+    return out
+
+
+def _copy_shader_is_position(attribute: u32) -> bool:
+    return attribute >= 12u32 and attribute <= 15u32
+
+
+def _copy_shader_attr_map_set(data: mutable CopyShaderData&, offset: u32, semantic: u32, component: u32) -> void:
+    i: mutable u32 = 0u32
+    while i < data.attr_map_count:
+        if data.attr_map_offsets[i.usize()] == offset:
+            data.attr_map_semantics[i.usize()] <- semantic
+            data.attr_map_components[i.usize()] <- component
+            return
+        i <- i + 1u32
+    if data.attr_map_count < COPY_SHADER_MAX_ATTRS:
+        idx: u32 = data.attr_map_count
+        data.attr_map_offsets[idx.usize()] <- offset
+        data.attr_map_semantics[idx.usize()] <- semantic
+        data.attr_map_components[idx.usize()] <- component
+        data.attr_map_count <- data.attr_map_count + 1u32
+
+
+def _copy_shader_second_smallest_offset(data: CopyShaderData&) -> u32:
+    smallest: u32 = 0xFFFFFFFFu32
+    second: u32 = 0xFFFFFFFFu32
+    i: mutable u32 = 0u32
+    while i < data.attr_map_count:
+        ofs: u32 = data.attr_map_offsets[i.usize()]
+        if ofs < smallest:
+            second <- smallest
+            smallest <- ofs
+        else:
+            if ofs < second and ofs != smallest:
+            second <- ofs
+        i <- i + 1u32
+    return second
+
+
+def ParseCopyShader(code_words: u32&, word_count: u32) -> CopyShaderData:
+    slice: mutable GcnCodeSlice = zeroed
+    GcnCodeSlice_Init(slice, code_words, word_count)
+    decoder: mutable GcnDecodeContext = zeroed
+
+    offsets: mutable int[64] = zeroed
+    oi: mutable u32 = 0u32
+    while oi < 64u32:
+        offsets[oi.usize()] <- -1
+        oi <- oi + 1u32
+
+    sources: mutable int[256] = zeroed
+    si: mutable u32 = 0u32
+    while si < 256u32:
+        sources[si.usize()] <- -1
+        si <- si + 1u32
+
+    data: mutable CopyShaderData = CopyShaderData_Default()
+    last_attr: mutable u32 = IR_ATTRIBUTE_POSITION0
+
+    while not GcnCodeSlice_atEnd(slice):
+        inst: GcnInst = GcnDecodeContext_decodeInstruction(decoder, slice.ref[mutable GcnCodeSlice&])
+
+        if inst.opcode == OPCODE_S_LSHL_B32:
+            if inst.src[0].field == OPERAND_FIELD_SIGNED_CONST_INT_POS and inst.src[1].field == OPERAND_FIELD_SIGNED_CONST_INT_POS:
+                src0: int = (inst.src[0].code - OPERAND_FIELD_RANGE_SIGNED_CONST_POS_MIN + 1u32).int()
+                src1: int = (inst.src[1].code - OPERAND_FIELD_RANGE_SIGNED_CONST_POS_MIN + 1u32).int()
+                if inst.dst[0].code < 256u32:
+                    sources[inst.dst[0].code.usize()] <- src0 << src1
+
+        else:
+            if inst.opcode == OPCODE_S_MOVK_I32:
+            if inst.dst[0].code < 256u32:
+                sources[inst.dst[0].code.usize()] <- inst.control_sopk_simm
+
+        else:
+            if inst.opcode == OPCODE_S_MOV_B32:
+            if inst.dst[0].code < 256u32:
+                sources[inst.dst[0].code.usize()] <- inst.src[0].code.int()
+
+        else:
+            if inst.opcode == OPCODE_S_ADDK_I32:
+            if inst.dst[0].code < 256u32:
+                sources[inst.dst[0].code.usize()] <- sources[inst.dst[0].code.usize()] + inst.control_sopk_simm
+
+        else:
+            if inst.opcode == OPCODE_S_BFM_B32:
+            if inst.src[0].field == OPERAND_FIELD_SIGNED_CONST_INT_POS and inst.src[1].field == OPERAND_FIELD_SIGNED_CONST_INT_POS:
+                src0: int = (inst.src[0].code - OPERAND_FIELD_RANGE_SIGNED_CONST_POS_MIN + 1u32).int()
+                src1: int = (inst.src[1].code - OPERAND_FIELD_RANGE_SIGNED_CONST_POS_MIN + 1u32).int()
+                if inst.dst[0].code < 256u32:
+                    sources[inst.dst[0].code.usize()] <- ((1i64 << src0.i64()) - 1i64 << src1.i64()).int()
+
+        else:
+            if inst.opcode == OP_MAP_EXP:
+            semantic: u32 = inst.control_exp_target
+            i: mutable u32 = 0u32
+            while i < inst.src_count and i < GCN_MAX_SRC_COUNT:
+                if (inst.control_exp_en & (1u32 << i)) != 0u32:
+                    src_code: u32 = inst.src[i.usize()].code
+                    if src_code < 64u32 and offsets[src_code.usize()] != -1:
+                        _copy_shader_attr_map_set(data, offsets[src_code.usize()].u32(), semantic, i)
+                        if semantic > last_attr:
+                            last_attr <- semantic
+                i <- i + 1u32
+
+        else:
+            if inst.opcode == OPCODE_BUFFER_LOAD_DWORD:
+            if inst.src[1].code < 64u32:
+                ofs: int = inst.control_mubuf_offset.int()
+                if inst.src[3].field != OPERAND_FIELD_CONST_ZERO:
+                    idx: u32 = inst.src[3].code
+                    if idx < 256u32 and sources[idx.usize()] != -1:
+                        ofs <- ofs + sources[idx.usize()]
+                offsets[inst.src[1].code.usize()] <- ofs
+                data.num_comps <- data.num_comps + 1u32
+
+    if not _copy_shader_is_position(last_attr):
+        data.num_attrs <- (last_attr - IR_ATTRIBUTE_PARAM0) + 1u32
+        if data.attr_map_count >= 2u32:
+            first: u32 = 0xFFFFFFFFu32
+            i2: mutable u32 = 0u32
+            while i2 < data.attr_map_count:
+                if data.attr_map_offsets[i2.usize()] < first:
+                    first <- data.attr_map_offsets[i2.usize()]
+                i2 <- i2 + 1u32
+            second: u32 = _copy_shader_second_smallest_offset(data)
+            if second != 0xFFFFFFFFu32 and second >= first:
+                data.output_vertices <- (second - first) / 64u32
+
+    return data

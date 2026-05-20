@@ -1,0 +1,102 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./vk_common.elisa"
+
+enum WindowSystemType:
+    Headless
+    Windows
+    X11
+    Wayland
+    Metal
+
+struct VkPlatformInstance:
+    handle: mutable u64
+    window_type: mutable WindowSystemType
+    validation_enabled: mutable bool
+    crash_diagnostic_enabled: mutable bool
+    extensions: mutable darray[static u8&]
+    layers: mutable darray[static u8&]
+
+global mutable g_moltenvk_safe_mode_enabled: bool = false
+global mutable g_force_fifo_present_enabled: bool = false
+
+def VkPlatform_SetMoltenVkSafeModeEnabled(enabled: bool) -> void:
+    g_moltenvk_safe_mode_enabled <- enabled
+
+def VkPlatform_IsMoltenVkSafeModeEnabled() -> bool:
+    return g_moltenvk_safe_mode_enabled
+
+def VkPlatform_SetForceFifoPresentEnabled(enabled: bool) -> void:
+    g_force_fifo_present_enabled <- enabled
+
+def VkPlatform_IsForceFifoPresentEnabled() -> bool:
+    return g_force_fifo_present_enabled
+
+def CreateSurface(instance_handle: u64, window_type: WindowSystemType) -> u64:
+    _ = instance_handle
+    if window_type == WindowSystemType.Headless:
+        return 0u64
+    return Vk_AllocHandle()
+
+def GetInstanceExtensions(window_type: WindowSystemType, enable_debug_utils: bool,
+                          hdr_allowed: bool = false) -> darray[static u8&]:
+    can Memory.Allocate, Abort.Panic:
+        out: mutable darray[static u8&] = []
+        if window_type == WindowSystemType.Windows:
+            out.push("VK_KHR_win32_surface")
+        if window_type == WindowSystemType.X11:
+            out.push("VK_KHR_xlib_surface")
+        if window_type == WindowSystemType.Wayland:
+            out.push("VK_KHR_wayland_surface")
+        if window_type == WindowSystemType.Metal:
+            out.push("VK_EXT_metal_surface")
+            out.push("VK_KHR_portability_enumeration")
+        if window_type != WindowSystemType.Headless:
+            out.push("VK_KHR_surface")
+        if hdr_allowed:
+            out.push("VK_EXT_swapchain_colorspace")
+        if enable_debug_utils:
+            out.push("VK_EXT_debug_utils")
+        return out
+
+def GetInstanceLayers(enable_validation: bool, enable_crash_diagnostic: bool,
+                      validation_layer_available: bool = true,
+                      crash_layer_available: bool = true) -> darray[static u8&]:
+    can Memory.Allocate, Abort.Panic:
+        out: mutable darray[static u8&] = []
+        if enable_validation and validation_layer_available:
+            out.push("VK_LAYER_KHRONOS_validation")
+        if enable_crash_diagnostic and crash_layer_available:
+            out.push("VK_LAYER_LUNARG_crash_diagnostic")
+        return out
+
+def CreateInstance(window_type: WindowSystemType, enable_validation: bool,
+                   enable_crash_diagnostic: bool, hdr_allowed: bool = false) -> VkPlatformInstance:
+    can Memory.Allocate, Abort.Panic:
+        extensions: darray[static u8&] = GetInstanceExtensions(window_type, true, hdr_allowed)
+        layers: darray[static u8&] = GetInstanceLayers(enable_validation, enable_crash_diagnostic)
+        return VkPlatformInstance(
+            Vk_AllocHandle(),
+            window_type,
+            enable_validation,
+            enable_crash_diagnostic,
+            extensions,
+            layers
+        )
+
+def CreateDebugCallback(instance_handle: u64) -> u64:
+    _ = instance_handle
+    return Vk_AllocHandle()
+
+struct VkResultValue[T]:
+    result: mutable u32
+    value: mutable T
+
+def Check(result: u32) -> bool:
+    return result == VK_RESULT_SUCCESS
+
+def CheckValue[T](result: VkResultValue[T]) -> T?:
+    if result.result != VK_RESULT_SUCCESS:
+        return null
+    return result.value

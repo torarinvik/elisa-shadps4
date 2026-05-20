@@ -1,0 +1,488 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+# Elisa port of shader_recompiler/frontend/decode.{h,cpp}
+
+include "./instruction.elisa"
+include "./format.elisa"
+
+const ENCODING_MASK_9BIT: u32 = 4286578688u32
+const ENCODING_MASK_7BIT: u32 = 4261412864u32
+const ENCODING_MASK_6BIT: u32 = 4227858432u32
+const ENCODING_MASK_5BIT: u32 = 4160749568u32
+const ENCODING_MASK_4BIT: u32 = 4026531840u32
+const ENCODING_MASK_2BIT: u32 = 3221225472u32
+const ENCODING_MASK_1BIT: u32 = 2147483648u32
+
+const OP_MAP_SOP2: u32 = 0u32
+const OP_MAP_SOPK: u32 = 45u32
+const OP_MAP_SOP1: u32 = 67u32
+const OP_MAP_SOPC: u32 = 121u32
+const OP_MAP_SOPP: u32 = 138u32
+const OP_MAP_VOPC: u32 = 165u32
+const OP_MAP_VOP2: u32 = 413u32
+const OP_MAP_VOP1: u32 = 506u32
+const OP_MAP_VOP3: u32 = 580u32
+const OP_MAP_VINTRP: u32 = 1604u32
+const OP_MAP_SMRD: u32 = 1586u32
+const OP_MAP_DS: u32 = 1618u32
+const OP_MAP_MUBUF: u32 = 1874u32
+const OP_MAP_MTBUF: u32 = 1988u32
+const OP_MAP_MIMG: u32 = 1996u32
+const OP_MAP_EXP: u32 = 2108u32
+
+const GCN_CODE_SLICE_MAX_WORDS: u32 = 4096u32
+
+struct GcnCodeSlice:
+    words: mutable u32[4096]
+    word_count: mutable u32
+    index: mutable u32
+
+struct GcnDecodeContext:
+    current_inst: mutable GcnInst
+
+
+def _min_u32(a: u32, b: u32) -> u32:
+    if a < b:
+        return a
+    return b
+
+
+def _bit_extract_u32(value: u32, lst: u32, fst: u32) -> u32:
+    width: u32 = (lst - fst) + 1u32
+    mask: u32 = 0xFFFFFFFFu32
+    if width < 32u32:
+        mask <- (1u32 << width) - 1u32
+    return (value >> fst) & mask
+
+
+def _bit_extract_u64(value: u64, lst: u32, fst: u32) -> u32:
+    width: u32 = (lst - fst) + 1u32
+    mask: u64 = 0xFFFFFFFFFFFFFFFFu64
+    if width < 64u32:
+        mask <- (1u64 << width) - 1u64
+    return ((value >> fst) & mask).u32()
+
+
+def GcnCodeSlice_Init(slice: mutable GcnCodeSlice&, words: u32&, word_count: u32) -> void:
+    slice.word_count <- _min_u32(word_count, GCN_CODE_SLICE_MAX_WORDS)
+    slice.index <- 0u32
+    i: mutable u32 = 0u32
+    while i < slice.word_count:
+        slice.words[i.usize()] <- words[i.usize()]
+        i <- i + 1u32
+
+
+def GcnCodeSlice_at(slice: GcnCodeSlice&, id: u32) -> u32:
+    return slice.words[(slice.index + id).usize()]
+
+
+def GcnCodeSlice_readu32(slice: mutable GcnCodeSlice&) -> u32:
+    value: u32 = slice.words[slice.index.usize()]
+    slice.index <- slice.index + 1u32
+    return value
+
+
+def GcnCodeSlice_readu64(slice: mutable GcnCodeSlice&) -> u64:
+    lo: u64 = GcnCodeSlice_readu32(slice).u64()
+    hi: u64 = GcnCodeSlice_readu32(slice).u64()
+    return lo | (hi << 32u64)
+
+
+def GcnCodeSlice_atEnd(slice: GcnCodeSlice&) -> bool:
+    return slice.index >= slice.word_count
+
+
+def GetInstructionEncoding(token: u32) -> u32:
+    encoding: u32 = token & ENCODING_MASK_9BIT
+    if encoding == INST_ENCODING_SOP1:
+        return encoding
+    if encoding == INST_ENCODING_SOPP:
+        return encoding
+    if encoding == INST_ENCODING_SOPC:
+        return encoding
+
+    encoding <- token & ENCODING_MASK_7BIT
+    if encoding == INST_ENCODING_VOP1:
+        return encoding
+    if encoding == INST_ENCODING_VOPC:
+        return encoding
+
+    encoding <- token & ENCODING_MASK_6BIT
+    if encoding == INST_ENCODING_VOP3:
+        return encoding
+    if encoding == INST_ENCODING_VOP3P:
+        return encoding
+    if encoding == INST_ENCODING_EXP:
+        return encoding
+    if encoding == INST_ENCODING_VINTRP:
+        return encoding
+    if encoding == INST_ENCODING_DS:
+        return encoding
+    if encoding == INST_ENCODING_MUBUF:
+        return encoding
+    if encoding == INST_ENCODING_MTBUF:
+        return encoding
+    if encoding == INST_ENCODING_MIMG:
+        return encoding
+
+    encoding <- token & ENCODING_MASK_5BIT
+    if encoding == INST_ENCODING_SMRD:
+        return encoding
+
+    encoding <- token & ENCODING_MASK_4BIT
+    if encoding == INST_ENCODING_SOPK:
+        return encoding
+
+    encoding <- token & ENCODING_MASK_2BIT
+    if encoding == INST_ENCODING_SOP2:
+        return encoding
+
+    encoding <- token & ENCODING_MASK_1BIT
+    if encoding == INST_ENCODING_VOP2:
+        return encoding
+
+    return INST_ENCODING_ILLEGAL
+
+
+def GetEncodingLength(encoding: u32) -> u32:
+    if encoding == INST_ENCODING_SOP1:
+        return 4u32
+    if encoding == INST_ENCODING_SOPP:
+        return 4u32
+    if encoding == INST_ENCODING_SOPC:
+        return 4u32
+    if encoding == INST_ENCODING_SOPK:
+        return 4u32
+    if encoding == INST_ENCODING_SOP2:
+        return 4u32
+    if encoding == INST_ENCODING_VOP1:
+        return 4u32
+    if encoding == INST_ENCODING_VOPC:
+        return 4u32
+    if encoding == INST_ENCODING_VOP2:
+        return 4u32
+    if encoding == INST_ENCODING_SMRD:
+        return 4u32
+    if encoding == INST_ENCODING_VINTRP:
+        return 4u32
+
+    if encoding == INST_ENCODING_VOP3:
+        return 8u32
+    if encoding == INST_ENCODING_VOP3P:
+        return 8u32
+    if encoding == INST_ENCODING_MUBUF:
+        return 8u32
+    if encoding == INST_ENCODING_MTBUF:
+        return 8u32
+    if encoding == INST_ENCODING_MIMG:
+        return 8u32
+    if encoding == INST_ENCODING_DS:
+        return 8u32
+    if encoding == INST_ENCODING_EXP:
+        return 8u32
+
+    return 0u32
+
+
+def _get_operand_field(code: u32) -> u32:
+    if code >= OPERAND_FIELD_RANGE_SCALAR_GPR_MIN and code <= OPERAND_FIELD_RANGE_SCALAR_GPR_MAX:
+        return OPERAND_FIELD_SCALAR_GPR
+    if code >= OPERAND_FIELD_RANGE_SIGNED_CONST_POS_MIN and code <= OPERAND_FIELD_RANGE_SIGNED_CONST_POS_MAX:
+        return OPERAND_FIELD_SIGNED_CONST_INT_POS
+    if code >= OPERAND_FIELD_RANGE_SIGNED_CONST_NEG_MIN and code <= OPERAND_FIELD_RANGE_SIGNED_CONST_NEG_MAX:
+        return OPERAND_FIELD_SIGNED_CONST_INT_NEG
+    if code >= OPERAND_FIELD_RANGE_VECTOR_GPR_MIN and code <= OPERAND_FIELD_RANGE_VECTOR_GPR_MAX:
+        return OPERAND_FIELD_VECTOR_GPR
+    return code
+
+
+def _apply_inst_format(inst: mutable GcnInst&, encoding: u32, encoding_op: u32) -> void:
+    fmt: InstFormat = InstructionFormat(encoding, encoding_op)
+    inst.inst_class <- fmt.inst_class
+    inst.category <- fmt.inst_category
+    inst.encoding <- encoding
+    inst.src_count <- fmt.src_count
+    inst.dst_count <- fmt.dst_count
+
+    i: mutable u32 = 0u32
+    while i < inst.src_count and i < GCN_MAX_SRC_COUNT:
+        if inst.src[i.usize()].type_ == SCALAR_TYPE_UNDEFINED:
+            inst.src[i.usize()].type_ <- fmt.src_type
+        i <- i + 1u32
+
+    if inst.dst_count >= 1u32:
+        if inst.dst[0].type_ == SCALAR_TYPE_UNDEFINED:
+            inst.dst[0].type_ <- fmt.dst_type
+
+
+def _decode_instruction_sop1(inst: mutable GcnInst&, hex_instruction: u32) -> u32:
+    ssrc0: u32 = _bit_extract_u32(hex_instruction, 7u32, 0u32)
+    op: u32 = _bit_extract_u32(hex_instruction, 15u32, 8u32)
+    sdst: u32 = _bit_extract_u32(hex_instruction, 22u32, 16u32)
+
+    inst.opcode <- op + OP_MAP_SOP1
+    inst.src[0].field <- _get_operand_field(ssrc0)
+    inst.src[0].code <- ssrc0
+    inst.dst[0].field <- _get_operand_field(sdst)
+    inst.dst[0].code <- sdst
+    return op
+
+
+def _decode_instruction_sopp(inst: mutable GcnInst&, hex_instruction: u32) -> u32:
+    op: u32 = _bit_extract_u32(hex_instruction, 22u32, 16u32)
+    simm_u: u32 = _bit_extract_u32(hex_instruction, 15u32, 0u32)
+    inst.opcode <- op + OP_MAP_SOPP
+    if simm_u >= 0x8000u32:
+        inst.control_sopp_simm <- (simm_u.i64() - 0x10000i64).int()
+    else:
+        inst.control_sopp_simm <- simm_u.int()
+    return op
+
+
+def _decode_instruction_sopk(inst: mutable GcnInst&, hex_instruction: u32) -> u32:
+    sdst: u32 = _bit_extract_u32(hex_instruction, 22u32, 16u32)
+    op: u32 = _bit_extract_u32(hex_instruction, 27u32, 23u32)
+    simm_u: u32 = _bit_extract_u32(hex_instruction, 15u32, 0u32)
+
+    inst.opcode <- op + OP_MAP_SOPK
+    inst.dst[0].field <- _get_operand_field(sdst)
+    inst.dst[0].code <- sdst
+    if simm_u >= 0x8000u32:
+        inst.control_sopk_simm <- (simm_u.i64() - 0x10000i64).int()
+    else:
+        inst.control_sopk_simm <- simm_u.int()
+    return op
+
+
+def _decode_instruction_sop2(inst: mutable GcnInst&, hex_instruction: u32) -> u32:
+    ssrc0: u32 = _bit_extract_u32(hex_instruction, 7u32, 0u32)
+    ssrc1: u32 = _bit_extract_u32(hex_instruction, 15u32, 8u32)
+    sdst: u32 = _bit_extract_u32(hex_instruction, 22u32, 16u32)
+    op: u32 = _bit_extract_u32(hex_instruction, 29u32, 23u32)
+
+    inst.opcode <- op + OP_MAP_SOP2
+    inst.src[0].field <- _get_operand_field(ssrc0)
+    inst.src[0].code <- ssrc0
+    inst.src[1].field <- _get_operand_field(ssrc1)
+    inst.src[1].code <- ssrc1
+    inst.dst[0].field <- _get_operand_field(sdst)
+    inst.dst[0].code <- sdst
+    return op
+
+
+def _decode_instruction_vop2(inst: mutable GcnInst&, hex_instruction: u32) -> u32:
+    src0: u32 = _bit_extract_u32(hex_instruction, 8u32, 0u32)
+    vsrc1: u32 = _bit_extract_u32(hex_instruction, 16u32, 9u32)
+    vdst: u32 = _bit_extract_u32(hex_instruction, 24u32, 17u32)
+    op: u32 = _bit_extract_u32(hex_instruction, 30u32, 25u32)
+
+    inst.opcode <- op + OP_MAP_VOP2
+
+    inst.src[0].field <- _get_operand_field(src0)
+    if inst.src[0].field == OPERAND_FIELD_VECTOR_GPR:
+        inst.src[0].code <- src0 - OPERAND_FIELD_VECTOR_GPR
+    else:
+        inst.src[0].code <- src0
+    inst.src[1].field <- OPERAND_FIELD_VECTOR_GPR
+    inst.src[1].code <- vsrc1
+    inst.dst[0].field <- OPERAND_FIELD_VECTOR_GPR
+    inst.dst[0].code <- vdst
+
+    if op == 1u32:
+        inst.src[1].field <- _get_operand_field(vsrc1)
+        inst.dst[0].field <- _get_operand_field(vdst)
+        inst.dst[0].type_ <- SCALAR_TYPE_UINT32
+    else:
+        if op == 2u32:
+        inst.src[1].field <- _get_operand_field(vsrc1)
+
+    return op
+
+
+def _decode_instruction_smrd(inst: mutable GcnInst&, hex_instruction: u32) -> u32:
+    sbase: u32 = _bit_extract_u32(hex_instruction, 14u32, 9u32)
+    sdst: u32 = _bit_extract_u32(hex_instruction, 21u32, 15u32)
+    op: u32 = _bit_extract_u32(hex_instruction, 26u32, 22u32)
+
+    inst.opcode <- op + OP_MAP_SMRD
+    inst.src[0].field <- OPERAND_FIELD_SCALAR_GPR
+    inst.src[0].code <- sbase
+    inst.dst[0].field <- OPERAND_FIELD_SCALAR_GPR
+    inst.dst[0].code <- sdst
+
+    inst.control_smrd_offset <- _bit_extract_u32(hex_instruction, 7u32, 0u32)
+    inst.control_smrd_imm <- _bit_extract_u32(hex_instruction, 8u32, 8u32) == 1u32
+
+    if op <= 4u32:
+        inst.control_smrd_count <- 1u32 << op
+    else:
+        if op >= 8u32 and op <= 12u32:
+        inst.control_smrd_count <- 1u32 << (op - 8u32)
+
+    if not inst.control_smrd_imm:
+        code: u32 = inst.control_smrd_offset
+        inst.src[1].field <- _get_operand_field(code)
+        inst.src[1].type_ <- SCALAR_TYPE_UINT32
+        inst.src[1].code <- code
+
+    return op
+
+
+def _decode_instruction_mubuf(inst: mutable GcnInst&, hex_instruction: u64) -> u32:
+    op: u32 = _bit_extract_u64(hex_instruction, 24u32, 18u32)
+    vaddr: u32 = _bit_extract_u64(hex_instruction, 39u32, 32u32)
+    vdata: u32 = _bit_extract_u64(hex_instruction, 47u32, 40u32)
+    srsrc: u32 = _bit_extract_u64(hex_instruction, 52u32, 48u32)
+    soffset: u32 = _bit_extract_u64(hex_instruction, 63u32, 56u32)
+
+    inst.opcode <- op + OP_MAP_MUBUF
+
+    inst.src[0].field <- OPERAND_FIELD_VECTOR_GPR
+    inst.src[0].code <- vaddr
+    inst.src[1].field <- OPERAND_FIELD_VECTOR_GPR
+    inst.src[1].code <- vdata
+    inst.src[2].field <- OPERAND_FIELD_SCALAR_GPR
+    inst.src[2].code <- srsrc
+    inst.src[3].field <- _get_operand_field(soffset)
+    inst.src[3].code <- soffset
+
+    inst.control_mubuf_offset <- _bit_extract_u64(hex_instruction, 11u32, 0u32)
+
+    if op >= 0u32 and op <= 3u32:
+        inst.control_mubuf_count <- op + 1u32
+        inst.control_mubuf_size <- (op + 1u32) * 4u32
+    else:
+        if op == 12u32:
+        inst.control_mubuf_count <- 1u32
+        inst.control_mubuf_size <- 4u32
+
+    return op
+
+
+def _decode_instruction_mtbuf(inst: mutable GcnInst&, hex_instruction: u64) -> u32:
+    op: u32 = _bit_extract_u64(hex_instruction, 18u32, 16u32)
+    vaddr: u32 = _bit_extract_u64(hex_instruction, 39u32, 32u32)
+    vdata: u32 = _bit_extract_u64(hex_instruction, 47u32, 40u32)
+    srsrc: u32 = _bit_extract_u64(hex_instruction, 52u32, 48u32)
+    soffset: u32 = _bit_extract_u64(hex_instruction, 63u32, 56u32)
+
+    inst.opcode <- op + OP_MAP_MTBUF
+
+    inst.src[0].field <- OPERAND_FIELD_VECTOR_GPR
+    inst.src[0].code <- vaddr
+    inst.src[1].field <- OPERAND_FIELD_VECTOR_GPR
+    inst.src[1].code <- vdata
+    inst.src[2].field <- OPERAND_FIELD_SCALAR_GPR
+    inst.src[2].code <- srsrc
+    inst.src[3].field <- _get_operand_field(soffset)
+    inst.src[3].code <- soffset
+
+    inst.control_mtbuf_offset <- _bit_extract_u64(hex_instruction, 11u32, 0u32)
+    inst.control_mtbuf_dfmt <- _bit_extract_u64(hex_instruction, 22u32, 19u32)
+    inst.control_mtbuf_nfmt <- _bit_extract_u64(hex_instruction, 25u32, 23u32)
+
+    if op <= 3u32:
+        inst.control_mtbuf_count <- op + 1u32
+        inst.control_mubuf_count <- op + 1u32
+    else:
+        if op >= 4u32 and op <= 7u32:
+        inst.control_mtbuf_count <- op - 3u32
+        inst.control_mubuf_count <- op - 3u32
+
+    return op
+
+
+def _decode_instruction_exp(inst: mutable GcnInst&, hex_instruction: u64) -> u32:
+    vsrc0: u32 = _bit_extract_u64(hex_instruction, 39u32, 32u32)
+    vsrc1: u32 = _bit_extract_u64(hex_instruction, 47u32, 40u32)
+    vsrc2: u32 = _bit_extract_u64(hex_instruction, 55u32, 48u32)
+    vsrc3: u32 = _bit_extract_u64(hex_instruction, 63u32, 56u32)
+
+    inst.opcode <- OP_MAP_EXP
+
+    inst.src[0].field <- OPERAND_FIELD_VECTOR_GPR
+    inst.src[0].code <- vsrc0
+    inst.src[1].field <- OPERAND_FIELD_VECTOR_GPR
+    inst.src[1].code <- vsrc1
+    inst.src[2].field <- OPERAND_FIELD_VECTOR_GPR
+    inst.src[2].code <- vsrc2
+    inst.src[3].field <- OPERAND_FIELD_VECTOR_GPR
+    inst.src[3].code <- vsrc3
+
+    inst.control_exp_en <- _bit_extract_u64(hex_instruction, 3u32, 0u32)
+    inst.control_exp_target <- _bit_extract_u64(hex_instruction, 9u32, 4u32)
+    return 0u32
+
+
+def _decode_literal_constant_if_present(inst: mutable GcnInst&, code: mutable GcnCodeSlice&) -> void:
+    i: mutable u32 = 0u32
+    while i < inst.src_count and i < GCN_MAX_SRC_COUNT:
+        if inst.src[i.usize()].field == OPERAND_FIELD_LITERAL_CONST and not GcnCodeSlice_atEnd(code):
+            inst.src[i.usize()].code <- GcnCodeSlice_readu32(code)
+            inst.length <- inst.length + 4u32
+            return
+        i <- i + 1u32
+
+
+def GcnDecodeContext_decodeInstruction(self: mutable GcnDecodeContext&, code: mutable GcnCodeSlice&) -> GcnInst:
+    token: u32 = GcnCodeSlice_at(code, 0u32)
+    encoding: u32 = GetInstructionEncoding(token)
+
+    inst: mutable GcnInst = GcnInst_Default()
+    if encoding == INST_ENCODING_ILLEGAL:
+        self.current_inst <- inst
+        return inst
+
+    inst.length <- GetEncodingLength(encoding)
+
+    encoding_op: u32 = 0xFFFFFFFFu32
+    if inst.length == 4u32:
+        hex_instruction: u32 = GcnCodeSlice_readu32(code)
+        if encoding == INST_ENCODING_SOP1:
+            encoding_op <- _decode_instruction_sop1(inst, hex_instruction)
+        else:
+            if encoding == INST_ENCODING_SOPP:
+            encoding_op <- _decode_instruction_sopp(inst, hex_instruction)
+        else:
+            if encoding == INST_ENCODING_SOPK:
+            encoding_op <- _decode_instruction_sopk(inst, hex_instruction)
+        else:
+            if encoding == INST_ENCODING_SOP2:
+            encoding_op <- _decode_instruction_sop2(inst, hex_instruction)
+        else:
+            if encoding == INST_ENCODING_VOP2:
+            encoding_op <- _decode_instruction_vop2(inst, hex_instruction)
+        else:
+            if encoding == INST_ENCODING_SMRD:
+            encoding_op <- _decode_instruction_smrd(inst, hex_instruction)
+    else:
+        hex_instruction64: u64 = GcnCodeSlice_readu64(code)
+        if encoding == INST_ENCODING_MUBUF:
+            encoding_op <- _decode_instruction_mubuf(inst, hex_instruction64)
+        else:
+            if encoding == INST_ENCODING_MTBUF:
+            encoding_op <- _decode_instruction_mtbuf(inst, hex_instruction64)
+        else:
+            if encoding == INST_ENCODING_EXP:
+            encoding_op <- _decode_instruction_exp(inst, hex_instruction64)
+
+    if encoding_op != 0xFFFFFFFFu32:
+        _apply_inst_format(inst, encoding, encoding_op)
+
+    if inst.length == 4u32:
+        _decode_literal_constant_if_present(inst, code)
+
+    self.current_inst <- inst
+    return inst
+
+
+def DecodeOpcode(token: u32) -> u32:
+    words: mutable u32[2] = zeroed
+    words[0] <- token
+    words[1] <- 0u32
+    slice: mutable GcnCodeSlice = zeroed
+    GcnCodeSlice_Init(slice, words[0].ref[u32&], 2u32)
+    ctx: mutable GcnDecodeContext = zeroed
+    inst: GcnInst = GcnDecodeContext_decodeInstruction(ctx, slice.ref[mutable GcnCodeSlice&])
+    return inst.opcode

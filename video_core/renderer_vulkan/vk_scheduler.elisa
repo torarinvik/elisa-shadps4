@@ -1,0 +1,398 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./vk_common.elisa"
+include "./vk_instance.elisa"
+include "./vk_master_semaphore.elisa"
+include "./vk_resource_pool.elisa"
+
+struct RenderAttachment:
+    image_view: mutable u64
+    image_layout: mutable u32
+    clear_value: mutable u32[4]
+    has_depth: mutable bool
+    depth_clear: mutable bool
+    has_stencil: mutable bool
+    stencil_clear: mutable bool
+
+struct RenderState:
+    color_attachments: mutable RenderAttachment[8]
+    depth_stencil_attachment: mutable RenderAttachment
+    width: mutable u16
+    height: mutable u16
+    num_layers: mutable u16
+    num_color_attachments: mutable u16
+
+struct SubmitInfo:
+    wait_semas: mutable u64[3]
+    wait_ticks: mutable u64[3]
+    signal_semas: mutable u64[3]
+    signal_ticks: mutable u64[3]
+    fence: mutable u64
+    num_wait_semas: mutable u32
+    num_signal_semas: mutable u32
+
+def SubmitInfo_New() -> SubmitInfo:
+    return SubmitInfo([0u64, 0u64, 0u64], [0u64, 0u64, 0u64], [0u64, 0u64, 0u64], [0u64, 0u64, 0u64], 0u64, 0u32, 0u32)
+
+def SubmitInfo_AddWait(self: mutable SubmitInfo&, semaphore: u64, tick: u64 = 1u64) -> bool:
+    if self.num_wait_semas >= 3u32:
+        return false
+    self.wait_semas[self.num_wait_semas.usize()] <- semaphore
+    self.wait_ticks[self.num_wait_semas.usize()] <- tick
+    self.num_wait_semas <- self.num_wait_semas + 1u32
+    return true
+
+def SubmitInfo_AddSignal(self: mutable SubmitInfo&, semaphore: u64, tick: u64 = 1u64) -> bool:
+    if self.num_signal_semas >= 3u32:
+        return false
+    self.signal_semas[self.num_signal_semas.usize()] <- semaphore
+    self.signal_ticks[self.num_signal_semas.usize()] <- tick
+    self.num_signal_semas <- self.num_signal_semas + 1u32
+    return true
+
+def SubmitInfo_AddFence(self: mutable SubmitInfo&, fence: u64) -> void:
+    self.fence <- fence
+
+struct DynamicState:
+    dirty_viewports: mutable bool
+    dirty_scissors: mutable bool
+    dirty_depth_test_enabled: mutable bool
+    dirty_depth_write_enabled: mutable bool
+    dirty_depth_compare_op: mutable bool
+    dirty_depth_bounds_test_enabled: mutable bool
+    dirty_depth_bounds: mutable bool
+    dirty_depth_bias_enabled: mutable bool
+    dirty_depth_bias: mutable bool
+    dirty_stencil_test_enabled: mutable bool
+    dirty_primitive_restart_enable: mutable bool
+    dirty_rasterizer_discard_enable: mutable bool
+    dirty_cull_mode: mutable bool
+    dirty_front_face: mutable bool
+    dirty_blend_constants: mutable bool
+    dirty_color_write_masks: mutable bool
+    dirty_line_width: mutable bool
+    dirty_feedback_loop_enabled: mutable bool
+    depth_test_enabled: mutable bool
+    depth_write_enabled: mutable bool
+    depth_compare_op: mutable u32
+    depth_bounds_test_enabled: mutable bool
+    depth_bounds_min: mutable f32
+    depth_bounds_max: mutable f32
+    depth_bias_enabled: mutable bool
+    depth_bias_constant: mutable f32
+    depth_bias_clamp: mutable f32
+    depth_bias_slope: mutable f32
+    stencil_test_enabled: mutable bool
+    primitive_restart_enable: mutable bool
+    rasterizer_discard_enable: mutable bool
+    cull_mode: mutable u32
+    front_face: mutable u32
+    blend_constants: mutable f32[4]
+    color_write_masks: mutable u32[8]
+    line_width: mutable f32
+    feedback_loop_enabled: mutable bool
+    commit_count: mutable u64
+
+def DynamicState_New() -> DynamicState:
+    return DynamicState(
+        true, true, true, true, true, true, true, true, true, true,
+        true, true, true, true, true, true, true, true,
+        false, false, 0u32, false, 0.0, 1.0, false, 0.0, 0.0, 0.0,
+        false, false, false, 0u32, 0u32,
+        [1.0, 1.0, 1.0, 1.0],
+        [0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32],
+        1.0,
+        false,
+        0u64
+    )
+
+def DynamicState_Invalidate(self: mutable DynamicState&) -> void:
+    self.dirty_viewports <- true
+    self.dirty_scissors <- true
+    self.dirty_depth_test_enabled <- true
+    self.dirty_depth_write_enabled <- true
+    self.dirty_depth_compare_op <- true
+    self.dirty_depth_bounds_test_enabled <- true
+    self.dirty_depth_bounds <- true
+    self.dirty_depth_bias_enabled <- true
+    self.dirty_depth_bias <- true
+    self.dirty_stencil_test_enabled <- true
+    self.dirty_primitive_restart_enable <- true
+    self.dirty_rasterizer_discard_enable <- true
+    self.dirty_cull_mode <- true
+    self.dirty_front_face <- true
+    self.dirty_blend_constants <- true
+    self.dirty_color_write_masks <- true
+    self.dirty_line_width <- true
+    self.dirty_feedback_loop_enabled <- true
+
+def DynamicState_SetDepthTestEnabled(self: mutable DynamicState&, enabled: bool) -> void:
+    if self.depth_test_enabled != enabled:
+        self.depth_test_enabled <- enabled
+        self.dirty_depth_test_enabled <- true
+
+def DynamicState_SetDepthWriteEnabled(self: mutable DynamicState&, enabled: bool) -> void:
+    if self.depth_write_enabled != enabled:
+        self.depth_write_enabled <- enabled
+        self.dirty_depth_write_enabled <- true
+
+def DynamicState_SetDepthCompareOp(self: mutable DynamicState&, compare_op: u32) -> void:
+    if self.depth_compare_op != compare_op:
+        self.depth_compare_op <- compare_op
+        self.dirty_depth_compare_op <- true
+
+def DynamicState_SetDepthBoundsTestEnabled(self: mutable DynamicState&, enabled: bool) -> void:
+    if self.depth_bounds_test_enabled != enabled:
+        self.depth_bounds_test_enabled <- enabled
+        self.dirty_depth_bounds_test_enabled <- true
+
+def DynamicState_SetDepthBounds(self: mutable DynamicState&, min_val: f32, max_val: f32) -> void:
+    if self.depth_bounds_min != min_val or self.depth_bounds_max != max_val:
+        self.depth_bounds_min <- min_val
+        self.depth_bounds_max <- max_val
+        self.dirty_depth_bounds <- true
+
+def DynamicState_SetDepthBiasEnabled(self: mutable DynamicState&, enabled: bool) -> void:
+    if self.depth_bias_enabled != enabled:
+        self.depth_bias_enabled <- enabled
+        self.dirty_depth_bias_enabled <- true
+
+def DynamicState_SetDepthBias(self: mutable DynamicState&, constant: f32, clamp: f32, slope: f32) -> void:
+    if self.depth_bias_constant != constant or self.depth_bias_clamp != clamp or self.depth_bias_slope != slope:
+        self.depth_bias_constant <- constant
+        self.depth_bias_clamp <- clamp
+        self.depth_bias_slope <- slope
+        self.dirty_depth_bias <- true
+
+def DynamicState_SetStencilTestEnabled(self: mutable DynamicState&, enabled: bool) -> void:
+    if self.stencil_test_enabled != enabled:
+        self.stencil_test_enabled <- enabled
+        self.dirty_stencil_test_enabled <- true
+
+def DynamicState_SetPrimitiveRestartEnabled(self: mutable DynamicState&, enabled: bool) -> void:
+    if self.primitive_restart_enable != enabled:
+        self.primitive_restart_enable <- enabled
+        self.dirty_primitive_restart_enable <- true
+
+def DynamicState_SetCullMode(self: mutable DynamicState&, mode: u32) -> void:
+    if self.cull_mode != mode:
+        self.cull_mode <- mode
+        self.dirty_cull_mode <- true
+
+def DynamicState_SetFrontFace(self: mutable DynamicState&, face: u32) -> void:
+    if self.front_face != face:
+        self.front_face <- face
+        self.dirty_front_face <- true
+
+def DynamicState_SetBlendConstants(self: mutable DynamicState&, c0: f32, c1: f32, c2: f32, c3: f32) -> void:
+    if self.blend_constants[0usize] != c0 or self.blend_constants[1usize] != c1 or self.blend_constants[2usize] != c2 or self.blend_constants[3usize] != c3:
+        self.blend_constants <- [c0, c1, c2, c3]
+        self.dirty_blend_constants <- true
+
+def DynamicState_SetRasterizerDiscardEnabled(self: mutable DynamicState&, enabled: bool) -> void:
+    if self.rasterizer_discard_enable != enabled:
+        self.rasterizer_discard_enable <- enabled
+        self.dirty_rasterizer_discard_enable <- true
+
+def DynamicState_SetLineWidth(self: mutable DynamicState&, width: f32) -> void:
+    if self.line_width != width:
+        self.line_width <- width
+        self.dirty_line_width <- true
+
+def DynamicState_SetAttachmentFeedbackLoopEnabled(self: mutable DynamicState&, enabled: bool) -> void:
+    if self.feedback_loop_enabled != enabled:
+        self.feedback_loop_enabled <- enabled
+        self.dirty_feedback_loop_enabled <- true
+
+def DynamicState_Commit(self: mutable DynamicState&, instance: Instance, cmdbuf: u64) -> u32:
+    _ = cmdbuf
+    committed: mutable u32 = 0u32
+    if self.dirty_viewports:
+        self.dirty_viewports <- false
+        committed <- committed + 1u32
+    if self.dirty_scissors:
+        self.dirty_scissors <- false
+        committed <- committed + 1u32
+    if self.dirty_depth_test_enabled:
+        self.dirty_depth_test_enabled <- false
+        committed <- committed + 1u32
+    if self.dirty_depth_write_enabled:
+        self.dirty_depth_write_enabled <- false
+        committed <- committed + 1u32
+    if self.dirty_depth_compare_op:
+        self.dirty_depth_compare_op <- false
+        committed <- committed + 1u32
+    if self.dirty_depth_bounds_test_enabled and Instance_IsDepthBoundsSupported(instance):
+        self.dirty_depth_bounds_test_enabled <- false
+        committed <- committed + 1u32
+    if self.dirty_depth_bounds and Instance_IsDepthBoundsSupported(instance):
+        self.dirty_depth_bounds <- false
+        committed <- committed + 1u32
+    if self.dirty_depth_bias_enabled:
+        self.dirty_depth_bias_enabled <- false
+        committed <- committed + 1u32
+    if self.dirty_depth_bias:
+        self.dirty_depth_bias <- false
+        committed <- committed + 1u32
+    if self.dirty_stencil_test_enabled:
+        self.dirty_stencil_test_enabled <- false
+        committed <- committed + 1u32
+    if self.dirty_primitive_restart_enable:
+        self.dirty_primitive_restart_enable <- false
+        committed <- committed + 1u32
+    if self.dirty_rasterizer_discard_enable:
+        self.dirty_rasterizer_discard_enable <- false
+        committed <- committed + 1u32
+    if self.dirty_cull_mode:
+        self.dirty_cull_mode <- false
+        committed <- committed + 1u32
+    if self.dirty_front_face:
+        self.dirty_front_face <- false
+        committed <- committed + 1u32
+    if self.dirty_blend_constants:
+        self.dirty_blend_constants <- false
+        committed <- committed + 1u32
+    if self.dirty_color_write_masks and Instance_IsDynamicColorWriteMaskSupported(instance):
+        self.dirty_color_write_masks <- false
+        committed <- committed + 1u32
+    if self.dirty_line_width:
+        self.dirty_line_width <- false
+        committed <- committed + 1u32
+    if self.dirty_feedback_loop_enabled and Instance_IsAttachmentFeedbackLoopLayoutSupported(instance):
+        self.dirty_feedback_loop_enabled <- false
+        committed <- committed + 1u32
+
+    self.commit_count <- self.commit_count + committed.u64()
+    return committed
+
+struct PendingTick:
+    tick: mutable u64
+
+struct Scheduler:
+    instance: mutable Instance
+    master_semaphore: mutable MasterSemaphore
+    command_pool: mutable CommandPool
+    dynamic_state: mutable DynamicState
+    current_cmdbuf: mutable u64
+    pending_ops: mutable darray[PendingTick]
+    priority_pending_ops: mutable darray[PendingTick]
+    render_state: mutable RenderState
+    is_rendering: mutable bool
+
+
+def RenderAttachment_Default() -> RenderAttachment:
+    return RenderAttachment(0u64, 0u32, [0u32, 0u32, 0u32, 0u32], false, false, false, false)
+
+def RenderState_Default() -> RenderState:
+    return RenderState(
+        [
+            RenderAttachment_Default(), RenderAttachment_Default(), RenderAttachment_Default(), RenderAttachment_Default(),
+            RenderAttachment_Default(), RenderAttachment_Default(), RenderAttachment_Default(), RenderAttachment_Default()
+        ],
+        RenderAttachment_Default(),
+        0u16,
+        0u16,
+        1u16,
+        0u16
+    )
+
+def Scheduler_New(instance: Instance) -> Scheduler:
+    can Memory.Allocate, Abort.Panic:
+        master: mutable MasterSemaphore = MasterSemaphore_New()
+        pool: CommandPool = CommandPool_New(master.ref[mutable MasterSemaphore&])
+        out: mutable Scheduler = Scheduler(
+            instance,
+            master,
+            pool,
+            DynamicState_New(),
+            0u64,
+            [],
+            [],
+            RenderState_Default(),
+            false
+        )
+        Scheduler_AllocateWorkerCommandBuffers(out.ref[mutable Scheduler&])
+        return out
+
+def Scheduler_BeginRendering(self: mutable Scheduler&, new_state: RenderState) -> void:
+    if self.is_rendering:
+        if self.render_state.width == new_state.width and
+           self.render_state.height == new_state.height and
+           self.render_state.num_layers == new_state.num_layers and
+           self.render_state.num_color_attachments == new_state.num_color_attachments:
+            return
+    Scheduler_EndRendering(self)
+    self.is_rendering <- true
+    self.render_state <- new_state
+
+def Scheduler_EndRendering(self: mutable Scheduler&) -> void:
+    if not self.is_rendering:
+        return
+    self.is_rendering <- false
+
+def Scheduler_Flush(self: mutable Scheduler&, info: mutable SubmitInfo&) -> u64:
+    can Memory.Allocate, Abort.Panic:
+        return Scheduler_SubmitExecution(self, info)
+
+def Scheduler_FlushNoInfo(self: mutable Scheduler&) -> u64:
+    can Memory.Allocate, Abort.Panic:
+        info: mutable SubmitInfo = SubmitInfo_New()
+        return Scheduler_Flush(self, info.ref[mutable SubmitInfo&])
+
+def Scheduler_Finish(self: mutable Scheduler&) -> void:
+    can Memory.Allocate, Abort.Panic:
+        info: mutable SubmitInfo = SubmitInfo_New()
+        submitted_tick: u64 = Scheduler_SubmitExecution(self, info.ref[mutable SubmitInfo&])
+        Scheduler_Wait(self, submitted_tick)
+
+def Scheduler_Wait(self: mutable Scheduler&, tick: u64) -> void:
+    if tick >= MasterSemaphore_CurrentTick(self.master_semaphore):
+        _ = Scheduler_FlushNoInfo(self)
+    MasterSemaphore_Wait(self.master_semaphore.ref[mutable MasterSemaphore&], tick)
+
+def Scheduler_PopPendingOperations(self: mutable Scheduler&) -> void:
+    MasterSemaphore_Refresh(self.master_semaphore.ref[mutable MasterSemaphore&])
+    i: mutable usize = 0usize
+    while i < self.pending_ops.count:
+        if MasterSemaphore_IsFree(self.master_semaphore, self.pending_ops[i].tick):
+            self.pending_ops[i] <- self.pending_ops[self.pending_ops.count - 1usize]
+            self.pending_ops.count <- self.pending_ops.count - 1usize
+            continue
+        i <- i + 1usize
+
+def Scheduler_DeferOperation(self: mutable Scheduler&) -> void:
+    can Memory.Allocate, Abort.Panic:
+        self.pending_ops.push(PendingTick(MasterSemaphore_CurrentTick(self.master_semaphore)))
+
+def Scheduler_DeferPriorityOperation(self: mutable Scheduler&) -> void:
+    can Memory.Allocate, Abort.Panic:
+        self.priority_pending_ops.push(PendingTick(MasterSemaphore_CurrentTick(self.master_semaphore)))
+
+def Scheduler_AllocateWorkerCommandBuffers(self: mutable Scheduler&) -> void:
+    can Memory.Allocate, Abort.Panic:
+        self.current_cmdbuf <- CommandPool_Commit(self.command_pool.ref[mutable CommandPool&])
+        DynamicState_Invalidate(self.dynamic_state.ref[mutable DynamicState&])
+
+def Scheduler_SubmitExecution(self: mutable Scheduler&, info: mutable SubmitInfo&) -> u64:
+    can Memory.Allocate, Abort.Panic:
+        signal_value: u64 = MasterSemaphore_NextTick(self.master_semaphore.ref[mutable MasterSemaphore&])
+        _ = SubmitInfo_AddSignal(info, MasterSemaphore_Handle(self.master_semaphore), signal_value)
+        Scheduler_EndRendering(self)
+        MasterSemaphore_Refresh(self.master_semaphore.ref[mutable MasterSemaphore&], signal_value)
+        Scheduler_AllocateWorkerCommandBuffers(self)
+        Scheduler_PopPendingOperations(self)
+        return signal_value
+
+
+def Scheduler_CurrentTick(self: Scheduler) -> u64:
+    return MasterSemaphore_CurrentTick(self.master_semaphore)
+
+def Scheduler_IsFree(self: mutable Scheduler&, tick: u64) -> bool:
+    if MasterSemaphore_IsFree(self.master_semaphore, tick):
+        return true
+    MasterSemaphore_Refresh(self.master_semaphore.ref[mutable MasterSemaphore&])
+    return MasterSemaphore_IsFree(self.master_semaphore, tick)
+
+def Scheduler_GetMasterSemaphore(self: mutable Scheduler&) -> mutable MasterSemaphore&:
+    return self.master_semaphore.ref[mutable MasterSemaphore&]
