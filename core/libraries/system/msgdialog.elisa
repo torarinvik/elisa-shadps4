@@ -2,55 +2,103 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 include "./commondialog.elisa"
+include "./msgdialog_ui.elisa"
 
-type OrbisMsgDialogProgressBarTarget = u32
-@fixed_layout
-struct DialogResult:
-    mode: mutable u32
-    result: mutable u32
-    button_id: mutable u32
-    reserved: mutable u8[32]
-@fixed_layout
-struct OrbisParam:
-    opaque: mutable u8[256]
+const ORBIS_COMMON_DIALOG_ERROR_NOT_SUPPORTED: int = 0x80B80009
+const ORBIS_COMMON_DIALOG_ERROR_PARAM_INVALID: int = 0x80B8000A
+const ORBIS_MSG_DIALOG_PROGRESSBAR_TARGET_DEFAULT: u32 = 0
+
+global mutable g_msg_status: u32 = ORBIS_COMMON_DIALOG_STATUS_NONE
+global mutable g_msg_result: DialogResult = zeroed
+global mutable g_msg_mode: u32 = 0
+global mutable g_msg_progress_value: u32 = 0
 
 def sceMsgDialogClose() -> u32:
+    if g_msg_status != ORBIS_COMMON_DIALOG_STATUS_RUNNING:
+        return ORBIS_COMMON_DIALOG_ERROR_NOT_RUNNING.u32()
+    g_msg_result.result <- ORBIS_COMMON_DIALOG_RESULT_OK
+    g_msg_status <- ORBIS_COMMON_DIALOG_STATUS_FINISHED
     return ORBIS_OK.u32()
 
 def sceMsgDialogGetResult(result: mutable u32&?) -> u32:
-    _ = result
+    if g_msg_status != ORBIS_COMMON_DIALOG_STATUS_FINISHED:
+        return ORBIS_COMMON_DIALOG_ERROR_NOT_FINISHED.u32()
+    if result == null:
+        return ORBIS_COMMON_DIALOG_ERROR_ARG_NULL.u32()
+    out: mutable DialogResult& = result.cast[mutable DialogResult&]
+    out.mode <- g_msg_result.mode
+    out.result <- g_msg_result.result
+    out.button_id <- g_msg_result.button_id
     return ORBIS_OK.u32()
 
 def sceMsgDialogGetStatus() -> u32:
-    return ORBIS_COMMON_DIALOG_STATUS_FINISHED
+    return g_msg_status
 
 def sceMsgDialogInitialize() -> u32:
+    if not g_isInitialized:
+        return ORBIS_COMMON_DIALOG_ERROR_NOT_SYSTEM_INITIALIZED.u32()
+    if g_msg_status != ORBIS_COMMON_DIALOG_STATUS_NONE:
+        return ORBIS_COMMON_DIALOG_ERROR_ALREADY_INITIALIZED.u32()
+    if g_isUsed:
+        return ORBIS_COMMON_DIALOG_ERROR_BUSY.u32()
+    g_msg_status <- ORBIS_COMMON_DIALOG_STATUS_INITIALIZED
+    g_isUsed <- true
     return ORBIS_OK.u32()
 
 def sceMsgDialogOpen(param: mutable void&?) -> u32:
-    _ = param
+    if g_msg_status != ORBIS_COMMON_DIALOG_STATUS_INITIALIZED and g_msg_status != ORBIS_COMMON_DIALOG_STATUS_FINISHED:
+        return ORBIS_COMMON_DIALOG_ERROR_INVALID_STATE.u32()
+    if param == null:
+        return ORBIS_COMMON_DIALOG_ERROR_ARG_NULL.u32()
+    p: mutable OrbisParam& = param.cast[mutable OrbisParam&]
+    g_msg_mode <- p.mode
+    g_msg_result <- zeroed
+    g_msg_result.mode <- g_msg_mode
+    g_msg_status <- ORBIS_COMMON_DIALOG_STATUS_RUNNING
+    g_msg_progress_value <- 0
     return ORBIS_OK.u32()
 
-def sceMsgDialogProgressBarInc(arg0: int, delta: u32) -> u32:
-    _ = arg0
-    _ = delta
+def sceMsgDialogProgressBarInc(target: int, delta: u32) -> u32:
+    if g_msg_status != ORBIS_COMMON_DIALOG_STATUS_RUNNING:
+        return ORBIS_COMMON_DIALOG_ERROR_NOT_RUNNING.u32()
+    if g_msg_mode != MSG_DIALOG_MODE_PROGRESS_BAR:
+        return ORBIS_COMMON_DIALOG_ERROR_NOT_SUPPORTED.u32()
+    if target.u32() != ORBIS_MSG_DIALOG_PROGRESSBAR_TARGET_DEFAULT:
+        return ORBIS_COMMON_DIALOG_ERROR_PARAM_INVALID.u32()
+    g_msg_progress_value <- g_msg_progress_value + delta
     return ORBIS_OK.u32()
 
-def sceMsgDialogProgressBarSetMsg(arg0: int, msg: mutable u8&?) -> u32:
-    _ = arg0
+def sceMsgDialogProgressBarSetMsg(target: int, msg: mutable u8&?) -> u32:
+    if g_msg_status != ORBIS_COMMON_DIALOG_STATUS_RUNNING:
+        return ORBIS_COMMON_DIALOG_ERROR_NOT_RUNNING.u32()
+    if g_msg_mode != MSG_DIALOG_MODE_PROGRESS_BAR:
+        return ORBIS_COMMON_DIALOG_ERROR_NOT_SUPPORTED.u32()
+    if target.u32() != ORBIS_MSG_DIALOG_PROGRESSBAR_TARGET_DEFAULT:
+        return ORBIS_COMMON_DIALOG_ERROR_PARAM_INVALID.u32()
     _ = msg
     return ORBIS_OK.u32()
 
-def sceMsgDialogProgressBarSetValue(arg0: int, value: u32) -> u32:
-    _ = arg0
-    _ = value
+def sceMsgDialogProgressBarSetValue(target: int, value: u32) -> u32:
+    if g_msg_status != ORBIS_COMMON_DIALOG_STATUS_RUNNING:
+        return ORBIS_COMMON_DIALOG_ERROR_NOT_RUNNING.u32()
+    if g_msg_mode != MSG_DIALOG_MODE_PROGRESS_BAR:
+        return ORBIS_COMMON_DIALOG_ERROR_NOT_SUPPORTED.u32()
+    if target.u32() != ORBIS_MSG_DIALOG_PROGRESSBAR_TARGET_DEFAULT:
+        return ORBIS_COMMON_DIALOG_ERROR_PARAM_INVALID.u32()
+    g_msg_progress_value <- value
     return ORBIS_OK.u32()
 
 def sceMsgDialogTerminate() -> u32:
+    if g_msg_status == ORBIS_COMMON_DIALOG_STATUS_RUNNING:
+        _ = sceMsgDialogClose()
+    if g_msg_status == ORBIS_COMMON_DIALOG_STATUS_NONE:
+        return ORBIS_COMMON_DIALOG_ERROR_NOT_INITIALIZED.u32()
+    g_msg_status <- ORBIS_COMMON_DIALOG_STATUS_NONE
+    g_isUsed <- false
     return ORBIS_OK.u32()
 
 def sceMsgDialogUpdateStatus() -> u32:
-    return ORBIS_COMMON_DIALOG_STATUS_FINISHED
+    return g_msg_status
 
 def MsgDialog_RegisterLib(sym: void&?) -> void:
     _ = sym
