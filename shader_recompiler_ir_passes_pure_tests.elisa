@@ -244,5 +244,33 @@ def shader_ir_helper_contracts_match_cpp_switch_intent() -> void:
         _ = ShaderIrProgram_AddInst(p.ref[mutable ShaderIrProgram&], b0, OPCODE_LOADSHAREDU16)
         special: u32 = CalculateSpecialSharedAtomicTypes(p)
         all_types: u32 = CalculateSharedMemoryTypes(p)
-        assert (special & IR_TYPE_U64) != 0u32
-        assert (all_types & IR_TYPE_U16) != 0u32
+        has_special_u64: bool = (special & IR_TYPE_U64) != 0u32
+        has_any_u16: bool = (all_types & IR_TYPE_U16) != 0u32
+        assert has_special_u64
+        assert has_any_u16
+
+@test
+def shader_ir_direct_helper_entrypoints_are_covered() -> void:
+    can Abort.Panic:
+        p: mutable ShaderIrProgram = ShaderIrProgram_Default()
+        b0: u32 = ShaderIrProgram_AddBlock(p.ref[mutable ShaderIrProgram&])
+
+        cp_id: u32 = ShaderIrProgram_AddInst(p.ref[mutable ShaderIrProgram&], b0, OPCODE_IADD32)
+        bb: mutable u32 = 0u32
+        bi: mutable u32 = 0u32
+        assert ShaderIrProgram_FindInst(p, cp_id, bb.ref[mutable u32&], bi.ref[mutable u32&])
+        ShaderIrPassInst_SetArgImm(p.blocks[bb.usize()].insts[bi.usize()].ref[mutable ShaderIrPassInst&], 0u32, 9u32)
+        ShaderIrPassInst_SetArgImm(p.blocks[bb.usize()].insts[bi.usize()].ref[mutable ShaderIrPassInst&], 1u32, 2u32)
+        assert ConstantPropagation(p.ref[mutable ShaderIrProgram&], bb, bi)
+
+        lower_id: u32 = ShaderIrProgram_AddInst(p.ref[mutable ShaderIrProgram&], b0, OPCODE_FPADDD64)
+        assert ShaderIrProgram_FindInst(p, lower_id, bb.ref[mutable u32&], bi.ref[mutable u32&])
+        Lower(p.ref[mutable ShaderIrProgram&], bb, bi)
+        assert p.blocks[bb.usize()].insts[bi.usize()].opcode == OPCODE_FPADD32
+
+        info: mutable ShaderIrInfo = zeroed
+        visit_inst: mutable ShaderIrPassInst = zeroed
+        visit_inst.opcode <- OPCODE_READCONST
+        visit_inst.flags_u32 <- 1u32
+        Visit(info.ref[mutable ShaderIrInfo&], visit_inst)
+        assert info.uses_dma == true
