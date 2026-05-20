@@ -5,6 +5,14 @@ include "../../error_codes.elisa"
 include "../orbis_error.elisa"
 include "../posix_error.elisa"
 
+extern elisa_kernel_event_create(init_pattern: u64, out_error: mutable int&?) -> void&?
+extern elisa_kernel_event_destroy(handle: void&?) -> int
+extern elisa_kernel_event_clear(handle: void&?, mask: u64) -> int
+extern elisa_kernel_event_set(handle: void&?, pattern: u64) -> int
+extern elisa_kernel_event_cancel(handle: void&?, set_pattern: u64, out_waiters: mutable int&?) -> int
+extern elisa_kernel_event_poll(handle: void&?, pattern: u64, wait_mode: u32, out_bits: mutable u64&?) -> int
+extern elisa_kernel_event_wait(handle: void&?, pattern: u64, wait_mode: u32, out_bits: mutable u64&?, usec: u64) -> int
+
 const POSIX_SIGUSR1: int = 30
 const POSIX_SIGHUP: int = 1
 const POSIX_SIGILL: int = 4
@@ -26,6 +34,7 @@ struct EventFlag:
     used: mutable bool
     bits: mutable u64
     attr: mutable u32
+    native_handle: mutable void&?
 
 global mutable g_event_flags: EventFlag[64]
 global mutable g_exception_handlers: void&?[130]
@@ -100,9 +109,14 @@ def sceKernelCreateEventFlag(ef: mutable int&, p_name: static u8&?, attr: u32, i
     i: mutable int = 0
     while i < 64:
         if not g_event_flags[i].used:
+            create_res: mutable int = 0
+            native: void&? = elisa_kernel_event_create(init_pattern, create_res)
+            if native == null:
+                return ORBIS_KERNEL_ERROR_UNKNOWN + create_res
             g_event_flags[i].used <- true
             g_event_flags[i].bits <- init_pattern
             g_event_flags[i].attr <- attr
+            g_event_flags[i].native_handle <- native
             ef <- i
             return ORBIS_OK
         i <- i + 1
@@ -111,8 +125,11 @@ def sceKernelCreateEventFlag(ef: mutable int&, p_name: static u8&?, attr: u32, i
 def sceKernelDeleteEventFlag(ef: int) -> int:
     if ef < 0 or ef >= 64 or not g_event_flags[ef].used:
         return ORBIS_KERNEL_ERROR_ESRCH
+    if g_event_flags[ef].native_handle != null:
+        _ = elisa_kernel_event_destroy(g_event_flags[ef].native_handle)
     g_event_flags[ef].used <- false
     g_event_flags[ef].bits <- 0u64
+    g_event_flags[ef].native_handle <- null
     return ORBIS_OK
 
 def sceKernelOpenEventFlag() -> int:
@@ -124,20 +141,23 @@ def sceKernelCloseEventFlag() -> int:
 def sceKernelClearEventFlag(ef: int, bit_pattern: u64) -> int:
     if ef < 0 or ef >= 64 or not g_event_flags[ef].used:
         return ORBIS_KERNEL_ERROR_ESRCH
+    _ = elisa_kernel_event_clear(g_event_flags[ef].native_handle, bit_pattern)
     g_event_flags[ef].bits <- g_event_flags[ef].bits and bit_pattern
     return ORBIS_OK
 
 def sceKernelCancelEventFlag(ef: int, set_pattern: u64, p_num_wait_threads: mutable int&?) -> int:
     if ef < 0 or ef >= 64 or not g_event_flags[ef].used:
         return ORBIS_KERNEL_ERROR_ESRCH
+    _ = elisa_kernel_event_cancel(g_event_flags[ef].native_handle, set_pattern, p_num_wait_threads)
     g_event_flags[ef].bits <- set_pattern
-    if p_num_wait_threads != null:
+    if p_num_wait_threads != null and p_num_wait_threads == 0:
         p_num_wait_threads <- 0
     return ORBIS_OK
 
 def sceKernelSetEventFlag(ef: int, bit_pattern: u64) -> int:
     if ef < 0 or ef >= 64 or not g_event_flags[ef].used:
         return ORBIS_KERNEL_ERROR_ESRCH
+    _ = elisa_kernel_event_set(g_event_flags[ef].native_handle, bit_pattern)
     g_event_flags[ef].bits <- g_event_flags[ef].bits or bit_pattern
     return ORBIS_OK
 
@@ -160,7 +180,12 @@ def sceKernelPollEventFlag(ef: int, bit_pattern: u64, wait_mode: u32, p_result_p
         ok <- (bits and bit_pattern) == bit_pattern
     else:
         ok <- (bits and bit_pattern) != 0u64
-    if p_result_pat != null:
+    native_r: int = elisa_kernel_event_poll(g_event_flags[ef].native_handle, bit_pattern, wait_mode, p_result_pat)
+    if native_r == POSIX_EAGAIN:
+        native_r <- POSIX_EBUSY
+    if native_r != 0 and native_r != POSIX_EBUSY:
+        return ORBIS_KERNEL_ERROR_UNKNOWN + native_r
+    if p_result_pat != null and native_r == POSIX_EBUSY:
         p_result_pat <- bits
     if not ok:
         return ORBIS_KERNEL_ERROR_EBUSY
@@ -173,8 +198,18 @@ def sceKernelPollEventFlag(ef: int, bit_pattern: u64, wait_mode: u32, p_result_p
 def sceKernelWaitEventFlag(ef: int, bit_pattern: u64, wait_mode: u32, p_result_pat: mutable u64&?, p_timeout: mutable u32&?) -> int:
     r: int = sceKernelPollEventFlag(ef, bit_pattern, wait_mode, p_result_pat)
     if r == ORBIS_KERNEL_ERROR_EBUSY:
+        wait_usec: u64 = 0xffffffffffffffffu64
+        if p_timeout != null:
+            wait_usec <- p_timeout as u64
+        native_r: int = elisa_kernel_event_wait(g_event_flags[ef].native_handle, bit_pattern, wait_mode, p_result_pat, wait_usec)
+        if native_r == 0:
+            return ORBIS_OK
         if p_timeout != null:
             p_timeout <- 0u32
+        if native_r == POSIX_ECANCELED:
+            return ORBIS_KERNEL_ERROR_ECANCELED
+        if native_r != POSIX_ETIMEDOUT:
+            return ORBIS_KERNEL_ERROR_UNKNOWN + native_r
         return ORBIS_KERNEL_ERROR_ETIMEDOUT
     return r
 

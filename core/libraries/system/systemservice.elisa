@@ -28,8 +28,10 @@ struct OrbisSystemServiceEvent:
     event_type: mutable int
     param: mutable u8[8192]
 
-global mutable g_systemservice_event_pending: bool = false
-global mutable g_systemservice_event_slot: OrbisSystemServiceEvent = zeroed
+global mutable g_systemservice_event_type_q: int[16] = zeroed
+global mutable g_systemservice_event_head: int = 0
+global mutable g_systemservice_event_tail: int = 0
+global mutable g_systemservice_event_count: int = 0
 
 def sceAppMessagingClearEventFlag() -> int:
     return ORBIS_OK
@@ -1086,10 +1088,10 @@ def sceSystemServiceGetStatus(status: mutable u32&?) -> int:
     if status == null:
         return ORBIS_SYSTEM_SERVICE_ERROR_PARAMETER
     out_status: mutable OrbisSystemServiceStatus& = status.cast[mutable OrbisSystemServiceStatus&]
-    out_status.event_num <- 0
+    out_status.event_num <- g_systemservice_event_count
     out_status.is_system_ui_overlaid <- false
     out_status.is_in_background_execution <- false
-    out_status.is_cpu_mode7_cpu_normal <- false
+    out_status.is_cpu_mode7_cpu_normal <- true
     out_status.is_game_live_streaming_on_air <- false
     out_status.is_out_of_vr_play_area <- false
     return ORBIS_OK
@@ -1101,6 +1103,7 @@ def sceSystemServiceGetVersionNumberOfCameraCalibrationData() -> int:
     return ORBIS_OK
 
 def sceSystemServiceHideSplashScreen() -> int:
+    g_systemservice_splash_status <- false
     return ORBIS_OK
 
 def sceSystemServiceIsAppSuspended() -> int:
@@ -1166,9 +1169,13 @@ global mutable g_systemservice_timezone_minutes: int = 120
 global mutable g_systemservice_summertime: int = 1
 global mutable g_systemservice_game_parental_level: int = 0
 global mutable g_systemservice_enter_button_assign: int = 1
+global mutable g_systemservice_splash_status: bool = true
 
 def SystemService_SetLanguage(lang: int) -> void:
     g_systemservice_lang <- lang
+
+def SystemService_IsSplashVisibleForTests() -> bool:
+    return g_systemservice_splash_status
 
 def sceSystemServiceParamGetInt(param_id: int, value: mutable int&?) -> int:
     if value == null:
@@ -1194,7 +1201,8 @@ def sceSystemServiceParamGetInt(param_id: int, value: mutable int&?) -> int:
     if param_id == 1000:
         value <- g_systemservice_enter_button_assign
         return ORBIS_OK
-    return ORBIS_SYSTEM_SERVICE_ERROR_PARAMETER
+    value <- 0
+    return ORBIS_OK
 
 def sceSystemServiceParamGetString() -> int:
     return ORBIS_OK
@@ -1208,12 +1216,20 @@ def sceSystemServiceRaiseExceptionLocalProcess() -> int:
 def sceSystemServiceReceiveEvent(event: mutable void&?) -> int:
     if event == null:
         return ORBIS_SYSTEM_SERVICE_ERROR_PARAMETER
-    if not g_systemservice_event_pending:
+    if g_systemservice_event_count == 0:
         return ORBIS_SYSTEM_SERVICE_ERROR_NO_EVENT
     out_event: mutable OrbisSystemServiceEvent& = event.cast[mutable OrbisSystemServiceEvent&]
-    out_event.event_type <- g_systemservice_event_slot.event_type
-    g_systemservice_event_pending <- false
+    out_event.event_type <- g_systemservice_event_type_q[g_systemservice_event_head.usize()]
+    g_systemservice_event_head <- (g_systemservice_event_head + 1) % 16
+    g_systemservice_event_count <- g_systemservice_event_count - 1
     return ORBIS_OK
+
+def SystemService_PushEventForTests(event_type: int) -> void:
+    if g_systemservice_event_count >= 16:
+        return
+    g_systemservice_event_type_q[g_systemservice_event_tail.usize()] <- event_type
+    g_systemservice_event_tail <- (g_systemservice_event_tail + 1) % 16
+    g_systemservice_event_count <- g_systemservice_event_count + 1
 
 def sceSystemServiceReenableMusicPlayer() -> int:
     return ORBIS_OK

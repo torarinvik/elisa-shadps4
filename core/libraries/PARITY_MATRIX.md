@@ -47,6 +47,13 @@ Status values:
 - RFC2822/RFC3339 parser and formatter contracts: `Exact`
 - Local timezone/current clock behavior via native C time APIs: `Exact`
 
+## videodec / videodec2
+- Resource query sizing and memory alignment contracts: `Exact`
+- Decoder/compute queue handle lifecycle and argument/struct-size errors: `Exact`
+- Empty decoder queue decode/flush/reset state behavior: `Exact`
+- Native H.264 frame decode payload generation: `Intentional Divergence`
+  - Elisa preserves observable validation and no-frame state contracts without embedding the FFmpeg-backed C++ decoder.
+
 ## Deferred / outstanding
 - None currently identified in covered core/libraries parity suites and emit gates.
 
@@ -62,6 +69,7 @@ Status values:
 - `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_random_pure_tests.elisa`
 - `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_razor_cpu_pure_tests.elisa`
 - `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_rtc_pure_tests.elisa`
+- `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_videodec_pure_tests.elisa`
 - `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_share_play_pure_tests.elisa`
 - `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_signin_dialog_pure_tests.elisa`
 - `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_system_pure_tests.elisa`

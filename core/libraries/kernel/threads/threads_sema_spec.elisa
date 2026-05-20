@@ -5,6 +5,14 @@ include "../../error_codes.elisa"
 include "../orbis_error.elisa"
 include "../posix_error.elisa"
 
+extern elisa_kernel_sem_create(value: int, max_value: int, out_error: mutable int&?) -> void&?
+extern elisa_kernel_sem_destroy(handle: void&?) -> int
+extern elisa_kernel_sem_wait(handle: void&?, need_count: int) -> int
+extern elisa_kernel_sem_trywait(handle: void&?, need_count: int) -> int
+extern elisa_kernel_sem_timedwait(handle: void&?, need_count: int, usec: u64) -> int
+extern elisa_kernel_sem_post(handle: void&?, signal_count: int) -> int
+extern elisa_kernel_sem_getvalue(handle: void&?, out_value: mutable int&?) -> int
+
 const ORBIS_KERNEL_SEM_VALUE_MAX: int = 0x7fffffff
 const PTHREAD_KEYS_MAX: int = 256
 const PTHREAD_DESTRUCTOR_ITERATIONS: int = 4
@@ -14,6 +22,7 @@ type PthreadKeyDestructor = func(void&?) -> void
 @fixed_layout
 struct PthreadSem:
     value: mutable int
+    native_handle: mutable void&?
 
 @fixed_layout
 struct OrbisSem:
@@ -21,6 +30,7 @@ struct OrbisSem:
     token_count: mutable int
     max_count: mutable int
     init_count: mutable int
+    native_handle: mutable void&?
 
 global mutable g_orbis_sems: OrbisSem[64]
 global mutable g_tls_allocated: bool[PTHREAD_KEYS_MAX]
@@ -40,10 +50,15 @@ def sceKernelCreateSema(sem: mutable int&, p_name: static u8&?, attr: u32, init_
     i: mutable int = 0
     while i < 64:
         if not g_orbis_sems[i].used:
+            create_res: mutable int = 0
+            native: void&? = elisa_kernel_sem_create(init_count, max_count, create_res)
+            if native == null:
+                return threads_posix_to_orbis_errno(create_res)
             g_orbis_sems[i].used <- true
             g_orbis_sems[i].token_count <- init_count
             g_orbis_sems[i].max_count <- max_count
             g_orbis_sems[i].init_count <- init_count
+            g_orbis_sems[i].native_handle <- native
             sem <- i
             return ORBIS_OK
         i <- i + 1
@@ -52,10 +67,19 @@ def sceKernelCreateSema(sem: mutable int&, p_name: static u8&?, attr: u32, init_
 def sceKernelWaitSema(sem: int, need_count: int, p_timeout: mutable u32&?) -> int:
     if sem < 0 or sem >= 64 or not g_orbis_sems[sem].used:
         return ORBIS_KERNEL_ERROR_ESRCH
+    if need_count < 0:
+        return ORBIS_KERNEL_ERROR_EINVAL
     if g_orbis_sems[sem].token_count < need_count:
-        if p_timeout != null:
+        if p_timeout == null:
+            r_wait: int = elisa_kernel_sem_wait(g_orbis_sems[sem].native_handle, need_count)
+            if r_wait != 0:
+                return threads_posix_to_orbis_errno(r_wait)
+            g_orbis_sems[sem].token_count <- g_orbis_sems[sem].token_count - need_count
+            return ORBIS_OK
+        r_timeout: int = elisa_kernel_sem_timedwait(g_orbis_sems[sem].native_handle, need_count, p_timeout as u64)
+        if r_timeout != 0:
             p_timeout <- 0u32
-        return ORBIS_KERNEL_ERROR_ETIMEDOUT
+            return threads_posix_to_orbis_errno(r_timeout)
     g_orbis_sems[sem].token_count <- g_orbis_sems[sem].token_count - need_count
     return ORBIS_OK
 
@@ -64,6 +88,10 @@ def sceKernelSignalSema(sem: int, signal_count: int) -> int:
         return ORBIS_KERNEL_ERROR_ESRCH
     if g_orbis_sems[sem].token_count + signal_count > g_orbis_sems[sem].max_count:
         return ORBIS_KERNEL_ERROR_EINVAL
+    if signal_count > 0:
+        r: int = elisa_kernel_sem_post(g_orbis_sems[sem].native_handle, signal_count)
+        if r != 0:
+            return threads_posix_to_orbis_errno(r)
     g_orbis_sems[sem].token_count <- g_orbis_sems[sem].token_count + signal_count
     return ORBIS_OK
 
@@ -72,6 +100,9 @@ def sceKernelPollSema(sem: int, need_count: int) -> int:
         return ORBIS_KERNEL_ERROR_ESRCH
     if g_orbis_sems[sem].token_count < need_count:
         return ORBIS_KERNEL_ERROR_EBUSY
+    r: int = elisa_kernel_sem_trywait(g_orbis_sems[sem].native_handle, need_count)
+    if r != 0:
+        return threads_posix_to_orbis_errno(r)
     g_orbis_sems[sem].token_count <- g_orbis_sems[sem].token_count - need_count
     return ORBIS_OK
 
@@ -89,10 +120,13 @@ def sceKernelCancelSema(sem: int, set_count: int, p_num_wait_threads: mutable in
 def sceKernelDeleteSema(sem: int) -> int:
     if sem < 0 or sem >= 64 or not g_orbis_sems[sem].used:
         return ORBIS_KERNEL_ERROR_ESRCH
+    if g_orbis_sems[sem].native_handle != null:
+        _ = elisa_kernel_sem_destroy(g_orbis_sems[sem].native_handle)
     g_orbis_sems[sem].used <- false
     g_orbis_sems[sem].token_count <- 0
     g_orbis_sems[sem].max_count <- 0
     g_orbis_sems[sem].init_count <- 0
+    g_orbis_sems[sem].native_handle <- null
     return ORBIS_OK
 
 def posix_sem_init(sem: mutable PthreadSem&?&, pshared: int, value: u32) -> int:
@@ -100,34 +134,54 @@ def posix_sem_init(sem: mutable PthreadSem&?&, pshared: int, value: u32) -> int:
     if value > ORBIS_KERNEL_SEM_VALUE_MAX as u32:
         return -1
     if sem != null:
-        sem <- PthreadSem(value as int)
+        create_res: mutable int = 0
+        native: void&? = elisa_kernel_sem_create(value as int, ORBIS_KERNEL_SEM_VALUE_MAX, create_res)
+        if native == null:
+            return -1
+        sem <- PthreadSem(value as int, native)
     return 0
 
 def posix_sem_destroy(sem: mutable PthreadSem&?&) -> int:
     if sem == null or sem == null:
         return -1
+    if sem.native_handle != null:
+        _ = elisa_kernel_sem_destroy(sem.native_handle)
     sem <- null
     return 0
 
 def posix_sem_wait(sem: mutable PthreadSem&?&) -> int:
     if sem == null or sem == null:
         return -1
-    if sem.value <= 0:
+    r: int = elisa_kernel_sem_wait(sem.native_handle, 1)
+    if r != 0:
         return -1
     sem.value <- sem.value - 1
     return 0
 
 def posix_sem_trywait(sem: mutable PthreadSem&?&) -> int:
-    return posix_sem_wait(sem)
+    if sem == null or sem == null:
+        return -1
+    r: int = elisa_kernel_sem_trywait(sem.native_handle, 1)
+    if r != 0:
+        return -1
+    sem.value <- sem.value - 1
+    return 0
 
 def posix_sem_timedwait(sem: mutable PthreadSem&?&, t: void&?) -> int:
     _ = t
-    return posix_sem_wait(sem)
+    if sem == null or sem == null:
+        return -1
+    r: int = elisa_kernel_sem_timedwait(sem.native_handle, 1, 0u64)
+    if r != 0:
+        return -1
+    sem.value <- sem.value - 1
+    return 0
 
 def posix_sem_post(sem: mutable PthreadSem&?&) -> int:
     if sem == null or sem == null:
         return -1
-    if sem.value >= ORBIS_KERNEL_SEM_VALUE_MAX:
+    r: int = elisa_kernel_sem_post(sem.native_handle, 1)
+    if r != 0:
         return -1
     sem.value <- sem.value + 1
     return 0
@@ -135,6 +189,11 @@ def posix_sem_post(sem: mutable PthreadSem&?&) -> int:
 def posix_sem_getvalue(sem: PthreadSem&?, sval: mutable int&?) -> int:
     if sem == null:
         return -1
+    if sem.native_handle != null:
+        _ = elisa_kernel_sem_getvalue(sem.native_handle, sval)
+        if sval != null:
+            sem.value <- sval
+        return 0
     if sval != null:
         sval <- sem.value
     return 0
