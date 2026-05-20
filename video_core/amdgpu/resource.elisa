@@ -1,0 +1,329 @@
+# SPDX-FileCopyrightText: Copyright 2024 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+# Buffer (V#), Image (T#), and Sampler (S#) resource descriptors.
+
+include "./pixel_format.elisa"
+include "./tiling.elisa"
+
+# --- Buffer (V# — 128-bit / 16 bytes) ---
+
+# Accessor helpers — raw u32[4] / u64[2] words.
+
+def Buffer_BaseAddress(w0: u64) -> u64:
+    return w0 & 0xFFFFFFFFFFFu64
+
+def Buffer_Stride(w0: u64) -> u32:
+    return ((w0 >> 48u64) & 0x3FFFu64).u32()
+
+def Buffer_CacheSwizzle(w0: u64) -> bool:
+    return ((w0 >> 62u64) & 1u64) != 0u64
+
+def Buffer_SwizzleEnable(w0: u64) -> bool:
+    return ((w0 >> 63u64) & 1u64) != 0u64
+
+def Buffer_NumRecords(w1: u32) -> u32:
+    return w1
+
+def Buffer_DstSelX(w2: u32) -> u32:
+    return w2 & 0x7u32
+
+def Buffer_DstSelY(w2: u32) -> u32:
+    return (w2 >> 3u32) & 0x7u32
+
+def Buffer_DstSelZ(w2: u32) -> u32:
+    return (w2 >> 6u32) & 0x7u32
+
+def Buffer_DstSelW(w2: u32) -> u32:
+    return (w2 >> 9u32) & 0x7u32
+
+def Buffer_NumFormat(w2: u32) -> u32:
+    return (w2 >> 12u32) & 0x7u32
+
+def Buffer_DataFormat(w2: u32) -> u32:
+    return (w2 >> 15u32) & 0xFu32
+
+def Buffer_ElementSize(w2: u32) -> u32:
+    return (w2 >> 19u32) & 0x3u32
+
+def Buffer_IndexStride(w2: u32) -> u32:
+    return (w2 >> 21u32) & 0x3u32
+
+def Buffer_AddTidEnable(w2: u32) -> bool:
+    return ((w2 >> 23u32) & 1u32) != 0u32
+
+def Buffer_Type(w2: u32) -> u32:
+    return (w2 >> 30u32) & 0x3u32
+
+def Buffer_Valid(w2: u32) -> bool:
+    return Buffer_Type(w2) == 0u32
+
+def Buffer_NonEmpty(w1: u32) -> bool:
+    return w1 != 0u32
+
+def Buffer_Stride_Value(w0: u64) -> u32:
+    return Buffer_Stride(w0)
+
+def Buffer_GetSize(w0: u64, w1: u32) -> u32:
+    stride: u32 = Buffer_Stride(w0)
+    num_records: u32 = Buffer_NumRecords(w1)
+    if stride == 0u32:
+        return num_records
+    return stride * num_records
+
+def Buffer_GetIndexStride(w2: u32) -> u32:
+    return 8u32 << Buffer_IndexStride(w2)
+
+def Buffer_GetElementSize(w2: u32) -> u32:
+    return 2u32 << Buffer_ElementSize(w2)
+
+def Buffer_GetDataFmt(w2: u32) -> u32:
+    return RemapDataFormat(Buffer_DataFormat(w2))
+
+def Buffer_GetNumberFmt(w2: u32) -> u32:
+    return RemapNumberFormat(Buffer_NumFormat(w2), Buffer_DataFormat(w2))
+
+def Buffer_GetNumberConversion(w2: u32) -> u32:
+    return MapNumberConversion(Buffer_NumFormat(w2), Buffer_DataFormat(w2))
+
+def Buffer_DstSelect(w2: u32) -> u32:
+    raw: u32 = CompMapping_Pack(Buffer_DstSelX(w2), Buffer_DstSelY(w2), Buffer_DstSelZ(w2), Buffer_DstSelW(w2))
+    return RemapSwizzle(Buffer_DataFormat(w2), raw)
+
+# --- ImageType enum ---
+
+const ImageType_Invalid:        u32 = 0u32
+const ImageType_Color1D:        u32 = 8u32
+const ImageType_Color2D:        u32 = 9u32
+const ImageType_Color3D:        u32 = 10u32
+const ImageType_Cube:           u32 = 11u32
+const ImageType_Color1DArray:   u32 = 12u32
+const ImageType_Color2DArray:   u32 = 13u32
+const ImageType_Color2DMsaa:    u32 = 14u32
+const ImageType_Color2DMsaaArray: u32 = 15u32
+
+extern image_type_name_of(t: u32) -> static u8&? effects[Unsafe.RawExtern]
+
+# --- Image (T# — 256-bit / 32 bytes) accessors ---
+# Words: w0..w7 (u32 each), or four u64s.
+
+def Image_BaseAddress(w0: u64) -> u64:
+    return (w0 & 0x3FFFFFFFFFFu64) << 8u64
+
+def Image_DataFormat(w0: u64) -> u32:
+    return ((w0 >> 52u64) & 0x3Fu64).u32()
+
+def Image_NumFormat(w0: u64) -> u32:
+    return ((w0 >> 58u64) & 0xFu64).u32()
+
+def Image_Width(w1: u64) -> u32:
+    return (w1 & 0x3FFFu64).u32()
+
+def Image_Height(w1: u64) -> u32:
+    return ((w1 >> 14u64) & 0x3FFFu64).u32()
+
+def Image_DstSelX(w1: u64) -> u32:
+    return ((w1 >> 32u64) & 0x7u64).u32()
+
+def Image_DstSelY(w1: u64) -> u32:
+    return ((w1 >> 35u64) & 0x7u64).u32()
+
+def Image_DstSelZ(w1: u64) -> u32:
+    return ((w1 >> 38u64) & 0x7u64).u32()
+
+def Image_DstSelW(w1: u64) -> u32:
+    return ((w1 >> 41u64) & 0x7u64).u32()
+
+def Image_BaseLevel(w1: u64) -> u32:
+    return ((w1 >> 44u64) & 0xFu64).u32()
+
+def Image_LastLevel(w1: u64) -> u32:
+    return ((w1 >> 48u64) & 0xFu64).u32()
+
+def Image_TilingIndex(w1: u64) -> u32:
+    return ((w1 >> 52u64) & 0x1Fu64).u32()
+
+def Image_Pow2Pad(w1: u64) -> bool:
+    return ((w1 >> 57u64) & 1u64) != 0u64
+
+def Image_AltTileMode(w1: u64) -> bool:
+    return ((w1 >> 62u64) & 1u64) != 0u64
+
+def Image_Type(w1: u64) -> u32:
+    return ((w1 >> 60u64) & 0xFu64).u32()
+
+def Image_Depth(w2: u64) -> u32:
+    return (w2 & 0x1FFFu64).u32()
+
+def Image_Pitch(w2: u64) -> u32:
+    return ((w2 >> 13u64) & 0x3FFFu64).u32()
+
+def Image_BaseArray(w2: u64) -> u32:
+    return ((w2 >> 32u64) & 0x1FFFu64).u32()
+
+def Image_LastArray(w2: u64) -> u32:
+    return ((w2 >> 45u64) & 0x1FFFu64).u32()
+
+def Image_Valid(w1: u64) -> bool:
+    return (Image_Type(w1) & 0x8u32) != 0u32
+
+def Image_NonEmpty(w0: u64) -> bool:
+    return (w0 & 0x3FFFFFFFFFFu64) != 0u64
+
+def Image_GetPitch(w2: u64) -> u32:
+    return Image_Pitch(w2) + 1u32
+
+def Image_IsCube(w1: u64) -> bool:
+    return Image_Type(w1) == ImageType_Cube
+
+def Image_GetType(w1: u64) -> u32:
+    if Image_IsCube(w1):
+        return ImageType_Color2DArray
+    return Image_Type(w1)
+
+def Image_GetDataFmt(w0: u64) -> u32:
+    return RemapDataFormat(Image_DataFormat(w0))
+
+def Image_GetNumberFmt(w0: u64) -> u32:
+    return RemapNumberFormat(Image_NumFormat(w0), Image_DataFormat(w0))
+
+def Image_GetNumberConversion(w0: u64) -> u32:
+    return MapNumberConversion(Image_NumFormat(w0), Image_DataFormat(w0))
+
+def Image_GetTileMode(w1: u64) -> u32:
+    return Image_TilingIndex(w1)
+
+def Image_IsTiled(w1: u64) -> bool:
+    tm: u32 = Image_GetTileMode(w1)
+    return tm != TileMode_DisplayLinearAligned and tm != TileMode_DisplayLinearGeneral
+
+def Image_NumLevels(w1: u64) -> u32:
+    t: u32 = Image_GetType(w1)
+    if t == ImageType_Color2DMsaa or t == ImageType_Color2DMsaaArray:
+        return 1u32
+    return Image_LastLevel(w1) + 1u32
+
+def Image_NumSamples(w1: u64) -> u32:
+    t: u32 = Image_GetType(w1)
+    if t == ImageType_Color2DMsaa or t == ImageType_Color2DMsaaArray:
+        return 1u32 << Image_LastLevel(w1)
+    return 1u32
+
+def Image_DstSelect(w0: u64, w1: u64) -> u32:
+    raw: u32 = CompMapping_Pack(Image_DstSelX(w1), Image_DstSelY(w1), Image_DstSelZ(w1), Image_DstSelW(w1))
+    return RemapSwizzle(Image_DataFormat(w0), raw)
+
+# --- Sampler (S# — 128-bit / 16 bytes) enum constants ---
+
+const ClampMode_Wrap:                 u32 = 0u32
+const ClampMode_Mirror:               u32 = 1u32
+const ClampMode_ClampLastTexel:       u32 = 2u32
+const ClampMode_MirrorOnceLastTexel:  u32 = 3u32
+const ClampMode_ClampHalfBorder:      u32 = 4u32
+const ClampMode_MirrorOnceHalfBorder: u32 = 5u32
+const ClampMode_ClampBorder:          u32 = 6u32
+const ClampMode_MirrorOnceBorder:     u32 = 7u32
+
+const AnisoRatio_One:     u32 = 0u32
+const AnisoRatio_Two:     u32 = 1u32
+const AnisoRatio_Four:    u32 = 2u32
+const AnisoRatio_Eight:   u32 = 3u32
+const AnisoRatio_Sixteen: u32 = 4u32
+
+const DepthCompare_Never:        u32 = 0u32
+const DepthCompare_Less:         u32 = 1u32
+const DepthCompare_Equal:        u32 = 2u32
+const DepthCompare_LessEqual:    u32 = 3u32
+const DepthCompare_Greater:      u32 = 4u32
+const DepthCompare_NotEqual:     u32 = 5u32
+const DepthCompare_GreaterEqual: u32 = 6u32
+const DepthCompare_Always:       u32 = 7u32
+
+const FilterMode_Blend: u32 = 0u32
+const FilterMode_Min:   u32 = 1u32
+const FilterMode_Max:   u32 = 2u32
+
+const Filter_Point:       u32 = 0u32
+const Filter_Bilinear:    u32 = 1u32
+const Filter_AnisoPoint:  u32 = 2u32
+const Filter_AnisoLinear: u32 = 3u32
+
+const MipFilter_None:   u32 = 0u32
+const MipFilter_Point:  u32 = 1u32
+const MipFilter_Linear: u32 = 2u32
+
+const BorderColor_TransparentBlack: u32 = 0u32
+const BorderColor_OpaqueBlack:      u32 = 1u32
+const BorderColor_White:            u32 = 2u32
+const BorderColor_Custom:           u32 = 3u32
+
+def IsAnisoFilter(filter: u32) -> bool:
+    return filter == Filter_AnisoPoint or filter == Filter_AnisoLinear
+
+# --- Sampler accessors (raw0: u64, raw1: u64) ---
+
+def Sampler_ClampX(raw0: u64) -> u32:
+    return (raw0 & 0x7u64).u32()
+
+def Sampler_ClampY(raw0: u64) -> u32:
+    return ((raw0 >> 3u64) & 0x7u64).u32()
+
+def Sampler_ClampZ(raw0: u64) -> u32:
+    return ((raw0 >> 6u64) & 0x7u64).u32()
+
+def Sampler_MaxAniso(raw0: u64) -> u32:
+    return ((raw0 >> 9u64) & 0x7u64).u32()
+
+def Sampler_DepthCompareFunc(raw0: u64) -> u32:
+    return ((raw0 >> 12u64) & 0x7u64).u32()
+
+def Sampler_ForceUnnormalized(raw0: u64) -> bool:
+    return ((raw0 >> 15u64) & 1u64) != 0u64
+
+def Sampler_FilterMode(raw0: u64) -> u32:
+    return ((raw0 >> 29u64) & 0x3u64).u32()
+
+def Sampler_MinLod(raw0: u64) -> u32:
+    return ((raw0 >> 32u64) & 0xFFFu64).u32()
+
+def Sampler_MaxLod(raw0: u64) -> u32:
+    return ((raw0 >> 44u64) & 0xFFFu64).u32()
+
+def Sampler_LodBias(raw1: u64) -> u32:
+    return (raw1 & 0x3FFFu64).u32()
+
+def Sampler_XyMagFilter(raw1: u64) -> u32:
+    return ((raw1 >> 20u64) & 0x3u64).u32()
+
+def Sampler_XyMinFilter(raw1: u64) -> u32:
+    return ((raw1 >> 22u64) & 0x3u64).u32()
+
+def Sampler_MipFilter(raw1: u64) -> u32:
+    return ((raw1 >> 26u64) & 0x3u64).u32()
+
+def Sampler_BorderColorType(raw1: u64) -> u32:
+    return ((raw1 >> 62u64) & 0x3u64).u32()
+
+def Sampler_BorderColorPtr(raw1: u64) -> u32:
+    return ((raw1 >> 32u64) & 0xFFFu64).u32()
+
+def Sampler_NonEmpty(raw0: u64, raw1: u64) -> bool:
+    return raw0 != 0u64 or raw1 != 0u64
+
+def Sampler_MinLodFloat(raw0: u64) -> f32:
+    return Sampler_MinLod(raw0).f32() / 256.0f32
+
+def Sampler_MaxLodFloat(raw0: u64) -> f32:
+    return Sampler_MaxLod(raw0).f32() / 256.0f32
+
+def Sampler_MaxAnisoFloat(raw0: u64) -> f32:
+    r: u32 = Sampler_MaxAniso(raw0)
+    if r == AnisoRatio_One:
+        return 1.0f32
+    if r == AnisoRatio_Two:
+        return 2.0f32
+    if r == AnisoRatio_Four:
+        return 4.0f32
+    if r == AnisoRatio_Eight:
+        return 8.0f32
+    return 16.0f32
