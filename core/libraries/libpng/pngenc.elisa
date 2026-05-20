@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 include "./pngenc_error.elisa"
+include "../error_codes.elisa"
 
 const ORBIS_PNG_ENC_ATTRIBUTE_NONE: u32 = 0
 const ORBIS_PNG_ENC_COLOR_SPACE_RGB: u16 = 3
@@ -15,75 +16,62 @@ const ORBIS_PNG_ENC_FILTER_TYPE_AVERAGE: u16 = 4
 const ORBIS_PNG_ENC_FILTER_TYPE_PAETH: u16 = 8
 const ORBIS_PNG_ENC_FILTER_TYPE_ALL: u16 = 15
 
-const PNG_IMAGE_VERSION: u32 = 1
-const PNG_FORMAT_RGB: u32 = 0x02
-const PNG_FORMAT_BGR: u32 = 0x12
-const PNG_FORMAT_RGBA: u32 = 0x03
-const PNG_FORMAT_BGRA: u32 = 0x13
+struct ElisaPngEncOutputInfo layout c:
+    data_size: mutable u32
+    processed_height: mutable u32
 
-struct PngImage layout c:
-    opaque: void&?
-    version: u32
-    width: u32
-    height: u32
-    format: u32
-    flags: u32
-    colormap_entries: u32
-    warning_or_error: u32
-    message: u8[64]
-
-@link_name(png_image_write_to_memory)
-extern c_png_image_write_to_memory(image: mutable PngImage&, memory: mutable void&?, memory_bytes: mutable usize&, convert_to_8_bit: int, buffer: void&, row_stride: i32, colormap: void&?) -> int
+@link_name(ElisaPngEncEncode)
+extern c_elisa_png_enc_encode(image_mem_addr: u8&?, png_mem_addr: mutable u8&?, image_mem_size: u32, png_mem_size: u32, image_width: u32, image_height: u32, image_pitch: u32, pixel_format: u16, color_space: u16, bit_depth: u16, filter_type: u16, compression_level: u16, output_info: mutable ElisaPngEncOutputInfo&?) -> int
 
 @fixed_layout
 struct OrbisPngEncCreateParam:
-    this_size: u32
-    attribute: u32
-    max_image_width: u32
-    max_filter_number: u32
+    this_size: mutable u32
+    attribute: mutable u32
+    max_image_width: mutable u32
+    max_filter_number: mutable u32
 
 @fixed_layout
 struct OrbisPngEncEncodeParam:
-    image_mem_addr: u8&?
+    image_mem_addr: mutable u8&?
     png_mem_addr: mutable u8&?
-    image_mem_size: u32
-    png_mem_size: u32
-    image_width: u32
-    image_height: u32
-    image_pitch: u32
-    pixel_format: u16
-    color_space: u16
-    bit_depth: u16
-    clut_number: u16
-    filter_type: u16
-    compression_level: u16
+    image_mem_size: mutable u32
+    png_mem_size: mutable u32
+    image_width: mutable u32
+    image_height: mutable u32
+    image_pitch: mutable u32
+    pixel_format: mutable u16
+    color_space: mutable u16
+    bit_depth: mutable u16
+    clut_number: mutable u16
+    filter_type: mutable u16
+    compression_level: mutable u16
 
 @fixed_layout
 struct OrbisPngEncOutputInfo:
-    data_size: u32
-    processed_height: u32
+    data_size: mutable u32
+    processed_height: mutable u32
 
 @fixed_layout
 struct OrbisPngEncHandleInternal:
-    self_ptr: OrbisPngEncHandleInternal&?
-    max_image_width: u32
-    max_filter_number: u32
+    self_ptr: mutable OrbisPngEncHandleInternal&?
+    max_image_width: mutable u32
+    max_filter_number: mutable u32
 
 type OrbisPngEncHandle = OrbisPngEncHandleInternal&?
 
 def PngEnc_ValidateHandle(handle: OrbisPngEncHandle) -> int:
     if handle == null:
         return ORBIS_PNG_ENC_ERROR_INVALID_HANDLE
-    h_opt: OrbisPngEncHandleInternal&? = handle
+    h_opt: mutable OrbisPngEncHandleInternal&? = handle
     if h_opt == null:
         return ORBIS_PNG_ENC_ERROR_INVALID_HANDLE
-    h: OrbisPngEncHandleInternal& = h_opt
+    h: mutable OrbisPngEncHandleInternal& = h_opt
     if h.self_ptr != h_opt:
         return ORBIS_PNG_ENC_ERROR_INVALID_HANDLE
     return ORBIS_OK
 
 def PngEnc_RowBytes(width: u32, color_space: u16) -> u32:
-    channels: u32 = 4
+    channels: mutable u32 = 4
     if color_space == ORBIS_PNG_ENC_COLOR_SPACE_RGB:
         channels <- 3
     return width * channels
@@ -105,17 +93,17 @@ def scePngEncCreate(param: OrbisPngEncCreateParam&?, memory_address: mutable voi
     return ORBIS_OK
 
 def scePngEncDelete(handle: OrbisPngEncHandle) -> int:
-    handle_ret: int = PngEnc_ValidateHandle(handle)
+    handle_ret: mutable int = PngEnc_ValidateHandle(handle)
     if handle_ret != ORBIS_OK:
         return handle_ret
     if handle == null:
         return ORBIS_PNG_ENC_ERROR_INVALID_HANDLE
-    h: OrbisPngEncHandleInternal& = handle
+    h: mutable OrbisPngEncHandleInternal& = handle
     h.self_ptr <- null
     return ORBIS_OK
 
 def scePngEncEncode(handle: OrbisPngEncHandle, param: OrbisPngEncEncodeParam&?, output_info: mutable OrbisPngEncOutputInfo&?) -> int:
-    handle_ret: int = PngEnc_ValidateHandle(handle)
+    handle_ret: mutable int = PngEnc_ValidateHandle(handle)
     if handle_ret != ORBIS_OK:
         return handle_ret
     if param == null:
@@ -124,83 +112,12 @@ def scePngEncEncode(handle: OrbisPngEncHandle, param: OrbisPngEncEncodeParam&?, 
         return ORBIS_PNG_ENC_ERROR_INVALID_ADDR
     if param.png_mem_size == 0 or param.image_mem_size == 0 or param.image_width == 0 or param.image_height == 0:
         return ORBIS_PNG_ENC_ERROR_INVALID_SIZE
-    native_image: mutable PngImage = zeroed
-    native_image.version <- PNG_IMAGE_VERSION
-    native_image.width <- param.image_width
-    native_image.height <- param.image_height
-
-    src_opt: u8&? = param.image_mem_addr
-    if src_opt == null:
-        return ORBIS_PNG_ENC_ERROR_INVALID_ADDR
-    src: u8& = src_opt
-
-    output_opt: mutable u8&? = param.png_mem_addr
-    if output_opt == null:
-        return ORBIS_PNG_ENC_ERROR_INVALID_ADDR
-    output_buf: mutable u8& = output_opt
-
-    probe_bytes: usize = param.png_mem_size.usize()
-    image_arg: void& = src as void&
-    row_stride: i32 = (param.image_width * 4).i32()
-    scratch_rgb: mutable u8[1048576] = zeroed
-
-    if param.color_space == ORBIS_PNG_ENC_COLOR_SPACE_RGBA:
-        if param.pixel_format == ORBIS_PNG_ENC_PIXEL_FORMAT_B8G8R8A8:
-            native_image.format <- PNG_FORMAT_BGRA
-        else:
-            native_image.format <- PNG_FORMAT_RGBA
-    else:
-        row_bytes: u32 = PngEnc_RowBytes(param.image_width, param.color_space)
-        packed_size: u32 = row_bytes * param.image_height
-        if packed_size > 1048576:
-            if output_info != null:
-                output_info.data_size <- 0
-                output_info.processed_height <- 0
-            return ORBIS_PNG_ENC_ERROR_INVALID_SIZE
-        if param.pixel_format == ORBIS_PNG_ENC_PIXEL_FORMAT_B8G8R8A8:
-            native_image.format <- PNG_FORMAT_BGR
-        else:
-            native_image.format <- PNG_FORMAT_RGB
-        y: u32 = 0
-        while y < param.image_height:
-            src_row_off: u32 = y * param.image_pitch
-            dst_row_off: u32 = y * row_bytes
-            x: u32 = 0
-            while x < param.image_width:
-                s: u32 = src_row_off + x * 4
-                d: u32 = dst_row_off + x * 3
-                scratch_rgb[d.usize()] <- src[s.usize()]
-                scratch_rgb[(d + 1).usize()] <- src[(s + 1).usize()]
-                scratch_rgb[(d + 2).usize()] <- src[(s + 2).usize()]
-                x <- x + 1
-            y <- y + 1
-        image_arg <- scratch_rgb.ref[mutable u8&] as void&
-        row_stride <- row_bytes.i32()
-
-    probe_ok: int = c_png_image_write_to_memory(native_image.ref[mutable PngImage&], null, probe_bytes.ref[mutable usize&], 0, image_arg, row_stride, null)
-    if probe_ok == 0:
-        if output_info != null:
-            output_info.data_size <- 0
-            output_info.processed_height <- 0
-        return ORBIS_PNG_ENC_ERROR_FATAL
-    if probe_bytes > param.png_mem_size.usize():
-        if output_info != null:
-            output_info.data_size <- 0
-            output_info.processed_height <- 0
-        return ORBIS_PNG_ENC_ERROR_DATA_OVERFLOW
-
-    written_bytes: usize = param.png_mem_size.usize()
-    write_ok: int = c_png_image_write_to_memory(native_image.ref[mutable PngImage&], output_buf as mutable void&?, written_bytes.ref[mutable usize&], 0, image_arg, row_stride, null)
-    if write_ok == 0:
-        if output_info != null:
-            output_info.data_size <- 0
-            output_info.processed_height <- 0
-        return ORBIS_PNG_ENC_ERROR_FATAL
-
+    native_info: mutable ElisaPngEncOutputInfo = zeroed
+    encode_ret: mutable int = c_elisa_png_enc_encode(param.image_mem_addr, param.png_mem_addr, param.image_mem_size, param.png_mem_size, param.image_width, param.image_height, param.image_pitch, param.pixel_format, param.color_space, param.bit_depth, param.filter_type, param.compression_level, native_info.ref[mutable ElisaPngEncOutputInfo&])
     if output_info != null:
-        output_info.data_size <- written_bytes.u32()
-        output_info.processed_height <- param.image_height
-    return written_bytes.i32()
+        output_info.data_size <- native_info.data_size
+        output_info.processed_height <- native_info.processed_height
+    return encode_ret
 
 def scePngEncQueryMemorySize(param: OrbisPngEncCreateParam&?) -> int:
     if param == null:

@@ -3,8 +3,10 @@
 
 #include "core/libraries/kernel/kernel.h"
 #include "core/libraries/network/net.h"
+#include "core/libraries/network/netctl.h"
 #include "core/libraries/network/net_resolver.h"
 #include "core/libraries/network/sys_net.h"
+#include "core/emulator_settings.h"
 
 extern "C" {
 
@@ -86,6 +88,19 @@ int NetElisa_sys_netabort(int s, int flags) {
     return Libraries::Net::sys_netabort(s, flags);
 }
 
+int NetElisa_get_mac_address(void* addr, int flags) {
+    return Libraries::Net::sceNetGetMacAddress(
+        static_cast<Libraries::NetCtl::OrbisNetEtherAddr*>(addr), flags);
+}
+
+const char* NetElisa_inet_ntop(int af, const void* src, char* dst, u32 size) {
+    return Libraries::Net::sceNetInetNtop(af, src, dst, size);
+}
+
+int NetElisa_inet_pton(int af, const char* src, void* dst) {
+    return Libraries::Net::sceNetInetPton(af, src, dst);
+}
+
 int NetElisa_epoll_create(const char* name, int flags) {
     return Libraries::Net::sceNetEpollCreate(name, flags);
 }
@@ -122,6 +137,23 @@ int NetElisa_resolver_start_ntoa(int resolverid, const char* hostname, void* add
     return Libraries::Net::sceNetResolverStartNtoa(
         resolverid, hostname, static_cast<Libraries::Net::OrbisNetInAddr*>(addr), timeout, retry,
         flags);
+}
+
+int NetElisa_is_connected_to_network() {
+    return EmulatorSettings.IsConnectedToNetwork() ? 1 : 0;
+}
+
+void NetElisa_set_connected_to_network(int connected) {
+    EmulatorSettings.SetConnectedToNetwork(connected != 0);
+}
+
+int NetElisa_netctl_get_info(int code, void* info) {
+    return Libraries::NetCtl::sceNetCtlGetInfo(
+        code, static_cast<Libraries::NetCtl::OrbisNetCtlInfo*>(info));
+}
+
+int NetElisa_netctl_get_state(int* state) {
+    return Libraries::NetCtl::sceNetCtlGetState(state);
 }
 
 } // extern "C"

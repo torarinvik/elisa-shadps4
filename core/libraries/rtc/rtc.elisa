@@ -1,0 +1,637 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../error_codes.elisa"
+include "./rtc_error.elisa"
+include "../libc_internal/libc_internal_io.elisa"
+
+const ORBIS_RTC_CLOCK_ID_NETWORK: int = 0x10
+const ORBIS_RTC_CLOCK_ID_DEBUG_NETWORK: int = 0x11
+const ORBIS_RTC_CLOCK_ID_AD_NETWORK: int = 0x12
+const UNIX_EPOCH_TICKS: s64 = 0xdcbffeff2bc000
+const WIN32_FILETIME_EPOCH_TICKS: s64 = 0xb36168b6a58000
+
+struct OrbisRtcTick:
+    tick: u64
+
+struct OrbisRtcDateTime:
+    year: u16
+    month: u16
+    day: u16
+    hour: u16
+    minute: u16
+    second: u16
+    microsecond: u32
+
+@fixed_layout
+struct RtcNativeTimespec:
+    tv_sec: mutable s64
+    tv_nsec: mutable s64
+
+@fixed_layout
+struct RtcNativeTimeval:
+    tv_sec: mutable s64
+    tv_usec: mutable s64
+
+@fixed_layout
+struct RtcNativeTimezone:
+    tz_minuteswest: mutable s32
+    tz_dsttime: mutable s32
+
+@c_abi(c)
+extern time(tloc: mutable s64&?) -> s64
+extern clock_gettime(clk_id: int, ts: mutable RtcNativeTimespec&?) -> int
+extern gettimeofday(tv: mutable RtcNativeTimeval&?, tz: mutable RtcNativeTimezone&?) -> int
+
+def _days_in_month(year: int, month: int) -> int:
+    if month == 2:
+        leap: bool = (year % 4 == 0 and year % 100 != 0) or (year % 400 == 0)
+        return 29 if leap else 28
+    if month == 4 or month == 6 or month == 9 or month == 11:
+        return 30
+    return 31
+
+def _atoi2(s: u8&, idx: usize) -> int:
+    return (s[idx].int() - 48) * 10 + (s[idx + 1].int() - 48)
+
+def _atoi4(s: u8&, idx: usize) -> int:
+    return (s[idx].int() - 48) * 1000 + (s[idx + 1].int() - 48) * 100 + (s[idx + 2].int() - 48) * 10 + (s[idx + 3].int() - 48)
+
+def _month_from_string(s: u8&, idx: usize) -> int:
+    if s[idx] == 'J' and s[idx + 1usize] == 'a' and s[idx + 2usize] == 'n':
+        return 1
+    if s[idx] == 'F' and s[idx + 1usize] == 'e' and s[idx + 2usize] == 'b':
+        return 2
+    if s[idx] == 'M' and s[idx + 1usize] == 'a' and s[idx + 2usize] == 'r':
+        return 3
+    if s[idx] == 'A' and s[idx + 1usize] == 'p' and s[idx + 2usize] == 'r':
+        return 4
+    if s[idx] == 'M' and s[idx + 1usize] == 'a' and s[idx + 2usize] == 'y':
+        return 5
+    if s[idx] == 'J' and s[idx + 1usize] == 'u' and s[idx + 2usize] == 'n':
+        return 6
+    if s[idx] == 'J' and s[idx + 1usize] == 'u' and s[idx + 2usize] == 'l':
+        return 7
+    if s[idx] == 'A' and s[idx + 1usize] == 'u' and s[idx + 2usize] == 'g':
+        return 8
+    if s[idx] == 'S' and s[idx + 1usize] == 'e' and s[idx + 2usize] == 'p':
+        return 9
+    if s[idx] == 'O' and s[idx + 1usize] == 'c' and s[idx + 2usize] == 't':
+        return 10
+    if s[idx] == 'N' and s[idx + 1usize] == 'o' and s[idx + 2usize] == 'v':
+        return 11
+    if s[idx] == 'D' and s[idx + 1usize] == 'e' and s[idx + 2usize] == 'c':
+        return 12
+    return 1
+
+def _current_tick_value(out_tick: mutable OrbisRtcTick&?) -> int:
+    if out_tick == null:
+        return ORBIS_RTC_ERROR_DATETIME_UNINITIALIZED
+    ts: mutable RtcNativeTimespec = zeroed
+    if clock_gettime(0, ts.ref[mutable RtcNativeTimespec&]) == 0:
+        out_tick.tick <- ((ts.tv_nsec / 1000) + (ts.tv_sec * 1000000) + UNIX_EPOCH_TICKS).u64()
+        return ORBIS_OK
+    now_sec: s64 = time(null)
+    out_tick.tick <- (now_sec * 1000000 + UNIX_EPOCH_TICKS).u64()
+    return ORBIS_OK
+
+def _rtc_timezone_minutes() -> int:
+    tz: mutable RtcNativeTimezone = zeroed
+    if gettimeofday(null, tz.ref[mutable RtcNativeTimezone&]) != 0:
+        return 0
+    return -(tz.tz_minuteswest.int() - (tz.tz_dsttime.int() * 60))
+
+def sceRtcCheckValid(p_time: mutable OrbisRtcDateTime&?) -> int:
+    if p_time == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    if p_time.year == 0 or p_time.year > 9999u16:
+        return ORBIS_RTC_ERROR_INVALID_YEAR
+    if p_time.month == 0 or p_time.month > 12u16:
+        return ORBIS_RTC_ERROR_INVALID_MONTH
+    if p_time.day == 0:
+        return ORBIS_RTC_ERROR_INVALID_DAY
+    if p_time.day > _days_in_month(p_time.year.int(), p_time.month.int()).u16():
+        return ORBIS_RTC_ERROR_INVALID_DAY
+    if p_time.hour >= 24u16:
+        return ORBIS_RTC_ERROR_INVALID_HOUR
+    if p_time.minute >= 60u16:
+        return ORBIS_RTC_ERROR_INVALID_MINUTE
+    if p_time.second >= 60u16:
+        return ORBIS_RTC_ERROR_INVALID_SECOND
+    if p_time.microsecond >= 1000000u32:
+        return ORBIS_RTC_ERROR_INVALID_MICROSECOND
+    return ORBIS_OK
+
+def sceRtcCompareTick(p_tick1: mutable OrbisRtcTick&?, p_tick2: mutable OrbisRtcTick&?) -> int:
+    if p_tick1 == null or p_tick2 == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    return 1 if p_tick1.tick <= p_tick2.tick else 0
+
+def sceRtcTickAddMinutes(p_tick1: mutable OrbisRtcTick&?, p_tick2: mutable OrbisRtcTick&?, l_add: s64) -> int:
+    if p_tick1 == null or p_tick2 == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    p_tick1.tick <- (l_add * 60000000 + p_tick2.tick.s64()).u64()
+    return ORBIS_OK
+
+def sceRtcConvertLocalTimeToUtc(p_tick_local: mutable OrbisRtcTick&?, p_tick_utc: mutable OrbisRtcTick&?) -> int:
+    if p_tick_local == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    if p_tick_utc == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    tz_minutes: int = _rtc_timezone_minutes()
+    return sceRtcTickAddMinutes(p_tick_utc, p_tick_local, (-tz_minutes).s64())
+
+def sceRtcConvertUtcToLocalTime(p_tick_utc: mutable OrbisRtcTick&?, p_tick_local: mutable OrbisRtcTick&?) -> int:
+    if p_tick_utc == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    if p_tick_local == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    _ = sceRtcTickAddMinutes(p_tick_local, p_tick_utc, _rtc_timezone_minutes().s64())
+    return 0
+
+def sceRtcEnd() -> int:
+    return ORBIS_OK
+
+def sceRtcGetCurrentTick(p_tick: mutable OrbisRtcTick&?) -> int:
+    if p_tick == null:
+        return ORBIS_RTC_ERROR_DATETIME_UNINITIALIZED
+    return _current_tick_value(p_tick)
+
+def sceRtcSetTick(p_time: mutable OrbisRtcDateTime&?, p_tick: mutable OrbisRtcTick&?) -> int:
+    if p_time == null or p_tick == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    ly: mutable u32 = 0u32
+    ld: mutable u32 = 0u32
+    lm: mutable u32 = 0u32
+    j: mutable u32 = 0u32
+    days: mutable u64 = p_tick.tick / 86400000000u64
+    msec: mutable u64 = p_tick.tick % 86400000000u64
+    days <- days + 307u64
+    j <- ((days << 2u64) - 1u64).u32()
+    ly <- j / 146097u32
+    j <- j - (146097u32 * ly)
+    ld <- j >> 2u32
+    j <- (((ld << 2u32) + 3u32) / 1461u32)
+    ld <- ((((ld << 2u32) + 7u32) - (1461u32 * j)) >> 2u32)
+    lm <- (((5u32 * ld) - 3u32) / 153u32)
+    ld <- (((5u32 * ld) + 2u32 - (153u32 * lm)) / 5u32)
+    ly <- (100u32 * ly) + j
+    if lm < 10u32:
+        lm <- lm + 3u32
+    else:
+        lm <- lm - 9u32
+        ly <- ly + 1u32
+    p_time.year <- ly.u16()
+    p_time.month <- lm.u16()
+    p_time.day <- ld.u16()
+    p_time.hour <- (msec / 3600000000u64).u16()
+    msec <- msec % 3600000000u64
+    p_time.minute <- (msec / 60000000u64).u16()
+    msec <- msec % 60000000u64
+    p_time.second <- (msec / 1000000u64).u16()
+    msec <- msec % 1000000u64
+    p_time.microsecond <- msec.u32()
+    return ORBIS_OK
+
+def sceRtcGetTick(p_time: mutable OrbisRtcDateTime&?, p_tick: mutable OrbisRtcTick&?) -> int:
+    if p_time == null or p_tick == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    valid: int = sceRtcCheckValid(p_time)
+    if valid != ORBIS_OK:
+        return valid
+    month_norm: mutable int = p_time.month.int()
+    year_norm: mutable int = p_time.year.int()
+    if month_norm > 2:
+        month_norm <- month_norm - 3
+    else:
+        month_norm <- month_norm + 9
+        year_norm <- year_norm - 1
+    c: int = year_norm / 100
+    ya: int = year_norm - (100 * c)
+    days: u64 = ((((146097 * c) >> 2) + ((1461 * ya) >> 2) + ((153 * month_norm + 2) / 5) + p_time.day.int() - 307) * 86400000000).u64()
+    msec: u64 = (p_time.hour.u64() * 3600000000u64) + (p_time.minute.u64() * 60000000u64) + (p_time.second.u64() * 1000000u64) + p_time.microsecond.u64()
+    p_tick.tick <- days + msec
+    return ORBIS_OK
+
+def sceRtcGetTickResolution() -> u32:
+    return 1000000u32
+
+def sceRtcInit() -> int:
+    return ORBIS_OK
+
+def sceRtcGetDaysInMonth(year: int, month: int) -> int:
+    if year <= 0:
+        return ORBIS_RTC_ERROR_INVALID_YEAR
+    if month <= 0 or month > 12:
+        return ORBIS_RTC_ERROR_INVALID_MONTH
+    return _days_in_month(year, month)
+
+def sceRtcIsLeapYear(year_int: int) -> int:
+    if year_int < 1:
+        return ORBIS_RTC_ERROR_INVALID_YEAR
+    return 1 if ((year_int % 4 == 0 and year_int % 100 != 0) or (year_int % 400 == 0)) else 0
+
+def sceRtcGetDayOfWeek(year: int, month: int, day: int) -> int:
+    if year < 1 or year > 9999:
+        return ORBIS_RTC_ERROR_INVALID_YEAR
+    if month <= 0 or month > 12:
+        return ORBIS_RTC_ERROR_INVALID_MONTH
+    if day <= 0 or day > _days_in_month(year, month):
+        return ORBIS_RTC_ERROR_INVALID_DAY
+    # Zeller-like mapping to 0=Sunday..6=Saturday
+    m: mutable int = month
+    y: mutable int = year
+    if m < 3:
+        m <- m + 12
+        y <- y - 1
+    k: int = y % 100
+    j: int = y / 100
+    h: int = (day + (13 * (m + 1)) / 5 + k + (k / 4) + (j / 4) + (5 * j)) % 7
+    return (h + 6) % 7
+
+def sceRtcGetCurrentClock(p_time: mutable OrbisRtcDateTime&?, time_zone: int) -> int:
+    if p_time == null:
+        return ORBIS_RTC_ERROR_DATETIME_UNINITIALIZED
+    tick: mutable OrbisRtcTick = zeroed
+    _ = sceRtcGetCurrentTick(tick.ref[mutable OrbisRtcTick&])
+    _ = sceRtcTickAddMinutes(tick.ref[mutable OrbisRtcTick&], tick.ref[mutable OrbisRtcTick&], time_zone.s64())
+    return sceRtcSetTick(p_time, tick.ref[mutable OrbisRtcTick&])
+
+def sceRtcGetCurrentClockLocalTime(p_time: mutable OrbisRtcDateTime&?) -> int:
+    if p_time == null:
+        return ORBIS_RTC_ERROR_DATETIME_UNINITIALIZED
+    return sceRtcGetCurrentClock(p_time, _rtc_timezone_minutes())
+
+def sceRtcGetCurrentAdNetworkTick(p_tick: mutable OrbisRtcTick&?) -> int:
+    if p_tick == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    return sceRtcGetCurrentTick(p_tick)
+
+def sceRtcGetCurrentDebugNetworkTick(p_tick: mutable OrbisRtcTick&?) -> int:
+    if p_tick == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    return sceRtcGetCurrentTick(p_tick)
+
+def sceRtcGetCurrentNetworkTick(p_tick: mutable OrbisRtcTick&?) -> int:
+    if p_tick == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    return sceRtcGetCurrentTick(p_tick)
+
+def sceRtcGetCurrentRawNetworkTick(p_tick: mutable OrbisRtcTick&?) -> int:
+    if p_tick == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    return sceRtcGetCurrentTick(p_tick)
+
+def sceRtcFormatRFC2822(psz_date_time: mutable u8&?, p_tick_utc: OrbisRtcTick&?, minutes: int) -> int:
+    if psz_date_time == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    fmt_tick: mutable OrbisRtcTick = zeroed
+    if p_tick_utc == null:
+        _ = sceRtcGetCurrentTick(fmt_tick.ref[mutable OrbisRtcTick&])
+    else:
+        fmt_tick.tick <- p_tick_utc.tick
+    _ = sceRtcTickAddMinutes(fmt_tick.ref[mutable OrbisRtcTick&], fmt_tick.ref[mutable OrbisRtcTick&], minutes.s64())
+    dt: mutable OrbisRtcDateTime = zeroed
+    _ = sceRtcSetTick(dt.ref[mutable OrbisRtcDateTime&], fmt_tick.ref[mutable OrbisRtcTick&])
+    wd: int = sceRtcGetDayOfWeek(dt.year.int(), dt.month.int(), dt.day.int())
+    tz_h: int = minutes / 60
+    tz_m: int = minutes % 60
+    sign: u8& = "+"
+    if tz_h < 0:
+        sign = "-"
+        tz_h <- -tz_h
+    if tz_m < 0:
+        tz_m <- -tz_m
+    if dt.month == 1u16:
+        _ = internal_snprintf(psz_date_time, 128u64, "%s, %02d Jan %04d %02d:%02d:%02d %s%02d%02d", "Sun" if wd == 0 else "Mon" if wd == 1 else "Tue" if wd == 2 else "Wed" if wd == 3 else "Thu" if wd == 4 else "Fri" if wd == 5 else "Sat", dt.day.int(), dt.year.int(), dt.hour.int(), dt.minute.int(), dt.second.int(), sign, tz_h, tz_m)
+    elif dt.month == 2u16:
+        _ = internal_snprintf(psz_date_time, 128u64, "%s, %02d Feb %04d %02d:%02d:%02d %s%02d%02d", "Sun" if wd == 0 else "Mon" if wd == 1 else "Tue" if wd == 2 else "Wed" if wd == 3 else "Thu" if wd == 4 else "Fri" if wd == 5 else "Sat", dt.day.int(), dt.year.int(), dt.hour.int(), dt.minute.int(), dt.second.int(), sign, tz_h, tz_m)
+    elif dt.month == 3u16:
+        _ = internal_snprintf(psz_date_time, 128u64, "%s, %02d Mar %04d %02d:%02d:%02d %s%02d%02d", "Sun" if wd == 0 else "Mon" if wd == 1 else "Tue" if wd == 2 else "Wed" if wd == 3 else "Thu" if wd == 4 else "Fri" if wd == 5 else "Sat", dt.day.int(), dt.year.int(), dt.hour.int(), dt.minute.int(), dt.second.int(), sign, tz_h, tz_m)
+    elif dt.month == 4u16:
+        _ = internal_snprintf(psz_date_time, 128u64, "%s, %02d Apr %04d %02d:%02d:%02d %s%02d%02d", "Sun" if wd == 0 else "Mon" if wd == 1 else "Tue" if wd == 2 else "Wed" if wd == 3 else "Thu" if wd == 4 else "Fri" if wd == 5 else "Sat", dt.day.int(), dt.year.int(), dt.hour.int(), dt.minute.int(), dt.second.int(), sign, tz_h, tz_m)
+    elif dt.month == 5u16:
+        _ = internal_snprintf(psz_date_time, 128u64, "%s, %02d May %04d %02d:%02d:%02d %s%02d%02d", "Sun" if wd == 0 else "Mon" if wd == 1 else "Tue" if wd == 2 else "Wed" if wd == 3 else "Thu" if wd == 4 else "Fri" if wd == 5 else "Sat", dt.day.int(), dt.year.int(), dt.hour.int(), dt.minute.int(), dt.second.int(), sign, tz_h, tz_m)
+    elif dt.month == 6u16:
+        _ = internal_snprintf(psz_date_time, 128u64, "%s, %02d Jun %04d %02d:%02d:%02d %s%02d%02d", "Sun" if wd == 0 else "Mon" if wd == 1 else "Tue" if wd == 2 else "Wed" if wd == 3 else "Thu" if wd == 4 else "Fri" if wd == 5 else "Sat", dt.day.int(), dt.year.int(), dt.hour.int(), dt.minute.int(), dt.second.int(), sign, tz_h, tz_m)
+    elif dt.month == 7u16:
+        _ = internal_snprintf(psz_date_time, 128u64, "%s, %02d Jul %04d %02d:%02d:%02d %s%02d%02d", "Sun" if wd == 0 else "Mon" if wd == 1 else "Tue" if wd == 2 else "Wed" if wd == 3 else "Thu" if wd == 4 else "Fri" if wd == 5 else "Sat", dt.day.int(), dt.year.int(), dt.hour.int(), dt.minute.int(), dt.second.int(), sign, tz_h, tz_m)
+    elif dt.month == 8u16:
+        _ = internal_snprintf(psz_date_time, 128u64, "%s, %02d Aug %04d %02d:%02d:%02d %s%02d%02d", "Sun" if wd == 0 else "Mon" if wd == 1 else "Tue" if wd == 2 else "Wed" if wd == 3 else "Thu" if wd == 4 else "Fri" if wd == 5 else "Sat", dt.day.int(), dt.year.int(), dt.hour.int(), dt.minute.int(), dt.second.int(), sign, tz_h, tz_m)
+    elif dt.month == 9u16:
+        _ = internal_snprintf(psz_date_time, 128u64, "%s, %02d Sep %04d %02d:%02d:%02d %s%02d%02d", "Sun" if wd == 0 else "Mon" if wd == 1 else "Tue" if wd == 2 else "Wed" if wd == 3 else "Thu" if wd == 4 else "Fri" if wd == 5 else "Sat", dt.day.int(), dt.year.int(), dt.hour.int(), dt.minute.int(), dt.second.int(), sign, tz_h, tz_m)
+    elif dt.month == 10u16:
+        _ = internal_snprintf(psz_date_time, 128u64, "%s, %02d Oct %04d %02d:%02d:%02d %s%02d%02d", "Sun" if wd == 0 else "Mon" if wd == 1 else "Tue" if wd == 2 else "Wed" if wd == 3 else "Thu" if wd == 4 else "Fri" if wd == 5 else "Sat", dt.day.int(), dt.year.int(), dt.hour.int(), dt.minute.int(), dt.second.int(), sign, tz_h, tz_m)
+    elif dt.month == 11u16:
+        _ = internal_snprintf(psz_date_time, 128u64, "%s, %02d Nov %04d %02d:%02d:%02d %s%02d%02d", "Sun" if wd == 0 else "Mon" if wd == 1 else "Tue" if wd == 2 else "Wed" if wd == 3 else "Thu" if wd == 4 else "Fri" if wd == 5 else "Sat", dt.day.int(), dt.year.int(), dt.hour.int(), dt.minute.int(), dt.second.int(), sign, tz_h, tz_m)
+    else:
+        _ = internal_snprintf(psz_date_time, 128u64, "%s, %02d Dec %04d %02d:%02d:%02d %s%02d%02d", "Sun" if wd == 0 else "Mon" if wd == 1 else "Tue" if wd == 2 else "Wed" if wd == 3 else "Thu" if wd == 4 else "Fri" if wd == 5 else "Sat", dt.day.int(), dt.year.int(), dt.hour.int(), dt.minute.int(), dt.second.int(), sign, tz_h, tz_m)
+    return ORBIS_OK
+
+def sceRtcFormatRFC2822LocalTime(psz_date_time: mutable u8&?, p_tick_utc: OrbisRtcTick&?) -> int:
+    return sceRtcFormatRFC2822(psz_date_time, p_tick_utc, _rtc_timezone_minutes())
+
+def sceRtcFormatRFC3339(psz_date_time: mutable u8&?, p_tick_utc: OrbisRtcTick&?, minutes: int) -> int:
+    return sceRtcFormatRFC3339Precise(psz_date_time, p_tick_utc, minutes)
+
+def sceRtcFormatRFC3339LocalTime(psz_date_time: mutable u8&?, p_tick_utc: OrbisRtcTick&?) -> int:
+    return sceRtcFormatRFC3339(psz_date_time, p_tick_utc, _rtc_timezone_minutes())
+
+def sceRtcFormatRFC3339Precise(psz_date_time: mutable u8&?, p_tick_utc: OrbisRtcTick&?, minutes: int) -> int:
+    if psz_date_time == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    fmt_tick: mutable OrbisRtcTick = zeroed
+    if p_tick_utc == null:
+        _ = sceRtcGetCurrentTick(fmt_tick.ref[mutable OrbisRtcTick&])
+    else:
+        fmt_tick.tick <- p_tick_utc.tick
+    _ = sceRtcTickAddMinutes(fmt_tick.ref[mutable OrbisRtcTick&], fmt_tick.ref[mutable OrbisRtcTick&], minutes.s64())
+    dt: mutable OrbisRtcDateTime = zeroed
+    _ = sceRtcSetTick(dt.ref[mutable OrbisRtcDateTime&], fmt_tick.ref[mutable OrbisRtcTick&])
+    if minutes == 0:
+        _ = internal_snprintf(psz_date_time, 128u64, "%04d-%02d-%02dT%02d:%02d:%02d.%02dZ", dt.year.int(), dt.month.int(), dt.day.int(), dt.hour.int(), dt.minute.int(), dt.second.int(), (dt.microsecond / 1000u32 / 10u32).int())
+    else:
+        sign: u8& = "+"
+        tz_h: int = minutes / 60
+        tz_m: int = minutes % 60
+        if tz_h < 0:
+            sign = "-"
+            tz_h <- -tz_h
+        if tz_m < 0:
+            tz_m <- -tz_m
+        _ = internal_snprintf(psz_date_time, 128u64, "%04d-%02d-%02dT%02d:%02d:%02d.%02d%s%02d:%02d", dt.year.int(), dt.month.int(), dt.day.int(), dt.hour.int(), dt.minute.int(), dt.second.int(), (dt.microsecond / 1000u32 / 10u32).int(), sign, tz_h, tz_m)
+    return ORBIS_OK
+
+def sceRtcFormatRFC3339PreciseLocalTime(psz_date_time: mutable u8&?, p_tick_utc: OrbisRtcTick&?) -> int:
+    return sceRtcFormatRFC3339Precise(psz_date_time, p_tick_utc, _rtc_timezone_minutes())
+
+def sceRtcGetDosTime(p_time: mutable OrbisRtcDateTime&?, dos_time: mutable u32&?) -> int:
+    if p_time == null or dos_time == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    valid: int = sceRtcCheckValid(p_time)
+    if valid != ORBIS_OK:
+        return valid
+    dos_time <- 0u32
+    dos_time <- dos_time | ((p_time.second / 2u16).u32() & 0x1Fu32)
+    dos_time <- dos_time | ((p_time.minute.u32() & 0x3Fu32) << 5u32)
+    dos_time <- dos_time | ((p_time.hour.u32() & 0x1Fu32) << 11u32)
+    dos_time <- dos_time | ((p_time.day.u32() & 0x1Fu32) << 16u32)
+    dos_time <- dos_time | ((p_time.month.u32() & 0x0Fu32) << 21u32)
+    dos_time <- dos_time | (((p_time.year - 1980u16).u32() & 0x7Fu32) << 25u32)
+    return ORBIS_OK
+
+def sceRtcGetTime_t(p_time: mutable OrbisRtcDateTime&?, ll_time: mutable s64&?) -> int:
+    if p_time == null or ll_time == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    valid: int = sceRtcCheckValid(p_time)
+    if valid != ORBIS_OK:
+        return valid
+    time_tick: mutable OrbisRtcTick = zeroed
+    _ = sceRtcGetTick(p_time, time_tick.ref[mutable OrbisRtcTick&])
+    if time_tick.tick < UNIX_EPOCH_TICKS.u64():
+        ll_time <- 0
+    else:
+        ll_time <- ((time_tick.tick - UNIX_EPOCH_TICKS.u64()) / 1000000u64).s64()
+    return ORBIS_OK
+
+def sceRtcGetWin32FileTime(p_time: mutable OrbisRtcDateTime&?, ul_win32_time: mutable u64&?) -> int:
+    if p_time == null or ul_win32_time == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    valid: int = sceRtcCheckValid(p_time)
+    if valid != ORBIS_OK:
+        return valid
+    time_tick: mutable OrbisRtcTick = zeroed
+    _ = sceRtcGetTick(p_time, time_tick.ref[mutable OrbisRtcTick&])
+    if time_tick.tick < WIN32_FILETIME_EPOCH_TICKS.u64():
+        ul_win32_time <- 0u64
+    else:
+        ul_win32_time <- (time_tick.tick - WIN32_FILETIME_EPOCH_TICKS.u64()) * 10u64
+    return ORBIS_OK
+
+def sceRtcParseDateTime(p_tick_utc: mutable OrbisRtcTick&?, psz_date_time: u8&?) -> int:
+    if p_tick_utc == null or psz_date_time == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    if psz_date_time[4] == '-':
+        return sceRtcParseRFC3339(p_tick_utc, psz_date_time)
+    dt: mutable OrbisRtcDateTime = zeroed
+    if psz_date_time[19] == ':':
+        dt.day <- _atoi2(psz_date_time, 5usize).u16()
+        dt.month <- _month_from_string(psz_date_time, 8usize).u16()
+        dt.year <- _atoi4(psz_date_time, 12usize).u16()
+        dt.hour <- _atoi2(psz_date_time, 17usize).u16()
+        dt.minute <- _atoi2(psz_date_time, 20usize).u16()
+        dt.second <- _atoi2(psz_date_time, 23usize).u16()
+        dt.microsecond <- 0u32
+        _ = sceRtcGetTick(dt.ref[mutable OrbisRtcDateTime&], p_tick_utc)
+        if psz_date_time[26] == '+' or psz_date_time[26] == '-':
+            offset: int = _atoi2(psz_date_time, 27usize) * 60 + _atoi2(psz_date_time, 29usize)
+            if psz_date_time[26] == '-':
+                offset <- -offset
+            _ = sceRtcTickAddMinutes(p_tick_utc, p_tick_utc, offset.s64())
+        return ORBIS_OK
+    dt.month <- _month_from_string(psz_date_time, 4usize).u16()
+    dt.day <- _atoi2(psz_date_time, 8usize).u16()
+    dt.hour <- _atoi2(psz_date_time, 11usize).u16()
+    dt.minute <- _atoi2(psz_date_time, 14usize).u16()
+    dt.second <- _atoi2(psz_date_time, 17usize).u16()
+    dt.year <- _atoi4(psz_date_time, 20usize).u16()
+    dt.microsecond <- 0u32
+    _ = sceRtcGetTick(dt.ref[mutable OrbisRtcDateTime&], p_tick_utc)
+    return ORBIS_OK
+
+def sceRtcParseRFC3339(p_tick_utc: mutable OrbisRtcTick&?, psz_date_time: u8&?) -> int:
+    if p_tick_utc == null or psz_date_time == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    dt: mutable OrbisRtcDateTime = zeroed
+    dt.year <- _atoi4(psz_date_time, 0).u16()
+    dt.month <- _atoi2(psz_date_time, 5).u16()
+    dt.day <- _atoi2(psz_date_time, 8).u16()
+    dt.hour <- _atoi2(psz_date_time, 11).u16()
+    dt.minute <- _atoi2(psz_date_time, 14).u16()
+    dt.second <- _atoi2(psz_date_time, 17).u16()
+    tz_pos: mutable usize = 19usize
+    dt.microsecond <- 0u32
+    if psz_date_time[19] == '.':
+        dt.microsecond <- (_atoi2(psz_date_time, 20) * 10000).u32()
+        tz_pos <- 22usize
+    _ = sceRtcGetTick(dt.ref[mutable OrbisRtcDateTime&], p_tick_utc)
+    if psz_date_time[tz_pos] == '+' or psz_date_time[tz_pos] == '-':
+        tzm: int = _atoi2(psz_date_time, tz_pos + 1usize) * 60 + _atoi2(psz_date_time, tz_pos + 4usize)
+        if psz_date_time[tz_pos] == '-':
+            tzm <- -tzm
+        _ = sceRtcTickAddMinutes(p_tick_utc, p_tick_utc, tzm.s64())
+    return ORBIS_OK
+
+def sceRtcSetConf(p1: void&?, p2: void&?, minuteswest: s32, dsttime: s32) -> void:
+    _ = p1
+    _ = p2
+    _ = minuteswest
+    _ = dsttime
+    return
+
+def sceRtcSetCurrentAdNetworkTick(p_tick: mutable OrbisRtcTick&?) -> int:
+    if p_tick == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    if p_tick.tick <= UNIX_EPOCH_TICKS.u64():
+        return ORBIS_RTC_ERROR_INVALID_VALUE
+    return 0
+
+def sceRtcSetCurrentDebugNetworkTick(p_tick: mutable OrbisRtcTick&?) -> int:
+    return sceRtcSetCurrentAdNetworkTick(p_tick)
+
+def sceRtcSetCurrentNetworkTick(p_tick: mutable OrbisRtcTick&?) -> int:
+    return sceRtcSetCurrentAdNetworkTick(p_tick)
+
+def sceRtcSetCurrentTick(p_tick: mutable OrbisRtcTick&?) -> int:
+    if p_tick == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    if p_tick.tick <= UNIX_EPOCH_TICKS.u64():
+        return ORBIS_RTC_ERROR_INVALID_VALUE
+    return ORBIS_OK
+
+def sceRtcSetDosTime(p_time: mutable OrbisRtcDateTime&?, dos_time: u32) -> int:
+    if p_time == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    p_time.microsecond <- 0u32
+    p_time.second <- ((dos_time << 1u32) & 0x3Eu32).u16()
+    p_time.minute <- ((dos_time >> 5u32) & 0x3Fu32).u16()
+    p_time.hour <- ((dos_time >> 11u32) & 0x1Fu32).u16()
+    days: u32 = dos_time >> 16u32
+    p_time.day <- (days & 0x1Fu32).u16()
+    p_time.month <- ((days >> 5u32) & 0x0Fu32).u16()
+    p_time.year <- ((days >> 9u32) + 1980u32).u16()
+    return ORBIS_OK
+
+def sceRtcSetTime_t(p_time: mutable OrbisRtcDateTime&?, ll_time: s64) -> int:
+    if p_time == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    if ll_time < 0:
+        return ORBIS_RTC_ERROR_INVALID_VALUE
+    tick: mutable OrbisRtcTick = zeroed
+    tick.tick <- (ll_time * 1000000 + UNIX_EPOCH_TICKS).u64()
+    return sceRtcSetTick(p_time, tick.ref[mutable OrbisRtcTick&])
+
+def sceRtcSetWin32FileTime(p_time: mutable OrbisRtcDateTime&?, ul_win32_time: s64) -> int:
+    if p_time == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    tick: mutable OrbisRtcTick = zeroed
+    tick.tick <- ((ul_win32_time / 10 + WIN32_FILETIME_EPOCH_TICKS).u64())
+    return sceRtcSetTick(p_time, tick.ref[mutable OrbisRtcTick&])
+
+def sceRtcTickAddDays(p_tick1: mutable OrbisRtcTick&?, p_tick2: mutable OrbisRtcTick&?, l_add: s32) -> int:
+    if p_tick1 == null or p_tick2 == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    p_tick1.tick <- (p_tick2.tick.s64() + l_add.s64() * 86400000000).u64()
+    return ORBIS_OK
+def sceRtcTickAddHours(p_tick1: mutable OrbisRtcTick&?, p_tick2: mutable OrbisRtcTick&?, l_add: s32) -> int:
+    if p_tick1 == null or p_tick2 == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    p_tick1.tick <- (p_tick2.tick.s64() + l_add.s64() * 3600000000).u64()
+    return ORBIS_OK
+def sceRtcTickAddMicroseconds(p_tick1: mutable OrbisRtcTick&?, p_tick2: mutable OrbisRtcTick&?, l_add: s64) -> int:
+    if p_tick1 == null or p_tick2 == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    p_tick1.tick <- (p_tick2.tick.s64() + l_add).u64()
+    return ORBIS_OK
+def sceRtcTickAddMonths(p_tick1: mutable OrbisRtcTick&?, p_tick2: mutable OrbisRtcTick&?, l_add: s32) -> int:
+    if p_tick1 == null or p_tick2 == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    if l_add == 0:
+        p_tick1.tick <- p_tick2.tick
+        return ORBIS_OK
+    time_value: mutable OrbisRtcDateTime = zeroed
+    _ = sceRtcSetTick(time_value.ref[mutable OrbisRtcDateTime&], p_tick1)
+    s: mutable s64 = 1
+    if l_add < 0:
+        s <- -1
+    year_value: mutable s64 = time_value.year.s64() + (l_add.s64() / 12)
+    temp_month: mutable s64 = time_value.month.s64() + (l_add.s64() % 12) - 1
+    if temp_month > 11 or temp_month < 0:
+        temp_month <- temp_month - (s * 12)
+        year_value <- year_value + s
+    time_value.year <- year_value.u16()
+    time_value.month <- (temp_month + 1).u16()
+    last_day: int = _days_in_month(time_value.year.int(), time_value.month.int())
+    if time_value.day.int() > last_day:
+        time_value.day <- last_day.u16()
+    valid: int = sceRtcCheckValid(time_value.ref[mutable OrbisRtcDateTime&])
+    if valid == ORBIS_OK:
+        return sceRtcGetTick(time_value.ref[mutable OrbisRtcDateTime&], p_tick1)
+    return valid
+def sceRtcTickAddSeconds(p_tick1: mutable OrbisRtcTick&?, p_tick2: mutable OrbisRtcTick&?, l_add: s64) -> int:
+    if p_tick1 == null or p_tick2 == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    p_tick1.tick <- (p_tick2.tick.s64() + l_add * 1000000).u64()
+    return ORBIS_OK
+def sceRtcTickAddTicks(p_tick1: mutable OrbisRtcTick&?, p_tick2: mutable OrbisRtcTick&?, l_add: s64) -> int:
+    if p_tick1 == null or p_tick2 == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    p_tick1.tick <- (p_tick2.tick.s64() + l_add).u64()
+    return ORBIS_OK
+def sceRtcTickAddWeeks(p_tick1: mutable OrbisRtcTick&?, p_tick2: mutable OrbisRtcTick&?, l_add: s32) -> int:
+    if p_tick1 == null or p_tick2 == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    p_tick1.tick <- (p_tick2.tick.s64() + l_add.s64() * 604800000000).u64()
+    return ORBIS_OK
+def sceRtcTickAddYears(p_tick1: mutable OrbisRtcTick&?, p_tick2: mutable OrbisRtcTick&?, l_add: s32) -> int:
+    if p_tick1 == null or p_tick2 == null:
+        return ORBIS_RTC_ERROR_INVALID_POINTER
+    if l_add == 0:
+        p_tick1.tick <- p_tick2.tick
+        return ORBIS_OK
+    time_value: mutable OrbisRtcDateTime = zeroed
+    _ = sceRtcSetTick(time_value.ref[mutable OrbisRtcDateTime&], p_tick1)
+    time_value.year <- (time_value.year.s32() + l_add).u16()
+    valid: int = sceRtcCheckValid(time_value.ref[mutable OrbisRtcDateTime&])
+    if valid == ORBIS_OK:
+        return sceRtcGetTick(time_value.ref[mutable OrbisRtcDateTime&], p_tick1)
+    return valid
+
+def Rtc_RegisterLib(sym: void&?) -> void:
+    LIB_FUNCTION("lPEBYdVX0XQ", "libSceRtc", 1, "libSceRtc", sceRtcCheckValid, sym)
+    LIB_FUNCTION("fNaZ4DbzHAE", "libSceRtc", 1, "libSceRtc", sceRtcCompareTick, sym)
+    LIB_FUNCTION("8Yr143yEnRo", "libSceRtc", 1, "libSceRtc", sceRtcConvertLocalTimeToUtc, sym)
+    LIB_FUNCTION("M1TvFst-jrM", "libSceRtc", 1, "libSceRtc", sceRtcConvertUtcToLocalTime, sym)
+    LIB_FUNCTION("8SljQx6pDP8", "libSceRtc", 1, "libSceRtc", sceRtcEnd, sym)
+    LIB_FUNCTION("eiuobaF-hK4", "libSceRtc", 1, "libSceRtc", sceRtcFormatRFC2822, sym)
+    LIB_FUNCTION("AxHBk3eat04", "libSceRtc", 1, "libSceRtc", sceRtcFormatRFC2822LocalTime, sym)
+    LIB_FUNCTION("WJ3rqFwymew", "libSceRtc", 1, "libSceRtc", sceRtcFormatRFC3339, sym)
+    LIB_FUNCTION("DwuHIlLGW8I", "libSceRtc", 1, "libSceRtc", sceRtcFormatRFC3339LocalTime, sym)
+    LIB_FUNCTION("lja0nNPWojg", "libSceRtc", 1, "libSceRtc", sceRtcFormatRFC3339Precise, sym)
+    LIB_FUNCTION("tOZ6fwwHZOA", "libSceRtc", 1, "libSceRtc", sceRtcFormatRFC3339PreciseLocalTime, sym)
+    LIB_FUNCTION("LN3Zcb72Q0c", "libSceRtc", 1, "libSceRtc", sceRtcGetCurrentAdNetworkTick, sym)
+    LIB_FUNCTION("8lfvnRMqwEM", "libSceRtc", 1, "libSceRtc", sceRtcGetCurrentClock, sym)
+    LIB_FUNCTION("ZPD1YOKI+Kw", "libSceRtc", 1, "libSceRtc", sceRtcGetCurrentClockLocalTime, sym)
+    LIB_FUNCTION("Ot1DE3gif84", "libSceRtc", 1, "libSceRtc", sceRtcGetCurrentDebugNetworkTick, sym)
+    LIB_FUNCTION("zO9UL3qIINQ", "libSceRtc", 1, "libSceRtc", sceRtcGetCurrentNetworkTick, sym)
+    LIB_FUNCTION("HWxHOdbM-Pg", "libSceRtc", 1, "libSceRtc", sceRtcGetCurrentRawNetworkTick, sym)
+    LIB_FUNCTION("18B2NS1y9UU", "libSceRtc", 1, "libSceRtc", sceRtcGetCurrentTick, sym)
+    LIB_FUNCTION("CyIK-i4XdgQ", "libSceRtc", 1, "libSceRtc", sceRtcGetDayOfWeek, sym)
+    LIB_FUNCTION("3O7Ln8AqJ1o", "libSceRtc", 1, "libSceRtc", sceRtcGetDaysInMonth, sym)
+    LIB_FUNCTION("E7AR4o7Ny7E", "libSceRtc", 1, "libSceRtc", sceRtcGetDosTime, sym)
+    LIB_FUNCTION("8w-H19ip48I", "libSceRtc", 1, "libSceRtc", sceRtcGetTick, sym)
+    LIB_FUNCTION("jMNwqYr4R-k", "libSceRtc", 1, "libSceRtc", sceRtcGetTickResolution, sym)
+    LIB_FUNCTION("BtqmpTRXHgk", "libSceRtc", 1, "libSceRtc", sceRtcGetTime_t, sym)
+    LIB_FUNCTION("jfRO0uTjtzA", "libSceRtc", 1, "libSceRtc", sceRtcGetWin32FileTime, sym)
+    LIB_FUNCTION("LlodCMDbk3o", "libSceRtc", 1, "libSceRtc", sceRtcInit, sym)
+    LIB_FUNCTION("Ug8pCwQvh0c", "libSceRtc", 1, "libSceRtc", sceRtcIsLeapYear, sym)
+    LIB_FUNCTION("NxEI1KByvCI", "libSceRtc", 1, "libSceRtc", sceRtcParseDateTime, sym)
+    LIB_FUNCTION("99bMGglFW3I", "libSceRtc", 1, "libSceRtc", sceRtcParseRFC3339, sym)
+    LIB_FUNCTION("fFLgmNUpChg", "libSceRtc", 1, "libSceRtc", sceRtcSetConf, sym)
+    LIB_FUNCTION("sV2tK+yOhBU", "libSceRtc", 1, "libSceRtc", sceRtcSetCurrentAdNetworkTick, sym)
+    LIB_FUNCTION("VLDUPKmw5L8", "libSceRtc", 1, "libSceRtc", sceRtcSetCurrentDebugNetworkTick, sym)
+    LIB_FUNCTION("qhDBtIo+auw", "libSceRtc", 1, "libSceRtc", sceRtcSetCurrentNetworkTick, sym)
+    LIB_FUNCTION("d4fHLCGmY80", "libSceRtc", 1, "libSceRtc", sceRtcSetCurrentTick, sym)
+    LIB_FUNCTION("aYPCd1cChyg", "libSceRtc", 1, "libSceRtc", sceRtcSetDosTime, sym)
+    LIB_FUNCTION("ueega6v3GUw", "libSceRtc", 1, "libSceRtc", sceRtcSetTick, sym)
+    LIB_FUNCTION("bDEVVP4bTjQ", "libSceRtc", 1, "libSceRtc", sceRtcSetTime_t, sym)
+    LIB_FUNCTION("n5JiAJXsbcs", "libSceRtc", 1, "libSceRtc", sceRtcSetWin32FileTime, sym)
+    LIB_FUNCTION("NR1J0N7L2xY", "libSceRtc", 1, "libSceRtc", sceRtcTickAddDays, sym)
+    LIB_FUNCTION("MDc5cd8HfCA", "libSceRtc", 1, "libSceRtc", sceRtcTickAddHours, sym)
+    LIB_FUNCTION("XPIiw58C+GM", "libSceRtc", 1, "libSceRtc", sceRtcTickAddMicroseconds, sym)
+    LIB_FUNCTION("mn-tf4QiFzk", "libSceRtc", 1, "libSceRtc", sceRtcTickAddMinutes, sym)
+    LIB_FUNCTION("CL6y9q-XbuQ", "libSceRtc", 1, "libSceRtc", sceRtcTickAddMonths, sym)
+    LIB_FUNCTION("07O525HgICs", "libSceRtc", 1, "libSceRtc", sceRtcTickAddSeconds, sym)
+    LIB_FUNCTION("AqVMssr52Rc", "libSceRtc", 1, "libSceRtc", sceRtcTickAddTicks, sym)
+    LIB_FUNCTION("gI4t194c2W8", "libSceRtc", 1, "libSceRtc", sceRtcTickAddWeeks, sym)
+    LIB_FUNCTION("-5y2uJ62qS8", "libSceRtc", 1, "libSceRtc", sceRtcTickAddYears, sym)

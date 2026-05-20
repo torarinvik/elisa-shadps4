@@ -1,11 +1,65 @@
 include "../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
 include "./core/libraries/network/net.elisa"
+include "./core/libraries/network/netctl.elisa"
 
 struct NetParityEpollEvent:
     events: mutable u32
     pad: mutable u32
     ident: mutable u64
     data_u64: mutable u64
+
+@test
+def net_get_mac_address_bridge_parity_contracts() -> void:
+    can Abort.Panic:
+        assert sceNetGetMacAddress(null, 0) == ORBIS_NET_EINVAL
+
+        mac: mutable array[u8, 6] = zeroed
+        assert sceNetGetMacAddress(mac[0].ref[mutable u8&], 0) == ORBIS_OK
+
+@test
+def net_inet_bridge_parity_contracts() -> void:
+    can Abort.Panic:
+        src4: mutable array[u8, 4] = zeroed
+        src4[0] <- 127u8
+        src4[3] <- 1u8
+
+        text4: mutable array[u8, 16] = zeroed
+        assert sceNetInetNtop(ORBIS_NET_AF_INET, src4[0].ref[mutable u8&], text4[0].ref[mutable u8&], 16u32) != null
+
+        tiny: mutable array[u8, 1] = zeroed
+        assert sceNetInetNtop(ORBIS_NET_AF_INET, src4[0].ref[mutable u8&], tiny[0].ref[mutable u8&], 1u32) == null
+        assert c_net_errno() == ORBIS_NET_ENOSPC
+
+        assert sceNetInetNtop(9999, src4[0].ref[mutable u8&], text4[0].ref[mutable u8&], 16u32) == null
+        assert c_net_errno() == ORBIS_NET_EAFNOSUPPORT
+
+        parsed4: mutable array[u8, 4] = zeroed
+        assert sceNetInetPton(ORBIS_NET_AF_INET, "127.0.0.1", parsed4[0].ref[mutable u8&]) == 1
+        assert parsed4[0] == 127u8
+        assert parsed4[3] == 1u8
+
+@test
+def netctl_info_state_bridge_parity_contracts() -> void:
+    can Abort.Panic:
+        prev_connected: int = c_is_connected_to_network()
+
+        info: mutable OrbisNetCtlInfo = zeroed
+        c_set_connected_to_network(0)
+        assert sceNetCtlGetInfo(ORBIS_NET_CTL_INFO_DEVICE, info.ref[mutable OrbisNetCtlInfo&]) == ORBIS_NET_CTL_ERROR_NOT_CONNECTED
+
+        c_set_connected_to_network(1)
+        state: mutable int = 0
+        assert sceNetCtlGetState(state.ref[mutable int&]) == ORBIS_OK
+        assert state == ORBIS_NET_CTL_STATE_IPOBTAINED
+
+        assert sceNetCtlGetInfo(ORBIS_NET_CTL_INFO_DEVICE, info.ref[mutable OrbisNetCtlInfo&]) == ORBIS_OK
+        assert info.device == ORBIS_NET_CTL_DEVICE_WIRED.u32()
+        assert sceNetCtlGetInfo(ORBIS_NET_CTL_INFO_MTU, info.ref[mutable OrbisNetCtlInfo&]) == ORBIS_OK
+        assert info.mtu == 1500u32
+        assert sceNetCtlGetInfo(ORBIS_NET_CTL_INFO_PRIMARY_DNS, info.ref[mutable OrbisNetCtlInfo&]) == ORBIS_OK
+        assert info.primary_dns[0] == '1'.u8()
+
+        c_set_connected_to_network(prev_connected)
 
 @test
 def net_resolver_bridge_parity_contracts() -> void:
@@ -102,3 +156,133 @@ def net_resolver_async_epoll_bridge_contracts() -> void:
         assert sceNetEpollControl(ep.i64(), 3, rid.i64(), null) == ORBIS_OK
         assert sceNetEpollDestroy(ep.i64()) == ORBIS_OK
         assert sceNetResolverDestroy(rid.i64()) == ORBIS_OK
+
+@test
+def net_resolver_offline_enodns_contracts() -> void:
+    can Abort.Panic:
+        assert sceNetInit() == ORBIS_OK
+
+        prev_connected: int = c_is_connected_to_network()
+        c_set_connected_to_network(0)
+
+        rid: int = sceNetResolverCreate("resolver-offline", 1, 0)
+        assert rid > 0
+
+        addr: mutable u32 = 0u32
+        sync_result: int = sceNetResolverStartNtoa(
+            rid.i64(), "localhost", addr.ref[mutable u32&].cast[mutable u8&], 0, 0, 0)
+        assert sync_result == ORBIS_NET_ERROR_RESOLVER_ENODNS
+
+        async_result: int = sceNetResolverStartNtoa(
+            rid.i64(), "localhost", addr.ref[mutable u32&].cast[mutable u8&], 0, 0, ORBIS_NET_RESOLVER_ASYNC)
+        assert async_result == ORBIS_NET_ERROR_RESOLVER_ENODNS or async_result == ORBIS_OK
+
+        status: mutable int = 0
+        assert sceNetResolverGetError(rid.i64(), status.ref[mutable int&]) == ORBIS_OK
+        if async_result == ORBIS_NET_ERROR_RESOLVER_ENODNS:
+            assert status == ORBIS_NET_ERROR_RESOLVER_ENODNS
+
+        assert sceNetResolverDestroy(rid.i64()) == ORBIS_OK
+        c_set_connected_to_network(prev_connected)
+
+def main() -> int:
+    assert sceNetInit() == ORBIS_OK
+
+    if sceNetGetMacAddress(null, 0) != ORBIS_NET_EINVAL:
+        return 16
+    mac: mutable array[u8, 6] = zeroed
+    if sceNetGetMacAddress(mac[0].ref[mutable u8&], 0) != ORBIS_OK:
+        return 17
+
+    src4: mutable array[u8, 4] = zeroed
+    src4[0] <- 127u8
+    src4[3] <- 1u8
+    text4: mutable array[u8, 16] = zeroed
+    if sceNetInetNtop(ORBIS_NET_AF_INET, src4[0].ref[mutable u8&], text4[0].ref[mutable u8&], 16u32) == null:
+        return 18
+    tiny: mutable array[u8, 1] = zeroed
+    if sceNetInetNtop(ORBIS_NET_AF_INET, src4[0].ref[mutable u8&], tiny[0].ref[mutable u8&], 1u32) != null:
+        return 19
+    if c_net_errno() != ORBIS_NET_ENOSPC:
+        return 20
+    parsed4: mutable array[u8, 4] = zeroed
+    if sceNetInetPton(ORBIS_NET_AF_INET, "127.0.0.1", parsed4[0].ref[mutable u8&]) != 1:
+        return 21
+
+    info: mutable OrbisNetCtlInfo = zeroed
+    prev_netctl_connected: int = c_is_connected_to_network()
+    c_set_connected_to_network(0)
+    if sceNetCtlGetInfo(ORBIS_NET_CTL_INFO_DEVICE, info.ref[mutable OrbisNetCtlInfo&]) != ORBIS_NET_CTL_ERROR_NOT_CONNECTED:
+        c_set_connected_to_network(prev_netctl_connected)
+        return 22
+    c_set_connected_to_network(1)
+    state_check: mutable int = 0
+    if sceNetCtlGetState(state_check.ref[mutable int&]) != ORBIS_OK:
+        c_set_connected_to_network(prev_netctl_connected)
+        return 23
+    if state_check != ORBIS_NET_CTL_STATE_IPOBTAINED:
+        c_set_connected_to_network(prev_netctl_connected)
+        return 24
+    if sceNetCtlGetInfo(ORBIS_NET_CTL_INFO_MTU, info.ref[mutable OrbisNetCtlInfo&]) != ORBIS_OK:
+        c_set_connected_to_network(prev_netctl_connected)
+        return 25
+    if info.mtu != 1500u32:
+        c_set_connected_to_network(prev_netctl_connected)
+        return 26
+    c_set_connected_to_network(prev_netctl_connected)
+
+    status: mutable int = 0
+    if sceNetResolverGetError(12345, status.ref[mutable int&]) != ORBIS_NET_ERROR_EBADF:
+        return 1
+    if sceNetResolverGetError(12345, null) != ORBIS_NET_ERROR_EINVAL:
+        return 2
+
+    rid: int = sceNetResolverCreate("main-resolver", 1, 0)
+    if rid <= 0:
+        return 3
+
+    addr: mutable u32 = 0u32
+    if sceNetResolverStartNtoa(rid.i64(), "localhost", addr.ref[mutable u32&].cast[mutable u8&], 0, 0, 0) != ORBIS_OK:
+        return 4
+
+    ep: int = sceNetEpollCreate("main-epoll", 0)
+    if ep <= 0:
+        return 5
+
+    event_storage: mutable array[u8, 32] = zeroed
+    event_ptr: mutable u8& = event_storage[0].ref[mutable u8&]
+    if sceNetEpollControl(ep.i64(), 1, rid.i64(), event_ptr) != ORBIS_OK:
+        return 6
+    if sceNetEpollControl(ep.i64(), 99, rid.i64(), event_ptr) != ORBIS_NET_ERROR_EINVAL:
+        return 7
+
+    if sceNetResolverStartNtoa(rid.i64(), "localhost", addr.ref[mutable u32&].cast[mutable u8&], 0, 0, ORBIS_NET_RESOLVER_ASYNC) != ORBIS_OK:
+        return 8
+    if sceNetResolverStartNtoa(rid.i64(), "localhost", addr.ref[mutable u32&].cast[mutable u8&], 0, 0, ORBIS_NET_RESOLVER_ASYNC) != ORBIS_NET_ERROR_RESOLVER_EBUSY:
+        return 9
+
+    wait_storage: mutable array[u8, 32] = zeroed
+    wait_ptr: mutable u8& = wait_storage[0].ref[mutable u8&]
+    wait_ret: int = sceNetEpollWait(ep.i64(), wait_ptr, 1, 0)
+    if wait_ret < 0 or wait_ret > 1:
+        return 10
+    if wait_ret == 1:
+        ev: mutable NetParityEpollEvent& = wait_ptr.cast[mutable NetParityEpollEvent&]
+        if ev.ident != rid.u64():
+            return 11
+
+    prev_connected: int = c_is_connected_to_network()
+    c_set_connected_to_network(0)
+    offline_ret: int = sceNetResolverStartNtoa(rid.i64(), "localhost", addr.ref[mutable u32&].cast[mutable u8&], 0, 0, 0)
+    c_set_connected_to_network(prev_connected)
+    if offline_ret != ORBIS_NET_ERROR_RESOLVER_ENODNS:
+        return 12
+
+    if sceNetEpollControl(ep.i64(), 3, rid.i64(), null) != ORBIS_OK:
+        return 13
+    if sceNetEpollDestroy(ep.i64()) != ORBIS_OK:
+        return 14
+    if sceNetResolverDestroy(rid.i64()) != ORBIS_OK:
+        return 15
+
+    return 0

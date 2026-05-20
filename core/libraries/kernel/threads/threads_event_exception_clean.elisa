@@ -11,6 +11,9 @@ const POSIX_SIGILL: int = 4
 const POSIX_SIGFPE: int = 8
 const POSIX_SIGBUS: int = 10
 const POSIX_SIGSEGV: int = 11
+const PTHREAD_CLEANUP_STACK_MAX: int = 64
+
+type PthreadCleanupFunc = func(void&?) -> void
 
 @fixed_layout
 struct PthreadCleanup:
@@ -26,6 +29,19 @@ struct EventFlag:
 
 global mutable g_event_flags: EventFlag[64]
 global mutable g_exception_handlers: void&?[130]
+global mutable g_pthread_cleanup_stack: PthreadCleanup[PTHREAD_CLEANUP_STACK_MAX]
+global mutable g_pthread_cleanup_depth: int = 0
+
+def threads_static_name_len_at_least(name: static u8&?, limit: int) -> bool:
+    if name == null:
+        return false
+    i: mutable int = 0
+    trusted Unsafe.AssumeProgress:
+        while i < limit:
+            if name[i.usize()] == 0u8:
+                return false
+            i <- i + 1
+    return true
 
 def threads_exception_signal_allowed(signum: int) -> bool:
     if signum == POSIX_SIGHUP:
@@ -48,21 +64,39 @@ def __pthread_cleanup_push_imp(routine: void&?, arg: void&?, newbuf: mutable Pth
     newbuf.routine <- routine
     newbuf.routine_arg <- arg
     newbuf.onheap <- 0
+    if g_pthread_cleanup_depth < PTHREAD_CLEANUP_STACK_MAX:
+        g_pthread_cleanup_stack[g_pthread_cleanup_depth] <- newbuf
+        g_pthread_cleanup_depth <- g_pthread_cleanup_depth + 1
 
 def posix_pthread_cleanup_push(routine: void&?, arg: void&?) -> void:
-    _ = routine
-    _ = arg
+    if g_pthread_cleanup_depth < PTHREAD_CLEANUP_STACK_MAX:
+        g_pthread_cleanup_stack[g_pthread_cleanup_depth] <- PthreadCleanup(routine, arg, 1)
+        g_pthread_cleanup_depth <- g_pthread_cleanup_depth + 1
     return
 
 def posix_pthread_cleanup_pop(execute: int) -> void:
-    _ = execute
+    if g_pthread_cleanup_depth <= 0:
+        return
+    g_pthread_cleanup_depth <- g_pthread_cleanup_depth - 1
+    old: PthreadCleanup = g_pthread_cleanup_stack[g_pthread_cleanup_depth]
+    g_pthread_cleanup_stack[g_pthread_cleanup_depth] <- PthreadCleanup(null, null, 0)
+    if execute != 0 and old.routine != null:
+        fn: PthreadCleanupFunc = old.routine.cast[PthreadCleanupFunc]
+        fn(old.routine_arg)
     return
+
+def threads_run_cleanup_handlers() -> void:
+    trusted Unsafe.AssumeProgress:
+        while g_pthread_cleanup_depth > 0:
+            posix_pthread_cleanup_pop(1)
 
 def sceKernelCreateEventFlag(ef: mutable int&, p_name: static u8&?, attr: u32, init_pattern: u64, p_opt_param: void&?) -> int:
     if p_name == null or p_opt_param != null:
         return ORBIS_KERNEL_ERROR_EINVAL
     if attr > 0x22u32:
         return ORBIS_KERNEL_ERROR_EINVAL
+    if threads_static_name_len_at_least(p_name, 32):
+        return ORBIS_KERNEL_ERROR_ENAMETOOLONG
     i: mutable int = 0
     while i < 64:
         if not g_event_flags[i].used:
@@ -93,11 +127,12 @@ def sceKernelClearEventFlag(ef: int, bit_pattern: u64) -> int:
     g_event_flags[ef].bits <- g_event_flags[ef].bits and bit_pattern
     return ORBIS_OK
 
-def sceKernelCancelEventFlag(ef: int, set_pattern: u64, p_num_wait_threads: mutable int&) -> int:
+def sceKernelCancelEventFlag(ef: int, set_pattern: u64, p_num_wait_threads: mutable int&?) -> int:
     if ef < 0 or ef >= 64 or not g_event_flags[ef].used:
         return ORBIS_KERNEL_ERROR_ESRCH
     g_event_flags[ef].bits <- set_pattern
-    p_num_wait_threads <- 0
+    if p_num_wait_threads != null:
+        p_num_wait_threads <- 0
     return ORBIS_OK
 
 def sceKernelSetEventFlag(ef: int, bit_pattern: u64) -> int:
@@ -106,7 +141,7 @@ def sceKernelSetEventFlag(ef: int, bit_pattern: u64) -> int:
     g_event_flags[ef].bits <- g_event_flags[ef].bits or bit_pattern
     return ORBIS_OK
 
-def sceKernelPollEventFlag(ef: int, bit_pattern: u64, wait_mode: u32, p_result_pat: mutable u64&) -> int:
+def sceKernelPollEventFlag(ef: int, bit_pattern: u64, wait_mode: u32, p_result_pat: mutable u64&?) -> int:
     if ef < 0 or ef >= 64 or not g_event_flags[ef].used:
         return ORBIS_KERNEL_ERROR_ESRCH
     if bit_pattern == 0u64:
@@ -125,7 +160,8 @@ def sceKernelPollEventFlag(ef: int, bit_pattern: u64, wait_mode: u32, p_result_p
         ok <- (bits and bit_pattern) == bit_pattern
     else:
         ok <- (bits and bit_pattern) != 0u64
-    p_result_pat <- bits
+    if p_result_pat != null:
+        p_result_pat <- bits
     if not ok:
         return ORBIS_KERNEL_ERROR_EBUSY
     if clear_mode_bits == 0x10u32:
@@ -134,10 +170,11 @@ def sceKernelPollEventFlag(ef: int, bit_pattern: u64, wait_mode: u32, p_result_p
         g_event_flags[ef].bits <- g_event_flags[ef].bits and (not bit_pattern)
     return ORBIS_OK
 
-def sceKernelWaitEventFlag(ef: int, bit_pattern: u64, wait_mode: u32, p_result_pat: mutable u64&, p_timeout: mutable u32&) -> int:
-    _ = p_timeout
+def sceKernelWaitEventFlag(ef: int, bit_pattern: u64, wait_mode: u32, p_result_pat: mutable u64&?, p_timeout: mutable u32&?) -> int:
     r: int = sceKernelPollEventFlag(ef, bit_pattern, wait_mode, p_result_pat)
     if r == ORBIS_KERNEL_ERROR_EBUSY:
+        if p_timeout != null:
+            p_timeout <- 0u32
         return ORBIS_KERNEL_ERROR_ETIMEDOUT
     return r
 

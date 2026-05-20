@@ -33,6 +33,20 @@ Status values:
 - Existing parity suites currently passing for covered behavior: `Exact`
 - Functions intentionally returning success/no-op in the C++ surface remain mirrored: `Exact` (stub parity where applicable)
 
+## random
+- `sceRandomGetRandomNumber` size gating and byte-fill behavior: `Exact`
+- Export registration (`libSceRandom`): `Exact`
+
+## razor_cpu
+- Full `sceRazorCpu*` surface currently stubbed in C++: `Exact` (stub parity)
+- Bool-return contracts (`sceRazorCpuFlushOccurred`, `sceRazorCpuIsCapturing`): `Exact`
+
+## rtc
+- Core validation and date/time utility contracts (`sceRtcCheckValid`, leap/year/month/day): `Exact`
+- Tick/date, Unix time, Win32 file time, DOS time, and add/subtract contracts: `Exact`
+- RFC2822/RFC3339 parser and formatter contracts: `Exact`
+- Local timezone/current clock behavior via native C time APIs: `Exact`
+
 ## Deferred / outstanding
 - None currently identified in covered core/libraries parity suites and emit gates.
 
@@ -45,3 +59,9 @@ Status values:
 - `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_ajm_aac_tests.elisa`
 - `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_move_pure_tests.elisa`
 - `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_ngs2_pure_tests.elisa`
+- `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_random_pure_tests.elisa`
+- `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_razor_cpu_pure_tests.elisa`
+- `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_rtc_pure_tests.elisa`
+- `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_share_play_pure_tests.elisa`
+- `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_signin_dialog_pure_tests.elisa`
+- `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_system_pure_tests.elisa`

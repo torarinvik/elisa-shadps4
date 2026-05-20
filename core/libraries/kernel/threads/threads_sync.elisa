@@ -5,6 +5,11 @@ include "../../error_codes.elisa"
 include "../posix_error.elisa"
 
 @fixed_layout
+struct OrbisKernelTimespec:
+    tv_sec: mutable s64
+    tv_nsec: mutable s64
+
+@fixed_layout
 struct PthreadMutexAttr:
     m_type: mutable int
     m_protocol: mutable int
@@ -43,16 +48,31 @@ global mutable g_default_mutex_attr: PthreadMutexAttr = PthreadMutexAttr(1, 0, 0
 global mutable g_default_cond_attr: PthreadCondAttr = PthreadCondAttr(0, 0)
 global mutable g_default_rwlock_attr: PthreadRwlockAttr = PthreadRwlockAttr(0, 0)
 
+def threads_sync_orbis_from_posix(ret: int) -> int:
+    if ret == 0:
+        return 0
+    return ORBIS_KERNEL_ERROR_UNKNOWN + ret
+
 def posix_pthread_mutex_init(mutex: mutable PthreadMutex&?&, mutex_attr: PthreadMutexAttr&?) -> int:
     if mutex == null:
         return POSIX_EINVAL
     attr: mutable PthreadMutexAttr = g_default_mutex_attr
     if mutex_attr != null:
+        if mutex_attr.m_type < 1 or mutex_attr.m_type >= 5:
+            return POSIX_EINVAL
+        if mutex_attr.m_protocol > 2:
+            return POSIX_EINVAL
         attr <- mutex_attr
     mutex <- PthreadMutex(true, false, 0, 0, attr.m_type, attr.m_protocol)
+    if attr.m_type == 4:
+        mutex.spinloops <- 2000
     return 0
 
 def scePthreadMutexInit(mutex: mutable PthreadMutex&?&, mutex_attr: PthreadMutexAttr&?, name: static u8&?) -> int:
+    _ = name
+    return threads_sync_orbis_from_posix(posix_pthread_mutex_init(mutex, mutex_attr))
+
+def scePthreadMutexInitPosix(mutex: mutable PthreadMutex&?&, mutex_attr: PthreadMutexAttr&?, name: static u8&?) -> int:
     _ = name
     return posix_pthread_mutex_init(mutex, mutex_attr)
 
@@ -76,7 +96,10 @@ def posix_pthread_mutex_lock(mutex: mutable PthreadMutex&?&) -> int:
     return posix_pthread_mutex_trylock(mutex)
 
 def posix_pthread_mutex_timedlock(mutex: mutable PthreadMutex&?&, abstime: void&?) -> int:
-    _ = abstime
+    if abstime != null:
+        ts: OrbisKernelTimespec&? = abstime as OrbisKernelTimespec&?
+        if ts == null or ts.tv_nsec < 0 or ts.tv_nsec >= 1000000000:
+            return POSIX_EINVAL
     return posix_pthread_mutex_trylock(mutex)
 
 def posix_pthread_mutex_reltimedlock_np(mutex: mutable PthreadMutex&?&, usec: u64) -> int:
@@ -142,11 +165,15 @@ def posix_pthread_mutexattr_getkind_np(attr: PthreadMutexAttr&?) -> int:
 def posix_pthread_mutexattr_setprioceiling(attr: mutable PthreadMutexAttr&?, prioceiling: int) -> int:
     if attr == null:
         return POSIX_EINVAL
+    if attr.m_protocol != 2 or prioceiling > ORBIS_KERNEL_PRIO_FIFO_HIGHEST or prioceiling < ORBIS_KERNEL_PRIO_FIFO_LOWEST:
+        return POSIX_EINVAL
     attr.m_ceiling <- prioceiling
     return 0
 
 def posix_pthread_mutexattr_getprioceiling(attr: PthreadMutexAttr&?, prioceiling: mutable int&) -> int:
     if attr == null:
+        return POSIX_EINVAL
+    if attr.m_protocol != 2:
         return POSIX_EINVAL
     prioceiling <- attr.m_ceiling
     return 0
@@ -180,11 +207,15 @@ def posix_pthread_mutexattr_getpshared(attr: PthreadMutexAttr&?, pshared: mutabl
 def posix_pthread_mutexattr_settype(attr: mutable PthreadMutexAttr&?, type_: int) -> int:
     if attr == null:
         return POSIX_EINVAL
+    if type_ < 1 or type_ >= 5:
+        return POSIX_EINVAL
     attr.m_type <- type_
     return 0
 
 def posix_pthread_mutexattr_gettype(attr: PthreadMutexAttr&?, type_: mutable int&) -> int:
     if attr == null:
+        return POSIX_EINVAL
+    if attr.m_type >= 5:
         return POSIX_EINVAL
     type_ <- attr.m_type
     return 0
@@ -204,7 +235,7 @@ def posix_pthread_cond_init(cond: mutable PthreadCond&?&, cond_attr: PthreadCond
 
 def scePthreadCondInit(cond: mutable PthreadCond&?&, cond_attr: PthreadCondAttr&?, name: static u8&?) -> int:
     _ = name
-    return posix_pthread_cond_init(cond, cond_attr)
+    return threads_sync_orbis_from_posix(posix_pthread_cond_init(cond, cond_attr))
 
 def posix_pthread_cond_destroy(cond: mutable PthreadCond&?&) -> int:
     if cond == null or cond == null:
@@ -221,6 +252,9 @@ def posix_pthread_cond_wait(cond: PthreadCond&?, mutex: mutable PthreadMutex&?&)
 
 def posix_pthread_cond_timedwait(cond: PthreadCond&?, mutex: mutable PthreadMutex&?&, abstime: void&?) -> int:
     if abstime == null:
+        return POSIX_EINVAL
+    ts: OrbisKernelTimespec&? = abstime as OrbisKernelTimespec&?
+    if ts == null or ts.tv_sec < 0 or ts.tv_nsec < 0 or ts.tv_nsec >= 1000000000:
         return POSIX_EINVAL
     return posix_pthread_cond_wait(cond, mutex)
 
@@ -286,8 +320,9 @@ def posix_pthread_rwlock_destroy(rwlock: mutable PthreadRwlock&?&) -> int:
     return 0
 
 def posix_pthread_rwlock_init(rwlock: mutable PthreadRwlock&?&, attr: PthreadRwlockAttr&?) -> int:
-    _ = attr
     if rwlock == null:
+        return POSIX_EINVAL
+    if attr != null and attr.type_ > 2:
         return POSIX_EINVAL
     rwlock <- PthreadRwlock(true, 0, false)
     return 0
@@ -301,7 +336,10 @@ def posix_pthread_rwlock_rdlock(rwlock: mutable PthreadRwlock&?&) -> int:
     return 0
 
 def posix_pthread_rwlock_timedrdlock(rwlock: mutable PthreadRwlock&?&, abstime: void&?) -> int:
-    _ = abstime
+    if rwlock != null and rwlock != null and rwlock.write_locked and abstime != null:
+        ts: OrbisKernelTimespec&? = abstime as OrbisKernelTimespec&?
+        if ts == null or ts.tv_nsec < 0 or ts.tv_nsec >= 1000000000:
+            return POSIX_EINVAL
     return posix_pthread_rwlock_rdlock(rwlock)
 
 def posix_pthread_rwlock_tryrdlock(rwlock: mutable PthreadRwlock&?&) -> int:
@@ -319,7 +357,10 @@ def posix_pthread_rwlock_wrlock(rwlock: mutable PthreadRwlock&?&) -> int:
     return posix_pthread_rwlock_trywrlock(rwlock)
 
 def posix_pthread_rwlock_timedwrlock(rwlock: mutable PthreadRwlock&?&, abstime: void&?) -> int:
-    _ = abstime
+    if rwlock != null and rwlock != null and (rwlock.write_locked or rwlock.read_count > 0) and abstime != null:
+        ts: OrbisKernelTimespec&? = abstime as OrbisKernelTimespec&?
+        if ts == null or ts.tv_nsec < 0 or ts.tv_nsec >= 1000000000:
+            return POSIX_EINVAL
     return posix_pthread_rwlock_trywrlock(rwlock)
 
 def posix_pthread_rwlock_unlock(rwlock: mutable PthreadRwlock&?&) -> int:
@@ -372,6 +413,109 @@ def posix_pthread_rwlockattr_setpshared(rwlockattr: mutable PthreadRwlockAttr&?,
     rwlockattr.pshared <- pshared
     return 0
 
+def scePthreadMutexIsowned(mutex: PthreadMutex&?) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_mutex_isowned_np(mutex))
+def scePthreadMutexInitOrbis(mutex: mutable PthreadMutex&?&, mutex_attr: PthreadMutexAttr&?) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_mutex_init(mutex, mutex_attr))
+def scePthreadMutexLock(mutex: mutable PthreadMutex&?&) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_mutex_lock(mutex))
+def scePthreadMutexRelTimedlock(mutex: mutable PthreadMutex&?&, usec: u64) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_mutex_reltimedlock_np(mutex, usec))
+def scePthreadMutexTrylock(mutex: mutable PthreadMutex&?&) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_mutex_trylock(mutex))
+def scePthreadMutexUnlock(mutex: mutable PthreadMutex&?&) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_mutex_unlock(mutex))
+def scePthreadMutexGetspinloops(mutex: PthreadMutex&?, count: mutable int&) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_mutex_getspinloops_np(mutex, count))
+def scePthreadMutexGetyieldloops(mutex: PthreadMutex&?, count: mutable int&) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_mutex_getyieldloops_np(mutex, count))
+def scePthreadMutexSetspinloops(mutex: mutable PthreadMutex&?, count: int) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_mutex_setspinloops_np(mutex, count))
+def scePthreadMutexSetyieldloops(mutex: mutable PthreadMutex&?, count: int) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_mutex_setyieldloops_np(mutex, count))
+def scePthreadMutexDestroy(mutex: mutable PthreadMutex&?&) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_mutex_destroy(mutex))
+def scePthreadMutexattrInit(attr: mutable PthreadMutexAttr&?&) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_mutexattr_init(attr))
+def scePthreadMutexattrGetkind(attr: PthreadMutexAttr&?) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_mutexattr_getkind_np(attr))
+def scePthreadMutexattrGetprioceiling(attr: PthreadMutexAttr&?, prioceiling: mutable int&) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_mutexattr_getprioceiling(attr, prioceiling))
+def scePthreadMutexattrGetprotocol(attr: PthreadMutexAttr&?, protocol: mutable int&) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_mutexattr_getprotocol(attr, protocol))
+def scePthreadMutexattrGetpshared(attr: PthreadMutexAttr&?, pshared: mutable int&) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_mutexattr_getpshared(attr, pshared))
+def scePthreadMutexattrGettype(attr: PthreadMutexAttr&?, type_: mutable int&) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_mutexattr_gettype(attr, type_))
+def scePthreadMutexattrSetkind(attr: mutable PthreadMutexAttr&?, kind: int) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_mutexattr_setkind_np(attr, kind))
+def scePthreadMutexattrSetprioceiling(attr: mutable PthreadMutexAttr&?, prioceiling: int) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_mutexattr_setprioceiling(attr, prioceiling))
+def scePthreadMutexattrSetprotocol(attr: mutable PthreadMutexAttr&?, protocol: int) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_mutexattr_setprotocol(attr, protocol))
+def scePthreadMutexattrSetpshared(attr: PthreadMutexAttr&?, pshared: int) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_mutexattr_setpshared(attr, pshared))
+def scePthreadMutexattrSettype(attr: mutable PthreadMutexAttr&?, type_: int) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_mutexattr_settype(attr, type_))
+def scePthreadMutexattrDestroy(attr: mutable PthreadMutexAttr&?&) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_mutexattr_destroy(attr))
+
+def scePthreadCondattrInit(attr: mutable PthreadCondAttr&?&) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_condattr_init(attr))
+def scePthreadCondattrSetpshared(attr: PthreadCondAttr&?, pshared: int) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_condattr_setpshared(attr, pshared))
+def scePthreadCondattrSetclock(attr: mutable PthreadCondAttr&?, clock_id: int) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_condattr_setclock(attr, clock_id))
+def scePthreadCondattrGetpshared(attr: PthreadCondAttr&?, pshared: mutable int&) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_condattr_getpshared(attr, pshared))
+def scePthreadCondattrGetclock(attr: PthreadCondAttr&?, clock_id: mutable int&) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_condattr_getclock(attr, clock_id))
+def scePthreadCondattrDestroy(attr: mutable PthreadCondAttr&?&) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_condattr_destroy(attr))
+def scePthreadCondRelTimedwait(cond: PthreadCond&?, mutex: mutable PthreadMutex&?&, usec: u64) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_cond_reltimedwait_np(cond, mutex, usec))
+def scePthreadCondWait(cond: PthreadCond&?, mutex: mutable PthreadMutex&?&) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_cond_wait(cond, mutex))
+def scePthreadCondSignal(cond: PthreadCond&?) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_cond_signal(cond))
+def scePthreadCondSignalto(cond: PthreadCond&?, thread: void&?) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_cond_signalto_np(cond, thread))
+def scePthreadCondBroadcast(cond: PthreadCond&?) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_cond_broadcast(cond))
+def scePthreadCondDestroy(cond: mutable PthreadCond&?&) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_cond_destroy(cond))
+
+def scePthreadRwlockattrDestroy(attr: mutable PthreadRwlockAttr&?&) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_rwlockattr_destroy(attr))
+def scePthreadRwlockattrGetpshared(attr: PthreadRwlockAttr&?, pshared: mutable int&) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_rwlockattr_getpshared(attr, pshared))
+def scePthreadRwlockattrGettype(attr: PthreadRwlockAttr&?, type_: mutable int&) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_rwlockattr_gettype_np(attr, type_))
+def scePthreadRwlockattrInit(attr: mutable PthreadRwlockAttr&?&) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_rwlockattr_init(attr))
+def scePthreadRwlockattrSetpshared(attr: mutable PthreadRwlockAttr&?, pshared: int) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_rwlockattr_setpshared(attr, pshared))
+def scePthreadRwlockattrSettype(attr: mutable PthreadRwlockAttr&?, type_: int) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_rwlockattr_settype_np(attr, type_))
+def scePthreadRwlockDestroy(rwlock: mutable PthreadRwlock&?&) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_rwlock_destroy(rwlock))
+def scePthreadRwlockInit(rwlock: mutable PthreadRwlock&?&, attr: PthreadRwlockAttr&?) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_rwlock_init(rwlock, attr))
+def scePthreadRwlockRdlock(rwlock: mutable PthreadRwlock&?&) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_rwlock_rdlock(rwlock))
+def scePthreadRwlockTimedrdlock(rwlock: mutable PthreadRwlock&?&, abstime: void&?) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_rwlock_timedrdlock(rwlock, abstime))
+def scePthreadRwlockTimedwrlock(rwlock: mutable PthreadRwlock&?&, abstime: void&?) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_rwlock_timedwrlock(rwlock, abstime))
+def scePthreadRwlockTryrdlock(rwlock: mutable PthreadRwlock&?&) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_rwlock_tryrdlock(rwlock))
+def scePthreadRwlockTrywrlock(rwlock: mutable PthreadRwlock&?&) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_rwlock_trywrlock(rwlock))
+def scePthreadRwlockUnlock(rwlock: mutable PthreadRwlock&?&) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_rwlock_unlock(rwlock))
+def scePthreadRwlockWrlock(rwlock: mutable PthreadRwlock&?&) -> int:
+    return threads_sync_orbis_from_posix(posix_pthread_rwlock_wrlock(rwlock))
+
 def RegisterMutex(sym: void&?) -> void:
     _ = sym
     LIB_FUNCTION("ttHNfU+qDBU", "libScePosix", 1, "libkernel", posix_pthread_mutex_init)
@@ -421,30 +565,30 @@ def RegisterMutex(sym: void&?) -> void:
     LIB_FUNCTION("mDmgMOGVUqg", "libkernel", 1, "libkernel", posix_pthread_mutexattr_settype)
     LIB_FUNCTION("HF7lK46xzjY", "libkernel", 1, "libkernel", posix_pthread_mutexattr_destroy)
     LIB_FUNCTION("cmo1RIYva9o", "libkernel", 1, "libkernel", scePthreadMutexInit)
-    LIB_FUNCTION("W6OrTBO95UY", "libkernel", 1, "libkernel", posix_pthread_mutex_isowned_np)
-    LIB_FUNCTION("qH1gXoq71RY", "libkernel", 1, "libkernel", posix_pthread_mutex_init)
-    LIB_FUNCTION("9UK1vLZQft4", "libkernel", 1, "libkernel", posix_pthread_mutex_lock)
-    LIB_FUNCTION("IafI2PxcPnQ", "libkernel", 1, "libkernel", posix_pthread_mutex_reltimedlock_np)
-    LIB_FUNCTION("upoVrzMHFeE", "libkernel", 1, "libkernel", posix_pthread_mutex_trylock)
-    LIB_FUNCTION("tn3VlD0hG60", "libkernel", 1, "libkernel", posix_pthread_mutex_unlock)
-    LIB_FUNCTION("pOmNmyRKlIE", "libkernel", 1, "libkernel", posix_pthread_mutex_getspinloops_np)
-    LIB_FUNCTION("AWS3NyViL9o", "libkernel", 1, "libkernel", posix_pthread_mutex_getyieldloops_np)
-    LIB_FUNCTION("42YkUouoMI0", "libkernel", 1, "libkernel", posix_pthread_mutex_setspinloops_np)
-    LIB_FUNCTION("bP+cqFmBW+A", "libkernel", 1, "libkernel", posix_pthread_mutex_setyieldloops_np)
-    LIB_FUNCTION("2Of0f+3mhhE", "libkernel", 1, "libkernel", posix_pthread_mutex_destroy)
-    LIB_FUNCTION("n2MMpvU8igI", "libkernel", 1, "libkernel", posix_pthread_mutexattr_init)
-    LIB_FUNCTION("F8bUHwAG284", "libkernel", 1, "libkernel", posix_pthread_mutexattr_init)
-    LIB_FUNCTION("rH2mWEndluc", "libkernel", 1, "libkernel", posix_pthread_mutexattr_getkind_np)
-    LIB_FUNCTION("SgjMpyH9Z9I", "libkernel", 1, "libkernel", posix_pthread_mutexattr_getprioceiling)
-    LIB_FUNCTION("GoTmFeui+hQ", "libkernel", 1, "libkernel", posix_pthread_mutexattr_getprotocol)
-    LIB_FUNCTION("losEubHc64c", "libkernel", 1, "libkernel", posix_pthread_mutexattr_getpshared)
-    LIB_FUNCTION("gquEhBrS2iw", "libkernel", 1, "libkernel", posix_pthread_mutexattr_gettype)
-    LIB_FUNCTION("UWZbVSFze24", "libkernel", 1, "libkernel", posix_pthread_mutexattr_setkind_np)
-    LIB_FUNCTION("532IaQguwMg", "libkernel", 1, "libkernel", posix_pthread_mutexattr_setprioceiling)
-    LIB_FUNCTION("1FGvU0i9saQ", "libkernel", 1, "libkernel", posix_pthread_mutexattr_setprotocol)
-    LIB_FUNCTION("mxKx9bxXF2I", "libkernel", 1, "libkernel", posix_pthread_mutexattr_setpshared)
-    LIB_FUNCTION("iMp8QpE+XO4", "libkernel", 1, "libkernel", posix_pthread_mutexattr_settype)
-    LIB_FUNCTION("smWEktiyyG0", "libkernel", 1, "libkernel", posix_pthread_mutexattr_destroy)
+    LIB_FUNCTION("W6OrTBO95UY", "libkernel", 1, "libkernel", scePthreadMutexIsowned)
+    LIB_FUNCTION("qH1gXoq71RY", "libkernel", 1, "libkernel", scePthreadMutexInitOrbis)
+    LIB_FUNCTION("9UK1vLZQft4", "libkernel", 1, "libkernel", scePthreadMutexLock)
+    LIB_FUNCTION("IafI2PxcPnQ", "libkernel", 1, "libkernel", scePthreadMutexRelTimedlock)
+    LIB_FUNCTION("upoVrzMHFeE", "libkernel", 1, "libkernel", scePthreadMutexTrylock)
+    LIB_FUNCTION("tn3VlD0hG60", "libkernel", 1, "libkernel", scePthreadMutexUnlock)
+    LIB_FUNCTION("pOmNmyRKlIE", "libkernel", 1, "libkernel", scePthreadMutexGetspinloops)
+    LIB_FUNCTION("AWS3NyViL9o", "libkernel", 1, "libkernel", scePthreadMutexGetyieldloops)
+    LIB_FUNCTION("42YkUouoMI0", "libkernel", 1, "libkernel", scePthreadMutexSetspinloops)
+    LIB_FUNCTION("bP+cqFmBW+A", "libkernel", 1, "libkernel", scePthreadMutexSetyieldloops)
+    LIB_FUNCTION("2Of0f+3mhhE", "libkernel", 1, "libkernel", scePthreadMutexDestroy)
+    LIB_FUNCTION("n2MMpvU8igI", "libkernel", 1, "libkernel", scePthreadMutexattrInit)
+    LIB_FUNCTION("F8bUHwAG284", "libkernel", 1, "libkernel", scePthreadMutexattrInit)
+    LIB_FUNCTION("rH2mWEndluc", "libkernel", 1, "libkernel", scePthreadMutexattrGetkind)
+    LIB_FUNCTION("SgjMpyH9Z9I", "libkernel", 1, "libkernel", scePthreadMutexattrGetprioceiling)
+    LIB_FUNCTION("GoTmFeui+hQ", "libkernel", 1, "libkernel", scePthreadMutexattrGetprotocol)
+    LIB_FUNCTION("losEubHc64c", "libkernel", 1, "libkernel", scePthreadMutexattrGetpshared)
+    LIB_FUNCTION("gquEhBrS2iw", "libkernel", 1, "libkernel", scePthreadMutexattrGettype)
+    LIB_FUNCTION("UWZbVSFze24", "libkernel", 1, "libkernel", scePthreadMutexattrSetkind)
+    LIB_FUNCTION("532IaQguwMg", "libkernel", 1, "libkernel", scePthreadMutexattrSetprioceiling)
+    LIB_FUNCTION("1FGvU0i9saQ", "libkernel", 1, "libkernel", scePthreadMutexattrSetprotocol)
+    LIB_FUNCTION("mxKx9bxXF2I", "libkernel", 1, "libkernel", scePthreadMutexattrSetpshared)
+    LIB_FUNCTION("iMp8QpE+XO4", "libkernel", 1, "libkernel", scePthreadMutexattrSettype)
+    LIB_FUNCTION("smWEktiyyG0", "libkernel", 1, "libkernel", scePthreadMutexattrDestroy)
 
 def RegisterCond(sym: void&?) -> void:
     _ = sym
@@ -477,18 +621,18 @@ def RegisterCond(sym: void&?) -> void:
     LIB_FUNCTION("mkx2fVhNMsg", "libkernel", 1, "libkernel", posix_pthread_cond_broadcast)
     LIB_FUNCTION("RXXqi4CtF8w", "libkernel", 1, "libkernel", posix_pthread_cond_destroy)
     LIB_FUNCTION("2Tb92quprl0", "libkernel", 1, "libkernel", scePthreadCondInit)
-    LIB_FUNCTION("m5-2bsNfv7s", "libkernel", 1, "libkernel", posix_pthread_condattr_init)
-    LIB_FUNCTION("6xMew9+rZwI", "libkernel", 1, "libkernel", posix_pthread_condattr_setpshared)
-    LIB_FUNCTION("c-bxj027czs", "libkernel", 1, "libkernel", posix_pthread_condattr_setclock)
-    LIB_FUNCTION("Dn-DRWi9t54", "libkernel", 1, "libkernel", posix_pthread_condattr_getpshared)
-    LIB_FUNCTION("6qM3kO5S3Oo", "libkernel", 1, "libkernel", posix_pthread_condattr_getclock)
-    LIB_FUNCTION("waPcxYiR3WA", "libkernel", 1, "libkernel", posix_pthread_condattr_destroy)
-    LIB_FUNCTION("BmMjYxmew1w", "libkernel", 1, "libkernel", posix_pthread_cond_reltimedwait_np)
-    LIB_FUNCTION("WKAXJ4XBPQ4", "libkernel", 1, "libkernel", posix_pthread_cond_wait)
-    LIB_FUNCTION("kDh-NfxgMtE", "libkernel", 1, "libkernel", posix_pthread_cond_signal)
-    LIB_FUNCTION("o69RpYO-Mu0", "libkernel", 1, "libkernel", posix_pthread_cond_signalto_np)
-    LIB_FUNCTION("JGgj7Uvrl+A", "libkernel", 1, "libkernel", posix_pthread_cond_broadcast)
-    LIB_FUNCTION("g+PZd2hiacg", "libkernel", 1, "libkernel", posix_pthread_cond_destroy)
+    LIB_FUNCTION("m5-2bsNfv7s", "libkernel", 1, "libkernel", scePthreadCondattrInit)
+    LIB_FUNCTION("6xMew9+rZwI", "libkernel", 1, "libkernel", scePthreadCondattrSetpshared)
+    LIB_FUNCTION("c-bxj027czs", "libkernel", 1, "libkernel", scePthreadCondattrSetclock)
+    LIB_FUNCTION("Dn-DRWi9t54", "libkernel", 1, "libkernel", scePthreadCondattrGetpshared)
+    LIB_FUNCTION("6qM3kO5S3Oo", "libkernel", 1, "libkernel", scePthreadCondattrGetclock)
+    LIB_FUNCTION("waPcxYiR3WA", "libkernel", 1, "libkernel", scePthreadCondattrDestroy)
+    LIB_FUNCTION("BmMjYxmew1w", "libkernel", 1, "libkernel", scePthreadCondRelTimedwait)
+    LIB_FUNCTION("WKAXJ4XBPQ4", "libkernel", 1, "libkernel", scePthreadCondWait)
+    LIB_FUNCTION("kDh-NfxgMtE", "libkernel", 1, "libkernel", scePthreadCondSignal)
+    LIB_FUNCTION("o69RpYO-Mu0", "libkernel", 1, "libkernel", scePthreadCondSignalto)
+    LIB_FUNCTION("JGgj7Uvrl+A", "libkernel", 1, "libkernel", scePthreadCondBroadcast)
+    LIB_FUNCTION("g+PZd2hiacg", "libkernel", 1, "libkernel", scePthreadCondDestroy)
 
 def RegisterRwlock(sym: void&?) -> void:
     _ = sym
@@ -522,18 +666,18 @@ def RegisterRwlock(sym: void&?) -> void:
     LIB_FUNCTION("xFebsA4YsFI", "libScePosix", 1, "libkernel", posix_pthread_rwlockattr_init)
     LIB_FUNCTION("OuKg+kRDD7U", "libScePosix", 1, "libkernel", posix_pthread_rwlockattr_setpshared)
     LIB_FUNCTION("8NuOHiTr1Vw", "libScePosix", 1, "libkernel", posix_pthread_rwlockattr_settype_np)
-    LIB_FUNCTION("i2ifZ3fS2fo", "libkernel", 1, "libkernel", posix_pthread_rwlockattr_destroy)
-    LIB_FUNCTION("LcOZBHGqbFk", "libkernel", 1, "libkernel", posix_pthread_rwlockattr_getpshared)
-    LIB_FUNCTION("Kyls1ChFyrc", "libkernel", 1, "libkernel", posix_pthread_rwlockattr_gettype_np)
-    LIB_FUNCTION("yOfGg-I1ZII", "libkernel", 1, "libkernel", posix_pthread_rwlockattr_init)
-    LIB_FUNCTION("-ZvQH18j10c", "libkernel", 1, "libkernel", posix_pthread_rwlockattr_setpshared)
-    LIB_FUNCTION("h-OifiouBd8", "libkernel", 1, "libkernel", posix_pthread_rwlockattr_settype_np)
-    LIB_FUNCTION("BB+kb08Tl9A", "libkernel", 1, "libkernel", posix_pthread_rwlock_destroy)
-    LIB_FUNCTION("6ULAa0fq4jA", "libkernel", 1, "libkernel", posix_pthread_rwlock_init)
-    LIB_FUNCTION("Ox9i0c7L5w0", "libkernel", 1, "libkernel", posix_pthread_rwlock_rdlock)
-    LIB_FUNCTION("iPtZRWICjrM", "libkernel", 1, "libkernel", posix_pthread_rwlock_timedrdlock)
-    LIB_FUNCTION("adh--6nIqTk", "libkernel", 1, "libkernel", posix_pthread_rwlock_timedwrlock)
-    LIB_FUNCTION("XD3mDeybCnk", "libkernel", 1, "libkernel", posix_pthread_rwlock_tryrdlock)
-    LIB_FUNCTION("bIHoZCTomsI", "libkernel", 1, "libkernel", posix_pthread_rwlock_trywrlock)
-    LIB_FUNCTION("+L98PIbGttk", "libkernel", 1, "libkernel", posix_pthread_rwlock_unlock)
-    LIB_FUNCTION("mqdNorrB+gI", "libkernel", 1, "libkernel", posix_pthread_rwlock_wrlock)
+    LIB_FUNCTION("i2ifZ3fS2fo", "libkernel", 1, "libkernel", scePthreadRwlockattrDestroy)
+    LIB_FUNCTION("LcOZBHGqbFk", "libkernel", 1, "libkernel", scePthreadRwlockattrGetpshared)
+    LIB_FUNCTION("Kyls1ChFyrc", "libkernel", 1, "libkernel", scePthreadRwlockattrGettype)
+    LIB_FUNCTION("yOfGg-I1ZII", "libkernel", 1, "libkernel", scePthreadRwlockattrInit)
+    LIB_FUNCTION("-ZvQH18j10c", "libkernel", 1, "libkernel", scePthreadRwlockattrSetpshared)
+    LIB_FUNCTION("h-OifiouBd8", "libkernel", 1, "libkernel", scePthreadRwlockattrSettype)
+    LIB_FUNCTION("BB+kb08Tl9A", "libkernel", 1, "libkernel", scePthreadRwlockDestroy)
+    LIB_FUNCTION("6ULAa0fq4jA", "libkernel", 1, "libkernel", scePthreadRwlockInit)
+    LIB_FUNCTION("Ox9i0c7L5w0", "libkernel", 1, "libkernel", scePthreadRwlockRdlock)
+    LIB_FUNCTION("iPtZRWICjrM", "libkernel", 1, "libkernel", scePthreadRwlockTimedrdlock)
+    LIB_FUNCTION("adh--6nIqTk", "libkernel", 1, "libkernel", scePthreadRwlockTimedwrlock)
+    LIB_FUNCTION("XD3mDeybCnk", "libkernel", 1, "libkernel", scePthreadRwlockTryrdlock)
+    LIB_FUNCTION("bIHoZCTomsI", "libkernel", 1, "libkernel", scePthreadRwlockTrywrlock)
+    LIB_FUNCTION("+L98PIbGttk", "libkernel", 1, "libkernel", scePthreadRwlockUnlock)
+    LIB_FUNCTION("mqdNorrB+gI", "libkernel", 1, "libkernel", scePthreadRwlockWrlock)

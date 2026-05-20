@@ -1,0 +1,77 @@
+include "../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "./core/libraries/save_data/savedata.elisa"
+include "./core/libraries/save_data/savedata_bridge_test_ffi.elisa"
+
+const SAVE_DATA_OK: int = 0
+const SAVE_DATA_PARAMETER: int = 0x809F0000
+const SAVE_DATA_MOUNT_MODE_RDWR_CREATE: u32 = 0x2u32 | 0x4u32
+
+@test
+def save_data_preinit_error_contracts() -> void:
+    can Abort.Panic:
+        assert sceSaveDataClearProgress() != SAVE_DATA_OK
+        assert sceSaveDataGetProgress(null) != SAVE_DATA_OK
+        assert sceSaveDataTerminate() != SAVE_DATA_OK
+
+@test
+def save_data_stubbed_ok_contracts() -> void:
+    can Abort.Panic:
+        assert sceSaveDataDebug() == SAVE_DATA_OK
+        assert sceSaveDataUpload() == SAVE_DATA_OK
+        assert sceSaveDataDownload() == SAVE_DATA_OK
+        assert sceSaveDataRegisterEventCallback() == SAVE_DATA_OK
+        assert sceSaveDataUnregisterEventCallback() == SAVE_DATA_OK
+        assert Func_02E4C4D201716422() == SAVE_DATA_OK
+
+@test
+def save_data_mount_param_umount_contracts() -> void:
+    can Abort.Panic:
+        assert sceSaveDataInitialize(null) == SAVE_DATA_OK
+
+        mount_point_buf: mutable array[u8, 64] = zeroed
+        mount_rc: int = c_savedata_test_mount2(1, "ELISA_PARITY_SLOT", SAVE_DATA_MOUNT_MODE_RDWR_CREATE, 128u64, mount_point_buf[0].ref[mutable u8&], 64u32)
+        assert mount_rc == SAVE_DATA_OK
+
+        blocks: mutable u64 = 0u64
+        free_blocks: mutable u64 = 0u64
+        assert c_savedata_test_get_mount_info(mount_point_buf[0].ref[mutable u8&], blocks.ref[mutable u64&], free_blocks.ref[mutable u64&]) == SAVE_DATA_OK
+        assert blocks > 0u64
+
+        assert c_savedata_test_set_param_title(mount_point_buf[0].ref[mutable u8&], "Elisa SaveData Parity") == SAVE_DATA_OK
+
+        title_buf: mutable array[u8, 128] = zeroed
+        got_size: mutable u64 = 0u64
+        assert c_savedata_test_get_param_title(mount_point_buf[0].ref[mutable u8&], title_buf[0].ref[mutable u8&], 128u32, got_size.ref[mutable u64&]) == SAVE_DATA_OK
+        assert got_size > 0u64
+
+        assert c_savedata_test_set_param_user(mount_point_buf[0].ref[mutable u8&], 77u32) == SAVE_DATA_OK
+        user_param: mutable u32 = 0u32
+        user_size: mutable u64 = 0u64
+        assert c_savedata_test_get_param_user(mount_point_buf[0].ref[mutable u8&], user_param.ref[mutable u32&], user_size.ref[mutable u64&]) == SAVE_DATA_OK
+        assert user_param == 77u32
+
+        assert c_savedata_test_umount(mount_point_buf[0].ref[mutable u8&]) == SAVE_DATA_OK
+        assert sceSaveDataTerminate() == SAVE_DATA_OK
+
+def main() -> int:
+    if sceSaveDataInitialize(null) != SAVE_DATA_OK:
+        return 1
+
+    progress: mutable i64 = 0
+    if sceSaveDataGetProgress(progress.ref[mutable i64&].cast[void&?]) != SAVE_DATA_OK:
+        return 2
+    if sceSaveDataGetProgress(null) != SAVE_DATA_PARAMETER:
+        return 3
+
+    mount_point_buf: mutable array[u8, 64] = zeroed
+    if c_savedata_test_mount2(1, "ELISA_PARITY_MAIN", SAVE_DATA_MOUNT_MODE_RDWR_CREATE, 128u64, mount_point_buf[0].ref[mutable u8&], 64u32) != SAVE_DATA_OK:
+        return 4
+    if c_savedata_test_set_param_user(mount_point_buf[0].ref[mutable u8&], 123u32) != SAVE_DATA_OK:
+        return 5
+    if c_savedata_test_umount(mount_point_buf[0].ref[mutable u8&]) != SAVE_DATA_OK:
+        return 6
+
+    if sceSaveDataTerminate() != SAVE_DATA_OK:
+        return 7
+
+    return 0

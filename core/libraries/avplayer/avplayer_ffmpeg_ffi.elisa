@@ -12,6 +12,8 @@ const AVPLAYER_FFMPEG_MAX_STREAMS: u32 = 8
 const AVMEDIA_TYPE_VIDEO: i32 = 0
 const AVMEDIA_TYPE_AUDIO: i32 = 1
 const AVMEDIA_TYPE_SUBTITLE: i32 = 3
+const AV_PIX_FMT_NV12: i32 = 23
+const AV_SAMPLE_FMT_S16: i32 = 1
 
 @c_bind_prefix("libavformat/avformat.h", "AVFormatContext")
 struct AVFormatContextPublicPrefix layout c:
@@ -102,36 +104,22 @@ struct AVPacketPublicPrefix layout c:
 
 @c_bind_prefix("libavutil/frame.h", "AVFrame")
 struct AVFramePublicPrefix layout c:
-    av_class: void&?
-    data0: mutable u8&?
-    data1: mutable u8&?
-    data2: mutable u8&?
-    data3: mutable u8&?
-    data4: mutable u8&?
-    data5: mutable u8&?
-    data6: mutable u8&?
-    data7: mutable u8&?
-    linesize: i32[8]
+    data: mutable u8&?[8]
+    linesize: mutable i32[8]
     extended_data: mutable u8&?
-    width: i32
-    height: i32
-    nb_samples: i32
-    format: i32
-    key_frame: i32
-    pict_type: i32
-    sample_aspect_ratio: AVRationalPublic
-    pts: i64
-    pkt_dts: i64
-    time_base: AVRationalPublic
-    quality: i32
-    opaque: void&?
-    repeat_pict: i32
-    interlaced_frame: i32
-    top_field_first: i32
-    palette_has_changed: i32
-    reordered_opaque: i64
-    sample_rate: i32
-    ch_layout: AVChannelLayoutPublicPrefix
+    width: mutable i32
+    height: mutable i32
+    nb_samples: mutable i32
+    format: mutable i32
+    pict_type: mutable i32
+    sample_aspect_ratio: mutable AVRationalPublic
+    pts: mutable i64
+    pkt_dts: mutable i64
+    time_base: mutable AVRationalPublic
+    quality: mutable i32
+    opaque: mutable void&?
+    repeat_pict: mutable i32
+    sample_rate: mutable i32
 
 @c_abi(c)
 extern avformat_open_input(ps: mutable void&?&, url: i8&?, fmt: void&?, options: void&?) -> i32
@@ -194,7 +182,34 @@ extern av_frame_free(frame: mutable void&?&) -> void
 extern av_frame_unref(frame: mutable void&?) -> void
 
 @c_abi(c)
+extern av_frame_get_buffer(frame: mutable void&?, align: i32) -> i32
+
+@c_abi(c)
 extern av_dict_get(m: void&?, key: i8&?, prev: void&?, flags: i32) -> void&?
+
+@c_abi(c)
+extern sws_getContext(src_w: i32, src_h: i32, src_format: i32, dst_w: i32, dst_h: i32, dst_format: i32, flags: i32, src_filter: void&?, dst_filter: void&?, param: void&?) -> void&?
+
+@c_abi(c)
+extern sws_scale(ctx: void&?, src_slice: void&?, src_stride: i32&, src_slice_y: i32, src_slice_h: i32, dst: void&?, dst_stride: i32&) -> i32
+
+@c_abi(c)
+extern sws_freeContext(ctx: void&?) -> void
+
+@c_abi(c)
+extern swr_alloc_set_opts2(ps: mutable void&?&, out_ch_layout: void&?, out_sample_fmt: i32, out_sample_rate: i32, in_ch_layout: void&?, in_sample_fmt: i32, in_sample_rate: i32, log_offset: i32, log_ctx: void&?) -> i32
+
+@c_abi(c)
+extern swr_init(ctx: void&?) -> i32
+
+@c_abi(c)
+extern swr_convert_frame(ctx: void&?, out_frame: mutable void&?, in_frame: void&?) -> i32
+
+@c_abi(c)
+extern swr_free(ctx: mutable void&?&) -> void
+
+@c_abi(c)
+extern memcpy(dest: mutable void&, src: void&, n: usize) -> mutable void&
 
 global mutable avffmpeg_contexts: void&?[AVPLAYER_FFMPEG_MAX_HANDLES] = zeroed
 global mutable avffmpeg_started: bool[AVPLAYER_FFMPEG_MAX_HANDLES] = zeroed
@@ -554,6 +569,100 @@ def avplayer_ffmpeg_decode_next_ts(handle: i32, stream_index: u32, codec_ctx: vo
     return avplayer_ffmpeg_decode_next_ts_ex(handle, stream_index, codec_ctx, out_ts, out_dummy_audio_samples, out_dummy_audio_sample_rate, out_dummy_audio_channels, out_dummy_video_width, out_dummy_video_height, out_dummy_video_pitch, out_dummy_video_aspect_num, out_dummy_video_aspect_den)
 
 def avplayer_ffmpeg_decode_next_ts_ex(handle: i32, stream_index: u32, codec_ctx: void&?, out_ts: mutable u64&, out_audio_samples: mutable u32&, out_audio_sample_rate: mutable u32&, out_audio_channels: mutable u32&, out_video_width: mutable u32&, out_video_height: mutable u32&, out_video_pitch: mutable u32&, out_video_aspect_num: mutable u32&, out_video_aspect_den: mutable u32&) -> i32:
+    return avplayer_ffmpeg_decode_next_ts_copy(handle, stream_index, codec_ctx, out_ts, out_audio_samples, out_audio_sample_rate, out_audio_channels, out_video_width, out_video_height, out_video_pitch, out_video_aspect_num, out_video_aspect_den, null, 0, false)
+
+def avffmpeg_copy_decoded_payload(decoded: AVFramePublicPrefix&, payload: mutable u8&?, payload_size: u32, is_video: bool):
+    if payload == null or payload_size == 0:
+        return
+    if is_video:
+        if decoded.width <= 0 or decoded.height <= 0 or decoded.data[0] == null:
+            return
+        width: u32 = decoded.width.u32()
+        height: u32 = decoded.height.u32()
+        luma_size: u32 = width * height
+        copy_luma: mutable u32 = luma_size
+        if copy_luma > payload_size:
+            copy_luma <- payload_size
+        _ = memcpy(payload.ref[mutable void&], decoded.data[0].ref[void&], copy_luma.usize())
+        if decoded.data[1] != null and payload_size > luma_size:
+            chroma_size: mutable u32 = luma_size / 2
+            remaining: u32 = payload_size - luma_size
+            if chroma_size > remaining:
+                chroma_size <- remaining
+            dst_chroma: mutable u8& = payload + luma_size.usize()
+            _ = memcpy(dst_chroma.ref[mutable void&], decoded.data[1].ref[void&], chroma_size.usize())
+        return
+    if decoded.data[0] == null:
+        return
+    audio_size: mutable u32 = payload_size
+    if decoded.linesize[0] > 0 and decoded.linesize[0].u32() < audio_size:
+        audio_size <- decoded.linesize[0].u32()
+    _ = memcpy(payload.ref[mutable void&], decoded.data[0].ref[void&], audio_size.usize())
+
+def avffmpeg_convert_video_to_nv12(frame: mutable void&?) -> mutable void&?:
+    if frame == null:
+        return null
+    src: AVFramePublicPrefix& = frame.ref[AVFramePublicPrefix&]
+    if src.format == AV_PIX_FMT_NV12:
+        return frame
+    if src.width <= 0 or src.height <= 0:
+        return frame
+    dst_frame: mutable void&? = av_frame_alloc()
+    if dst_frame == null:
+        return frame
+    dst: AVFramePublicPrefix& = dst_frame.ref[AVFramePublicPrefix&]
+    dst.format <- AV_PIX_FMT_NV12
+    dst.width <- src.width
+    dst.height <- src.height
+    dst.sample_aspect_ratio <- src.sample_aspect_ratio
+    if av_frame_get_buffer(dst_frame, 0) < 0:
+        av_frame_free(dst_frame.ref[mutable void&?&])
+        return frame
+    sws_ctx: void&? = sws_getContext(src.width, src.height, src.format, dst.width, dst.height, AV_PIX_FMT_NV12, 2, null, null, null)
+    if sws_ctx == null:
+        av_frame_free(dst_frame.ref[mutable void&?&])
+        return frame
+    src_data_ptr: void&? = src.data.ref[void&?]
+    dst_data_ptr: void&? = dst.data.ref[void&?]
+    _ = sws_scale(sws_ctx, src_data_ptr.ref[void&], src.linesize[0].ref[i32&], 0, src.height, dst_data_ptr.ref[void&], dst.linesize[0].ref[i32&])
+    sws_freeContext(sws_ctx)
+    return dst_frame
+
+def avffmpeg_convert_audio_to_s16(frame: mutable void&?) -> mutable void&?:
+    if frame == null:
+        return null
+    src: AVFramePublicPrefix& = frame.ref[AVFramePublicPrefix&]
+    if src.format == AV_SAMPLE_FMT_S16:
+        return frame
+    dst_frame: mutable void&? = av_frame_alloc()
+    if dst_frame == null:
+        return frame
+    dst: AVFramePublicPrefix& = dst_frame.ref[AVFramePublicPrefix&]
+    dst.format <- AV_SAMPLE_FMT_S16
+    dst.nb_samples <- src.nb_samples
+    dst.sample_rate <- src.sample_rate
+    if av_frame_get_buffer(dst_frame, 0) < 0:
+        av_frame_free(dst_frame.ref[mutable void&?&])
+        return frame
+    swr_ctx: void&? = null
+    if swr_alloc_set_opts2(swr_ctx.ref[mutable void&?&], src.ref[void&], AV_SAMPLE_FMT_S16, src.sample_rate, src.ref[void&], src.format, src.sample_rate, 0, null) < 0:
+        av_frame_free(dst_frame.ref[mutable void&?&])
+        return frame
+    if swr_ctx == null:
+        av_frame_free(dst_frame.ref[mutable void&?&])
+        return frame
+    if swr_init(swr_ctx) < 0:
+        swr_free(swr_ctx.ref[mutable void&?&])
+        av_frame_free(dst_frame.ref[mutable void&?&])
+        return frame
+    if swr_convert_frame(swr_ctx, dst_frame, frame) < 0:
+        swr_free(swr_ctx.ref[mutable void&?&])
+        av_frame_free(dst_frame.ref[mutable void&?&])
+        return frame
+    swr_free(swr_ctx.ref[mutable void&?&])
+    return dst_frame
+
+def avplayer_ffmpeg_decode_next_ts_copy(handle: i32, stream_index: u32, codec_ctx: void&?, out_ts: mutable u64&, out_audio_samples: mutable u32&, out_audio_sample_rate: mutable u32&, out_audio_channels: mutable u32&, out_video_width: mutable u32&, out_video_height: mutable u32&, out_video_pitch: mutable u32&, out_video_aspect_num: mutable u32&, out_video_aspect_den: mutable u32&, payload: mutable u8&?, payload_size: u32, payload_is_video: bool) -> i32:
     if not avffmpeg_valid_handle(handle) or codec_ctx == null:
         return -1
     out_audio_samples <- 0
@@ -600,13 +709,16 @@ def avplayer_ffmpeg_decode_next_ts_ex(handle: i32, stream_index: u32, codec_ctx:
                 return -1
             drain_rc: i32 = avcodec_receive_frame(codec_ctx, frame)
             if drain_rc == 0:
-                decoded: AVFramePublicPrefix& = frame.ref[AVFramePublicPrefix&]
+                copy_frame: mutable void&? = frame
+                if payload_is_video:
+                    copy_frame <- avffmpeg_convert_video_to_nv12(frame)
+                else:
+                    copy_frame <- avffmpeg_convert_audio_to_s16(frame)
+                decoded: AVFramePublicPrefix& = copy_frame.ref[AVFramePublicPrefix&]
                 if decoded.nb_samples > 0:
                     out_audio_samples <- decoded.nb_samples.u32()
                 if decoded.sample_rate > 0:
                     out_audio_sample_rate <- decoded.sample_rate.u32()
-                if decoded.ch_layout.nb_channels > 0:
-                    out_audio_channels <- decoded.ch_layout.nb_channels.u32()
                 if decoded.width > 0:
                     out_video_width <- decoded.width.u32()
                 if decoded.height > 0:
@@ -616,10 +728,13 @@ def avplayer_ffmpeg_decode_next_ts_ex(handle: i32, stream_index: u32, codec_ctx:
                 if decoded.sample_aspect_ratio.num > 0 and decoded.sample_aspect_ratio.den > 0:
                     out_video_aspect_num <- decoded.sample_aspect_ratio.num.u32()
                     out_video_aspect_den <- decoded.sample_aspect_ratio.den.u32()
+                avffmpeg_copy_decoded_payload(decoded, payload, payload_size, payload_is_video)
                 next_ts: u64 = avffmpeg_last_stream_ts[stream_slot] + 33
                 avffmpeg_last_stream_ts[stream_slot] <- next_ts
                 out_ts <- next_ts
                 av_frame_unref(frame)
+                if copy_frame != frame:
+                    av_frame_free(copy_frame.ref[mutable void&?&])
                 av_frame_free(frame.ref[mutable void&?&])
                 av_packet_free(pkt.ref[mutable void&?&])
                 return 0
@@ -640,13 +755,16 @@ def avplayer_ffmpeg_decode_next_ts_ex(handle: i32, stream_index: u32, codec_ctx:
                 return -1
             recv_rc: i32 = avcodec_receive_frame(codec_ctx, frame)
             if recv_rc == 0:
-                decoded: AVFramePublicPrefix& = frame.ref[AVFramePublicPrefix&]
+                copy_frame: mutable void&? = frame
+                if payload_is_video:
+                    copy_frame <- avffmpeg_convert_video_to_nv12(frame)
+                else:
+                    copy_frame <- avffmpeg_convert_audio_to_s16(frame)
+                decoded: AVFramePublicPrefix& = copy_frame.ref[AVFramePublicPrefix&]
                 if decoded.nb_samples > 0:
                     out_audio_samples <- decoded.nb_samples.u32()
                 if decoded.sample_rate > 0:
                     out_audio_sample_rate <- decoded.sample_rate.u32()
-                if decoded.ch_layout.nb_channels > 0:
-                    out_audio_channels <- decoded.ch_layout.nb_channels.u32()
                 if decoded.width > 0:
                     out_video_width <- decoded.width.u32()
                 if decoded.height > 0:
@@ -656,6 +774,7 @@ def avplayer_ffmpeg_decode_next_ts_ex(handle: i32, stream_index: u32, codec_ctx:
                 if decoded.sample_aspect_ratio.num > 0 and decoded.sample_aspect_ratio.den > 0:
                     out_video_aspect_num <- decoded.sample_aspect_ratio.num.u32()
                     out_video_aspect_den <- decoded.sample_aspect_ratio.den.u32()
+                avffmpeg_copy_decoded_payload(decoded, payload, payload_size, payload_is_video)
                 pkt_dts_u64: mutable u64 = 0
                 if local_dts > 0:
                     pkt_dts_u64 <- local_dts.u64()
@@ -667,6 +786,8 @@ def avplayer_ffmpeg_decode_next_ts_ex(handle: i32, stream_index: u32, codec_ctx:
                     out_ts <- pkt_dts_u64 * 1000
                 avffmpeg_last_stream_ts[stream_slot] <- out_ts
                 av_frame_unref(frame)
+                if copy_frame != frame:
+                    av_frame_free(copy_frame.ref[mutable void&?&])
                 av_frame_free(frame.ref[mutable void&?&])
                 av_packet_free(pkt.ref[mutable void&?&])
                 return 0

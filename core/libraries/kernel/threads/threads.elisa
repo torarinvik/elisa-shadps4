@@ -14,12 +14,20 @@ extern pthread_getname_np(thread: void&?, name: mutable u8&, len: u64) -> int
 extern pthread_setcancelstate(state: int, oldstate: mutable int&) -> int
 extern pthread_getschedparam(thread: void&?, policy: mutable int&, param: mutable SchedParam&) -> int
 extern pthread_setschedparam(thread: void&?, policy: int, param: SchedParam&) -> int
+extern pthread_create(thread: mutable void&?&, attr: void&?, start_routine: void&?, arg: void&?) -> int
+extern pthread_cancel(thread: void&?) -> int
 extern pthread_detach(thread: void&?) -> int
 extern pthread_join(thread: void&?, retval: mutable void&?&) -> int
 extern pthread_getaffinity_np(thread: void&?, cpusetsize: u64, cpuset: mutable void&?) -> int
 extern pthread_setaffinity_np(thread: void&?, cpusetsize: u64, cpuset: void&?) -> int
 extern sched_yield() -> int
 extern getpid() -> int
+extern elisa_kernel_thread_create(entry: void&?, arg: void&?, out_error: mutable int&?) -> void&?
+extern elisa_kernel_thread_native(handle: void&?) -> void&?
+extern elisa_kernel_thread_join(handle: void&?, retval: mutable void&?&) -> int
+extern elisa_kernel_thread_timedjoin(handle: void&?, retval: mutable void&?&, tv_sec: s64, tv_nsec: s64) -> int
+extern elisa_kernel_thread_detach(handle: void&?) -> int
+extern elisa_kernel_thread_cancel(handle: void&?) -> int
 
 const ORBIS_KERNEL_PRIO_FIFO_DEFAULT: int = 700
 const ORBIS_KERNEL_PRIO_FIFO_LOWEST: int = 256
@@ -36,6 +44,7 @@ const PTHREAD_STACK_MIN: u64 = 0x4000u64
 const PTHREAD_SCOPE_PROCESS: int = 0
 const PTHREAD_SCOPE_SYSTEM: int = 2
 const PTHREAD_DETACHED: int = 1
+const POSIX_PTHREAD_CANCELED_VALUE: int = 1
 
 @fixed_layout
 struct SchedParam:
@@ -70,8 +79,18 @@ def posix_sched_get_priority_min(policy: int) -> int:
         return ORBIS_KERNEL_PRIO_OTHER_LOWEST
     return -1
 
+def threads_sched_priority_valid(policy: int, prio: int) -> bool:
+    if policy == 1 or policy == 3:
+        return prio >= ORBIS_KERNEL_PRIO_FIFO_LOWEST and prio <= ORBIS_KERNEL_PRIO_FIFO_HIGHEST
+    return true
+
 def posix_getpid() -> int:
     return getpid()
+
+def threads_orbis_from_posix(ret: int) -> int:
+    if ret == 0:
+        return 0
+    return threads_posix_to_orbis_errno(ret)
 
 def posix_pthread_attr_init(attr: mutable PthreadAttr&?&) -> int:
     if attr == null:
@@ -140,6 +159,8 @@ def posix_pthread_attr_setschedparam(attr: mutable PthreadAttr&?, param: SchedPa
     if attr == null:
         return POSIX_EINVAL
     if param == null:
+        return POSIX_ENOTSUP
+    if not threads_sched_priority_valid(attr.sched_policy, param.sched_priority):
         return POSIX_ENOTSUP
     attr.prio <- param.sched_priority
     return 0
@@ -222,10 +243,17 @@ def posix_pthread_attr_setstacksize(attr: mutable PthreadAttr&?, stacksize: u64)
     return 0
 
 def posix_pthread_attr_get_np(pthread: void&?, dstattr: mutable PthreadAttr&?) -> int:
-    _ = pthread
-    if dstattr == null:
+    threads_bootstrap_runtime()
+    if pthread == null or dstattr == null:
         return POSIX_EINVAL
+    id: mutable int = threads_handle_to_id(pthread)
+    if threads_is_current_self_handle(pthread):
+        id <- g_fake_thread_id
+    if not threads_is_valid_live_thread_id(id):
+        return POSIX_ESRCH
     dstattr <- g_default_attr
+    if g_fake_threads_detached[id]:
+        dstattr.flags <- dstattr.flags or PTHREAD_DETACHED
     return 0
 
 def posix_pthread_attr_setcreatesuspend_np(attr: mutable PthreadAttr&?) -> int:
@@ -236,28 +264,106 @@ def posix_pthread_attr_setcreatesuspend_np(attr: mutable PthreadAttr&?) -> int:
 
 def posix_pthread_attr_getaffinity_np(pattr: PthreadAttr&?, cpusetsize: u64, cpusetp: mutable void&?) -> int:
     _ = cpusetsize
-    _ = cpusetp
     if pattr == null:
         return POSIX_EINVAL
+    if cpusetp != null:
+        mask: mutable u64&? = cpusetp as mutable u64&?
+        if mask != null:
+            if pattr.cpuset == null:
+                mask <- 0xffffffffffffffffu64
+            else:
+                source: u64&? = pattr.cpuset as u64&?
+                if source != null:
+                    mask <- source
     return 0
 
 def posix_pthread_attr_setaffinity_np(pattr: mutable PthreadAttr&?, cpusetsize: u64, cpusetp: void&?) -> int:
-    _ = cpusetsize
-    _ = cpusetp
     if pattr == null:
         return POSIX_EINVAL
+    if cpusetsize == 0u64 or cpusetp == null:
+        pattr.cpusetsize <- 0u64
+        pattr.cpuset <- null
+        return 0
+    pattr.cpusetsize <- cpusetsize
+    pattr.cpuset <- cpusetp
     return 0
 
 def scePthreadAttrGetaffinity(attr: PthreadAttr&?, mask: mutable u64&) -> int:
-    _ = attr
-    mask <- 0xffffffffffffffffu64
-    return 0
+    local_mask: mutable u64 = 0u64
+    ret: int = posix_pthread_attr_getaffinity_np(attr, 8u64, local_mask as mutable void&?)
+    if ret == 0:
+        mask <- local_mask
+    return threads_orbis_from_posix(ret)
 
 def scePthreadAttrSetaffinity(attr: mutable PthreadAttr&?, mask: u64) -> int:
-    _ = mask
-    if attr == null:
-        return POSIX_EINVAL
-    return 0
+    local_mask: mutable u64 = mask
+    return threads_orbis_from_posix(posix_pthread_attr_setaffinity_np(attr, 8u64, local_mask as void&?))
+
+def scePthreadAttrInit(attr: mutable PthreadAttr&?&) -> int:
+    return threads_orbis_from_posix(posix_pthread_attr_init(attr))
+
+def scePthreadAttrDestroy(attr: mutable PthreadAttr&?&) -> int:
+    return threads_orbis_from_posix(posix_pthread_attr_destroy(attr))
+
+def scePthreadAttrGetNp(thread: void&?, attr: mutable PthreadAttr&?) -> int:
+    return threads_orbis_from_posix(posix_pthread_attr_get_np(thread, attr))
+
+def scePthreadAttrGetdetachstate(attr: PthreadAttr&?, detachstate: mutable int&) -> int:
+    return threads_orbis_from_posix(posix_pthread_attr_getdetachstate(attr, detachstate))
+
+def scePthreadAttrGetguardsize(attr: PthreadAttr&?, guardsize: mutable u64&) -> int:
+    return threads_orbis_from_posix(posix_pthread_attr_getguardsize(attr, guardsize))
+
+def scePthreadAttrGetinheritsched(attr: PthreadAttr&?, sched_inherit: mutable int&) -> int:
+    return threads_orbis_from_posix(posix_pthread_attr_getinheritsched(attr, sched_inherit))
+
+def scePthreadAttrGetschedparam(attr: PthreadAttr&?, param: mutable SchedParam&?) -> int:
+    return threads_orbis_from_posix(posix_pthread_attr_getschedparam(attr, param))
+
+def scePthreadAttrGetschedpolicy(attr: PthreadAttr&?, policy: mutable int&) -> int:
+    return threads_orbis_from_posix(posix_pthread_attr_getschedpolicy(attr, policy))
+
+def scePthreadAttrGetscope(attr: PthreadAttr&?, contentionscope: mutable int&) -> int:
+    return threads_orbis_from_posix(posix_pthread_attr_getscope(attr, contentionscope))
+
+def scePthreadAttrGetstack(attr: PthreadAttr&?, stackaddr: mutable void&?&, stacksize: mutable u64&) -> int:
+    return threads_orbis_from_posix(posix_pthread_attr_getstack(attr, stackaddr, stacksize))
+
+def scePthreadAttrGetstackaddr(attr: PthreadAttr&?, stackaddr: mutable void&?&) -> int:
+    return threads_orbis_from_posix(posix_pthread_attr_getstackaddr(attr, stackaddr))
+
+def scePthreadAttrGetstacksize(attr: PthreadAttr&?, stacksize: mutable u64&) -> int:
+    return threads_orbis_from_posix(posix_pthread_attr_getstacksize(attr, stacksize))
+
+def scePthreadAttrSetcreatesuspend(attr: mutable PthreadAttr&?) -> int:
+    return threads_orbis_from_posix(posix_pthread_attr_setcreatesuspend_np(attr))
+
+def scePthreadAttrSetdetachstate(attr: mutable PthreadAttr&?, detachstate: int) -> int:
+    return threads_orbis_from_posix(posix_pthread_attr_setdetachstate(attr, detachstate))
+
+def scePthreadAttrSetguardsize(attr: mutable PthreadAttr&?, guardsize: u64) -> int:
+    return threads_orbis_from_posix(posix_pthread_attr_setguardsize(attr, guardsize))
+
+def scePthreadAttrSetinheritsched(attr: mutable PthreadAttr&?, sched_inherit: int) -> int:
+    return threads_orbis_from_posix(posix_pthread_attr_setinheritsched(attr, sched_inherit))
+
+def scePthreadAttrSetschedparam(attr: mutable PthreadAttr&?, param: SchedParam&?) -> int:
+    return threads_orbis_from_posix(posix_pthread_attr_setschedparam(attr, param))
+
+def scePthreadAttrSetschedpolicy(attr: mutable PthreadAttr&?, policy: int) -> int:
+    return threads_orbis_from_posix(posix_pthread_attr_setschedpolicy(attr, policy))
+
+def scePthreadAttrSetscope(attr: mutable PthreadAttr&?, contentionscope: int) -> int:
+    return threads_orbis_from_posix(posix_pthread_attr_setscope(attr, contentionscope))
+
+def scePthreadAttrSetstack(attr: mutable PthreadAttr&?, stackaddr: void&?, stacksize: u64) -> int:
+    return threads_orbis_from_posix(posix_pthread_attr_setstack(attr, stackaddr, stacksize))
+
+def scePthreadAttrSetstackaddr(attr: mutable PthreadAttr&?, stackaddr: void&?) -> int:
+    return threads_orbis_from_posix(posix_pthread_attr_setstackaddr(attr, stackaddr))
+
+def scePthreadAttrSetstacksize(attr: mutable PthreadAttr&?, stacksize: u64) -> int:
+    return threads_orbis_from_posix(posix_pthread_attr_setstacksize(attr, stacksize))
 
 @fixed_layout
 struct PthreadOnce:
@@ -267,6 +373,8 @@ global mutable g_fake_thread_id: int = 1
 global mutable g_fake_sched_policy: int = 2
 global mutable g_fake_sched_prio: int = ORBIS_KERNEL_PRIO_FIFO_DEFAULT
 global mutable g_fake_cancel_enable: bool = true
+global mutable g_fake_cancel_pending: bool = false
+global mutable g_fake_cancelling: bool = false
 global mutable g_fake_affinity_mask: u64 = 0xffffffffffffffffu64
 const FAKE_THREADS_MAX: int = 256
 global mutable g_fake_threads_bootstrapped: bool = false
@@ -274,6 +382,8 @@ global mutable g_fake_threads_alive: bool[FAKE_THREADS_MAX]
 global mutable g_fake_threads_detached: bool[FAKE_THREADS_MAX]
 global mutable g_fake_threads_has_joiner: bool[FAKE_THREADS_MAX]
 global mutable g_fake_threads_retval: void&?[FAKE_THREADS_MAX]
+global mutable g_fake_threads_host_handle: void&?[FAKE_THREADS_MAX]
+global mutable g_fake_threads_host_backed: bool[FAKE_THREADS_MAX]
 global mutable g_fake_next_thread_id: int = 2
 global mutable g_fake_thread_dtors: void&? = null
 global mutable g_fake_threads_exited: bool[FAKE_THREADS_MAX]
@@ -287,7 +397,23 @@ def threads_bootstrap_runtime() -> void:
     g_fake_threads_alive[1] <- true
 
 def threads_handle_to_id(thread: void&?) -> int:
+    i: mutable int = 1
+    trusted Unsafe.AssumeProgress:
+        while i < FAKE_THREADS_MAX:
+            if g_fake_threads_alive[i] and g_fake_threads_host_handle[i] == thread:
+                return i
+            i <- i + 1
     return thread as int
+
+def threads_handle_for_id(id: int) -> void&?:
+    if id > 0 and id < FAKE_THREADS_MAX and g_fake_threads_host_handle[id] != null:
+        return g_fake_threads_host_handle[id]
+    return id as void&?
+
+def threads_native_handle_for_call(id: int, thread: void&?) -> void&?:
+    if id > 0 and id < FAKE_THREADS_MAX and g_fake_threads_host_backed[id]:
+        return elisa_kernel_thread_native(g_fake_threads_host_handle[id])
+    return thread
 
 def threads_is_valid_live_thread_id(id: int) -> bool:
     if id <= 0 or id >= FAKE_THREADS_MAX:
@@ -330,7 +456,7 @@ def posix_pthread_detach(pthread: void&?) -> int:
     threads_bootstrap_runtime()
     if pthread == null:
         return POSIX_EINVAL
-    id: int = threads_handle_to_id(pthread)
+    id: mutable int = threads_handle_to_id(pthread)
     if threads_is_current_self_handle(pthread):
         id <- g_fake_thread_id
     if not threads_is_valid_live_thread_id(id):
@@ -340,17 +466,35 @@ def posix_pthread_detach(pthread: void&?) -> int:
     if g_fake_threads_exited[id]:
         g_fake_threads_alive[id] <- false
         g_fake_threads_running[id] <- false
-    _ = pthread_detach(pthread)
+    host_handle: void&? = threads_handle_for_id(id)
+    if g_fake_threads_host_backed[id]:
+        host_res: int = elisa_kernel_thread_detach(host_handle)
+        if host_res != 0:
+            return host_res
+    else:
+        _ = pthread_detach(host_handle)
     g_fake_threads_detached[id] <- true
+    if g_fake_threads_host_backed[id]:
+        g_fake_threads_alive[id] <- false
+        g_fake_threads_running[id] <- false
+        g_fake_threads_exited[id] <- false
     return 0
 
 def posix_pthread_exit(status: void&?) -> void:
     threads_bootstrap_runtime()
+    if g_fake_cancelling:
+        return
+    g_fake_cancelling <- true
+    g_fake_cancel_enable <- false
+    g_fake_cancel_pending <- false
     g_fake_threads_retval[g_fake_thread_id] <- status
     g_fake_threads_exited[g_fake_thread_id] <- true
+    threads_run_cleanup_handlers()
     if g_fake_thread_dtors != null:
         CALL_VOID_FN_0(g_fake_thread_dtors)
+    threads_cleanup_specific()
     g_fake_threads_alive[g_fake_thread_id] <- false
+    g_fake_cancelling <- false
     return
 
 def posix_pthread_join(pthread: void&?, thread_return: mutable void&?&) -> int:
@@ -358,7 +502,7 @@ def posix_pthread_join(pthread: void&?, thread_return: mutable void&?&) -> int:
     _ = thread_return
     if pthread == null:
         return POSIX_EINVAL
-    id: int = threads_handle_to_id(pthread)
+    id: mutable int = threads_handle_to_id(pthread)
     if threads_is_current_self_handle(pthread):
         id <- g_fake_thread_id
     if id == g_fake_thread_id:
@@ -369,10 +513,14 @@ def posix_pthread_join(pthread: void&?, thread_return: mutable void&?&) -> int:
         return POSIX_EINVAL
     if g_fake_threads_has_joiner[id]:
         return POSIX_ENOTSUP
-    if g_fake_threads_running[id] and not g_fake_threads_exited[id]:
+    if g_fake_threads_running[id] and not g_fake_threads_exited[id] and not g_fake_threads_host_backed[id]:
         return POSIX_ETIMEDOUT
     host_ret: mutable void&? = null
-    _ = pthread_join(pthread, host_ret)
+    if g_fake_threads_host_backed[id]:
+        host_res: int = elisa_kernel_thread_join(threads_handle_for_id(id), host_ret)
+        if host_res != 0:
+            return host_res
+        g_fake_threads_retval[id] <- host_ret
     g_fake_threads_has_joiner[id] <- true
     if thread_return != null:
         thread_return <- g_fake_threads_retval[id]
@@ -382,6 +530,8 @@ def posix_pthread_join(pthread: void&?, thread_return: mutable void&?&) -> int:
     g_fake_threads_has_joiner[id] <- false
     g_fake_threads_exited[id] <- false
     g_fake_threads_retval[id] <- null
+    g_fake_threads_host_handle[id] <- null
+    g_fake_threads_host_backed[id] <- false
     return 0
 
 def posix_pthread_timedjoin_np(pthread: void&?, thread_return: mutable void&?&, abstime: void&?) -> int:
@@ -391,20 +541,37 @@ def posix_pthread_timedjoin_np(pthread: void&?, thread_return: mutable void&?&, 
         return POSIX_EDEADLK
     if abstime == null:
         return POSIX_EINVAL
-    id: int = threads_handle_to_id(pthread)
+    ts: OrbisKernelTimespec&? = abstime as OrbisKernelTimespec&?
+    if ts == null or ts.tv_sec < 0 or ts.tv_nsec < 0 or ts.tv_nsec >= 1000000000:
+        return POSIX_EINVAL
+    id: mutable int = threads_handle_to_id(pthread)
     if threads_is_current_self_handle(pthread):
         id <- g_fake_thread_id
     if id <= 0 or id >= FAKE_THREADS_MAX:
         return POSIX_ESRCH
+    if g_fake_threads_host_backed[id]:
+        host_ret: mutable void&? = null
+        host_res: int = elisa_kernel_thread_timedjoin(threads_handle_for_id(id), host_ret, ts.tv_sec, ts.tv_nsec)
+        if host_res != 0:
+            return host_res
+        g_fake_threads_retval[id] <- host_ret
+        if thread_return != null:
+            thread_return <- g_fake_threads_retval[id]
+        g_fake_threads_alive[id] <- false
+        g_fake_threads_running[id] <- false
+        g_fake_threads_detached[id] <- true
+        g_fake_threads_has_joiner[id] <- false
+        g_fake_threads_exited[id] <- false
+        g_fake_threads_retval[id] <- null
+        g_fake_threads_host_handle[id] <- null
+        g_fake_threads_host_backed[id] <- false
+        return 0
     if not g_fake_threads_exited[id]:
         return POSIX_ETIMEDOUT
     return posix_pthread_join(pthread, thread_return)
 
 def posix_pthread_create(thread: mutable void&?&, attr: void&?, start_routine: void&?, arg: void&?) -> int:
     threads_bootstrap_runtime()
-    _ = attr
-    _ = start_routine
-    _ = arg
     if thread == null:
         return POSIX_EINVAL
     if g_fake_next_thread_id >= FAKE_THREADS_MAX:
@@ -416,11 +583,30 @@ def posix_pthread_create(thread: mutable void&?&, attr: void&?, start_routine: v
     g_fake_threads_detached[id] <- false
     g_fake_threads_has_joiner[id] <- false
     g_fake_threads_retval[id] <- null
+    g_fake_threads_host_handle[id] <- null
+    g_fake_threads_host_backed[id] <- false
     g_fake_threads_exited[id] <- false
     if attr != null:
         a: PthreadAttr&? = attr as PthreadAttr&?
         if a != null and (a.flags and PTHREAD_DETACHED) != 0:
             g_fake_threads_detached[id] <- true
+    if start_routine != null:
+        create_res: mutable int = 0
+        host_thread: void&? = elisa_kernel_thread_create(start_routine, arg, create_res)
+        if create_res != 0:
+            g_fake_threads_alive[id] <- false
+            g_fake_threads_running[id] <- false
+            g_fake_threads_detached[id] <- false
+            g_fake_threads_exited[id] <- false
+            return create_res
+        g_fake_threads_host_handle[id] <- host_thread
+        g_fake_threads_host_backed[id] <- true
+        thread <- host_thread
+        if g_fake_threads_detached[id]:
+            _ = elisa_kernel_thread_detach(host_thread)
+            g_fake_threads_alive[id] <- false
+            g_fake_threads_running[id] <- false
+        return 0
     if g_fake_threads_autocomplete:
         g_fake_threads_retval[id] <- arg
         g_fake_threads_running[id] <- false
@@ -448,13 +634,44 @@ def posix_pthread_setcancelstate(state: int, oldstate: mutable int&?) -> int:
         else:
             oldstate <- 1
     g_fake_cancel_enable <- state == 0
+    if g_fake_cancel_enable and g_fake_cancel_pending:
+        posix_pthread_exit(POSIX_PTHREAD_CANCELED_VALUE as void&?)
     return 0
+
+def posix_pthread_cancel(thread: void&?) -> int:
+    threads_bootstrap_runtime()
+    if thread == null:
+        return POSIX_EINVAL
+    id: mutable int = threads_handle_to_id(thread)
+    if threads_is_current_self_handle(thread):
+        id <- g_fake_thread_id
+    if not threads_is_valid_live_thread_id(id):
+        return POSIX_ESRCH
+    if id == g_fake_thread_id:
+        g_fake_cancel_pending <- true
+        if g_fake_cancel_enable:
+            posix_pthread_exit(POSIX_PTHREAD_CANCELED_VALUE as void&?)
+        return 0
+    if g_fake_threads_host_backed[id]:
+        host_res: int = elisa_kernel_thread_cancel(threads_handle_for_id(id))
+        if host_res != 0:
+            return host_res
+    g_fake_threads_retval[id] <- POSIX_PTHREAD_CANCELED_VALUE as void&?
+    g_fake_threads_exited[id] <- true
+    g_fake_threads_running[id] <- false
+    return 0
+
+def posix_pthread_testcancel() -> void:
+    threads_bootstrap_runtime()
+    if g_fake_cancel_enable and g_fake_cancel_pending:
+        posix_pthread_exit(POSIX_PTHREAD_CANCELED_VALUE as void&?)
+    return
 
 def posix_pthread_setprio(thread: void&?, prio: int) -> int:
     threads_bootstrap_runtime()
     if thread == null:
         return POSIX_EINVAL
-    id: int = threads_handle_to_id(thread)
+    id: mutable int = threads_handle_to_id(thread)
     if threads_is_current_self_handle(thread):
         id <- g_fake_thread_id
     if not threads_is_valid_live_thread_id(id):
@@ -466,7 +683,7 @@ def posix_pthread_rename_np(thread: void&?, name: static u8&?) -> int:
     threads_bootstrap_runtime()
     if thread == null:
         return POSIX_EINVAL
-    id: int = threads_handle_to_id(thread)
+    id: mutable int = threads_handle_to_id(thread)
     if threads_is_current_self_handle(thread):
         id <- g_fake_thread_id
     if not threads_is_valid_live_thread_id(id):
@@ -484,12 +701,12 @@ def posix_pthread_getschedparam(thread: void&?, policy: mutable int&, param: mut
     threads_bootstrap_runtime()
     if thread == null:
         return POSIX_EINVAL
-    id: int = threads_handle_to_id(thread)
+    id: mutable int = threads_handle_to_id(thread)
     if threads_is_current_self_handle(thread):
         id <- g_fake_thread_id
     if not threads_is_valid_live_thread_id(id):
         return POSIX_ESRCH
-    host_r: int = pthread_getschedparam(thread, policy, param)
+    host_r: int = pthread_getschedparam(threads_native_handle_for_call(id, thread), policy, param)
     if host_r != 0 and posix_pthread_equal(thread, posix_pthread_self()) == 1:
         return POSIX_EINVAL
     policy <- g_fake_sched_policy
@@ -500,12 +717,12 @@ def posix_pthread_setschedparam(thread: void&?, policy: int, param: SchedParam&?
     threads_bootstrap_runtime()
     if thread == null or param == null:
         return POSIX_EINVAL
-    id: int = threads_handle_to_id(thread)
+    id: mutable int = threads_handle_to_id(thread)
     if threads_is_current_self_handle(thread):
         id <- g_fake_thread_id
     if not threads_is_valid_live_thread_id(id):
         return POSIX_ESRCH
-    host_r: int = pthread_setschedparam(thread, policy, param as SchedParam&)
+    host_r: int = pthread_setschedparam(threads_native_handle_for_call(id, thread), policy, param as SchedParam&)
     if host_r != 0 and posix_pthread_equal(thread, posix_pthread_self()) == 1:
         return POSIX_EINVAL
     g_fake_sched_policy <- policy
@@ -518,12 +735,12 @@ def posix_pthread_getaffinity_np(thread: void&?, cpusetsize: u64, cpusetp: mutab
     _ = cpusetp
     if thread == null:
         return POSIX_EINVAL
-    id: int = threads_handle_to_id(thread)
+    id: mutable int = threads_handle_to_id(thread)
     if threads_is_current_self_handle(thread):
         id <- g_fake_thread_id
     if not threads_is_valid_live_thread_id(id):
         return POSIX_ESRCH
-    host_r: int = pthread_getaffinity_np(thread, cpusetsize, cpusetp)
+    host_r: int = pthread_getaffinity_np(threads_native_handle_for_call(id, thread), cpusetsize, cpusetp)
     if host_r != 0 and posix_pthread_equal(thread, posix_pthread_self()) == 1:
         return POSIX_EINVAL
     return 0
@@ -534,12 +751,12 @@ def posix_pthread_setaffinity_np(thread: void&?, cpusetsize: u64, cpusetp: void&
     _ = cpusetp
     if thread == null:
         return POSIX_EINVAL
-    id: int = threads_handle_to_id(thread)
+    id: mutable int = threads_handle_to_id(thread)
     if threads_is_current_self_handle(thread):
         id <- g_fake_thread_id
     if not threads_is_valid_live_thread_id(id):
         return POSIX_ESRCH
-    host_r: int = pthread_setaffinity_np(thread, cpusetsize, cpusetp)
+    host_r: int = pthread_setaffinity_np(threads_native_handle_for_call(id, thread), cpusetsize, cpusetp)
     if host_r != 0 and posix_pthread_equal(thread, posix_pthread_self()) == 1:
         return POSIX_EINVAL
     return 0
@@ -557,7 +774,7 @@ def posix_pthread_getname_np(thread: void&?, name: mutable u8&?) -> int:
         return POSIX_EINVAL
     if thread == null:
         return POSIX_EINVAL
-    id: int = threads_handle_to_id(thread)
+    id: mutable int = threads_handle_to_id(thread)
     if threads_is_current_self_handle(thread):
         id <- g_fake_thread_id
     if not threads_is_valid_live_thread_id(id):
@@ -606,6 +823,39 @@ def scePthreadSetaffinity(thread: void&?, mask: u64) -> int:
             return POSIX_EINVAL
     return 0
 
+def scePthreadOnce(once_control: mutable PthreadOnce&?, init_routine: void&?) -> int:
+    return threads_orbis_from_posix(posix_pthread_once(once_control, init_routine))
+
+def scePthreadRenameNp(thread: void&?, name: static u8&?) -> int:
+    return threads_orbis_from_posix(posix_pthread_rename_np(thread, name))
+
+def scePthreadCreateNameNp(thread: mutable void&?&, attr: void&?, start_routine: void&?, arg: void&?, name: static u8&?) -> int:
+    return threads_orbis_from_posix(posix_pthread_create_name_np(thread, attr, start_routine, arg, name))
+
+def scePthreadDetach(thread: void&?) -> int:
+    return threads_orbis_from_posix(posix_pthread_detach(thread))
+
+def scePthreadJoin(thread: void&?, thread_return: mutable void&?&) -> int:
+    return threads_orbis_from_posix(posix_pthread_join(thread, thread_return))
+
+def scePthreadGetschedparam(thread: void&?, policy: mutable int&, param: mutable SchedParam&) -> int:
+    return threads_orbis_from_posix(posix_pthread_getschedparam(thread, policy, param))
+
+def scePthreadSetschedparam(thread: void&?, policy: int, param: SchedParam&) -> int:
+    return threads_orbis_from_posix(posix_pthread_setschedparam(thread, policy, param))
+
+def scePthreadGetnameNp(thread: void&?, name: mutable u8&?) -> int:
+    return threads_orbis_from_posix(posix_pthread_getname_np(thread, name))
+
+def scePthreadSetprio(thread: void&?, priority: int) -> int:
+    return threads_orbis_from_posix(posix_pthread_setprio(thread, priority))
+
+def scePthreadGetaffinityOrbis(thread: void&?, mask: mutable u64&?) -> int:
+    return threads_orbis_from_posix(scePthreadGetaffinity(thread, mask))
+
+def scePthreadSetaffinityOrbis(thread: void&?, mask: u64) -> int:
+    return threads_orbis_from_posix(scePthreadSetaffinity(thread, mask))
+
 def posix_sched_yield_shim() -> int:
     return sched_yield()
 
@@ -644,30 +894,30 @@ def RegisterThreadAttr(sym: void&?) -> void:
     LIB_FUNCTION("2Q0z6rnBrTE", "libScePosix", 1, "libkernel", posix_pthread_attr_setstacksize)
     LIB_FUNCTION("zHchY8ft5pk", "libScePosix", 1, "libkernel", posix_pthread_attr_destroy)
 
-    LIB_FUNCTION("nsYoNRywwNg", "libkernel", 1, "libkernel", posix_pthread_attr_init)
-    LIB_FUNCTION("x1X76arYMxU", "libkernel", 1, "libkernel", posix_pthread_attr_get_np)
+    LIB_FUNCTION("nsYoNRywwNg", "libkernel", 1, "libkernel", scePthreadAttrInit)
+    LIB_FUNCTION("x1X76arYMxU", "libkernel", 1, "libkernel", scePthreadAttrGetNp)
     LIB_FUNCTION("8+s5BzZjxSg", "libkernel", 1, "libkernel", scePthreadAttrGetaffinity)
-    LIB_FUNCTION("JaRMy+QcpeU", "libkernel", 1, "libkernel", posix_pthread_attr_getdetachstate)
-    LIB_FUNCTION("txHtngJ+eyc", "libkernel", 1, "libkernel", posix_pthread_attr_getguardsize)
-    LIB_FUNCTION("lpMP8HhkBbg", "libkernel", 1, "libkernel", posix_pthread_attr_getinheritsched)
-    LIB_FUNCTION("FXPWHNk8Of0", "libkernel", 1, "libkernel", posix_pthread_attr_getschedparam)
-    LIB_FUNCTION("NMyIQ9WgWbU", "libkernel", 1, "libkernel", posix_pthread_attr_getschedpolicy)
-    LIB_FUNCTION("+7B2AEKKns8", "libkernel", 1, "libkernel", posix_pthread_attr_getscope)
-    LIB_FUNCTION("-quPa4SEJUw", "libkernel", 1, "libkernel", posix_pthread_attr_getstack)
-    LIB_FUNCTION("Ru36fiTtJzA", "libkernel", 1, "libkernel", posix_pthread_attr_getstackaddr)
-    LIB_FUNCTION("-fA+7ZlGDQs", "libkernel", 1, "libkernel", posix_pthread_attr_getstacksize)
+    LIB_FUNCTION("JaRMy+QcpeU", "libkernel", 1, "libkernel", scePthreadAttrGetdetachstate)
+    LIB_FUNCTION("txHtngJ+eyc", "libkernel", 1, "libkernel", scePthreadAttrGetguardsize)
+    LIB_FUNCTION("lpMP8HhkBbg", "libkernel", 1, "libkernel", scePthreadAttrGetinheritsched)
+    LIB_FUNCTION("FXPWHNk8Of0", "libkernel", 1, "libkernel", scePthreadAttrGetschedparam)
+    LIB_FUNCTION("NMyIQ9WgWbU", "libkernel", 1, "libkernel", scePthreadAttrGetschedpolicy)
+    LIB_FUNCTION("+7B2AEKKns8", "libkernel", 1, "libkernel", scePthreadAttrGetscope)
+    LIB_FUNCTION("-quPa4SEJUw", "libkernel", 1, "libkernel", scePthreadAttrGetstack)
+    LIB_FUNCTION("Ru36fiTtJzA", "libkernel", 1, "libkernel", scePthreadAttrGetstackaddr)
+    LIB_FUNCTION("-fA+7ZlGDQs", "libkernel", 1, "libkernel", scePthreadAttrGetstacksize)
     LIB_FUNCTION("3qxgM4ezETA", "libkernel", 1, "libkernel", scePthreadAttrSetaffinity)
-    LIB_FUNCTION("GZSR0Ooae9Q", "libkernel", 1, "libkernel", posix_pthread_attr_setcreatesuspend_np)
-    LIB_FUNCTION("-Wreprtu0Qs", "libkernel", 1, "libkernel", posix_pthread_attr_setdetachstate)
-    LIB_FUNCTION("El+cQ20DynU", "libkernel", 1, "libkernel", posix_pthread_attr_setguardsize)
-    LIB_FUNCTION("eXbUSpEaTsA", "libkernel", 1, "libkernel", posix_pthread_attr_setinheritsched)
-    LIB_FUNCTION("DzES9hQF4f4", "libkernel", 1, "libkernel", posix_pthread_attr_setschedparam)
-    LIB_FUNCTION("4+h9EzwKF4I", "libkernel", 1, "libkernel", posix_pthread_attr_setschedpolicy)
-    LIB_FUNCTION("YdZfEZfRnPk", "libkernel", 1, "libkernel", posix_pthread_attr_setscope)
-    LIB_FUNCTION("Bvn74vj6oLo", "libkernel", 1, "libkernel", posix_pthread_attr_setstack)
-    LIB_FUNCTION("F+yfmduIBB8", "libkernel", 1, "libkernel", posix_pthread_attr_setstackaddr)
-    LIB_FUNCTION("UTXzJbWhhTE", "libkernel", 1, "libkernel", posix_pthread_attr_setstacksize)
-    LIB_FUNCTION("62KCwEMmzcM", "libkernel", 1, "libkernel", posix_pthread_attr_destroy)
+    LIB_FUNCTION("GZSR0Ooae9Q", "libkernel", 1, "libkernel", scePthreadAttrSetcreatesuspend)
+    LIB_FUNCTION("-Wreprtu0Qs", "libkernel", 1, "libkernel", scePthreadAttrSetdetachstate)
+    LIB_FUNCTION("El+cQ20DynU", "libkernel", 1, "libkernel", scePthreadAttrSetguardsize)
+    LIB_FUNCTION("eXbUSpEaTsA", "libkernel", 1, "libkernel", scePthreadAttrSetinheritsched)
+    LIB_FUNCTION("DzES9hQF4f4", "libkernel", 1, "libkernel", scePthreadAttrSetschedparam)
+    LIB_FUNCTION("4+h9EzwKF4I", "libkernel", 1, "libkernel", scePthreadAttrSetschedpolicy)
+    LIB_FUNCTION("YdZfEZfRnPk", "libkernel", 1, "libkernel", scePthreadAttrSetscope)
+    LIB_FUNCTION("Bvn74vj6oLo", "libkernel", 1, "libkernel", scePthreadAttrSetstack)
+    LIB_FUNCTION("F+yfmduIBB8", "libkernel", 1, "libkernel", scePthreadAttrSetstackaddr)
+    LIB_FUNCTION("UTXzJbWhhTE", "libkernel", 1, "libkernel", scePthreadAttrSetstacksize)
+    LIB_FUNCTION("62KCwEMmzcM", "libkernel", 1, "libkernel", scePthreadAttrDestroy)
 
 def RegisterThread(sym: void&?) -> void:
     _ = sym
@@ -706,14 +956,14 @@ def RegisterThread(sym: void&?) -> void:
     LIB_FUNCTION("5KWrg7-ZqvE", "libkernel", 1, "libkernel", posix_pthread_setaffinity_np)
     LIB_FUNCTION("3eqs37G74-s", "libkernel", 1, "libkernel", posix_pthread_getthreadid_np)
 
-    LIB_FUNCTION("14bOACANTBo", "libkernel", 1, "libkernel", posix_pthread_once)
-    LIB_FUNCTION("GBUY7ywdULE", "libkernel", 1, "libkernel", posix_pthread_rename_np)
-    LIB_FUNCTION("6UgtwV+0zb4", "libkernel", 1, "libkernel", posix_pthread_create_name_np)
-    LIB_FUNCTION("4qGrR6eoP9Y", "libkernel", 1, "libkernel", posix_pthread_detach)
-    LIB_FUNCTION("onNY9Byn-W8", "libkernel", 1, "libkernel", posix_pthread_join)
-    LIB_FUNCTION("P41kTWUS3EI", "libkernel", 1, "libkernel", posix_pthread_getschedparam)
-    LIB_FUNCTION("oIRFTjoILbg", "libkernel", 1, "libkernel", posix_pthread_setschedparam)
-    LIB_FUNCTION("How7B8Oet6k", "libkernel", 1, "libkernel", posix_pthread_getname_np)
+    LIB_FUNCTION("14bOACANTBo", "libkernel", 1, "libkernel", scePthreadOnce)
+    LIB_FUNCTION("GBUY7ywdULE", "libkernel", 1, "libkernel", scePthreadRenameNp)
+    LIB_FUNCTION("6UgtwV+0zb4", "libkernel", 1, "libkernel", scePthreadCreateNameNp)
+    LIB_FUNCTION("4qGrR6eoP9Y", "libkernel", 1, "libkernel", scePthreadDetach)
+    LIB_FUNCTION("onNY9Byn-W8", "libkernel", 1, "libkernel", scePthreadJoin)
+    LIB_FUNCTION("P41kTWUS3EI", "libkernel", 1, "libkernel", scePthreadGetschedparam)
+    LIB_FUNCTION("oIRFTjoILbg", "libkernel", 1, "libkernel", scePthreadSetschedparam)
+    LIB_FUNCTION("How7B8Oet6k", "libkernel", 1, "libkernel", scePthreadGetnameNp)
     LIB_FUNCTION("3kg7rT0NQIs", "libkernel", 1, "libkernel", posix_pthread_exit)
     LIB_FUNCTION("aI+OeCz8xrQ", "libkernel", 1, "libkernel", posix_pthread_self)
     LIB_FUNCTION("oxMp8uPqa+U", "libkernel", 1, "libkernel", posix_pthread_set_name_np)
@@ -721,12 +971,12 @@ def RegisterThread(sym: void&?) -> void:
     LIB_FUNCTION("T72hz6ffq08", "libkernel", 1, "libkernel", posix_pthread_yield)
     LIB_FUNCTION("EI-5-jlq2dE", "libkernel", 1, "libkernel", posix_pthread_getthreadid_np)
     LIB_FUNCTION("1tKyG7RlMJo", "libkernel", 1, "libkernel", scePthreadGetprio)
-    LIB_FUNCTION("W0Hpm2X0uPE", "libkernel", 1, "libkernel", posix_pthread_setprio)
+    LIB_FUNCTION("W0Hpm2X0uPE", "libkernel", 1, "libkernel", scePthreadSetprio)
     LIB_FUNCTION("rNhWz+lvOMU", "libkernel", 1, "libkernel", _sceKernelSetThreadDtors)
     LIB_FUNCTION("6XG4B33N09g", "libkernel", 1, "libkernel", posix_sched_yield_shim)
     LIB_FUNCTION("HoLVWNanBBc", "libkernel", 1, "libkernel", posix_getpid)
-    LIB_FUNCTION("rcrVFJsQWRY", "libkernel", 1, "libkernel", scePthreadGetaffinity)
-    LIB_FUNCTION("bt3CTBKmGyI", "libkernel", 1, "libkernel", scePthreadSetaffinity)
+    LIB_FUNCTION("rcrVFJsQWRY", "libkernel", 1, "libkernel", scePthreadGetaffinityOrbis)
+    LIB_FUNCTION("bt3CTBKmGyI", "libkernel", 1, "libkernel", scePthreadSetaffinityOrbis)
 
 def RegisterRtld(sym: void&?) -> void:
     _ = sym

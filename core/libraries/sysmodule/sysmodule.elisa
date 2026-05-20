@@ -1,0 +1,143 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../error_codes.elisa"
+include "./sysmodule_error.elisa"
+
+type OrbisSysModule = u16
+type OrbisSysModuleInternal = u32
+
+global mutable g_sysmodule_slot_ids: u32[256] = zeroed
+global mutable g_sysmodule_slot_loads: int[256] = zeroed
+global mutable g_sysmodule_slot_handles: int[256] = zeroed
+global mutable g_sysmodule_next_handle: int = 0x1000
+
+def sysmodule_invalid_id_internal(id: OrbisSysModuleInternal) -> bool:
+    return id == 0u32 or id == 0x80000000u32
+
+def sysmodule_find_slot(id: u32) -> int:
+    i: mutable int = 0
+    while i < 256:
+        if g_sysmodule_slot_ids[i] == id:
+            return i
+        i <- i + 1
+    return -1
+
+def sysmodule_find_or_create_slot(id: u32) -> int:
+    existing: int = sysmodule_find_slot(id)
+    if existing >= 0:
+        return existing
+    i: mutable int = 0
+    while i < 256:
+        if g_sysmodule_slot_ids[i] == 0u32:
+            g_sysmodule_slot_ids[i] <- id
+            g_sysmodule_slot_loads[i] <- 0
+            g_sysmodule_slot_handles[i] <- 0
+            return i
+        i <- i + 1
+    return -1
+
+def sceSysmoduleGetModuleHandleInternal(id: OrbisSysModuleInternal, handle: mutable int&?) -> int:
+    _ = handle
+    if sysmodule_invalid_id_internal(id):
+        return ORBIS_SYSMODULE_INVALID_ID
+    slot: int = sysmodule_find_slot(id)
+    if slot < 0 or g_sysmodule_slot_loads[slot] <= 0:
+        return ORBIS_SYSMODULE_NOT_LOADED
+    return ORBIS_OK
+
+def sceSysmoduleGetModuleInfoForUnwind(addr: u64, flags: int, info: mutable void&?) -> int:
+    _ = addr
+    _ = flags
+    _ = info
+    return ORBIS_OK
+
+def sceSysmoduleIsCalledFromSysModule() -> int:
+    return ORBIS_OK
+
+def sceSysmoduleIsCameraPreloaded() -> int:
+    return ORBIS_OK
+
+def sceSysmoduleIsLoaded(id: OrbisSysModule) -> int:
+    if id == 0u16:
+        return ORBIS_SYSMODULE_INVALID_ID
+    slot: int = sysmodule_find_slot(id.u32())
+    if slot < 0 or g_sysmodule_slot_loads[slot] <= 0:
+        return ORBIS_SYSMODULE_NOT_LOADED
+    return ORBIS_OK
+
+def sceSysmoduleIsLoadedInternal(id: OrbisSysModuleInternal) -> int:
+    if sysmodule_invalid_id_internal(id):
+        return ORBIS_SYSMODULE_INVALID_ID
+    slot: int = sysmodule_find_slot(id)
+    if slot < 0 or g_sysmodule_slot_loads[slot] <= 0:
+        return ORBIS_SYSMODULE_NOT_LOADED
+    return ORBIS_OK
+
+def sceSysmoduleLoadModule(id: OrbisSysModule) -> int:
+    if id == 0u16:
+        return ORBIS_SYSMODULE_INVALID_ID
+    slot: int = sysmodule_find_or_create_slot(id.u32())
+    if slot < 0:
+        return ORBIS_SYSMODULE_LOCK_FAILED
+    if g_sysmodule_slot_loads[slot] == 0:
+        g_sysmodule_slot_handles[slot] <- g_sysmodule_next_handle
+        g_sysmodule_next_handle <- g_sysmodule_next_handle + 1
+    g_sysmodule_slot_loads[slot] <- g_sysmodule_slot_loads[slot] + 1
+    return ORBIS_OK
+
+def sceSysmoduleLoadModuleByNameInternal() -> int:
+    return ORBIS_OK
+
+def sceSysmoduleLoadModuleInternal(id: OrbisSysModuleInternal) -> int:
+    if sysmodule_invalid_id_internal(id):
+        return ORBIS_SYSMODULE_INVALID_ID
+    slot: int = sysmodule_find_or_create_slot(id)
+    if slot < 0:
+        return ORBIS_SYSMODULE_LOCK_FAILED
+    if g_sysmodule_slot_loads[slot] == 0:
+        g_sysmodule_slot_handles[slot] <- g_sysmodule_next_handle
+        g_sysmodule_next_handle <- g_sysmodule_next_handle + 1
+    g_sysmodule_slot_loads[slot] <- g_sysmodule_slot_loads[slot] + 1
+    return ORBIS_OK
+
+def sceSysmoduleLoadModuleInternalWithArg(id: OrbisSysModuleInternal, argc: int, argv: void&?, unk: u64, res_out: mutable int&?) -> int:
+    _ = argc
+    _ = argv
+    _ = res_out
+    if sysmodule_invalid_id_internal(id):
+        return ORBIS_SYSMODULE_INVALID_ID
+    if unk != 0u64:
+        return ORBIS_SYSMODULE_INVALID_ID
+    result: int = sceSysmoduleLoadModuleInternal(id)
+    if result != ORBIS_OK:
+        return result
+    _ = res_out
+    return ORBIS_OK
+
+def sceSysmoduleMapLibcForLibkernel() -> int:
+    return ORBIS_OK
+
+def sceSysmodulePreloadModuleForLibkernel() -> int:
+    return ORBIS_OK
+
+def sceSysmoduleUnloadModule(id: OrbisSysModule) -> int:
+    if id == 0u16:
+        return ORBIS_SYSMODULE_INVALID_ID
+    slot: int = sysmodule_find_slot(id.u32())
+    if slot < 0 or g_sysmodule_slot_loads[slot] <= 0:
+        return ORBIS_SYSMODULE_NOT_LOADED
+    g_sysmodule_slot_loads[slot] <- g_sysmodule_slot_loads[slot] - 1
+    return ORBIS_OK
+
+def sceSysmoduleUnloadModuleByNameInternal() -> int:
+    return ORBIS_OK
+
+def sceSysmoduleUnloadModuleInternal() -> int:
+    return ORBIS_OK
+
+def sceSysmoduleUnloadModuleInternalWithArg() -> int:
+    return ORBIS_OK
+
+def RegisterLib(sym: void&?) -> void:
+    _ = sym

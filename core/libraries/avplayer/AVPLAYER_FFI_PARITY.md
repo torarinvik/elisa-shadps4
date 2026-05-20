@@ -38,6 +38,8 @@ Current validated prefix structs:
 
 - `Implemented`: init/initEx/addSource/addSourceEx/start/stop/pause/resume/close
 - `Implemented`: stream count/info, get audio/video data, loop flag, current time
+- `Implemented`: `SetAvSyncMode` now stores sync mode in source state; `None` bypasses video delivery sync gating like C++ source behavior
+- `Implemented`: `SetLooping` now fails with operation failure when no source is attached, matching the C++ state/source guard
 - `Implemented`: `JumpToTime` matches the current C++ no-op behavior
 - `Implemented`: `DisableStream` matches the current C++ no-op behavior
 - `Implemented`: subtitle/timed-text streams can participate in auto-start and startup validation
@@ -74,6 +76,12 @@ Current validated prefix structs:
 - `Implemented`: non-Ex `GetVideoData` now also prefers delivered decode aspect ratio (num/den) when available, reducing fallback-only aspect behavior
 - `Implemented`: `GetVideoDataEx` `video_full_range_flag` now reads from source-side delivered metadata cache (plumbed path ready for decode-fed color-range)
 - `Implemented`: source now initializes video full-range cache from FFmpeg stream `color_range` metadata (full-range when FFmpeg reports JPEG/full-range), and `GetVideoDataEx` consumes it
+- `Implemented`: lifecycle resets (`init/add-source/stop`) now clear decode-driven video metadata caches (pitch/aspect/full-range); seek/jump clears per-frame pitch/aspect while preserving stream-level full-range metadata
+- `Implemented`: FFmpeg 8 `AVFrame` prefix binding now follows the public `data[8]` layout and validates with `c-bind-check`
+- `Implemented`: successful `GetAudioData`, `GetVideoData`, and `GetVideoDataEx` now allocate stable frame payload buffers through the player memory callbacks instead of returning metadata-only frames with `p_data = null`
+- `Implemented`: FFmpeg decode now has an Elisa-side copy path that copies live decoded frame data into caller-provided payload buffers before `AVFrame` release
+- `Partial`: decoded payload copying currently handles direct plane copies for already-compatible frame data; non-NV12 video and non-S16 audio still need swscale/swresample conversion parity
+- `Different`: Elisa currently cannot model nullable function-pointer fields directly, so `AvPlayerMemAllocator` callback fields are represented as callable function values; this preserves callback invocation and function-pointer-sized ABI shape, but null-callback validation is deferred to compiler nullable-function support
 - `Implemented`: source caches stream start-time/duration for active audio/video and frame getters now apply cached stream start-time offset to output timestamps
 - `Implemented`: start-time offset application now keys on `start_time` presence (not duration presence), improving streams with unknown/zero duration
 - `Implemented`: handle `CurrentTime` bookkeeping now updates from post-offset frame timestamps (internal time matches returned timeline)
@@ -91,9 +99,10 @@ Current validated prefix structs:
 - `Implemented`: add-source paths now reset queue state, stream metadata/timing caches, cadence markers, and playback time anchors before new source lifecycle begins
 - `Implemented`: add-source source-runtime baseline now also resets loop mode to false for deterministic per-source setup
 - `Implemented`: add-source source-runtime baseline now nulls decoder context pointers before next start-time decoder initialization
+- `Implemented`: init/initEx now clamp requested output video framebuffer count to the C++ range `[2, 16]` and store it in source state
 - `Implemented`: `IsActive` and `CurrentTime` gating now follow the C++ source shape
 - `Partial`: no full demux/decode threads, packet queues, or converted frame pipeline
-- `Partial`: no guest buffer pool or frame-object lifetime model like C++
+- `Partial`: guest payload buffers now use the supplied allocator callbacks and are released on close, but this is still a single reusable payload per media type rather than the full C++ queued `GuestBuffer` pool
 
 ### State/controller (`avplayer_state.elisa`)
 
@@ -121,7 +130,7 @@ Current validated prefix structs:
 - `Implemented`: decoder EOF drain attempt (flush packet + receive) before signaling terminal EOF
 - `Implemented`: seek/flush accessors for source-level replay handling
 - `Implemented`: ABI prefix layout checks for core structs
-- `Missing`: swscale/swresample conversion helpers and full frame-format conversion parity
+- `Missing`: swscale/swresample conversion helpers for frame formats that are not already directly copy-compatible with the expected guest output
 
 ## Remaining Gaps To Reach 100% C++ Parity
 
