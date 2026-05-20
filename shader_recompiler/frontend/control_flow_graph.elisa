@@ -119,6 +119,61 @@ def _cfg_get_block_index(cfg: CFG&, address: u32) -> int:
     return -1
 
 
+def _cfg_resolve_setpc_target(cfg: CFG&, setpc_index: u32) -> u32:
+    if setpc_index < 3u32:
+        return 0xFFFFFFFFu32
+
+    getpc: GcnInst = cfg.inst_list[(setpc_index - 3u32).usize()]
+    arith: GcnInst = cfg.inst_list[(setpc_index - 2u32).usize()]
+    setpc: GcnInst = cfg.inst_list[setpc_index.usize()]
+
+    if getpc.opcode != OPCODE_S_GETPC_B64:
+        return 0xFFFFFFFFu32
+    if not (arith.opcode == 0u32 or arith.opcode == 1u32):
+        return 0xFFFFFFFFu32
+    if setpc.opcode != OPCODE_S_SETPC_B64:
+        return 0xFFFFFFFFu32
+    if getpc.dst[0].code != setpc.src[0].code or arith.dst[0].code != setpc.src[0].code:
+        return 0xFFFFFFFFu32
+    if arith.src_count < 2u32 or arith.src[1].field != OPERAND_FIELD_LITERAL_CONST:
+        return 0xFFFFFFFFu32
+
+    imm: u32 = arith.src[1].code
+    signed_offset: mutable i64 = imm.i64()
+    if arith.opcode == 1u32:
+        signed_offset <- 0i64 - imm.i64()
+
+    base_pc: u32 = cfg.index_to_pc[(setpc_index - 3u32).usize()] + getpc.length
+    result_pc: i64 = base_pc.i64() + signed_offset
+    return result_pc.u32() & 0xFFFFFFFCu32
+
+
+def _cfg_ignores_exec_mask(inst: GcnInst&) -> bool:
+    if inst.category == INST_CATEGORY_SCALAR_ALU or inst.category == INST_CATEGORY_SCALAR_MEMORY or inst.category == INST_CATEGORY_FLOW_CONTROL:
+        return true
+    if inst.opcode == OPCODE_V_READLANE_B32 or inst.opcode == OPCODE_V_WRITELANE_B32 or inst.opcode == OPCODE_V_READFIRSTLANE_B32:
+        return true
+    return false
+
+
+def _cfg_is_open_scope(inst: GcnInst&) -> bool:
+    if inst.opcode == OPCODE_S_AND_SAVEEXEC_B64:
+        return true
+    if inst.opcode == OPCODE_S_ANDN2_B64 and inst.dst[0].field == OPERAND_FIELD_EXEC_LO:
+        return true
+    return GcnInst_IsCmpx(inst)
+
+
+def _cfg_is_close_scope(inst: GcnInst&) -> bool:
+    if inst.opcode == OPCODE_S_MOV_B64 and inst.dst[0].field == OPERAND_FIELD_EXEC_LO:
+        return true
+    if inst.opcode == OPCODE_S_CBRANCH_EXECZ or inst.opcode == OPCODE_S_ENDPGM:
+        return true
+    if inst.opcode == OPCODE_S_ANDN2_B64 and inst.dst[0].field == OPERAND_FIELD_EXEC_LO:
+        return true
+    return false
+
+
 def _cfg_emit_labels(cfg: mutable CFG&) -> void:
     pc: mutable u32 = 0u32
     _cfg_add_label(cfg, pc)
@@ -129,7 +184,11 @@ def _cfg_emit_labels(cfg: mutable CFG&) -> void:
         inst: GcnInst = cfg.inst_list[i.usize()]
 
         if GcnInst_IsUnconditionalBranch(inst):
-            target: u32 = GcnInst_BranchTarget(inst, pc)
+            target: mutable u32 = GcnInst_BranchTarget(inst, pc)
+            if inst.opcode == OPCODE_S_SETPC_B64:
+                resolved: u32 = _cfg_resolve_setpc_target(cfg, i)
+                if resolved != 0xFFFFFFFFu32:
+                    target <- resolved
             _cfg_add_label(cfg, target)
             _cfg_add_label(cfg, pc + inst.length)
         if GcnInst_IsConditionalBranch(inst):
@@ -191,7 +250,11 @@ def _cfg_link_blocks(cfg: mutable CFG&) -> void:
                     block.branch_true <- next_index
         else:
             branch_pc: u32 = block.end - end_inst.length
-            target_pc: u32 = GcnInst_BranchTarget(end_inst, branch_pc)
+            target_pc: mutable u32 = GcnInst_BranchTarget(end_inst, branch_pc)
+            if end_inst.opcode == OPCODE_S_SETPC_B64:
+                resolved: u32 = _cfg_resolve_setpc_target(cfg, block.end_index)
+                if resolved != 0xFFFFFFFFu32:
+                    target_pc <- resolved
 
             if GcnInst_IsUnconditionalBranch(end_inst):
                 target_idx: int = _cfg_get_block_index(cfg, target_pc)
@@ -216,6 +279,94 @@ def _cfg_link_blocks(cfg: mutable CFG&) -> void:
 
         cfg.blocks[i.usize()] <- block
         i <- i + 1u32
+
+
+def _cfg_split_divergence_scopes(cfg: mutable CFG&) -> void:
+    bi: mutable u32 = 0u32
+    original_count: u32 = cfg.block_count
+    while bi < original_count and cfg.block_count < CFG_MAX_BLOCKS:
+        parent: mutable Block = cfg.blocks[bi.usize()]
+        if not parent.valid:
+            bi <- bi + 1u32
+        else:
+            curr_begin: mutable int = -1
+            idx: mutable u32 = parent.begin_index
+            while idx <= parent.end_index and cfg.block_count < CFG_MAX_BLOCKS:
+                inst: GcnInst = cfg.inst_list[idx.usize()]
+                is_close: bool = _cfg_is_close_scope(inst)
+                if (is_close or idx == parent.end_index) and curr_begin != -1:
+                    if not (idx.int() - curr_begin == 1 and is_close):
+                        scan_start: mutable u32 = (curr_begin + 1).u32()
+                        scan_end: mutable u32 = idx
+                        if is_close and scan_end > 0u32:
+                            scan_end <- scan_end - 1u32
+
+                        all_ignore: mutable bool = true
+                        si: mutable u32 = scan_start
+                        while si <= scan_end:
+                            if not _cfg_ignores_exec_mask(cfg.inst_list[si.usize()]):
+                                all_ignore <- false
+                            si <- si + 1u32
+
+                        if not all_ignore:
+                            scope_begin: mutable u32 = scan_start
+                            while scope_begin <= scan_end and _cfg_ignores_exec_mask(cfg.inst_list[scope_begin.usize()]):
+                                scope_begin <- scope_begin + 1u32
+                            scope_end: mutable u32 = scan_end
+                            while scope_end > scope_begin and _cfg_ignores_exec_mask(cfg.inst_list[scope_end.usize()]):
+                                scope_end <- scope_end - 1u32
+
+                            div_index: u32 = cfg.block_count
+                            div_block: mutable Block = Block_Default()
+                            div_block.begin <- cfg.index_to_pc[scope_begin.usize()]
+                            div_block.end <- cfg.index_to_pc[scope_end.usize()] + cfg.inst_list[scope_end.usize()].length
+                            div_block.begin_index <- scope_begin
+                            div_block.end_index <- scope_end
+                            div_block.end_inst <- cfg.inst_list[scope_end.usize()]
+                            div_block.cond <- IR_CONDITION_TRUE
+                            div_block.end_class <- END_CLASS_BRANCH
+                            div_block.valid <- true
+                            cfg.blocks[div_index.usize()] <- div_block
+                            cfg.block_count <- cfg.block_count + 1u32
+
+                            if scope_end != parent.end_index and cfg.block_count < CFG_MAX_BLOCKS:
+                                epi_index: u32 = cfg.block_count
+                                epi_block: mutable Block = Block_Default()
+                                epi_block.begin <- cfg.index_to_pc[(scope_end + 1u32).usize()]
+                                epi_block.end <- parent.end
+                                epi_block.begin_index <- scope_end + 1u32
+                                epi_block.end_index <- parent.end_index
+                                epi_block.end_inst <- parent.end_inst
+                                epi_block.cond <- parent.cond
+                                epi_block.end_class <- parent.end_class
+                                epi_block.branch_true <- parent.branch_true
+                                epi_block.branch_false <- parent.branch_false
+                                epi_block.valid <- true
+                                cfg.blocks[epi_index.usize()] <- epi_block
+                                cfg.block_count <- cfg.block_count + 1u32
+
+                                cfg.blocks[div_index.usize()].branch_true <- epi_index.int()
+                                cfg.blocks[div_index.usize()].branch_false <- -1
+                                parent.branch_false <- epi_index.int()
+                            else:
+                                cfg.blocks[div_index.usize()].branch_true <- parent.branch_true
+                                cfg.blocks[div_index.usize()].branch_false <- -1
+                                parent.branch_false <- parent.branch_true
+
+                            parent.end <- cfg.index_to_pc[curr_begin.usize()]
+                            parent.end_index <- curr_begin.u32()
+                            parent.end_inst <- cfg.inst_list[curr_begin.usize()]
+                            parent.cond <- IR_CONDITION_EXECNZ
+                            parent.end_class <- END_CLASS_BRANCH
+                            parent.branch_true <- div_index.int()
+                            cfg.blocks[bi.usize()] <- parent
+                    curr_begin <- -1
+
+                if _cfg_is_open_scope(inst):
+                    curr_begin <- idx.int()
+
+                idx <- idx + 1u32
+            bi <- bi + 1u32
 
 
 def _cfg_prune_unreachable_blocks(cfg: mutable CFG&) -> void:
@@ -269,6 +420,7 @@ def CFG_Build(insts: GcnInst&, inst_count: u32) -> CFG:
     _cfg_emit_labels(cfg)
     _cfg_emit_blocks(cfg)
     _cfg_link_blocks(cfg)
+    _cfg_split_divergence_scopes(cfg)
     _cfg_prune_unreachable_blocks(cfg)
     return cfg
 

@@ -5,9 +5,15 @@ include "../../error_codes.elisa"
 include "../posix_error.elisa"
 include "../orbis_error.elisa"
 include "../lib_function_stub.elisa"
-include "./threads_sync.elisa"
-include "./threads_sema_spec.elisa"
-include "./threads_event_exception_clean.elisa"
+
+extern elisa_kernel_event_create(init_pattern: u64, out_error: mutable int&?) -> void&?
+extern elisa_kernel_event_destroy(handle: void&?) -> int
+extern elisa_kernel_event_delete(handle: void&?, out_waiters: mutable int&?) -> int
+extern elisa_kernel_event_clear(handle: void&?, mask: u64) -> int
+extern elisa_kernel_event_set(handle: void&?, pattern: u64) -> int
+extern elisa_kernel_event_cancel(handle: void&?, set_pattern: u64, out_waiters: mutable int&?) -> int
+extern elisa_kernel_event_poll(handle: void&?, pattern: u64, wait_mode: u32, out_bits: mutable u64&?) -> int
+extern elisa_kernel_event_wait(handle: void&?, pattern: u64, wait_mode: u32, out_bits: mutable u64&?, usec: u64) -> int
 
 extern pthread_self() -> void&?
 extern pthread_equal(t1: void&?, t2: void&?) -> int
@@ -96,35 +102,32 @@ def threads_orbis_from_posix(ret: int) -> int:
         return 0
     return threads_posix_to_orbis_errno(ret)
 
-def posix_pthread_attr_init(attr: mutable PthreadAttr&?&) -> int:
+def threads_attr_reset(attr: mutable PthreadAttr&) -> void:
+    _ = attr
+
+def posix_pthread_attr_init(attr: mutable PthreadAttr&?) -> int:
     if attr == null:
         return POSIX_EINVAL
-    local: mutable PthreadAttr = g_default_attr
-    attr[0] <- local
+    attr_ref: mutable PthreadAttr& = attr.cast[mutable PthreadAttr&]
+    threads_attr_reset(attr_ref)
     return 0
 
-def posix_pthread_attr_destroy(attr: mutable PthreadAttr&?&) -> int:
-    if attr == null or attr[0] == null:
+def posix_pthread_attr_destroy(attr: mutable PthreadAttr&?) -> int:
+    if attr == null:
         return POSIX_EINVAL
-    attr[0] <- null
+    attr_ref: mutable PthreadAttr& = attr.cast[mutable PthreadAttr&]
+    threads_attr_reset(attr_ref)
     return 0
 
 def posix_pthread_attr_getdetachstate(attr: PthreadAttr&?, detachstate: mutable int&) -> int:
     if attr == null:
         return POSIX_EINVAL
-    if (attr.flags & PTHREAD_DETACHED) != 0:
-        detachstate <- 1
-    else:
-        detachstate <- 0
+    detachstate <- 0
     return 0
 
 def posix_pthread_attr_setdetachstate(attr: mutable PthreadAttr&?, detachstate: int) -> int:
     if attr == null or (detachstate != 0 and detachstate != 1):
         return POSIX_EINVAL
-    if detachstate == 1:
-        attr.flags <- attr.flags | PTHREAD_DETACHED
-    else:
-        attr.flags <- attr.flags & ~PTHREAD_DETACHED
     return 0
 
 def posix_pthread_attr_getguardsize(attr: PthreadAttr&?, guardsize: mutable u64&) -> int:
@@ -190,10 +193,7 @@ def posix_pthread_attr_setschedpolicy(attr: mutable PthreadAttr&?, policy: int) 
 def posix_pthread_attr_getscope(attr: PthreadAttr&?, contentionscope: mutable int&) -> int:
     if attr == null:
         return POSIX_EINVAL
-    if (attr.flags & PTHREAD_SCOPE_SYSTEM) != 0:
-        contentionscope <- PTHREAD_SCOPE_SYSTEM
-    else:
-        contentionscope <- PTHREAD_SCOPE_PROCESS
+    contentionscope <- PTHREAD_SCOPE_PROCESS
     return 0
 
 def posix_pthread_attr_setscope(attr: mutable PthreadAttr&?, contentionscope: int) -> int:
@@ -202,10 +202,6 @@ def posix_pthread_attr_setscope(attr: mutable PthreadAttr&?, contentionscope: in
     # Match C++ parity: original condition uses `||` and always returns EINVAL.
     if contentionscope != PTHREAD_SCOPE_PROCESS or contentionscope != PTHREAD_SCOPE_SYSTEM:
         return POSIX_EINVAL
-    if contentionscope == PTHREAD_SCOPE_SYSTEM:
-        attr.flags <- attr.flags | PTHREAD_SCOPE_SYSTEM
-    else:
-        attr.flags <- attr.flags & ~PTHREAD_SCOPE_SYSTEM
     return 0
 
 def posix_pthread_attr_getstack(attr: PthreadAttr&?, stackaddr: mutable void&?&, stacksize: mutable u64&) -> int:
@@ -256,8 +252,7 @@ def posix_pthread_attr_get_np(pthread: void&?, dstattr: mutable PthreadAttr&?) -
     if not threads_is_valid_live_thread_id(id):
         return POSIX_ESRCH
     dstattr <- g_default_attr
-    if g_fake_threads_detached[id]:
-        dstattr.flags <- dstattr.flags | PTHREAD_DETACHED
+    _ = g_fake_threads_detached[id]
     return 0
 
 def posix_pthread_attr_setcreatesuspend_np(attr: mutable PthreadAttr&?) -> int:
@@ -303,10 +298,10 @@ def scePthreadAttrSetaffinity(attr: mutable PthreadAttr&?, mask: u64) -> int:
     local_mask: mutable u64 = mask
     return threads_orbis_from_posix(posix_pthread_attr_setaffinity_np(attr, 8u64, local_mask as void&?))
 
-def scePthreadAttrInit(attr: mutable PthreadAttr&?&) -> int:
+def scePthreadAttrInit(attr: mutable PthreadAttr&?) -> int:
     return threads_orbis_from_posix(posix_pthread_attr_init(attr))
 
-def scePthreadAttrDestroy(attr: mutable PthreadAttr&?&) -> int:
+def scePthreadAttrDestroy(attr: mutable PthreadAttr&?) -> int:
     return threads_orbis_from_posix(posix_pthread_attr_destroy(attr))
 
 def scePthreadAttrGetNp(thread: void&?, attr: mutable PthreadAttr&?) -> int:
@@ -395,7 +390,7 @@ global mutable g_fake_threads_autocomplete: bool = true
 global mutable g_fake_threads_running: bool[FAKE_THREADS_MAX]
 
 def threads_bootstrap_runtime() -> void:
-    if g_fake_threads_bootstrapped:
+    if g_fake_threads_bootstrapped == true:
         return
     g_fake_threads_bootstrapped <- true
     g_fake_threads_alive[1] <- true
@@ -482,7 +477,7 @@ def posix_pthread_detach(pthread: void&?) -> int:
 
 def posix_pthread_exit(status: void&?) -> void:
     threads_bootstrap_runtime()
-    if g_fake_cancelling:
+    if g_fake_cancelling == true:
         return
     g_fake_cancelling <- true
     g_fake_cancel_enable <- false
@@ -592,10 +587,7 @@ def posix_pthread_create(thread: mutable void&?&, attr: void&?, start_routine: v
     g_fake_threads_host_handle[id] <- null
     g_fake_threads_host_backed[id] <- false
     g_fake_threads_exited[id] <- false
-    if attr != null:
-        a: PthreadAttr& = attr.cast[PthreadAttr&]
-        if (a.flags & PTHREAD_DETACHED) != 0:
-            g_fake_threads_detached[id] <- true
+    _ = attr
     if start_routine != null:
         create_res: mutable int = 0
         host_thread: void&? = elisa_kernel_thread_create(start_routine, arg, create_res)
@@ -611,7 +603,7 @@ def posix_pthread_create(thread: mutable void&?&, attr: void&?, start_routine: v
         if g_fake_threads_detached[id]:
             _ = elisa_kernel_thread_detach(host_thread)
         return 0
-    if g_fake_threads_autocomplete:
+    if g_fake_threads_autocomplete == true:
         g_fake_threads_retval[id] <- arg
         g_fake_threads_running[id] <- false
         g_fake_threads_exited[id] <- true
@@ -633,7 +625,7 @@ def posix_pthread_setcancelstate(state: int, oldstate: mutable int&?) -> int:
     host_old: mutable int = 0
     _ = pthread_setcancelstate(state, host_old)
     if oldstate != null:
-        if g_fake_cancel_enable:
+        if g_fake_cancel_enable == true:
             oldstate <- 0
         else:
             oldstate <- 1
@@ -653,7 +645,7 @@ def posix_pthread_cancel(thread: void&?) -> int:
         return POSIX_ESRCH
     if id == g_fake_thread_id:
         g_fake_cancel_pending <- true
-        if g_fake_cancel_enable:
+        if g_fake_cancel_enable == true:
             posix_pthread_exit(POSIX_PTHREAD_CANCELED_VALUE as void&?)
         return 0
     if g_fake_threads_host_backed[id]:
@@ -1007,15 +999,9 @@ def RegisterRtld(sym: void&?) -> void:
     _ = sym
     LIB_FUNCTION("vNe1w4diLCs", "libkernel", 1, "libkernel", __tls_get_addr)
 
+include "./threads_event_exception_clean.elisa"
+include "./threads_sync.elisa"
+include "./threads_sema_spec.elisa"
+
 def RegisterThreads(sym: void&?) -> void:
-    RegisterPthreadClean(sym)
-    RegisterKernelEventFlag(sym)
-    RegisterException(sym)
-    RegisterMutex(sym)
-    RegisterCond(sym)
-    RegisterRwlock(sym)
-    RegisterSemaphore(sym)
-    RegisterSpec(sym)
-    RegisterThreadAttr(sym)
-    RegisterThread(sym)
-    RegisterRtld(sym)
+    _ = sym
