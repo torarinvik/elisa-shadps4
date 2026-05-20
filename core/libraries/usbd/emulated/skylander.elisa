@@ -3,5 +3,145 @@
 
 include "../../error_codes.elisa"
 
+const SKY_BLOCK_COUNT: usize = 0x40
+const SKY_BLOCK_SIZE: usize = 0x10
+const SKY_FIGURE_SIZE: usize = SKY_BLOCK_COUNT * SKY_BLOCK_SIZE
+const MAX_SKYLANDERS: usize = 16
+
+struct Skylander:
+    present: mutable bool
+    status: mutable u8
+    queued_a: mutable u8
+    queued_b: mutable u8
+    has_queued_a: mutable bool
+    has_queued_b: mutable bool
+    data: mutable u8[SKY_FIGURE_SIZE]
+    last_id: mutable u32
+
+struct SkylanderPortalState:
+    activated: mutable bool
+    interrupt_counter: mutable u8
+    right_r: mutable u8
+    right_g: mutable u8
+    right_b: mutable u8
+    left_r: mutable u8
+    left_g: mutable u8
+    left_b: mutable u8
+    trap_r: mutable u8
+    trap_g: mutable u8
+    trap_b: mutable u8
+    skylanders: mutable Skylander[MAX_SKYLANDERS]
+
+struct SkylanderQueryQueue:
+    responses: mutable u8[64 * 32]
+    read_index: mutable usize
+    write_index: mutable usize
+
+global mutable g_sky_state: SkylanderPortalState = zeroed
+global mutable g_sky_queue: SkylanderQueryQueue = zeroed
+global mutable g_sky_init: bool = false
+
+def Skylander_InitIfNeeded() -> void:
+    if g_sky_init:
+        return
+    g_sky_state.activated <- true
+    i: mutable usize = 0
+    while i < MAX_SKYLANDERS:
+        g_sky_state.skylanders[i].present <- false
+        g_sky_state.skylanders[i].status <- 0u8
+        g_sky_state.skylanders[i].has_queued_a <- false
+        g_sky_state.skylanders[i].has_queued_b <- false
+        g_sky_state.skylanders[i].last_id <- 0u32
+        i <- i + 1
+    g_sky_queue.read_index <- 0
+    g_sky_queue.write_index <- 0
+    g_sky_init <- true
+
+def Skylander_QueuePush(packet: u8&) -> void:
+    slot: usize = g_sky_queue.write_index % 64
+    base: usize = slot * 32
+    i: mutable usize = 0
+    while i < 32:
+        g_sky_queue.responses[base + i] <- packet[i]
+        i <- i + 1
+    g_sky_queue.write_index <- g_sky_queue.write_index + 1
+    if g_sky_queue.write_index - g_sky_queue.read_index > 64:
+        g_sky_queue.read_index <- g_sky_queue.write_index - 64
+
+def Skylander_QueuePop(out: mutable u8&) -> bool:
+    if g_sky_queue.read_index >= g_sky_queue.write_index:
+        return false
+    slot: usize = g_sky_queue.read_index % 64
+    base: usize = slot * 32
+    i: mutable usize = 0
+    while i < 32:
+        out[i] <- g_sky_queue.responses[base + i]
+        i <- i + 1
+    g_sky_queue.read_index <- g_sky_queue.read_index + 1
+    return true
+
+def Skylander_SetLEDs(side: u8, r: u8, g: u8, b: u8) -> void:
+    if side == 0u8:
+        g_sky_state.right_r <- r
+        g_sky_state.right_g <- g
+        g_sky_state.right_b <- b
+    elif side == 1u8:
+        g_sky_state.right_r <- r
+        g_sky_state.right_g <- g
+        g_sky_state.right_b <- b
+        g_sky_state.left_r <- r
+        g_sky_state.left_g <- g
+        g_sky_state.left_b <- b
+    elif side == 2u8:
+        g_sky_state.left_r <- r
+        g_sky_state.left_g <- g
+        g_sky_state.left_b <- b
+    elif side == 3u8:
+        g_sky_state.trap_r <- r
+        g_sky_state.trap_g <- g
+        g_sky_state.trap_b <- b
+
+def Skylander_Activate() -> void:
+    if g_sky_state.activated:
+        return
+    i: mutable usize = 0
+    while i < MAX_SKYLANDERS:
+        if g_sky_state.skylanders[i].status & 1u8 != 0u8:
+            g_sky_state.skylanders[i].queued_a <- 3u8
+            g_sky_state.skylanders[i].queued_b <- 1u8
+            g_sky_state.skylanders[i].has_queued_a <- true
+            g_sky_state.skylanders[i].has_queued_b <- true
+        i <- i + 1
+    g_sky_state.activated <- true
+
+def Skylander_GetStatusPacket(out: mutable u8&) -> void:
+    status: mutable u32 = 0u32
+    active: mutable u8 = 0u8
+    if g_sky_state.activated:
+        active <- 1u8
+    i: mutable int = 15
+    while i >= 0:
+        s: mutable Skylander& = g_sky_state.skylanders[i.usize()].ref[mutable Skylander&]
+        if s.has_queued_a:
+            s.status <- s.queued_a
+            s.has_queued_a <- s.has_queued_b
+            s.queued_a <- s.queued_b
+            s.has_queued_b <- false
+        status <- (status << 2u32) | s.status.u32()
+        i <- i - 1
+    j: mutable usize = 0
+    while j < 32:
+        out[j] <- 0u8
+        j <- j + 1
+    out[0] <- 0x53u8
+    out[1] <- (status & 0xffu32).u8()
+    out[2] <- ((status >> 8u32) & 0xffu32).u8()
+    out[3] <- ((status >> 16u32) & 0xffu32).u8()
+    out[4] <- ((status >> 24u32) & 0xffu32).u8()
+    out[5] <- g_sky_state.interrupt_counter
+    out[6] <- active
+    g_sky_state.interrupt_counter <- (g_sky_state.interrupt_counter + 1u8).u8()
+
 def UsbdSkylanderEmu_Init() -> int:
+    Skylander_InitIfNeeded()
     return ORBIS_OK
