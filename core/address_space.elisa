@@ -1,0 +1,120 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../common/types.elisa"
+
+type MemoryPermission = u32
+const MemoryPermission_None: MemoryPermission = 0u32()
+const MemoryPermission_Read: MemoryPermission = 1u32()
+const MemoryPermission_Write: MemoryPermission = 2u32()
+const MemoryPermission_ReadWrite: MemoryPermission = 3u32()
+const MemoryPermission_Execute: MemoryPermission = 4u32()
+const MemoryPermission_ReadWriteExecute: MemoryPermission = 7u32()
+
+struct AddressRange:
+    begin: mutable VAddr
+    size: mutable u64
+    perms: mutable MemoryPermission
+
+struct AddressSpace:
+    backing_base: mutable VAddr
+    system_managed_base: mutable VAddr
+    system_managed_size: mutable u64
+    system_reserved_base: mutable VAddr
+    system_reserved_size: mutable u64
+    user_base: mutable VAddr
+    user_size: mutable u64
+    mapped_ranges: mutable darray[AddressRange]
+
+def AddressSpace_New() -> AddressSpace:
+    return AddressSpace(
+        0x1000000000.uintptr(),
+        0x2000000000.uintptr(),
+        0x7FFBFC000.u64(),
+        0x3000000000.uintptr(),
+        0x7C0004000.u64(),
+        0x4000000000.uintptr(),
+        0x5F9000000000.u64(),
+        []
+    )
+
+def AddressSpace_BackingBase(self: AddressSpace&) -> VAddr:
+    return self.backing_base
+
+def AddressSpace_SystemManagedVirtualBase(self: AddressSpace&) -> VAddr:
+    return self.system_managed_base
+
+def AddressSpace_SystemManagedVirtualSize(self: AddressSpace&) -> u64:
+    return self.system_managed_size
+
+def AddressSpace_SystemReservedVirtualBase(self: AddressSpace&) -> VAddr:
+    return self.system_reserved_base
+
+def AddressSpace_SystemReservedVirtualSize(self: AddressSpace&) -> u64:
+    return self.system_reserved_size
+
+def AddressSpace_UserVirtualBase(self: AddressSpace&) -> VAddr:
+    return self.user_base
+
+def AddressSpace_UserVirtualSize(self: AddressSpace&) -> u64:
+    return self.user_size
+
+def AddressSpace_Map(self: mutable AddressSpace&, virtual_addr: VAddr, size: u64, phys_addr: PAddr, exec: bool) -> VAddr:
+    _ = phys_addr
+    if size == 0:
+        return 0.uintptr()
+    target: VAddr = virtual_addr
+    if target == 0.uintptr():
+        target <- AddressSpace_ChooseNextSystemManaged(self.ref[mutable AddressSpace&], size)
+    perms: MemoryPermission = MemoryPermission_ReadWrite
+    if exec:
+        perms <- MemoryPermission_ReadWriteExecute
+    self.mapped_ranges.push(AddressRange(target, size, perms))
+    return target
+
+def AddressSpace_MapFile(self: mutable AddressSpace&, virtual_addr: VAddr, size: u64, offset: u64, prot: u32, fd: uintptr) -> VAddr:
+    _ = offset
+    _ = fd
+    if size == 0:
+        return 0.uintptr()
+    target: VAddr = virtual_addr
+    if target == 0.uintptr():
+        target <- AddressSpace_ChooseNextSystemManaged(self.ref[mutable AddressSpace&], size)
+    self.mapped_ranges.push(AddressRange(target, size, prot))
+    return target
+
+def AddressSpace_Unmap(self: mutable AddressSpace&, virtual_addr: VAddr, size: u64) -> void:
+    if size == 0 or self.mapped_ranges.count == 0:
+        return
+    i: mutable usize = 0
+    while i < self.mapped_ranges.count:
+        entry: AddressRange = self.mapped_ranges[i]
+        if entry.begin == virtual_addr and entry.size == size:
+            j: mutable usize = i
+            while j + 1 < self.mapped_ranges.count:
+                self.mapped_ranges[j] <- self.mapped_ranges[j + 1]
+                j <- j + 1
+            _ = self.mapped_ranges.pop()
+            return
+        i <- i + 1
+
+def AddressSpace_Protect(self: mutable AddressSpace&, virtual_addr: VAddr, size: u64, perms: MemoryPermission) -> void:
+    for i in 0..<self.mapped_ranges.count:
+        if self.mapped_ranges[i].begin == virtual_addr and self.mapped_ranges[i].size == size:
+            self.mapped_ranges[i].perms <- perms
+            return
+
+def AddressSpace_GetUsableRegions(self: AddressSpace&) -> darray[AddressRange]:
+    return self.mapped_ranges
+
+def AddressSpace_ChooseNextSystemManaged(self: mutable AddressSpace&, size: u64) -> VAddr:
+    if self.mapped_ranges.count == 0:
+        return self.system_managed_base
+    last_end: VAddr = self.system_managed_base
+    for i in 0..<self.mapped_ranges.count:
+        end_addr: VAddr = self.mapped_ranges[i].begin + self.mapped_ranges[i].size.uintptr()
+        if end_addr > last_end:
+            last_end <- end_addr
+    if last_end + size.uintptr() <= self.system_managed_base + self.system_managed_size.uintptr():
+        return last_end
+    return self.system_managed_base

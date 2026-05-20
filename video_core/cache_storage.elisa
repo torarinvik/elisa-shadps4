@@ -1,0 +1,120 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+enum BlobType:
+    ShaderMeta
+    ShaderBinary
+    PipelineKey
+    ShaderProfile
+
+struct DataBaseBlobBytes:
+    blob_type: mutable BlobType
+    name: mutable static u8&
+    data: mutable darray[u8]
+
+struct DataBaseBlobU32:
+    blob_type: mutable BlobType
+    name: mutable static u8&
+    data: mutable darray[u32]
+
+struct DataBase:
+    opened: mutable bool
+    archive_mode: mutable bool
+    preload_finished: mutable bool
+    io_requests: mutable u64
+    cache_path: mutable static u8&
+    bytes_blobs: mutable darray[DataBaseBlobBytes]
+    words_blobs: mutable darray[DataBaseBlobU32]
+
+global mutable g_database: DataBase = DataBase(false, false, false, 0u64, "", [], [])
+
+def DataBase_Instance() -> mutable DataBase&:
+    return g_database.ref[mutable DataBase&]
+
+def DataBase_IsOpened(self: DataBase) -> bool:
+    return self.opened
+
+def DataBase_Open(self: mutable DataBase&, cache_path: static u8& = "", archive_mode: bool = false) -> void:
+    if self.opened:
+        return
+    self.opened <- true
+    self.archive_mode <- archive_mode
+    self.preload_finished <- false
+    self.io_requests <- 0u64
+    self.cache_path <- cache_path
+
+
+def DataBase_Close(self: mutable DataBase&) -> void:
+    if not self.opened:
+        return
+    self.opened <- false
+
+
+def DataBase_FindBytesBlob(self: DataBase, blob_type: BlobType, name: static u8&) -> usize?:
+    i: mutable usize = 0usize
+    while i < self.bytes_blobs.count:
+        if self.bytes_blobs[i].blob_type == blob_type and self.bytes_blobs[i].name == name:
+            return i
+        i <- i + 1usize
+    return null
+
+def DataBase_FindU32Blob(self: DataBase, blob_type: BlobType, name: static u8&) -> usize?:
+    i: mutable usize = 0usize
+    while i < self.words_blobs.count:
+        if self.words_blobs[i].blob_type == blob_type and self.words_blobs[i].name == name:
+            return i
+        i <- i + 1usize
+    return null
+
+def DataBase_SaveBytes(self: mutable DataBase&, blob_type: BlobType, name: static u8&, data: darray[u8]) -> bool:
+    can Memory.Allocate, Abort.Panic:
+        if not self.opened:
+            return false
+        found: usize = DataBase_FindBytesBlob(self, blob_type, name) else 0xffffffffffffffffusize
+        if found != 0xffffffffffffffffusize:
+            self.bytes_blobs[found].data <- data
+        else:
+            self.bytes_blobs.push(DataBaseBlobBytes(blob_type, name, data))
+        self.io_requests <- self.io_requests + 1u64
+        return true
+
+def DataBase_SaveWords(self: mutable DataBase&, blob_type: BlobType, name: static u8&, data: darray[u32]) -> bool:
+    can Memory.Allocate, Abort.Panic:
+        if not self.opened:
+            return false
+        found: usize = DataBase_FindU32Blob(self, blob_type, name) else 0xffffffffffffffffusize
+        if found != 0xffffffffffffffffusize:
+            self.words_blobs[found].data <- data
+        else:
+            self.words_blobs.push(DataBaseBlobU32(blob_type, name, data))
+        self.io_requests <- self.io_requests + 1u64
+        return true
+
+def DataBase_LoadBytes(self: DataBase, blob_type: BlobType, name: static u8&) -> darray[u8]:
+    can Memory.Allocate, Abort.Panic:
+        if not self.opened:
+            return []
+        found: usize = DataBase_FindBytesBlob(self, blob_type, name) else return []
+        return self.bytes_blobs[found].data
+
+def DataBase_LoadWords(self: DataBase, blob_type: BlobType, name: static u8&) -> darray[u32]:
+    can Memory.Allocate, Abort.Panic:
+        if not self.opened:
+            return []
+        found: usize = DataBase_FindU32Blob(self, blob_type, name) else return []
+        return self.words_blobs[found].data
+
+def DataBase_ForEachBlob(self: DataBase, blob_type: BlobType, out_blobs: mutable darray[darray[u8]]&) -> void:
+    can Memory.Allocate, Abort.Panic:
+        if not self.opened:
+            return
+        i: mutable usize = 0usize
+        while i < self.bytes_blobs.count:
+            if self.bytes_blobs[i].blob_type == blob_type:
+                out_blobs.push(self.bytes_blobs[i].data)
+            i <- i + 1usize
+
+def DataBase_FinishPreload(self: mutable DataBase&) -> void:
+    if not self.opened:
+        return
+    self.preload_finished <- true

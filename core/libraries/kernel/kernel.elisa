@@ -1,0 +1,361 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../error_codes.elisa"
+include "./orbis_error.elisa"
+include "./posix_error.elisa"
+include "./lib_function_stub.elisa"
+
+const CURRENT_FIRMWARE_VERSION: int = 0x13500011
+const GLOBAL_PID: int = 1
+const POSIX_SC_PAGESIZE: int = 47
+
+@fixed_layout
+struct SwVersionStruct:
+    struct_size: mutable u64
+    text_representation: mutable i8[0x1c]
+    hex_representation: mutable u32
+
+@fixed_layout
+struct AuthInfoData:
+    paid: mutable u64
+    caps: mutable u64[4]
+    attrs: mutable u64[4]
+    ucred: mutable u64[8]
+
+@fixed_layout
+struct OrbisKernelTitleWorkaround:
+    version: mutable int
+    align: mutable int
+    ids: mutable u64[2]
+
+@fixed_layout
+struct OrbisKernelAppInfo:
+    app_id: mutable int
+    mmap_flags: mutable int
+    attribute_exe: mutable int
+    attribute2: mutable int
+    cusa_name: mutable i8[10]
+    debug_level: mutable u8
+    slv_flags: mutable u8
+    mini_app_dmem_flags: mutable u8
+    render_mode: mutable u8
+    mdbg_out: mutable u8
+    required_hdcp_type: mutable u8
+    preload_prx_flags: mutable u64
+    attribute1: mutable int
+    has_param_sfo: mutable int
+    title_workaround: mutable OrbisKernelTitleWorkaround
+
+@fixed_layout
+struct HeapInfoInfo:
+    size: mutable u64
+    flag: mutable u32
+    getSegmentInfo: mutable u32
+    mspace_atomic_id_mask: mutable void&?
+    mstate_table: mutable void&?
+
+@fixed_layout
+struct OrbisKernelUuid:
+    timeLow: mutable u32
+    timeMid: mutable u16
+    timeHiAndVersion: mutable u16
+    clockSeqHiAndReserved: mutable u8
+    clockSeqLow: mutable u8
+    node: mutable u8[6]
+
+global mutable g_posix_errno: int = 0
+global mutable g_mspace_atomic_id_mask: u64 = 0u64
+global mutable g_mstate_table: u64[64] = zeroed
+
+def __Error() -> void&?:
+    return g_posix_errno.ref[mutable int&]
+
+def ErrSceToPosix(error: int) -> void:
+    g_posix_errno <- error - ORBIS_KERNEL_ERROR_UNKNOWN
+
+
+def ErrnoToSceKernelError(error: int) -> int:
+    return error + ORBIS_KERNEL_ERROR_UNKNOWN
+
+
+def SetPosixErrno(e: int) -> void:
+    if e == POSIX_EPERM:
+        g_posix_errno <- POSIX_EPERM
+    elif e == POSIX_ENOENT:
+        g_posix_errno <- POSIX_ENOENT
+    elif e == POSIX_EDEADLK:
+        g_posix_errno <- POSIX_EDEADLK
+    elif e == POSIX_ENOMEM:
+        g_posix_errno <- POSIX_ENOMEM
+    elif e == POSIX_EACCES:
+        g_posix_errno <- POSIX_EACCES
+    elif e == POSIX_EFAULT:
+        g_posix_errno <- POSIX_EFAULT
+    elif e == POSIX_EINVAL:
+        g_posix_errno <- POSIX_EINVAL
+    elif e == POSIX_ENOSPC:
+        g_posix_errno <- POSIX_ENOSPC
+    elif e == POSIX_ERANGE:
+        g_posix_errno <- POSIX_ERANGE
+    elif e == POSIX_EAGAIN:
+        g_posix_errno <- POSIX_EAGAIN
+    elif e == POSIX_ETIMEDOUT:
+        g_posix_errno <- POSIX_ETIMEDOUT
+    else:
+        g_posix_errno <- e
+
+
+def sceKernelError(posix_error: int) -> int:
+    if posix_error == 0:
+        return 0
+    return posix_error + ORBIS_KERNEL_ERROR_UNKNOWN
+
+
+def sceKernelGetAllowedSdkVersionOnSystem(ver: void&?) -> int:
+    out: mutable int&? = ver as mutable int&?
+    if out == null:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    out <- CURRENT_FIRMWARE_VERSION | 0xfff
+    return ORBIS_OK
+
+
+def sceKernelGetSystemSwVersion(ret: void&?) -> int:
+    out: SwVersionStruct&? = ret as SwVersionStruct&?
+    if out == null:
+        return ORBIS_OK
+    out.hex_representation <- CURRENT_FIRMWARE_VERSION.u32()
+    i: int = 0
+    while i < 0x1c:
+        out.text_representation[i.usize()] <- 0
+        i <- i + 1
+    # Minimal stable value; formatting parity can be expanded later.
+    out.text_representation[0] <- '1'.i8()
+    out.text_representation[1] <- '.'.i8()
+    out.text_representation[2] <- '3'.i8()
+    out.text_representation[3] <- '5'.i8()
+    return ORBIS_OK
+
+
+def get_authinfo(pid: int, p2: void&?) -> int:
+    if p2 == null:
+        SetPosixErrno(POSIX_EPERM)
+        return -1
+    if pid != 0 and pid != GLOBAL_PID:
+        SetPosixErrno(POSIX_ESRCH)
+        return -1
+    info: AuthInfoData&? = p2 as AuthInfoData&?
+    if info != null:
+        info.paid <- 0u64
+        idx: int = 0
+        while idx < 4:
+            info.caps[idx.usize()] <- 0u64
+            info.attrs[idx.usize()] <- 0u64
+            idx <- idx + 1
+        idx <- 0
+        while idx < 8:
+            info.ucred[idx.usize()] <- 0u64
+            idx <- idx + 1
+        info.caps[0] <- 0x2000000000000000u64
+    return ORBIS_OK
+
+
+def sceKernelGetAppInfo(pid: int, app_info: void&?) -> int:
+    if pid != GLOBAL_PID:
+        return ORBIS_KERNEL_ERROR_EPERM
+    info: OrbisKernelAppInfo&? = app_info as OrbisKernelAppInfo&?
+    if info == null:
+        return ORBIS_OK
+    info.has_param_sfo <- 1
+    return ORBIS_OK
+
+
+def sceKernelTitleWorkaroundIsEnabled(tw: void&?, bit: int, result: void&?) -> int:
+    if tw == null or result == null:
+        return ORBIS_KERNEL_ERROR_EFAULT
+    if bit >= 0x3a:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    work: OrbisKernelTitleWorkaround&? = tw as OrbisKernelTitleWorkaround&?
+    out: mutable int&? = result as mutable int&?
+    if work == null or out == null:
+        return ORBIS_KERNEL_ERROR_EFAULT
+    idx: usize = (bit >> 6).usize()
+    shift: u64 = (bit & 0x3f).u64()
+    out <- ((work.ids[idx] >> shift) & 1u64).int()
+    return ORBIS_OK
+
+
+def sceKernelGetProcessType(pid: int) -> int:
+    if pid != GLOBAL_PID:
+        return ORBIS_KERNEL_ERROR_ENOSYS
+    return 0
+
+
+def kernel_ioctl(fd: int, cmd: u64, VA_ARGS: int) -> int:
+    _ = fd
+    _ = cmd
+    _ = VA_ARGS
+    return ORBIS_OK
+
+
+def sceKernelGetFsSandboxRandomWord() -> u8&?:
+    return "sys"
+
+
+def _sigprocmask() -> int:
+    return ORBIS_OK
+
+
+def sceKernelUuidCreate(orbisUuid: void&?) -> int:
+    uuid: OrbisKernelUuid&? = orbisUuid as OrbisKernelUuid&?
+    if uuid == null:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    uuid.timeLow <- 0u32
+    uuid.timeMid <- 0u16
+    uuid.timeHiAndVersion <- 0u16
+    uuid.clockSeqHiAndReserved <- 0u8
+    uuid.clockSeqLow <- 0u8
+    i: int = 0
+    while i < 6:
+        uuid.node[i.usize()] <- 0u8
+        i <- i + 1
+    return ORBIS_OK
+
+
+def stack_chk_fail() -> int:
+    return ORBIS_KERNEL_ERROR_EFAULT
+
+
+def posix_getpagesize() -> int:
+    return 16 * 1024
+
+
+def posix_sysconf(name: int) -> u64:
+    if name == POSIX_SC_PAGESIZE:
+        return posix_getpagesize().u64()
+    return 0u64
+
+
+def sceLibcHeapGetTraceInfo(info: void&?) -> void:
+    out: HeapInfoInfo&? = info as HeapInfoInfo&?
+    if out != null:
+        out.mspace_atomic_id_mask <- g_mspace_atomic_id_mask.ref[mutable u64&]
+        out.mstate_table <- g_mstate_table[0].ref[mutable u64&]
+        out.getSegmentInfo <- 0u32
+    return
+
+# Kernel network entrypoints are intentionally stubbed here; net.elisa owns full behavior.
+def sys_connect() -> int: return ORBIS_OK
+
+def sys_socketex() -> int: return ORBIS_OK
+
+def sys_bind() -> int: return ORBIS_OK
+
+def sys_getsockopt() -> int: return ORBIS_OK
+
+def sys_setsockopt() -> int: return ORBIS_OK
+
+def sys_listen() -> int: return ORBIS_OK
+
+def sys_accept() -> int: return ORBIS_OK
+
+def sys_shutdown() -> int: return ORBIS_OK
+
+def sys_socket() -> int: return ORBIS_OK
+
+def sys_socketpair() -> int: return ORBIS_OK
+
+def sys_htonl() -> int: return ORBIS_OK
+
+def sys_htons() -> int: return ORBIS_OK
+
+def sys_send() -> int: return ORBIS_OK
+
+def sys_sendto() -> int: return ORBIS_OK
+
+def sys_recv() -> int: return ORBIS_OK
+
+def sys_recvfrom() -> int: return ORBIS_OK
+
+def sys_recvmsg() -> int: return ORBIS_OK
+
+def sys_getpeername() -> int: return ORBIS_OK
+
+def sys_getsockname() -> int: return ORBIS_OK
+
+def sceNetInetNtop() -> int: return ORBIS_OK
+
+def sceNetInetPton() -> int: return ORBIS_OK
+
+def sys_sendmsg() -> int: return ORBIS_OK
+
+def sceKernelGetGPI() -> int: return ORBIS_OK
+
+def sceKernelSetGPO() -> int: return ORBIS_OK
+
+def getargc() -> int: return 0
+
+def getargv() -> u8&?: return null
+
+def RegisterLib(sym: void&?) -> void:
+    _ = sym
+    LIB_FUNCTION("D4yla3vx4tY", "libkernel", 1, "libkernel", sceKernelError)
+    LIB_FUNCTION("YeU23Szo3BM", "libkernel", 1, "libkernel", sceKernelGetAllowedSdkVersionOnSystem)
+    LIB_FUNCTION("Mv1zUObHvXI", "libkernel", 1, "libkernel", sceKernelGetSystemSwVersion)
+    LIB_FUNCTION("igMefp4SAv0", "libkernel", 1, "libkernel", get_authinfo)
+    LIB_FUNCTION("G-MYv5erXaU", "libkernel", 1, "libkernel", sceKernelGetAppInfo)
+    LIB_FUNCTION("1yca4VvfcNA", "libkernel", 1, "libkernel", sceKernelTitleWorkaroundIsEnabled)
+    LIB_FUNCTION("+g+UP8Pyfmo", "libkernel", 1, "libkernel", sceKernelGetProcessType)
+    LIB_FUNCTION("PfccT7qURYE", "libkernel", 1, "libkernel", kernel_ioctl)
+    LIB_FUNCTION("wW+k21cmbwQ", "libkernel", 1, "libkernel", kernel_ioctl)
+    LIB_FUNCTION("JGfTMBOdUJo", "libkernel", 1, "libkernel", sceKernelGetFsSandboxRandomWord)
+    LIB_FUNCTION("6xVpy0Fdq+I", "libkernel", 1, "libkernel", _sigprocmask)
+    LIB_FUNCTION("Xjoosiw+XPI", "libkernel", 1, "libkernel", sceKernelUuidCreate)
+    LIB_FUNCTION("Ou3iL1abvng", "libkernel", 1, "libkernel", stack_chk_fail)
+    LIB_FUNCTION("9BcDykPmo1I", "libkernel", 1, "libkernel", __Error)
+    LIB_FUNCTION("k+AXqu2-eBc", "libkernel", 1, "libkernel", posix_getpagesize)
+    LIB_FUNCTION("k+AXqu2-eBc", "libScePosix", 1, "libkernel", posix_getpagesize)
+    LIB_FUNCTION("mkawd0NA9ts", "libkernel", 1, "libkernel", posix_sysconf)
+    LIB_FUNCTION("mkawd0NA9ts", "libScePosix", 1, "libkernel", posix_sysconf)
+    LIB_FUNCTION("NWtTN10cJzE", "libSceLibcInternalExt", 1, "libSceLibcInternal", sceLibcHeapGetTraceInfo)
+
+    LIB_FUNCTION("XVL8So3QJUk", "libkernel", 1, "libkernel", sys_connect)
+    LIB_FUNCTION("pG70GT5yRo4", "libkernel", 1, "libkernel", sys_socketex)
+    LIB_FUNCTION("KuOmgKoqCdY", "libkernel", 1, "libkernel", sys_bind)
+    LIB_FUNCTION("6O8EwYOgH9Y", "libkernel", 1, "libkernel", sys_getsockopt)
+    LIB_FUNCTION("fFxGkxF2bVo", "libkernel", 1, "libkernel", sys_setsockopt)
+    LIB_FUNCTION("pxnCmagrtao", "libkernel", 1, "libkernel", sys_listen)
+    LIB_FUNCTION("3e+4Iv7IJ8U", "libkernel", 1, "libkernel", sys_accept)
+    LIB_FUNCTION("TUuiYS2kE8s", "libkernel", 1, "libkernel", sys_shutdown)
+    LIB_FUNCTION("TU-d9PfIHPM", "libkernel", 1, "libkernel", sys_socket)
+    LIB_FUNCTION("MZb0GKT3mo8", "libkernel", 1, "libkernel", sys_socketpair)
+    LIB_FUNCTION("MZb0GKT3mo8", "libkernel_ps2emu", 1, "libkernel", sys_socketpair)
+    LIB_FUNCTION("K1S8oc61xiM", "libkernel", 1, "libkernel", sys_htonl)
+    LIB_FUNCTION("jogUIsOV3-U", "libkernel", 1, "libkernel", sys_htons)
+    LIB_FUNCTION("fZOeZIOEmLw", "libkernel", 1, "libkernel", sys_send)
+    LIB_FUNCTION("oBr313PppNE", "libkernel", 1, "libkernel", sys_sendto)
+    LIB_FUNCTION("Ez8xjo9UF4E", "libkernel", 1, "libkernel", sys_recv)
+    LIB_FUNCTION("lUk6wrGXyMw", "libkernel", 1, "libkernel", sys_recvfrom)
+
+    LIB_FUNCTION("TU-d9PfIHPM", "libScePosix", 1, "libkernel", sys_socket)
+    LIB_FUNCTION("fZOeZIOEmLw", "libScePosix", 1, "libkernel", sys_send)
+    LIB_FUNCTION("oBr313PppNE", "libScePosix", 1, "libkernel", sys_sendto)
+    LIB_FUNCTION("Ez8xjo9UF4E", "libScePosix", 1, "libkernel", sys_recv)
+    LIB_FUNCTION("lUk6wrGXyMw", "libScePosix", 1, "libkernel", sys_recvfrom)
+    LIB_FUNCTION("hI7oVeOluPM", "libScePosix", 1, "libkernel", sys_recvmsg)
+    LIB_FUNCTION("TXFFFiNldU8", "libScePosix", 1, "libkernel", sys_getpeername)
+    LIB_FUNCTION("6O8EwYOgH9Y", "libScePosix", 1, "libkernel", sys_getsockopt)
+    LIB_FUNCTION("fFxGkxF2bVo", "libScePosix", 1, "libkernel", sys_setsockopt)
+    LIB_FUNCTION("RenI1lL1WFk", "libScePosix", 1, "libkernel", sys_getsockname)
+    LIB_FUNCTION("KuOmgKoqCdY", "libScePosix", 1, "libkernel", sys_bind)
+    LIB_FUNCTION("5jRCs2axtr4", "libScePosix", 1, "libkernel", sceNetInetNtop)
+    LIB_FUNCTION("4n51s0zEf0c", "libScePosix", 1, "libkernel", sceNetInetPton)
+    LIB_FUNCTION("XVL8So3QJUk", "libScePosix", 1, "libkernel", sys_connect)
+    LIB_FUNCTION("3e+4Iv7IJ8U", "libScePosix", 1, "libkernel", sys_accept)
+    LIB_FUNCTION("aNeavPDNKzA", "libScePosix", 1, "libkernel", sys_sendmsg)
+    LIB_FUNCTION("pxnCmagrtao", "libScePosix", 1, "libkernel", sys_listen)
+
+    LIB_FUNCTION("4oXYe9Xmk0Q", "libkernel", 1, "libkernel", sceKernelGetGPI)
+    LIB_FUNCTION("ca7v6Cxulzs", "libkernel", 1, "libkernel", sceKernelSetGPO)
+    LIB_FUNCTION("iKJMWrAumPE", "libkernel", 1, "libkernel", getargc)
+    LIB_FUNCTION("FJmglmTMdr4", "libkernel", 1, "libkernel", getargv)

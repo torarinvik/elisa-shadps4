@@ -151,6 +151,18 @@ def main() -> int:
             ROOT,
             args.verbose,
         ) and ok
+        ok = run_step(
+            "shader recompiler spirv parity matrix generation",
+            [sys.executable, "shader_recompiler_backend_spirv_parity_matrix.py"],
+            ROOT,
+            args.verbose,
+        ) and ok
+        ok = run_step(
+            "shader recompiler spirv parity matrix gate",
+            [sys.executable, "shader_recompiler_backend_spirv_parity_matrix_check.py", "--summary"],
+            ROOT,
+            args.verbose,
+        ) and ok
 
     if not args.skip_lowering:
         if not (compiler_dir / "go.mod").exists():

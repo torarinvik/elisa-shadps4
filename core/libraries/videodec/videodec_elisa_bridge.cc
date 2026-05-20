@@ -3,6 +3,7 @@
 
 #include "videodec_elisa_bridge.hh"
 
+#include "common/assert.h"
 #include "common/alignment.h"
 #include "core/libraries/error_codes.h"
 #include "core/libraries/videodec/videodec_error.h"
@@ -116,7 +117,6 @@ int VideodecElisa_sceVideodecDeleteDecoder(VideodecElisaCtrl* ctrl) {
         return ORBIS_VIDEODEC_ERROR_HANDLE;
     }
     delete decoder;
-    ctrl->handle = nullptr;
     return ORBIS_OK;
 }
 
@@ -330,6 +330,11 @@ int Videodec2Elisa_sceVideodec2GetPictureInfo(const Videodec2ElisaOutputInfo* ou
         std::memcpy(first_picture, &Libraries::Videodec2::gPictureInfos.back(), picture_size);
         std::memcpy(first_picture, &picture_size, sizeof(uint64_t));
     }
+
+    if (output->pictureCount > 1) {
+        UNREACHABLE();
+    }
+
     return ORBIS_OK;
 }
 

@@ -1,0 +1,381 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./ime.elisa"
+
+const ORBIS_IME_DIALOG_STATUS_NONE: u32 = 0
+const ORBIS_IME_DIALOG_STATUS_RUNNING: u32 = 1
+const ORBIS_IME_DIALOG_STATUS_FINISHED: u32 = 2
+
+const ORBIS_IME_DIALOG_END_STATUS_OK: u32 = 0
+const ORBIS_IME_DIALOG_END_STATUS_USER_CANCELED: u32 = 1
+const ORBIS_IME_DIALOG_END_STATUS_ABORTED: u32 = 2
+
+const ORBIS_IME_PANEL_TYPE_DIALOG: u32 = 2
+
+@fixed_layout
+struct OrbisImeDialogParam:
+    user_id: mutable int
+    type_: mutable u32
+    supported_languages: mutable u64
+    enter_label: mutable u32
+    input_method: mutable u32
+    filter: mutable OrbisImeTextFilter?
+    option: mutable u32
+    max_text_length: mutable u32
+    input_text_buffer: mutable u16&?
+    posx: mutable f32
+    posy: mutable f32
+    horizontal_alignment: mutable u32
+    vertical_alignment: mutable u32
+    placeholder: mutable u16&?
+    title: mutable u16&?
+    reserved: mutable i8[16]
+
+@fixed_layout
+struct OrbisImeDialogResult:
+    endstatus: mutable u32
+    reserved: mutable i8[12]
+
+global mutable g_ime_dialog_status: u32 = ORBIS_IME_DIALOG_STATUS_NONE
+global mutable g_ime_dialog_has_client: bool = false
+global mutable g_ime_dialog_param: OrbisImeDialogParam = zeroed
+global mutable g_ime_dialog_has_extended: bool = false
+global mutable g_ime_dialog_extended: OrbisImeParamExtended = zeroed
+global mutable g_ime_dialog_result: OrbisImeDialogResult = zeroed
+
+def ime_dialog_reset_state():
+    g_ime_dialog_status <- ORBIS_IME_DIALOG_STATUS_NONE
+    g_ime_dialog_has_client <- false
+    g_ime_dialog_param <- zeroed
+    g_ime_dialog_has_extended <- false
+    g_ime_dialog_extended <- zeroed
+    g_ime_dialog_result <- zeroed
+
+def ime_dialog_reserved_zero(param: OrbisImeDialogParam&) -> bool:
+    i: mutable int = 0
+    while i < 16:
+        if param.reserved[i] != 0:
+            return false
+        i <- i + 1
+    return true
+
+def ime_dialog_result_reserved_zero(result: OrbisImeDialogResult&) -> bool:
+    i: mutable int = 0
+    while i < 12:
+        if result.reserved[i] != 0:
+            return false
+        i <- i + 1
+    return true
+
+def ime_dialog_extended_reserved_zero(extended: OrbisImeParamExtended&) -> bool:
+    i: mutable int = 0
+    while i < 60:
+        if extended.reserved[i] != 0:
+            return false
+        i <- i + 1
+    return true
+
+def ime_dialog_get_panel_size_internal(param: OrbisImeDialogParam&, strict_validate: bool, width: mutable u32&, height: mutable u32&) -> int:
+    if param.type_ > ORBIS_IME_TYPE_NUMBER:
+        return ORBIS_IME_ERROR_INVALID_TYPE
+
+    option: mutable u32 = param.option
+    option_mask: u32 = ime_get_option_mask()
+    invalid_bits: u32 = option & (option_mask ^ 0xfffffdffu32)
+    if invalid_bits != 0u32:
+        if strict_validate:
+            return ORBIS_IME_ERROR_INVALID_OPTION
+        preserve_over2k: u32 = option & ORBIS_IME_OPTION_USE_OVER_2K_COORDINATES
+        option <- (option & ~invalid_bits) | preserve_over2k
+
+    lang_mask: u64 = ime_get_language_mask()
+    if ((~lang_mask) & param.supported_languages) != 0u64:
+        if strict_validate:
+            return ORBIS_IME_ERROR_INVALID_SUPPORTED_LANGUAGES
+
+    sdk: u32 = ime_get_compiled_sdk_version()
+    if param.type_ == ORBIS_IME_TYPE_NUMBER:
+        width <- 0x172u32
+        h: mutable u32 = 0x1d6u32
+        if sdk > 0x16fffffu32:
+            h <- 0x20au32
+            if sdk < 0x2000000u32:
+                h <- h - 1u32
+        height <- h
+    else:
+        special_layout: bool = false
+        if param.type_ != ORBIS_IME_TYPE_BASIC_LATIN and (option & 0xc0000004u32) != 4u32:
+            special_layout <- true
+        width <- 0x319u32
+        if special_layout:
+            height <- (0x274u32 if (option & 1u32) != 0u32 else 0x210u32)
+        else:
+            if (option & 1u32) == 0u32:
+                height <- (0x210u32 if sdk > 0x16fffffu32 else 0x1dcu32)
+            else:
+                height <- (0x274u32 if sdk > 0x16fffffu32 else 0x240u32)
+
+    if (option & ORBIS_IME_OPTION_USE_OVER_2K_COORDINATES) != 0u32:
+        width <- width << 1
+        height <- height << 1
+    return ORBIS_OK
+
+def ime_dialog_get_panel_size_extended_internal(param: OrbisImeDialogParam&, extended: OrbisImeParamExtended&, strict_validate: bool, width: mutable u32&, height: mutable u32&) -> int:
+    base_res: int = ime_dialog_get_panel_size_internal(param, strict_validate, width, height)
+    if base_res != ORBIS_OK:
+        return base_res
+
+    sdk: u32 = ime_get_compiled_sdk_version()
+    if sdk > 0x16fffffu32 and not ime_valid_ext_option(extended.option):
+        return ORBIS_IME_ERROR_INVALID_EXTENDED
+
+    accessibility_enabled: bool = (extended.option & 0x1000u32) != 0u32
+    accessibility_forced: bool = (extended.option & 0x2000u32) != 0u32
+    if accessibility_enabled and accessibility_forced:
+        width <- 0x780u32
+        height <- 0x438u32
+        if (param.option & ORBIS_IME_OPTION_USE_OVER_2K_COORDINATES) != 0u32:
+            width <- width << 1
+            height <- height << 1
+        return ORBIS_OK
+
+    hide_keypanel_for_ext: bool = ((param.option & ORBIS_IME_OPTION_EXT_KEYBOARD) != 0u32) and ((extended.option & 0x400u32) != 0u32)
+    multiline: bool = (param.option & ORBIS_IME_OPTION_MULTILINE) != 0u32
+
+    if param.type_ == ORBIS_IME_TYPE_NUMBER:
+        width <- 0x172u32
+        if not hide_keypanel_for_ext:
+            if sdk > 0x16fffffu32:
+                height <- (0x209u32 if sdk < 0x2000000u32 else 0x20au32)
+            else:
+                height <- 0x1d6u32
+        else:
+            if sdk < 0x1700000u32:
+                height <- 0x1d6u32
+            else:
+                height <- (0x65u32 if sdk < 0x2000000u32 else 0x66u32)
+    else:
+        basic_latin_branch: bool = (param.type_ == ORBIS_IME_TYPE_BASIC_LATIN) or ((param.option & 0xc0000004u32) == 4u32)
+        width <- 0x319u32
+        if basic_latin_branch:
+            if not multiline:
+                if not hide_keypanel_for_ext:
+                    height <- (0x210u32 if sdk > 0x16fffffu32 else 0x1dcu32)
+                else:
+                    height <- (0x66u32 if sdk < 0x1700000u32 else 0x67u32)
+            else:
+                if not hide_keypanel_for_ext:
+                    height <- (0x274u32 if sdk > 0x16fffffu32 else 0x240u32)
+                else:
+                    height <- (0x10au32 if sdk < 0x1700000u32 else 0xcbu32)
+        else:
+            if not multiline:
+                if hide_keypanel_for_ext:
+                    height <- (0xa6u32 if sdk < 0x1700000u32 else 0xa8u32)
+                else:
+                    height <- 0x210u32
+            else:
+                if hide_keypanel_for_ext:
+                    height <- (0x10au32 if sdk < 0x1700000u32 else 0x10cu32)
+                else:
+                    height <- 0x274u32
+
+    if (param.option & ORBIS_IME_OPTION_USE_OVER_2K_COORDINATES) != 0u32:
+        width <- width << 1
+        height <- height << 1
+    return ORBIS_OK
+
+def sceImeDialogAbort() -> int:
+    if not g_ime_dialog_has_client:
+        return ORBIS_IME_ERROR_DIALOG_NOT_IN_USE
+    if g_ime_dialog_status != ORBIS_IME_DIALOG_STATUS_RUNNING:
+        return ORBIS_IME_ERROR_DIALOG_NOT_RUNNING
+    g_ime_dialog_status <- ORBIS_IME_DIALOG_STATUS_FINISHED
+    g_ime_dialog_result.endstatus <- ORBIS_IME_DIALOG_END_STATUS_ABORTED
+    return ORBIS_OK
+
+def sceImeDialogForceClose() -> int:
+    if not g_ime_dialog_has_client:
+        return ORBIS_IME_ERROR_DIALOG_NOT_IN_USE
+    ime_dialog_reset_state()
+    return ORBIS_OK
+
+def sceImeDialogForTestFunction() -> int:
+    return ORBIS_IME_ERROR_INTERNAL
+
+def sceImeDialogGetCurrentStarState(param_1: i64) -> int:
+    if not g_ime_dialog_has_client:
+        return ORBIS_IME_ERROR_DIALOG_NOT_IN_USE
+    if param_1 == 0:
+        return ORBIS_IME_ERROR_INVALID_ADDRESS
+    if g_ime_dialog_status == ORBIS_IME_DIALOG_STATUS_RUNNING or g_ime_dialog_status == ORBIS_IME_DIALOG_STATUS_FINISHED:
+        return ORBIS_IME_ERROR_IME_SUSPENDING
+    return ORBIS_OK
+
+def sceImeDialogGetPanelPositionAndForm(posForm: mutable OrbisImePositionAndForm&?) -> int:
+    if not g_ime_dialog_has_client:
+        return ORBIS_IME_ERROR_DIALOG_NOT_IN_USE
+    if posForm == null:
+        return ORBIS_IME_ERROR_INVALID_ADDRESS
+
+    posForm.type_ <- ORBIS_IME_PANEL_TYPE_DIALOG
+    posForm.posx <- g_ime_dialog_param.posx
+    posForm.posy <- g_ime_dialog_param.posy
+    posForm.horizontal_alignment <- g_ime_dialog_param.horizontal_alignment
+    posForm.vertical_alignment <- g_ime_dialog_param.vertical_alignment
+
+    panel_width: mutable u32 = 0u32
+    panel_height: mutable u32 = 0u32
+    if g_ime_dialog_has_extended:
+        _ = ime_dialog_get_panel_size_extended_internal(g_ime_dialog_param, g_ime_dialog_extended, false, panel_width.ref[mutable u32&], panel_height.ref[mutable u32&])
+    else:
+        _ = ime_dialog_get_panel_size_internal(g_ime_dialog_param, false, panel_width.ref[mutable u32&], panel_height.ref[mutable u32&])
+    posForm.width <- panel_width
+    posForm.height <- panel_height
+    return ORBIS_OK
+
+def sceImeDialogGetPanelSize(param: OrbisImeDialogParam&?, width: mutable u32&?, height: mutable u32&?) -> int:
+    if param == null or width == null or height == null:
+        return ORBIS_IME_ERROR_INVALID_ADDRESS
+    return ime_dialog_get_panel_size_internal(param, true, width.ref[mutable u32&], height.ref[mutable u32&])
+
+def sceImeDialogGetPanelSizeExtended(param: OrbisImeDialogParam&?, extended: OrbisImeParamExtended&?, width: mutable u32&?, height: mutable u32&?) -> int:
+    if param == null or width == null or height == null:
+        return ORBIS_IME_ERROR_INVALID_ADDRESS
+    if extended == null:
+        return ime_dialog_get_panel_size_internal(param, true, width.ref[mutable u32&], height.ref[mutable u32&])
+    return ime_dialog_get_panel_size_extended_internal(param, extended, true, width.ref[mutable u32&], height.ref[mutable u32&])
+
+def sceImeDialogGetResult(result: mutable OrbisImeDialogResult&?) -> int:
+    if not g_ime_dialog_has_client:
+        return ORBIS_IME_ERROR_DIALOG_NOT_IN_USE
+    if result == null:
+        return ORBIS_IME_ERROR_INVALID_ADDRESS
+    if not ime_dialog_result_reserved_zero(result):
+        return ORBIS_IME_ERROR_INVALID_RESERVED
+    if g_ime_dialog_status == ORBIS_IME_DIALOG_STATUS_RUNNING:
+        return ORBIS_IME_ERROR_DIALOG_NOT_FINISHED
+    result.endstatus <- g_ime_dialog_result.endstatus
+    return ORBIS_OK
+
+def sceImeDialogGetStatus() -> u32:
+    if not g_ime_dialog_has_client:
+        return ORBIS_IME_DIALOG_STATUS_NONE
+    return g_ime_dialog_status
+
+def sceImeDialogInit(param: mutable OrbisImeDialogParam&?, extended: OrbisImeParamExtended&?) -> int:
+    if param == null:
+        return ORBIS_IME_ERROR_INVALID_ADDRESS
+    if g_ime_dialog_has_client or g_ime_dialog_status != ORBIS_IME_DIALOG_STATUS_NONE:
+        return ORBIS_IME_ERROR_BUSY
+    if not ime_valid_user_id(param.user_id):
+        return ORBIS_IME_ERROR_INVALID_USER_ID
+    if param.type_ > ORBIS_IME_TYPE_NUMBER:
+        return ORBIS_IME_ERROR_INVALID_TYPE
+    if param.enter_label > ORBIS_IME_ENTER_LABEL_GO:
+        return ORBIS_IME_ERROR_INVALID_ENTER_LABEL
+    if param.input_method != ORBIS_IME_INPUT_METHOD_DEFAULT:
+        return ORBIS_IME_ERROR_INVALID_INPUT_METHOD
+    if ime_has_invalid_option(param.option):
+        return ORBIS_IME_ERROR_INVALID_OPTION
+    if ((~ime_get_language_mask()) & param.supported_languages) != 0u64:
+        return ORBIS_IME_ERROR_INVALID_SUPPORTED_LANGUAGES
+    if param.max_text_length == 0u32 or param.max_text_length > ORBIS_IME_DIALOG_MAX_TEXT_LENGTH:
+        return ORBIS_IME_ERROR_INVALID_MAX_TEXT_LENGTH
+    if param.input_text_buffer == null:
+        return ORBIS_IME_ERROR_INVALID_INPUT_TEXT_BUFFER
+    if not ime_dialog_reserved_zero(param):
+        return ORBIS_IME_ERROR_INVALID_RESERVED
+
+    if extended != null:
+        sdk: u32 = ime_get_compiled_sdk_version()
+        if extended.priority > ORBIS_IME_PANEL_PRIORITY_ACCENT:
+            return ORBIS_IME_ERROR_INVALID_EXTENDED
+        if not ime_valid_ext_option(extended.option):
+            return ORBIS_IME_ERROR_INVALID_EXTENDED
+        if not ime_dialog_extended_reserved_zero(extended):
+            return ORBIS_IME_ERROR_INVALID_EXTENDED
+        if (extended.disable_device & 0xfffffff8u32) != 0u32:
+            return ORBIS_IME_ERROR_INVALID_EXTENDED
+        if sdk < 0x01560000u32:
+            if extended.ext_keyboard_filter != null or extended.disable_device != 0u32 or extended.ext_keyboard_mode != 0u32:
+                return ORBIS_IME_ERROR_INVALID_EXTENDED
+        else:
+            if (extended.ext_keyboard_mode & 0xe3fffffcu32) != 0u32:
+                return ORBIS_IME_ERROR_INVALID_EXTENDED
+
+    g_ime_dialog_has_client <- true
+    g_ime_dialog_status <- ORBIS_IME_DIALOG_STATUS_RUNNING
+    g_ime_dialog_param <- param
+    g_ime_dialog_result <- zeroed
+    g_ime_dialog_result.endstatus <- ORBIS_IME_DIALOG_END_STATUS_OK
+    if extended != null:
+        g_ime_dialog_has_extended <- true
+        g_ime_dialog_extended <- extended
+    else:
+        g_ime_dialog_has_extended <- false
+        g_ime_dialog_extended <- zeroed
+    return ORBIS_OK
+
+def sceImeDialogInitInternal(param: mutable OrbisImeDialogParam&?, extended: OrbisImeParamExtended&?) -> int:
+    return sceImeDialogInit(param, extended)
+
+def sceImeDialogInitInternal2(param_1: mutable int&?, param_2: mutable u32&?, param_3: u32, param_4: u64) -> int:
+    _ = param_3
+    _ = param_4
+    if param_1 == null:
+        return ORBIS_IME_ERROR_INVALID_ADDRESS
+    p: mutable OrbisImeDialogParam& = param_1.cast[mutable OrbisImeDialogParam&]
+    ext: mutable OrbisImeParamExtended&? = null
+    if param_2 != null:
+        ext <- param_2.cast[mutable OrbisImeParamExtended&]
+    return sceImeDialogInit(p.ref[mutable OrbisImeDialogParam&], ext)
+
+def sceImeDialogInitInternal3(param_1: mutable int&?, param_2: mutable u32&?, param_3: u32, param_4: u64, param_5: u32, param_6: u32) -> int:
+    _ = param_3
+    _ = param_4
+    _ = param_5
+    _ = param_6
+    if param_1 == null:
+        return ORBIS_IME_ERROR_INVALID_ADDRESS
+    p: mutable OrbisImeDialogParam& = param_1.cast[mutable OrbisImeDialogParam&]
+    ext: mutable OrbisImeParamExtended&? = null
+    if param_2 != null:
+        ext <- param_2.cast[mutable OrbisImeParamExtended&]
+    return sceImeDialogInit(p.ref[mutable OrbisImeDialogParam&], ext)
+
+def sceImeDialogSetPanelPosition(posx: i32, posy: i32) -> int:
+    if not g_ime_dialog_has_client:
+        return ORBIS_IME_ERROR_DIALOG_NOT_IN_USE
+    if g_ime_dialog_status == ORBIS_IME_DIALOG_STATUS_RUNNING or g_ime_dialog_status == ORBIS_IME_DIALOG_STATUS_FINISHED:
+        return ORBIS_IME_ERROR_IME_SUSPENDING
+    g_ime_dialog_param.posx <- posx.f32()
+    g_ime_dialog_param.posy <- posy.f32()
+    return ORBIS_OK
+
+def sceImeDialogTerm() -> int:
+    if not g_ime_dialog_has_client:
+        return ORBIS_IME_ERROR_DIALOG_NOT_IN_USE
+    if g_ime_dialog_status != ORBIS_IME_DIALOG_STATUS_FINISHED:
+        return ORBIS_IME_ERROR_DIALOG_NOT_FINISHED
+    ime_dialog_reset_state()
+    return ORBIS_OK
+
+def ImeDialog_RegisterLib(sym: void&?) -> void:
+    _ = sym
+    LIB_FUNCTION("oBmw4xrmfKs", "libSceImeDialog", 1, "libSceImeDialog", sceImeDialogAbort)
+    LIB_FUNCTION("bX4H+sxPI-o", "libSceImeDialog", 1, "libSceImeDialog", sceImeDialogForceClose)
+    LIB_FUNCTION("UFcyYDf+e88", "libSceImeDialog", 1, "libSceImeDialog", sceImeDialogForTestFunction)
+    LIB_FUNCTION("fy6ntM25pEc", "libSceImeDialog", 1, "libSceImeDialog", sceImeDialogGetCurrentStarState)
+    LIB_FUNCTION("8jqzzPioYl8", "libSceImeDialog", 1, "libSceImeDialog", sceImeDialogGetPanelPositionAndForm)
+    LIB_FUNCTION("wqsJvRXwl58", "libSceImeDialog", 1, "libSceImeDialog", sceImeDialogGetPanelSize)
+    LIB_FUNCTION("CRD+jSErEJQ", "libSceImeDialog", 1, "libSceImeDialog", sceImeDialogGetPanelSizeExtended)
+    LIB_FUNCTION("x01jxu+vxlc", "libSceImeDialog", 1, "libSceImeDialog", sceImeDialogGetResult)
+    LIB_FUNCTION("IADmD4tScBY", "libSceImeDialog", 1, "libSceImeDialog", sceImeDialogGetStatus)
+    LIB_FUNCTION("NUeBrN7hzf0", "libSceImeDialog", 1, "libSceImeDialog", sceImeDialogInit)
+    LIB_FUNCTION("KR6QDasuKco", "libSceImeDialog", 1, "libSceImeDialog", sceImeDialogInitInternal)
+    LIB_FUNCTION("oe92cnJQ9HE", "libSceImeDialog", 1, "libSceImeDialog", sceImeDialogInitInternal2)
+    LIB_FUNCTION("IoKIpNf9EK0", "libSceImeDialog", 1, "libSceImeDialog", sceImeDialogInitInternal3)
+    LIB_FUNCTION("-2WqB87KKGg", "libSceImeDialog", 1, "libSceImeDialog", sceImeDialogSetPanelPosition)
+    LIB_FUNCTION("gyTyVn+bXMw", "libSceImeDialog", 1, "libSceImeDialog", sceImeDialogTerm)

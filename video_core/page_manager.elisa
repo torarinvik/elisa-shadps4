@@ -1,0 +1,152 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./buffer_cache/region_definitions.elisa"
+
+const PM_PAGE_BITS: u64 = TRACKER_PAGE_BITS
+const PM_PAGE_SIZE: u64 = TRACKER_BYTES_PER_PAGE
+
+const MEMORY_PERMISSION_NONE: u32 = 0u32
+const MEMORY_PERMISSION_READ: u32 = 1u32
+const MEMORY_PERMISSION_WRITE: u32 = 2u32
+
+struct PageState:
+    page_index: mutable u64
+    num_write_watchers: mutable u8
+    num_read_watchers: mutable u8
+
+struct ProtectEvent:
+    page_index: mutable u64
+    permission_mask: mutable u32
+
+struct MappedRange:
+    begin: mutable u64
+    end: mutable u64
+
+struct PageManager:
+    states: mutable darray[PageState]
+    mapped_ranges: mutable darray[MappedRange]
+    protect_events: mutable darray[ProtectEvent]
+
+def PageManager_New() -> PageManager:
+    return PageManager([], [], [])
+
+def PageManager_GetPageAddr(addr: u64) -> u64:
+    return addr & ~(PM_PAGE_SIZE - 1u64)
+
+def PageManager_GetNextPageAddr(addr: u64) -> u64:
+    return ((addr + PM_PAGE_SIZE) / PM_PAGE_SIZE) * PM_PAGE_SIZE
+
+def PageState_PermissionMask(state: PageState) -> u32:
+    mask: mutable u32 = MEMORY_PERMISSION_NONE
+    if state.num_read_watchers == 0u8:
+        mask <- mask | MEMORY_PERMISSION_READ
+    if state.num_write_watchers == 0u8:
+        mask <- mask | MEMORY_PERMISSION_WRITE
+    return mask
+
+def PageManager_FindState(self: PageManager, page_index: u64) -> usize?:
+    i: mutable usize = 0usize
+    while i < self.states.count:
+        if self.states[i].page_index == page_index:
+            return i
+        i <- i + 1usize
+    return null
+
+def PageManager_GetOrCreateState(self: mutable PageManager&, page_index: u64) -> mutable PageState&:
+    can Memory.Allocate, Abort.Panic:
+        found: usize = PageManager_FindState(self, page_index) else 0xffffffffffffffffusize
+        if found != 0xffffffffffffffffusize:
+            return self.states[found].ref[mutable PageState&]
+        self.states.push(PageState(page_index, 0u8, 0u8))
+        return self.states[self.states.count - 1usize].ref[mutable PageState&]
+
+def PageManager_OnGpuMap(self: mutable PageManager&, address: u64, size: usize) -> void:
+    can Memory.Allocate, Abort.Panic:
+        if size == 0usize:
+            return
+        self.mapped_ranges.push(MappedRange(address, address + size.u64()))
+
+def PageManager_OnGpuUnmap(self: mutable PageManager&, address: u64, size: usize) -> void:
+    if size == 0usize:
+        return
+    remove_begin: u64 = address
+    remove_end: u64 = address + size.u64()
+    i: mutable usize = 0usize
+    while i < self.mapped_ranges.count:
+        if self.mapped_ranges[i].begin == remove_begin and self.mapped_ranges[i].end == remove_end:
+            self.mapped_ranges[i] <- self.mapped_ranges[self.mapped_ranges.count - 1usize]
+            self.mapped_ranges.count <- self.mapped_ranges.count - 1usize
+            continue
+        i <- i + 1usize
+
+def PageManager_IsMapped(self: PageManager, address: u64, size: u64) -> bool:
+    if size == 0u64:
+        return false
+    end_addr: u64 = address + size
+    i: mutable usize = 0usize
+    while i < self.mapped_ranges.count:
+        if self.mapped_ranges[i].begin <= address and self.mapped_ranges[i].end >= end_addr:
+            return true
+        i <- i + 1usize
+    return false
+
+def PageManager_ApplyWatcherDelta(self: mutable PageManager&, page_index: u64, track: bool, is_read: bool) -> void:
+    can Memory.Allocate, Abort.Panic:
+        state: mutable PageState& = PageManager_GetOrCreateState(self, page_index)
+        old_mask: u32 = PageState_PermissionMask(state.value())
+
+        if is_read:
+            if track:
+                if state.num_read_watchers < 255u8:
+                    state.num_read_watchers <- state.num_read_watchers + 1u8
+            else:
+                if state.num_read_watchers > 0u8:
+                    state.num_read_watchers <- state.num_read_watchers - 1u8
+        else:
+            if track:
+                if state.num_write_watchers < 127u8:
+                    state.num_write_watchers <- state.num_write_watchers + 1u8
+            else:
+                if state.num_write_watchers > 0u8:
+                    state.num_write_watchers <- state.num_write_watchers - 1u8
+
+        new_mask: u32 = PageState_PermissionMask(state.value())
+        if new_mask != old_mask:
+            self.protect_events.push(ProtectEvent(page_index, new_mask))
+
+def PageManager_UpdatePageWatchers(self: mutable PageManager&, addr: u64, size: u64, track: bool, is_read: bool) -> void:
+    can Memory.Allocate, Abort.Panic:
+        if size == 0u64:
+            return
+        start_page: u64 = addr >> PM_PAGE_BITS
+        end_page: u64 = (addr + size + PM_PAGE_SIZE - 1u64) >> PM_PAGE_BITS
+        page: mutable u64 = start_page
+        while page < end_page:
+            PageManager_ApplyWatcherDelta(self, page, track, is_read)
+            page <- page + 1u64
+
+def PageManager_UpdatePageWatchersForRegion(self: mutable PageManager&, base_addr: u64, mask: RegionBits, track: bool, is_read: bool) -> void:
+    can Memory.Allocate, Abort.Panic:
+        base_page: u64 = base_addr >> PM_PAGE_BITS
+        page: mutable u64 = 0u64
+        while page < NUM_PAGES_PER_REGION:
+            if RegionBits_IsSet(mask.ref[RegionBits&], page):
+                PageManager_ApplyWatcherDelta(self, base_page + page, track, is_read)
+            page <- page + 1u64
+
+def PageManager_UpdatePageWatchers_TrackWrite(self: mutable PageManager&, addr: u64, size: u64) -> void:
+    can Memory.Allocate, Abort.Panic:
+        PageManager_UpdatePageWatchers(self, addr, size, true, false)
+
+def PageManager_UpdatePageWatchers_UntrackWrite(self: mutable PageManager&, addr: u64, size: u64) -> void:
+    can Memory.Allocate, Abort.Panic:
+        PageManager_UpdatePageWatchers(self, addr, size, false, false)
+
+def PageManager_UpdatePageWatchers_TrackRead(self: mutable PageManager&, addr: u64, size: u64) -> void:
+    can Memory.Allocate, Abort.Panic:
+        PageManager_UpdatePageWatchers(self, addr, size, true, true)
+
+def PageManager_UpdatePageWatchers_UntrackRead(self: mutable PageManager&, addr: u64, size: u64) -> void:
+    can Memory.Allocate, Abort.Panic:
+        PageManager_UpdatePageWatchers(self, addr, size, false, true)

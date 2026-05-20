@@ -1,0 +1,286 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../common/types.elisa"
+include "./address_space.elisa"
+
+type MemoryProt = u32
+const MemoryProt_NoAccess: MemoryProt = 0u32()
+const MemoryProt_CpuRead: MemoryProt = 1u32()
+const MemoryProt_CpuWrite: MemoryProt = 2u32()
+const MemoryProt_CpuReadWrite: MemoryProt = 3u32()
+const MemoryProt_CpuExec: MemoryProt = 4u32()
+const MemoryProt_GpuRead: MemoryProt = 16u32()
+const MemoryProt_GpuWrite: MemoryProt = 32u32()
+const MemoryProt_GpuReadWrite: MemoryProt = 48u32()
+
+type MemoryMapFlags = u32
+const MemoryMapFlags_NoFlags: MemoryMapFlags = 0u32()
+const MemoryMapFlags_Shared: MemoryMapFlags = 1u32()
+const MemoryMapFlags_Private: MemoryMapFlags = 2u32()
+const MemoryMapFlags_Fixed: MemoryMapFlags = 0x10u32()
+const MemoryMapFlags_NoOverwrite: MemoryMapFlags = 0x80u32()
+const MemoryMapFlags_Anon: MemoryMapFlags = 0x1000u32()
+
+type PhysicalMemoryType = u32
+const PhysicalMemoryType_Free: PhysicalMemoryType = 0u32()
+const PhysicalMemoryType_Allocated: PhysicalMemoryType = 1u32()
+const PhysicalMemoryType_Mapped: PhysicalMemoryType = 2u32()
+const PhysicalMemoryType_Pooled: PhysicalMemoryType = 3u32()
+const PhysicalMemoryType_Committed: PhysicalMemoryType = 4u32()
+const PhysicalMemoryType_Flexible: PhysicalMemoryType = 5u32()
+
+type VMAType = u32
+const VMAType_Free: VMAType = 0u32()
+const VMAType_Reserved: VMAType = 1u32()
+const VMAType_Direct: VMAType = 2u32()
+const VMAType_Flexible: VMAType = 3u32()
+const VMAType_Pooled: VMAType = 4u32()
+const VMAType_PoolReserved: VMAType = 5u32()
+const VMAType_Stack: VMAType = 6u32()
+const VMAType_Code: VMAType = 7u32()
+const VMAType_File: VMAType = 8u32()
+
+struct PhysicalMemoryArea:
+    base: mutable PAddr
+    size: mutable u64
+    memory_type: mutable s32
+    dma_type: mutable PhysicalMemoryType
+
+struct VirtualMemoryArea:
+    base: mutable VAddr
+    size: mutable u64
+    vma_type: mutable VMAType
+    prot: mutable MemoryProt
+    name: mutable static u8&
+    fd: mutable s32
+    disallow_merge: mutable bool
+
+struct PrtArea:
+    start: mutable VAddr
+    end: mutable VAddr
+    mapped: mutable bool
+
+struct MemoryManager:
+    address_space: mutable AddressSpace
+    dmem_areas: mutable darray[PhysicalMemoryArea]
+    vma_areas: mutable darray[VirtualMemoryArea]
+    total_direct_size: mutable u64
+    total_flexible_size: mutable u64
+    flexible_usage: mutable u64
+    pool_budget: mutable u64
+    prt_areas: mutable PrtArea[3]
+
+global mutable memory_singleton: MemoryManager = MemoryManager(
+    AddressSpace_New(),
+    [],
+    [],
+    0.u64(),
+    0.u64(),
+    0.u64(),
+    0.u64(),
+    [PrtArea(0.uintptr(), 0.uintptr(), false), PrtArea(0.uintptr(), 0.uintptr(), false), PrtArea(0.uintptr(), 0.uintptr(), false)]
+)
+
+def MemoryManager_New() -> MemoryManager:
+    return MemoryManager(
+        AddressSpace_New(),
+        [],
+        [],
+        0.u64(),
+        0.u64(),
+        0.u64(),
+        0.u64(),
+        [PrtArea(0.uintptr(), 0.uintptr(), false), PrtArea(0.uintptr(), 0.uintptr(), false), PrtArea(0.uintptr(), 0.uintptr(), false)]
+    )
+
+def Memory_Instance() -> mutable MemoryManager&:
+    return memory_singleton.ref[mutable MemoryManager&]
+
+def Memory_Reset() -> void:
+    memory_singleton <- MemoryManager_New()
+
+def MemoryManager_GetAddressSpace(self: mutable MemoryManager&) -> mutable AddressSpace&:
+    return self.address_space.ref[mutable AddressSpace&]
+
+def MemoryManager_GetTotalDirectSize(self: MemoryManager&) -> u64:
+    return self.total_direct_size
+
+def MemoryManager_GetTotalFlexibleSize(self: MemoryManager&) -> u64:
+    return self.total_flexible_size
+
+def MemoryManager_GetAvailableFlexibleSize(self: MemoryManager&) -> u64:
+    if self.flexible_usage >= self.total_flexible_size:
+        return 0
+    return self.total_flexible_size - self.flexible_usage
+
+def MemoryManager_SystemReservedVirtualBase(self: MemoryManager&) -> VAddr:
+    return AddressSpace_SystemReservedVirtualBase(self.address_space.ref[AddressSpace&])
+
+def MemoryManager_IsValidGpuMapping(self: MemoryManager&, virtual_addr: VAddr, size: u64) -> bool:
+    _ = self
+    max_gpu_address: VAddr = 0x10000000000.uintptr()
+    return virtual_addr < max_gpu_address and size <= (max_gpu_address - virtual_addr).u64()
+
+def VirtualMemoryArea_Contains(self: VirtualMemoryArea&, addr: VAddr, size: u64) -> bool:
+    if addr < self.base:
+        return false
+    offset: u64 = (addr - self.base).u64()
+    return offset <= self.size and size <= (self.size - offset)
+
+def VirtualMemoryArea_Overlaps(self: VirtualMemoryArea&, addr: VAddr, size: u64) -> bool:
+    if size == 0 or self.size == 0:
+        return false
+    a_end: VAddr = addr + size.uintptr()
+    b_end: VAddr = self.base + self.size.uintptr()
+    return addr < b_end and self.base < a_end
+
+def MemoryManager_IsValidMapping(self: MemoryManager&, virtual_addr: VAddr, size: u64) -> bool:
+    if size == 0:
+        for i in 0..<self.vma_areas.count:
+            if VirtualMemoryArea_Contains(self.vma_areas[i], virtual_addr, 1):
+                return true
+        return false
+    remaining: u64 = size
+    probe: VAddr = virtual_addr
+    while remaining > 0:
+        found: mutable bool = false
+        for i in 0..<self.vma_areas.count:
+            area: VirtualMemoryArea = self.vma_areas[i]
+            if VirtualMemoryArea_Contains(area, probe, 1):
+                found <- true
+                offset: u64 = (probe - area.base).u64()
+                covered: u64 = area.size - offset
+                if covered > remaining:
+                    covered <- remaining
+                remaining <- remaining - covered
+                probe <- probe + covered.uintptr()
+        if not found:
+            return false
+    return true
+
+def MemoryManager_ClampRangeSize(self: MemoryManager&, virtual_addr: VAddr, size: u64) -> u64:
+    if size == 0:
+        return 0
+    if MemoryManager_IsValidMapping(self, virtual_addr, size):
+        return size
+    i: mutable u64 = size
+    while i > 0:
+        if MemoryManager_IsValidMapping(self, virtual_addr, i):
+            return i
+        i <- i - 1
+    return 0
+
+def MemoryManager_SetPrtArea(self: mutable MemoryManager&, id: u32, address: VAddr, size: u64) -> void:
+    if id >= 3:
+        return
+    self.prt_areas[id.usize()] <- PrtArea(address, address + size.uintptr(), true)
+
+def MemoryManager_CopySparseMemory(self: MemoryManager&, source: VAddr, dest: mutable u8&, size: u64) -> void:
+    _ = self
+    _ = source
+    i: mutable u64 = 0
+    while i < size:
+        dest[i.usize()] <- 0
+        i <- i + 1
+
+def MemoryManager_TryWriteBacking(self: MemoryManager&, address: void&?, data: void&?, size: u64) -> bool:
+    _ = data
+    if address == null:
+        return false
+    return MemoryManager_IsValidMapping(self, address.cast[VAddr], size)
+
+def MemoryManager_TryWriteGuestMemory(self: MemoryManager&, address: void&?, data: void&?, size: u64) -> bool:
+    return MemoryManager_TryWriteBacking(self, address, data, size)
+
+def MemoryManager_SetupMemoryRegions(self: mutable MemoryManager&, flexible_size: u64, use_extended_mem1: bool, use_extended_mem2: bool) -> void:
+    _ = use_extended_mem1
+    _ = use_extended_mem2
+    self.total_direct_size <- GB(5)
+    self.total_flexible_size <- flexible_size
+    self.pool_budget <- flexible_size
+    self.flexible_usage <- 0
+
+def MemoryManager_PoolExpand(self: mutable MemoryManager&, search_start: PAddr, search_end: PAddr, size: u64, alignment: u64) -> PAddr:
+    _ = self
+    _ = search_end
+    _ = alignment
+    return search_start + size.uintptr()
+
+def MemoryManager_Allocate(self: mutable MemoryManager&, search_start: PAddr, search_end: PAddr, size: u64, alignment: u64, memory_type: s32) -> PAddr:
+    _ = search_end
+    _ = alignment
+    self.dmem_areas.push(PhysicalMemoryArea(search_start, size, memory_type, PhysicalMemoryType_Allocated))
+    return search_start
+
+def MemoryManager_Free(self: mutable MemoryManager&, phys_addr: PAddr, size: u64, is_checked: bool) -> s32:
+    _ = is_checked
+    for i in 0..<self.dmem_areas.count:
+        if self.dmem_areas[i].base == phys_addr and self.dmem_areas[i].size == size:
+            j: mutable usize = i
+            while j + 1 < self.dmem_areas.count:
+                self.dmem_areas[j] <- self.dmem_areas[j + 1]
+                j <- j + 1
+            _ = self.dmem_areas.pop()
+            return 0
+    return -1
+
+def MemoryManager_MapMemory(self: mutable MemoryManager&, out_addr: mutable VAddr&, virtual_addr: VAddr, size: u64, prot: MemoryProt, flags: MemoryMapFlags, vma_type: VMAType, name: static u8&, validate_dmem: bool, phys_addr: PAddr, alignment: u64) -> s32:
+    _ = flags
+    _ = validate_dmem
+    _ = phys_addr
+    _ = alignment
+    mapped: VAddr = AddressSpace_Map(self.address_space.ref[mutable AddressSpace&], virtual_addr, size, 0.uintptr(), false)
+    out_addr <- mapped
+    self.vma_areas.push(VirtualMemoryArea(mapped, size, vma_type, prot, name, 0, false))
+    return 0
+
+def MemoryManager_MapFile(self: mutable MemoryManager&, out_addr: mutable VAddr&, virtual_addr: VAddr, size: u64, prot: MemoryProt, flags: MemoryMapFlags, fd: s32, phys_addr: s64) -> s32:
+    _ = flags
+    mapped: VAddr = AddressSpace_MapFile(self.address_space.ref[mutable AddressSpace&], virtual_addr, size, phys_addr.u64(), prot, fd.uintptr())
+    out_addr <- mapped
+    self.vma_areas.push(VirtualMemoryArea(mapped, size, VMAType_File, prot, "file", fd, false))
+    return 0
+
+def MemoryManager_PoolDecommit(self: mutable MemoryManager&, virtual_addr: VAddr, size: u64) -> s32:
+    return MemoryManager_UnmapMemory(self.ref[mutable MemoryManager&], virtual_addr, size)
+
+def MemoryManager_UnmapMemory(self: mutable MemoryManager&, virtual_addr: VAddr, size: u64) -> s32:
+    AddressSpace_Unmap(self.address_space.ref[mutable AddressSpace&], virtual_addr, size)
+    for i in 0..<self.vma_areas.count:
+        if self.vma_areas[i].base == virtual_addr and self.vma_areas[i].size == size:
+            j: mutable usize = i
+            while j + 1 < self.vma_areas.count:
+                self.vma_areas[j] <- self.vma_areas[j + 1]
+                j <- j + 1
+            _ = self.vma_areas.pop()
+            return 0
+    return -1
+
+def MemoryManager_QueryProtection(self: MemoryManager&, addr: VAddr, start: mutable VAddr&, end: mutable VAddr&, prot: mutable u32&) -> s32:
+    for i in 0..<self.vma_areas.count:
+        if VirtualMemoryArea_Contains(self.vma_areas[i], addr, 1):
+            start <- self.vma_areas[i].base
+            end <- self.vma_areas[i].base + self.vma_areas[i].size.uintptr()
+            prot <- self.vma_areas[i].prot
+            return 0
+    return -1
+
+def MemoryManager_Protect(self: mutable MemoryManager&, addr: VAddr, size: u64, prot: MemoryProt) -> s32:
+    AddressSpace_Protect(self.address_space.ref[mutable AddressSpace&], addr, size, prot)
+    for i in 0..<self.vma_areas.count:
+        if self.vma_areas[i].base == addr and self.vma_areas[i].size == size:
+            self.vma_areas[i].prot <- prot
+            return 0
+    return -1
+
+def MemoryManager_NameVirtualRange(self: mutable MemoryManager&, virtual_addr: VAddr, size: u64, name: static u8&) -> void:
+    for i in 0..<self.vma_areas.count:
+        if self.vma_areas[i].base == virtual_addr and self.vma_areas[i].size == size:
+            self.vma_areas[i].name <- name
+            return
+
+def MemoryManager_InvalidateMemory(self: MemoryManager&, addr: VAddr, size: u64) -> void:
+    _ = self
+    _ = addr
+    _ = size

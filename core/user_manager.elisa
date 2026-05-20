@@ -1,0 +1,157 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../common/types.elisa"
+
+struct User:
+    user_id: mutable s32
+    user_name: mutable static u8&
+    user_color: mutable u32
+    player_index: mutable int
+    logged_in: mutable bool
+    shadnet_npid: mutable static u8&
+    shadnet_password: mutable static u8&
+    shadnet_token: mutable static u8&
+    shadnet_email: mutable static u8&
+    shadnet_enabled: mutable bool
+
+struct Users:
+    user: mutable darray[User]
+    commit_hash: mutable static u8&
+
+struct LoggedInUsers:
+    user_id: mutable s32[4]
+
+struct UserManager:
+    users: mutable Users
+    default_user_id: mutable s32
+    logged_in_users: mutable LoggedInUsers
+
+def User_New(id: s32, name: static u8&, color: u32, player_index: int) -> User:
+    return User(id, name, color, player_index, false, "", "", "", "", false)
+
+def Users_New() -> Users:
+    return Users([], "")
+
+def LoggedInUsers_New() -> LoggedInUsers:
+    return LoggedInUsers([-1, -1, -1, -1])
+
+def UserManager_New() -> UserManager:
+    return UserManager(Users_New(), -1, LoggedInUsers_New())
+
+def UserManager_AddUser(self: mutable UserManager&, user: User) -> bool:
+    for i in 0..<self.users.user.count:
+        if self.users.user[i].user_id == user.user_id:
+            return false
+    self.users.user.push(user)
+    if self.default_user_id < 0:
+        self.default_user_id <- user.user_id
+    return true
+
+def UserManager_RemoveUser(self: mutable UserManager&, user_id: s32) -> bool:
+    idx: mutable int = -1
+    for i in 0..<self.users.user.count:
+        if self.users.user[i].user_id == user_id:
+            idx <- i.int()
+    if idx < 0:
+        return false
+    i: mutable usize = idx.usize()
+    while i + 1 < self.users.user.count:
+        self.users.user[i] <- self.users.user[i + 1]
+        i <- i + 1
+    _ = self.users.user.pop()
+    slot: mutable usize = 0
+    while slot < 4:
+        if self.logged_in_users.user_id[slot] == user_id:
+            self.logged_in_users.user_id[slot] <- -1
+        slot <- slot + 1
+    if self.default_user_id == user_id:
+        if self.users.user.count > 0:
+            self.default_user_id <- self.users.user[0].user_id
+        else:
+            self.default_user_id <- -1
+    return true
+
+def UserManager_RenameUser(self: mutable UserManager&, user_id: s32, new_name: static u8&) -> bool:
+    u: mutable User&? = UserManager_GetUserByID(self.ref[mutable UserManager&], user_id)
+    if u == null:
+        return false
+    u.user_name <- new_name
+    return true
+
+def UserManager_GetUserByID(self: mutable UserManager&, user_id: s32) -> mutable User&?:
+    for i in 0..<self.users.user.count:
+        if self.users.user[i].user_id == user_id:
+            return self.users.user[i].ref[mutable User&]
+    return null
+
+def UserManager_GetUserByPlayerIndex(self: mutable UserManager&, index: s32) -> mutable User&?:
+    for i in 0..<self.users.user.count:
+        if self.users.user[i].player_index == index.int():
+            return self.users.user[i].ref[mutable User&]
+    return null
+
+def UserManager_GetAllUsers(self: UserManager&) -> darray[User]:
+    return self.users.user
+
+def UserManager_CreateDefaultUsers() -> Users:
+    out: mutable Users = Users_New()
+    out.user.push(User_New(1, "User 1", 0x0049A5FF.u32(), 0))
+    out.user.push(User_New(2, "User 2", 0xD64541FF.u32(), 1))
+    out.user.push(User_New(3, "User 3", 0x2E8B57FF.u32(), 2))
+    out.user.push(User_New(4, "User 4", 0x8A2BE2FF.u32(), 3))
+    return out
+
+def UserManager_SetDefaultUser(self: mutable UserManager&, user_id: u32) -> bool:
+    if UserManager_GetUserByID(self.ref[mutable UserManager&], user_id.s32()) == null:
+        return false
+    self.default_user_id <- user_id.s32()
+    return true
+
+def UserManager_GetDefaultUser(self: UserManager&) -> User:
+    for i in 0..<self.users.user.count:
+        if self.users.user[i].user_id == self.default_user_id:
+            return self.users.user[i]
+    if self.users.user.count > 0:
+        return self.users.user[0]
+    return User_New(-1, "", 0, 0)
+
+def UserManager_SetControllerPort(self: mutable UserManager&, user_id: u32, port: int) -> void:
+    u: mutable User&? = UserManager_GetUserByID(self.ref[mutable UserManager&], user_id.s32())
+    if u == null:
+        return
+    u.player_index <- port
+
+def UserManager_GetValidUsers(self: UserManager&) -> darray[User]:
+    out: mutable darray[User] = []
+    for i in 0..<self.users.user.count:
+        if self.users.user[i].user_id >= 0:
+            out.push(self.users.user[i])
+    return out
+
+def UserManager_GetLoggedInUsers(self: UserManager&) -> LoggedInUsers:
+    return self.logged_in_users
+
+def UserManager_LoginUser(self: mutable UserManager&, user_id: s32, player_index: s32) -> void:
+    if player_index < 0 or player_index >= 4:
+        return
+    user_ref: mutable User&? = UserManager_GetUserByID(self.ref[mutable UserManager&], user_id)
+    if user_ref == null:
+        return
+    user_ref.logged_in <- true
+    user_ref.player_index <- player_index.int()
+    self.logged_in_users.user_id[player_index.usize()] <- user_id
+
+def UserManager_LogoutUser(self: mutable UserManager&, user_id: s32) -> void:
+    user_ref: mutable User&? = UserManager_GetUserByID(self.ref[mutable UserManager&], user_id)
+    if user_ref != null:
+        user_ref.logged_in <- false
+    i: mutable usize = 0
+    while i < 4:
+        if self.logged_in_users.user_id[i] == user_id:
+            self.logged_in_users.user_id[i] <- -1
+        i <- i + 1
+
+def UserManager_Save(self: UserManager&) -> bool:
+    _ = self
+    return true

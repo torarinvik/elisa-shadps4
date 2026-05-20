@@ -12,14 +12,18 @@ const ORBIS_NET_MAX_SOCKETS: usize = 64
 const ORBIS_NET_RESOLVER_ASYNC: int = 1
 const ORBIS_NET_SEND_FLAGS: int = 0x40020000
 const ORBIS_NET_RECV_FLAGS: int = 0x40000000
+const ORBIS_NET_AF_UNIX: int = 1
 const ORBIS_NET_AF_INET: int = 2
 const ORBIS_NET_AF_INET6: int = 28
+const ORBIS_NET_SOCK_DGRAM_P2P: int = 6
+const ORBIS_NET_SOCK_STREAM_P2P: int = 10
 const NATIVE_AF_INET: int = 2
 const NATIVE_AF_INET6: int = 30
 
 struct OrbisNetSocketState:
     in_use: mutable bool
     handle: mutable i64
+    socket_type: mutable int
     connected: mutable bool
     listening: mutable bool
     shutdown_state: mutable int
@@ -55,6 +59,12 @@ def sceNet_RequireInit() -> int:
         sceNet_SetErr(ORBIS_NET_ERROR_ENOTINIT)
         return ORBIS_NET_ERROR_ENOTINIT
     return ORBIS_OK
+
+def sceNet_IsP2PSocket(socket_index: int) -> bool:
+    if socket_index < 0 or socket_index >= ORBIS_NET_MAX_SOCKETS.int():
+        return false
+    slot: mutable OrbisNetSocketState& = g_net_sockets[socket_index.usize()].ref[mutable OrbisNetSocketState&]
+    return slot.socket_type == ORBIS_NET_SOCK_DGRAM_P2P or slot.socket_type == ORBIS_NET_SOCK_STREAM_P2P
 
 def sceNet_FfiIntResult(result: int, fallback: int) -> int:
     if result < 0:
@@ -126,6 +136,9 @@ def sceNetAccept(s: i64, addr: u8&?, paddrlen: u32&?) -> int:
     if idx < 0:
         sceNet_SetErr(ORBIS_NET_ERROR_ENOTSOCK)
         return ORBIS_NET_ERROR_ENOTSOCK
+    if sceNet_IsP2PSocket(idx):
+        sceNet_SetErr(ORBIS_NET_ERROR_EAGAIN)
+        return ORBIS_NET_ERROR_EAGAIN
     accepted_fd: int = c_accept(s.int(), addr, paddrlen)
     if accepted_fd < 0:
         return sceNet_FfiIntResult(accepted_fd, ORBIS_NET_ERROR_EBADF)
@@ -136,6 +149,7 @@ def sceNetAccept(s: i64, addr: u8&?, paddrlen: u32&?) -> int:
         if not candidate.in_use:
             candidate.in_use <- true
             candidate.handle <- accepted_fd.i64()
+            candidate.socket_type <- 0
             candidate.connected <- true
             client_idx <- i.int()
             break
@@ -199,6 +213,9 @@ def sceNetBind(s: i64, addr: u8&?, addrlen: int) -> int:
     if idx < 0:
         sceNet_SetErr(ORBIS_NET_ERROR_ENOTSOCK)
         return ORBIS_NET_ERROR_ENOTSOCK
+    if sceNet_IsP2PSocket(idx):
+        sceNet_SetErr(ORBIS_OK)
+        return ORBIS_OK
     result: int = c_bind(s.int(), addr, addrlen.u32())
     return sceNet_FfiIntResult(result, ORBIS_NET_ERROR_EINVAL)
 
@@ -485,6 +502,9 @@ def sceNetConnect(s: i64, addr: u8&?, addrlen: int) -> int:
     if idx < 0:
         sceNet_SetErr(ORBIS_NET_ERROR_ENOTSOCK)
         return ORBIS_NET_ERROR_ENOTSOCK
+    if sceNet_IsP2PSocket(idx):
+        sceNet_SetErr(ORBIS_OK)
+        return ORBIS_OK
     result: int = c_connect(s.int(), addr, addrlen.u32())
     if result < 0:
         return sceNet_FfiIntResult(result, ORBIS_NET_ERROR_ECONNREFUSED)
@@ -648,6 +668,9 @@ def sceNetGetpeername(s: i64, addr: u8&?, paddrlen: u32&?) -> int:
     if idx < 0:
         sceNet_SetErr(ORBIS_NET_ERROR_ENOTSOCK)
         return ORBIS_NET_ERROR_ENOTSOCK
+    if sceNet_IsP2PSocket(idx):
+        sceNet_SetErr(ORBIS_OK)
+        return ORBIS_OK
     result: int = c_getpeername(s.int(), addr, paddrlen)
     return sceNet_FfiIntResult(result, ORBIS_NET_ERROR_EBADF)
 
@@ -675,6 +698,9 @@ def sceNetGetsockname(s: i64, addr: u8&?, paddrlen: u32&?) -> int:
     if idx < 0:
         sceNet_SetErr(ORBIS_NET_ERROR_ENOTSOCK)
         return ORBIS_NET_ERROR_ENOTSOCK
+    if sceNet_IsP2PSocket(idx):
+        sceNet_SetErr(ORBIS_OK)
+        return ORBIS_OK
     result: int = c_getsockname(s.int(), addr, paddrlen)
     return sceNet_FfiIntResult(result, ORBIS_NET_ERROR_EBADF)
 
@@ -686,6 +712,9 @@ def sceNetGetsockopt(s: i64, level: int, optname: int, optval: u8&?, optlen: u32
     if idx < 0:
         sceNet_SetErr(ORBIS_NET_ERROR_ENOTSOCK)
         return ORBIS_NET_ERROR_ENOTSOCK
+    if sceNet_IsP2PSocket(idx):
+        sceNet_SetErr(ORBIS_OK)
+        return ORBIS_OK
     result: int = c_getsockopt(s.int(), level, optname, optval, optlen)
     return sceNet_FfiIntResult(result, ORBIS_NET_ERROR_EBADF)
 
@@ -766,6 +795,9 @@ def sceNetListen(s: i64, backlog: int) -> int:
     if idx < 0:
         sceNet_SetErr(ORBIS_NET_ERROR_ENOTSOCK)
         return ORBIS_NET_ERROR_ENOTSOCK
+    if sceNet_IsP2PSocket(idx):
+        sceNet_SetErr(ORBIS_OK)
+        return ORBIS_OK
     result: int = c_listen(s.int(), backlog)
     if result < 0:
         return sceNet_FfiIntResult(result, ORBIS_NET_ERROR_EINVAL)
@@ -822,6 +854,9 @@ def sceNetRecv(s: i64, buf: u8&?, len: u64, flags: int) -> int:
     if idx < 0:
         sceNet_SetErr(ORBIS_NET_ERROR_ENOTSOCK)
         return ORBIS_NET_ERROR_ENOTSOCK
+    if sceNet_IsP2PSocket(idx):
+        sceNet_SetErr(ORBIS_NET_ERROR_EAGAIN)
+        return ORBIS_NET_ERROR_EAGAIN
     result: isize = c_recvfrom(s.int(), buf, len.usize(), flags | ORBIS_NET_RECV_FLAGS, null, null)
     return sceNet_FfiSizeResult(result, ORBIS_NET_ERROR_EAGAIN)
 
@@ -833,6 +868,9 @@ def sceNetRecvfrom(s: i64, buf: u8&?, len: u64, flags: int, addr: u8&?, paddrlen
     if idx < 0:
         sceNet_SetErr(ORBIS_NET_ERROR_ENOTSOCK)
         return ORBIS_NET_ERROR_ENOTSOCK
+    if sceNet_IsP2PSocket(idx):
+        sceNet_SetErr(ORBIS_NET_ERROR_EAGAIN)
+        return ORBIS_NET_ERROR_EAGAIN
     result: isize = c_recvfrom(s.int(), buf, len.usize(), flags | ORBIS_NET_RECV_FLAGS, addr, paddrlen)
     return sceNet_FfiSizeResult(result, ORBIS_NET_ERROR_EAGAIN)
 
@@ -844,6 +882,9 @@ def sceNetRecvmsg(s: i64, msg: u8&?, flags: int) -> int:
     if idx < 0:
         sceNet_SetErr(ORBIS_NET_ERROR_ENOTSOCK)
         return ORBIS_NET_ERROR_ENOTSOCK
+    if sceNet_IsP2PSocket(idx):
+        sceNet_SetErr(ORBIS_NET_ERROR_EAGAIN)
+        return ORBIS_NET_ERROR_EAGAIN
     result: isize = c_recvmsg(s.int(), msg, flags | ORBIS_NET_RECV_FLAGS)
     return sceNet_FfiSizeResult(result, ORBIS_NET_ERROR_EAGAIN)
 
@@ -910,6 +951,9 @@ def sceNetSend(s: i64, buf: u8&?, len: u64, flags: int) -> int:
     if idx < 0:
         sceNet_SetErr(ORBIS_NET_ERROR_ENOTSOCK)
         return ORBIS_NET_ERROR_ENOTSOCK
+    if sceNet_IsP2PSocket(idx):
+        sceNet_SetErr(ORBIS_NET_ERROR_EAGAIN)
+        return ORBIS_NET_ERROR_EAGAIN
     result: isize = c_sendto(s.int(), buf, len.usize(), flags | ORBIS_NET_SEND_FLAGS, null, 0)
     return sceNet_FfiSizeResult(result, ORBIS_NET_ERROR_EPIPE)
 
@@ -921,6 +965,9 @@ def sceNetSendmsg(s: i64, msg: u8&?, flags: int) -> int:
     if idx < 0:
         sceNet_SetErr(ORBIS_NET_ERROR_ENOTSOCK)
         return ORBIS_NET_ERROR_ENOTSOCK
+    if sceNet_IsP2PSocket(idx):
+        sceNet_SetErr(ORBIS_NET_ERROR_EAGAIN)
+        return ORBIS_NET_ERROR_EAGAIN
     result: isize = c_sendmsg(s.int(), msg, flags | ORBIS_NET_SEND_FLAGS)
     return sceNet_FfiSizeResult(result, ORBIS_NET_ERROR_EPIPE)
 
@@ -932,6 +979,9 @@ def sceNetSendto(s: i64, buf: u8&?, len: u64, flags: int, addr: u8&?, addrlen: i
     if idx < 0:
         sceNet_SetErr(ORBIS_NET_ERROR_ENOTSOCK)
         return ORBIS_NET_ERROR_ENOTSOCK
+    if sceNet_IsP2PSocket(idx):
+        sceNet_SetErr(ORBIS_NET_ERROR_EAGAIN)
+        return ORBIS_NET_ERROR_EAGAIN
     result: isize = c_sendto(s.int(), buf, len.usize(), flags | ORBIS_NET_SEND_FLAGS, addr, addrlen.u32())
     return sceNet_FfiSizeResult(result, ORBIS_NET_ERROR_EPIPE)
 
@@ -959,6 +1009,9 @@ def sceNetSetsockopt(s: i64, level: int, optname: int, optval: u8&?, optlen: u32
     if idx < 0:
         sceNet_SetErr(ORBIS_NET_ERROR_ENOTSOCK)
         return ORBIS_NET_ERROR_ENOTSOCK
+    if sceNet_IsP2PSocket(idx):
+        sceNet_SetErr(ORBIS_OK)
+        return ORBIS_OK
     result: int = c_setsockopt(s.int(), level, optname, optval, optlen)
     return sceNet_FfiIntResult(result, ORBIS_NET_ERROR_EBADF)
 
@@ -1056,6 +1109,7 @@ def sceNetSocket(name: u8&?, family: int, type: int, protocol: int) -> i64:
         if not slot.in_use:
             slot.in_use <- true
             slot.handle <- native_fd.i64()
+            slot.socket_type <- type
             slot.connected <- false
             slot.listening <- false
             slot.shutdown_state <- 0

@@ -1,0 +1,190 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../common/types.elisa"
+
+const SCE_DBG_MAX_NAME_LENGTH: usize = 256
+const SCE_DBG_MAX_SEGMENTS: usize = 4
+const SCE_DBG_NUM_FINGERPRINT: usize = 20
+
+struct OrbisKernelModuleSegmentInfo:
+    address: mutable VAddr
+    size: mutable u32
+    prot: mutable s32
+
+struct OrbisKernelModuleInfo:
+    st_size: mutable u64
+    name: mutable static u8&
+    num_segments: mutable u32
+
+struct OrbisKernelModuleInfoEx:
+    st_size: mutable u64
+    name: mutable static u8&
+    id: mutable s32
+    tls_index: mutable u32
+    tls_init_addr: mutable VAddr
+    tls_init_size: mutable u32
+    tls_size: mutable u32
+    tls_offset: mutable u32
+    tls_align: mutable u32
+    init_proc_addr: mutable VAddr
+    fini_proc_addr: mutable VAddr
+    eh_frame_hdr_addr: mutable VAddr
+    eh_frame_addr: mutable VAddr
+    eh_frame_hdr_size: mutable u32
+    eh_frame_size: mutable u32
+    segment_count: mutable u32
+
+struct ModuleInfo:
+    name: mutable static u8&
+    value: mutable u64
+    enc_id: mutable static u8&
+
+struct LibraryInfo:
+    name: mutable static u8&
+    value: mutable u64
+    enc_id: mutable static u8&
+
+struct ThreadLocalImage:
+    align: mutable u32
+    image_size: mutable u32
+    offset: mutable u32
+    modid: mutable u32
+    image_virtual_addr: mutable VAddr
+    init_image_size: mutable u32
+
+struct DynamicModuleInfo:
+    init_virtual_addr: mutable u64
+    fini_virtual_addr: mutable u64
+    import_modules: mutable darray[ModuleInfo]
+    export_modules: mutable darray[ModuleInfo]
+    import_libs: mutable darray[LibraryInfo]
+    export_libs: mutable darray[LibraryInfo]
+    filename: mutable static u8&
+
+struct Module:
+    file: mutable static u8&
+    name: mutable static u8&
+    base_virtual_addr: mutable VAddr
+    proc_param_virtual_addr: mutable VAddr
+    eh_frame_hdr_addr: mutable VAddr
+    eh_frame_addr: mutable VAddr
+    eh_frame_hdr_size: mutable u32
+    eh_frame_size: mutable u32
+    tls: mutable ThreadLocalImage
+    info: mutable OrbisKernelModuleInfo
+    dynamic_info: mutable DynamicModuleInfo
+    is_shared_lib: mutable bool
+    is_valid: mutable bool
+
+def DynamicModuleInfo_New() -> DynamicModuleInfo:
+    return DynamicModuleInfo(0, 0, [], [], [], [], "")
+
+def Module_New(file: static u8&, name: static u8&, base_virtual_addr: VAddr, is_shared_lib: bool) -> Module:
+    info: OrbisKernelModuleInfo = OrbisKernelModuleInfo(0x160.u64(), name, 0)
+    tls: ThreadLocalImage = ThreadLocalImage(0, 0, 0, 0, 0.uintptr(), 0)
+    return Module(
+        file,
+        name,
+        base_virtual_addr,
+        0.uintptr(),
+        0.uintptr(),
+        0.uintptr(),
+        0,
+        0,
+        tls,
+        info,
+        DynamicModuleInfo_New(),
+        is_shared_lib,
+        base_virtual_addr != 0.uintptr()
+    )
+
+def Module_GetBaseAddress(self: Module&) -> VAddr:
+    return self.base_virtual_addr
+
+def Module_GetEntryAddress(self: Module&, elf_entry: VAddr) -> VAddr:
+    return self.base_virtual_addr + elf_entry
+
+def Module_GetModuleInfo(self: Module&) -> OrbisKernelModuleInfo:
+    return self.info
+
+def Module_IsValid(self: Module&) -> bool:
+    return self.is_valid
+
+def Module_IsSharedLib(self: Module&) -> bool:
+    return self.is_shared_lib
+
+def Module_GetProcParam(self: Module&) -> VAddr:
+    return self.proc_param_virtual_addr
+
+def Module_GetImportModules(self: Module&) -> darray[ModuleInfo]:
+    return self.dynamic_info.import_modules
+
+def Module_GetExportModules(self: Module&) -> darray[ModuleInfo]:
+    return self.dynamic_info.export_modules
+
+def Module_GetImportLibs(self: Module&) -> darray[LibraryInfo]:
+    return self.dynamic_info.import_libs
+
+def Module_GetExportLibs(self: Module&) -> darray[LibraryInfo]:
+    return self.dynamic_info.export_libs
+
+def Module_Start(self: mutable Module&, args: u64, argp: void&?, param: void&?) -> s32:
+    _ = args
+    _ = argp
+    _ = param
+    if not self.is_valid:
+        return -1
+    return 0
+
+def Module_LoadModuleToMemory(self: mutable Module&, max_tls_index: mutable u32&) -> void:
+    max_tls_index <- max_tls_index + 1
+    self.tls.modid <- max_tls_index
+
+def Module_LoadDynamicInfo(self: mutable Module&) -> void:
+    _ = self
+
+def Module_LoadSymbols(self: mutable Module&) -> void:
+    _ = self
+
+def Module_FindByName(self: Module&, symbol_name: static u8&) -> uintptr:
+    _ = symbol_name
+    return self.base_virtual_addr
+
+def Module_GetModuleInfoEx(self: Module&) -> OrbisKernelModuleInfoEx:
+    return OrbisKernelModuleInfoEx(
+        0x1A8.u64(),
+        self.name,
+        0,
+        self.tls.modid,
+        self.tls.image_virtual_addr,
+        self.tls.init_image_size,
+        self.tls.image_size,
+        self.tls.offset,
+        self.tls.align,
+        self.dynamic_info.init_virtual_addr.uintptr(),
+        self.dynamic_info.fini_virtual_addr.uintptr(),
+        self.eh_frame_hdr_addr,
+        self.eh_frame_addr,
+        self.eh_frame_hdr_size,
+        self.eh_frame_size,
+        self.info.num_segments
+    )
+
+def Module_FindModule(self: Module&, id: static u8&) -> ModuleInfo?:
+    for i in 0..<self.dynamic_info.import_modules.count:
+        if streq(self.dynamic_info.import_modules[i].name, id) == 1:
+            return self.dynamic_info.import_modules[i]
+    for i in 0..<self.dynamic_info.export_modules.count:
+        if streq(self.dynamic_info.export_modules[i].name, id) == 1:
+            return self.dynamic_info.export_modules[i]
+    return null
+
+def Module_FindLibrary(self: Module&, id: static u8&) -> LibraryInfo?:
+    for i in 0..<self.dynamic_info.import_libs.count:
+        if streq(self.dynamic_info.import_libs[i].name, id) == 1:
+            return self.dynamic_info.import_libs[i]
+    for i in 0..<self.dynamic_info.export_libs.count:
+        if streq(self.dynamic_info.export_libs[i].name, id) == 1:
+            return self.dynamic_info.export_libs[i]
+    return null
