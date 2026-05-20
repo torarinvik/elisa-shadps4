@@ -1,0 +1,119 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./value.elisa"
+
+const IR_MAX_BLOCK_INSTRUCTIONS: u32 = 1024u32
+const IR_MAX_BLOCK_EDGES: u32 = 64u32
+
+struct ShaderIrBlock:
+    definition: mutable u32
+    is_ssa_sealed: mutable bool
+    cfg_block_id: mutable u32
+
+    inst_count: mutable u32
+    insts: mutable ShaderIrInst[1024]
+
+    imm_predecessor_count: mutable u32
+    imm_predecessors: mutable u32[64]
+
+    imm_successor_count: mutable u32
+    imm_successors: mutable u32[64]
+
+    ssa_sreg_values: mutable ShaderIrValue[104]
+    ssa_sbit_values: mutable ShaderIrValue[104]
+    ssa_vreg_values: mutable ShaderIrValue[256]
+
+
+def ShaderIrBlock_New() -> ShaderIrBlock:
+    out: mutable ShaderIrBlock = zeroed
+    out.cfg_block_id <- 0xFFFFFFFFu32
+    return out
+
+
+def ShaderIrBlock_AppendNewInst(block: mutable ShaderIrBlock&, opcode: u32, args: ShaderIrValue[6], arg_count: u32) -> u32:
+    assert block.inst_count < IR_MAX_BLOCK_INSTRUCTIONS
+    idx: u32 = block.inst_count
+    block.inst_count <- block.inst_count + 1u32
+    block.insts[idx.usize()] <- ShaderIrInst_New(opcode, 0u64)
+    if opcode != IR_OPCODE_PHI:
+        block.insts[idx.usize()].arg_count <- arg_count
+        a: mutable u32 = 0u32
+        while a < arg_count and a < IR_MAX_ARGS:
+            block.insts[idx.usize()].args[a.usize()] <- args[a.usize()]
+            a <- a + 1u32
+    return idx
+
+
+def ShaderIrBlock_PrependNewInstCopy(block: mutable ShaderIrBlock&, insertion_index: u32, base_inst: ShaderIrInst) -> u32:
+    assert insertion_index <= block.inst_count
+    assert block.inst_count < IR_MAX_BLOCK_INSTRUCTIONS
+    i: mutable u32 = block.inst_count
+    while i > insertion_index:
+        block.insts[i.usize()] <- block.insts[(i - 1u32).usize()]
+        i <- i - 1u32
+    block.insts[insertion_index.usize()] <- base_inst
+    block.inst_count <- block.inst_count + 1u32
+    return insertion_index
+
+
+def ShaderIrBlock_PrependNewInst(block: mutable ShaderIrBlock&, insertion_index: u32, opcode: u32, args: ShaderIrValue[6], arg_count: u32, flags_u64: u64) -> u32:
+    assert insertion_index <= block.inst_count
+    assert block.inst_count < IR_MAX_BLOCK_INSTRUCTIONS
+    i: mutable u32 = block.inst_count
+    while i > insertion_index:
+        block.insts[i.usize()] <- block.insts[(i - 1u32).usize()]
+        i <- i - 1u32
+    block.insts[insertion_index.usize()] <- ShaderIrInst_New(opcode, flags_u64)
+    if opcode != IR_OPCODE_PHI:
+        block.insts[insertion_index.usize()].arg_count <- arg_count
+        a: mutable u32 = 0u32
+        while a < arg_count and a < IR_MAX_ARGS:
+            block.insts[insertion_index.usize()].args[a.usize()] <- args[a.usize()]
+            a <- a + 1u32
+    block.inst_count <- block.inst_count + 1u32
+    return insertion_index
+
+
+def ShaderIrBlock_AddBranch(block: mutable ShaderIrBlock&, succ_block_index: u32, succ_block: mutable ShaderIrBlock&) -> void:
+    i: mutable u32 = 0u32
+    while i < block.imm_successor_count:
+        if block.imm_successors[i.usize()] == succ_block_index:
+            assert false
+        i <- i + 1u32
+
+    j: mutable u32 = 0u32
+    while j < succ_block.imm_predecessor_count:
+        if succ_block.imm_predecessors[j.usize()] == block.cfg_block_id:
+            assert false
+        j <- j + 1u32
+
+    assert block.imm_successor_count < IR_MAX_BLOCK_EDGES
+    assert succ_block.imm_predecessor_count < IR_MAX_BLOCK_EDGES
+
+    block.imm_successors[block.imm_successor_count.usize()] <- succ_block_index
+    block.imm_successor_count <- block.imm_successor_count + 1u32
+
+    succ_block.imm_predecessors[succ_block.imm_predecessor_count.usize()] <- block.cfg_block_id
+    succ_block.imm_predecessor_count <- succ_block.imm_predecessor_count + 1u32
+
+
+def ShaderIrBlock_SsaSeal(block: mutable ShaderIrBlock&) -> void:
+    block.is_ssa_sealed <- true
+
+
+def ShaderIrBlock_IsSsaSealed(block: ShaderIrBlock) -> bool:
+    return block.is_ssa_sealed
+
+
+def ShaderIrBlock_Empty(block: ShaderIrBlock) -> bool:
+    return block.inst_count == 0u32
+
+
+def ShaderIrBlock_Size(block: ShaderIrBlock) -> u32:
+    return block.inst_count
+
+
+def ShaderIrBlock_Dump(block: ShaderIrBlock) -> static u8&:
+    _ = block
+    return "Block"

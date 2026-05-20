@@ -1,0 +1,183 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../common/types.elisa"
+include "./loader/symbols_resolver.elisa"
+include "./memory.elisa"
+include "./module.elisa"
+
+struct OrbisKernelMemParam:
+    size: mutable u64
+    extended_page_table: mutable uintptr
+    flexible_memory_size: mutable uintptr
+    extended_memory_1: mutable uintptr
+    extended_gpu_page_table: mutable uintptr
+    extended_memory_2: mutable uintptr
+    extended_cpu_page_table: mutable uintptr
+
+struct OrbisProcParam:
+    size: mutable u64
+    magic: mutable u32
+    entry_count: mutable u32
+    sdk_version: mutable u64
+    process_name: mutable static u8&
+    main_thread_name: mutable static u8&
+    main_thread_prio: mutable uintptr
+    main_thread_stack_size: mutable uintptr
+    libc_param: mutable uintptr
+    mem_param: mutable uintptr
+    fs_param: mutable uintptr
+    process_preload_enable: mutable uintptr
+    unknown1: mutable u64
+
+struct EntryParams:
+    argc: mutable int
+    padding: mutable u32
+    entry_addr: mutable VAddr
+    argv: mutable darray[static u8&]
+
+struct Linker:
+    memory: mutable uintptr
+    dtv_generation_counter: mutable u32
+    static_tls_size: mutable usize
+    max_tls_index: mutable u32
+    num_static_modules: mutable u32
+    modules: mutable darray[Module]
+    hle_symbols: mutable SymbolsResolver
+    last_execute_argc: mutable usize
+
+global mutable linker_singleton: Linker = Linker(
+    0.uintptr(),
+    1,
+    0,
+    0,
+    0,
+    [],
+    SymbolsResolver_new(),
+    0
+)
+
+def Linker_New() -> Linker:
+    return Linker(
+        Memory_Instance().ref[mutable MemoryManager&].cast[uintptr],
+        1,
+        0,
+        0,
+        0,
+        [],
+        SymbolsResolver_new(),
+        0
+    )
+
+def Linker_GetInstance() -> mutable Linker&:
+    return linker_singleton.ref[mutable Linker&]
+
+def Linker_Reset() -> void:
+    linker_singleton <- Linker_New()
+
+def Linker_GetHLESymbols(self: mutable Linker&) -> mutable SymbolsResolver&:
+    return self.hle_symbols.ref[mutable SymbolsResolver&]
+
+def Linker_GetProcParam(self: Linker&) -> VAddr:
+    if self.modules.count == 0:
+        return 0.uintptr()
+    return self.modules[0].proc_param_virtual_addr
+
+def Linker_GetModule(self: mutable Linker&, index: s32) -> mutable Module&?:
+    if index < 0 or index >= self.modules.count.int():
+        return null
+    return self.modules[index.usize()].ref[mutable Module&]
+
+def Linker_FindByName(self: Linker&, name: static u8&) -> u32:
+    for i in 0..<self.modules.count:
+        if streq(self.modules[i].file, name) == 1:
+            return i.u32()
+    return 0xFFFFFFFF.u32()
+
+def Linker_MaxTlsIndex(self: Linker&) -> u32:
+    return self.max_tls_index
+
+def Linker_GenerationCounter(self: Linker&) -> u32:
+    return self.dtv_generation_counter
+
+def Linker_StaticTlsSize(self: Linker&) -> usize:
+    return self.static_tls_size
+
+def Linker_RelocateAnyImports(self: mutable Linker&, module: mutable Module&) -> void:
+    _ = self
+    _ = module
+
+def Linker_RelocateAllImports(self: mutable Linker&) -> void:
+    _ = self
+
+def Linker_AdvanceGenerationCounter(self: mutable Linker&) -> void:
+    self.dtv_generation_counter <- self.dtv_generation_counter + 1
+
+def Linker_TlsGetAddr(self: Linker&, module_index: u64, offset: u64) -> uintptr:
+    _ = self
+    return (module_index * 0x1000 + offset).uintptr()
+
+def Linker_AllocateTlsForThread(self: mutable Linker&, is_primary: bool) -> uintptr:
+    _ = is_primary
+    self.static_tls_size <- self.static_tls_size + 0x100
+    return (0x7000000000.u64() + self.static_tls_size.u64()).uintptr()
+
+def Linker_FreeTlsForNonPrimaryThread(self: mutable Linker&, pointer: void&?) -> void:
+    _ = self
+    _ = pointer
+
+def Linker_LoadModule(self: mutable Linker&, elf_name: static u8&, is_dynamic: bool) -> s32:
+    base: VAddr = (0x5000000000.u64() + (self.modules.count * 0x200000).u64()).uintptr()
+    module_name: static u8& = elf_name
+    module: Module = Module_New(elf_name, module_name, base, is_dynamic)
+    Module_LoadModuleToMemory(module.ref[mutable Module&], self.max_tls_index.ref[mutable u32&])
+    self.modules.push(module)
+    return (self.modules.count - 1).s32()
+
+def Linker_LoadAndStartModule(self: mutable Linker&, path: static u8&, args: u64, argp: void&?, p_res: mutable int&?) -> s32:
+    idx: s32 = Linker_LoadModule(self.ref[mutable Linker&], path, true)
+    if idx < 0:
+        if p_res != null:
+            p_res <- idx
+        return idx
+    mod_ref: mutable Module&? = Linker_GetModule(self.ref[mutable Linker&], idx)
+    if mod_ref == null:
+        if p_res != null:
+            p_res <- -1
+        return -1
+    start_result: s32 = Module_Start(mod_ref, args, argp, null)
+    if p_res != null:
+        p_res <- start_result
+    return idx
+
+def Linker_FindByAddress(self: mutable Linker&, address: VAddr) -> mutable Module&?:
+    for i in 0..<self.modules.count:
+        mod: Module = self.modules[i]
+        if mod.base_virtual_addr <= address and address < mod.base_virtual_addr + 0x100000.uintptr():
+            return self.modules[i].ref[mutable Module&]
+    return null
+
+def Linker_Relocate(self: mutable Linker&, module: mutable Module&) -> void:
+    _ = self
+    _ = module
+
+def Linker_Resolve(self: mutable Linker&, name: static u8&, module: mutable Module&, out_virtual_address: mutable u64&) -> bool:
+    _ = module
+    out_virtual_address <- 0
+    i: mutable usize = 0
+    while i < self.hle_symbols.symbols.len:
+        sym: SymbolRecord = self.hle_symbols.symbols[i]
+        if streq(sym.name, name) == 1 or streq(sym.nid_name, name) == 1:
+            out_virtual_address <- sym.virtual_address
+            return true
+        i <- i + 1
+    return false
+
+def Linker_Execute(self: mutable Linker&, args: darray[static u8&]) -> void:
+    self.last_execute_argc <- args.count
+
+def Linker_DebugDump(self: Linker&) -> darray[static u8&]:
+    out: mutable darray[static u8&] = []
+    for i in 0..<self.modules.count:
+        out.push(self.modules[i].name)
+    return out
