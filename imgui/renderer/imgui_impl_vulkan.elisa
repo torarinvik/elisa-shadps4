@@ -1,0 +1,513 @@
+# SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+# Based on imgui_impl_vulkan.cpp from Dear ImGui repository
+
+permission Vulkan:
+    Init
+    Draw
+    Memory
+    Upload
+
+# ---------------------------------------------------------------------------
+# Data structures
+# ---------------------------------------------------------------------------
+
+struct ImGuiVkRenderBuffer:
+    buffer_memory: mutable u64   # VkDeviceMemory (non-dispatchable handle)
+    buffer_size: mutable u64     # VkDeviceSize
+    buffer: mutable u64          # VkBuffer
+
+struct ImGuiVkFrameRenderBuffers:
+    vertex: mutable ImGuiVkRenderBuffer
+    index: mutable ImGuiVkRenderBuffer
+
+struct ImGuiVkInitInfo:
+    instance: mutable void&?           # VkInstance
+    physical_device: mutable void&?    # VkPhysicalDevice
+    device: mutable void&?             # VkDevice
+    queue_family: mutable u32
+    queue: mutable void&?              # VkQueue
+    image_count: mutable u32
+    min_allocation_size: mutable u64   # VkDeviceSize
+    pipeline_cache: mutable u64        # VkPipelineCache
+    subpass: mutable u32
+    color_attachment_format: mutable i32  # VkFormat for pipeline_rendering_create_info
+    allocator: mutable void&?
+    check_vk_result_fn: mutable void&?  # function pointer: void(*)(VkResult)
+
+struct ImGuiVkData:
+    init_info: mutable ImGuiVkInitInfo
+    buffer_memory_alignment: mutable u64
+    descriptor_pool: mutable u64         # VkDescriptorPool
+    descriptor_set_layout: mutable u64   # VkDescriptorSetLayout
+    pipeline_layout: mutable u64         # VkPipelineLayout
+    pipeline: mutable u64                # VkPipeline
+    shader_module_vert: mutable u64      # VkShaderModule
+    shader_module_frag: mutable u64      # VkShaderModule
+    command_pool: mutable u64            # VkCommandPool
+    simple_sampler: mutable u64          # VkSampler
+    font_memory: mutable u64             # VkDeviceMemory
+    font_image: mutable u64              # VkImage
+    font_view: mutable u64               # VkImageView
+    font_texture: mutable void&?         # ImTextureID
+    font_command_buffer: mutable void&?  # VkCommandBuffer (dispatchable)
+    render_buf_index: mutable u32
+    render_buf_count: mutable u32
+    # frame render buffers: stored as opaque pointer to heap-allocated array
+    frame_render_buffers: mutable void&?
+    enabled_blending: mutable bool
+
+global mutable g_imgui_vk_backend: ImGuiVkData = zeroed
+
+# ---------------------------------------------------------------------------
+# External Vulkan API wrappers
+# ---------------------------------------------------------------------------
+
+extern imgui_vk_get_backend_data() -> void&? effects[Unsafe.RawExtern]
+
+extern vk_create_descriptor_pool(device: void&?, max_sets: u32, pool_size_count: u32, pool_sizes: void&?, allocator: void&?, out: mutable u64&) -> i32 effects[Vulkan.Init, Unsafe.RawExtern]
+extern vk_create_descriptor_set_layout(device: void&?, binding_count: u32, bindings: void&?, allocator: void&?, out: mutable u64&) -> i32 effects[Vulkan.Init, Unsafe.RawExtern]
+extern vk_create_pipeline_layout(device: void&?, set_layout: u64, push_constant_size: u32, allocator: void&?, out: mutable u64&) -> i32 effects[Vulkan.Init, Unsafe.RawExtern]
+extern vk_create_shader_module(device: void&?, code: void&?, code_size: usize, allocator: void&?, out: mutable u64&) -> i32 effects[Vulkan.Init, Unsafe.RawExtern]
+extern vk_create_pipeline(device: void&?, cache: u64, vert: u64, frag: u64, layout: u64, color_format: i32, allocator: void&?, out: mutable u64&) -> i32 effects[Vulkan.Init, Unsafe.RawExtern]
+extern vk_create_sampler(device: void&?, allocator: void&?, out: mutable u64&) -> i32 effects[Vulkan.Init, Unsafe.RawExtern]
+extern vk_create_command_pool(device: void&?, queue_family: u32, allocator: void&?, out: mutable u64&) -> i32 effects[Vulkan.Init, Unsafe.RawExtern]
+
+extern vk_destroy_descriptor_pool(device: void&?, pool: u64, allocator: void&?) -> void effects[Vulkan.Init, Unsafe.RawExtern]
+extern vk_destroy_descriptor_set_layout(device: void&?, layout: u64, allocator: void&?) -> void effects[Vulkan.Init, Unsafe.RawExtern]
+extern vk_destroy_pipeline_layout(device: void&?, layout: u64, allocator: void&?) -> void effects[Vulkan.Init, Unsafe.RawExtern]
+extern vk_destroy_pipeline(device: void&?, pipeline: u64, allocator: void&?) -> void effects[Vulkan.Init, Unsafe.RawExtern]
+extern vk_destroy_shader_module(device: void&?, shader: u64, allocator: void&?) -> void effects[Vulkan.Init, Unsafe.RawExtern]
+extern vk_destroy_sampler(device: void&?, sampler: u64, allocator: void&?) -> void effects[Vulkan.Init, Unsafe.RawExtern]
+extern vk_destroy_command_pool(device: void&?, pool: u64, allocator: void&?) -> void effects[Vulkan.Init, Unsafe.RawExtern]
+extern vk_destroy_image(device: void&?, image: u64, allocator: void&?) -> void effects[Vulkan.Memory, Unsafe.RawExtern]
+extern vk_destroy_image_view(device: void&?, view: u64, allocator: void&?) -> void effects[Vulkan.Memory, Unsafe.RawExtern]
+extern vk_free_memory(device: void&?, memory: u64, allocator: void&?) -> void effects[Vulkan.Memory, Unsafe.RawExtern]
+extern vk_destroy_buffer(device: void&?, buffer: u64, allocator: void&?) -> void effects[Vulkan.Memory, Unsafe.RawExtern]
+
+extern vk_device_wait_idle(device: void&?) -> i32 effects[Vulkan.Init, Unsafe.RawExtern]
+extern vk_queue_wait_idle(queue: void&?) -> i32 effects[Vulkan.Init, Unsafe.RawExtern]
+extern vk_queue_submit(queue: void&?, cmd_buf: void&?) -> i32 effects[Vulkan.Upload, Unsafe.RawExtern]
+
+extern vk_allocate_command_buffers(device: void&?, pool: u64, count: u32, out: mutable void&?) -> i32 effects[Vulkan.Upload, Unsafe.RawExtern]
+extern vk_free_command_buffers(device: void&?, pool: u64, cmd_buf: void&?) -> void effects[Vulkan.Upload, Unsafe.RawExtern]
+extern vk_begin_command_buffer(cmd_buf: void&?, one_time: bool) -> i32 effects[Vulkan.Upload, Unsafe.RawExtern]
+extern vk_end_command_buffer(cmd_buf: void&?) -> i32 effects[Vulkan.Upload, Unsafe.RawExtern]
+
+extern vk_allocate_descriptor_sets(device: void&?, pool: u64, layout: u64, count: u32, out: mutable u64&) -> i32 effects[Vulkan.Draw, Unsafe.RawExtern]
+extern vk_free_descriptor_sets(device: void&?, pool: u64, set: u64) -> i32 effects[Vulkan.Draw, Unsafe.RawExtern]
+extern vk_update_descriptor_sets_combined_image_sampler(device: void&?, dst_set: u64, sampler: u64, image_view: u64, image_layout: i32) -> void effects[Vulkan.Draw, Unsafe.RawExtern]
+
+extern vk_create_image(device: void&?, format: i32, width: u32, height: u32, usage: u32, allocator: void&?, out: mutable u64&) -> i32 effects[Vulkan.Memory, Unsafe.RawExtern]
+extern vk_create_image_view(device: void&?, image: u64, format: i32, allocator: void&?, out: mutable u64&) -> i32 effects[Vulkan.Memory, Unsafe.RawExtern]
+extern vk_create_buffer(device: void&?, size: u64, usage: u32, allocator: void&?, out: mutable u64&) -> i32 effects[Vulkan.Memory, Unsafe.RawExtern]
+extern vk_allocate_memory(device: void&?, size: u64, type_index: u32, allocator: void&?, out: mutable u64&) -> i32 effects[Vulkan.Memory, Unsafe.RawExtern]
+extern vk_bind_image_memory(device: void&?, image: u64, memory: u64, offset: u64) -> i32 effects[Vulkan.Memory, Unsafe.RawExtern]
+extern vk_bind_buffer_memory(device: void&?, buffer: u64, memory: u64, offset: u64) -> i32 effects[Vulkan.Memory, Unsafe.RawExtern]
+extern vk_map_memory(device: void&?, memory: u64, offset: u64, size: u64, out: mutable void&?) -> i32 effects[Vulkan.Memory, Unsafe.RawExtern]
+extern vk_unmap_memory(device: void&?, memory: u64) -> void effects[Vulkan.Memory, Unsafe.RawExtern]
+extern vk_flush_mapped_memory_ranges(device: void&?, memory: u64, size: u64) -> i32 effects[Vulkan.Memory, Unsafe.RawExtern]
+
+extern vk_find_memory_type(physical_device: void&?, properties: u32, type_bits: u32) -> u32 effects[Vulkan.Memory, Unsafe.RawExtern]
+extern vk_get_image_memory_requirements(device: void&?, image: u64, size_out: mutable u64&, type_bits_out: mutable u32&, alignment_out: mutable u64&) -> void effects[Vulkan.Memory, Unsafe.RawExtern]
+extern vk_get_buffer_memory_requirements(device: void&?, buffer: u64, size_out: mutable u64&, type_bits_out: mutable u32&, alignment_out: mutable u64&) -> void effects[Vulkan.Memory, Unsafe.RawExtern]
+
+extern vk_cmd_bind_pipeline(cmd_buf: void&?, pipeline: u64) -> void effects[Vulkan.Draw, Unsafe.RawExtern]
+extern vk_cmd_bind_vertex_buffers(cmd_buf: void&?, buffer: u64) -> void effects[Vulkan.Draw, Unsafe.RawExtern]
+extern vk_cmd_bind_index_buffer(cmd_buf: void&?, buffer: u64, use_uint32: bool) -> void effects[Vulkan.Draw, Unsafe.RawExtern]
+extern vk_cmd_set_viewport(cmd_buf: void&?, x: f32, y: f32, w: f32, h: f32) -> void effects[Vulkan.Draw, Unsafe.RawExtern]
+extern vk_cmd_set_scissor(cmd_buf: void&?, x: i32, y: i32, w: u32, h: u32) -> void effects[Vulkan.Draw, Unsafe.RawExtern]
+extern vk_cmd_push_constants_scale_translate(cmd_buf: void&?, layout: u64, scale_x: f32, scale_y: f32, translate_x: f32, translate_y: f32) -> void effects[Vulkan.Draw, Unsafe.RawExtern]
+extern vk_cmd_bind_descriptor_sets(cmd_buf: void&?, layout: u64, desc_set: u64) -> void effects[Vulkan.Draw, Unsafe.RawExtern]
+extern vk_cmd_draw_indexed(cmd_buf: void&?, elem_count: u32, idx_offset: u32, vtx_offset: i32) -> void effects[Vulkan.Draw, Unsafe.RawExtern]
+extern vk_cmd_pipeline_barrier_upload_to_transfer(cmd_buf: void&?, image: u64) -> void effects[Vulkan.Upload, Unsafe.RawExtern]
+extern vk_cmd_pipeline_barrier_transfer_to_shader(cmd_buf: void&?, image: u64) -> void effects[Vulkan.Upload, Unsafe.RawExtern]
+extern vk_cmd_copy_buffer_to_image(cmd_buf: void&?, buffer: u64, image: u64, width: u32, height: u32) -> void effects[Vulkan.Upload, Unsafe.RawExtern]
+
+extern vk_get_spir_v_vert_shader(size_out: mutable usize&) -> void&? effects[Vulkan.Init, Unsafe.RawExtern]
+extern vk_get_spir_v_frag_shader(size_out: mutable usize&) -> void&? effects[Vulkan.Init, Unsafe.RawExtern]
+
+extern imgui_vk_new_texture(descriptor_set: u64) -> void&? effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_delete_texture(texture: void&?) -> void effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_texture_get_descriptor_set(texture: void&?) -> u64 effects[Vulkan.Draw, Unsafe.RawExtern]
+
+extern imgui_vk_get_io() -> void&? effects[Unsafe.RawExtern]
+extern imgui_vk_get_fonts_atlas(io: void&?) -> void&? effects[Unsafe.RawExtern]
+extern imgui_vk_fonts_get_tex_data_as_rgba32(atlas: void&?, pixels_out: mutable void&?, width_out: mutable i32&, height_out: mutable i32&) -> void effects[Unsafe.RawExtern]
+extern imgui_vk_fonts_set_tex_id(atlas: void&?, tex_id: void&?) -> void effects[Unsafe.RawExtern]
+extern imgui_vk_get_current_context() -> void&? effects[Unsafe.RawExtern]
+extern imgui_vk_get_io_backend_renderer_userdata(io: void&?) -> void&? effects[Unsafe.RawExtern]
+extern imgui_vk_set_io_backend_renderer_userdata(io: void&?, data: void&?) -> void effects[Unsafe.RawExtern]
+extern imgui_vk_set_io_backend_renderer_name(io: void&?, name: static u8&?) -> void effects[Unsafe.RawExtern]
+extern imgui_vk_set_io_backend_flags_has_renderer_or(io: void&?) -> void effects[Unsafe.RawExtern]
+extern imgui_vk_clear_io_backend_flags_renderer(io: void&?) -> void effects[Unsafe.RawExtern]
+extern imgui_vk_im_new_data() -> void&? effects[Vulkan.Init, Unsafe.RawExtern]
+extern imgui_vk_im_delete_data(data: void&?) -> void effects[Vulkan.Init, Unsafe.RawExtern]
+
+extern imgui_vk_alloc_frame_render_buffers(count: u32) -> void&? effects[Vulkan.Memory, Unsafe.RawExtern]
+extern imgui_vk_free_frame_render_buffers(bufs: void&?) -> void effects[Vulkan.Memory, Unsafe.RawExtern]
+extern imgui_vk_get_frame_render_buffer(bufs: void&?, index: u32) -> void&? effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_frb_get_vertex(frb: void&?) -> void&? effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_frb_get_index(frb: void&?) -> void&? effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_rb_get_buffer(rb: void&?) -> u64 effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_rb_get_buffer_size(rb: void&?) -> u64 effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_rb_set_buffer(rb: void&?, buffer: u64) -> void effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_rb_set_buffer_size(rb: void&?, size: u64) -> void effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_rb_set_buffer_memory(rb: void&?, memory: u64) -> void effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_rb_get_buffer_memory(rb: void&?) -> u64 effects[Vulkan.Draw, Unsafe.RawExtern]
+
+extern imgui_vk_draw_data_get_total_vtx_count(draw_data: void&?) -> i32 effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_draw_data_get_total_idx_count(draw_data: void&?) -> i32 effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_draw_data_get_display_size_x(draw_data: void&?) -> f32 effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_draw_data_get_display_size_y(draw_data: void&?) -> f32 effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_draw_data_get_display_pos_x(draw_data: void&?) -> f32 effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_draw_data_get_display_pos_y(draw_data: void&?) -> f32 effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_draw_data_get_framebuffer_scale_x(draw_data: void&?) -> f32 effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_draw_data_get_framebuffer_scale_y(draw_data: void&?) -> f32 effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_draw_data_get_cmd_lists_count(draw_data: void&?) -> i32 effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_draw_data_get_cmd_list(draw_data: void&?, index: i32) -> void&? effects[Vulkan.Draw, Unsafe.RawExtern]
+
+extern imgui_vk_cmd_list_copy_vtx_to_mapped(cmd_list: void&?, dst: void&?) -> void effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_cmd_list_copy_idx_to_mapped(cmd_list: void&?, dst: void&?) -> void effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_cmd_list_get_vtx_buffer_size(cmd_list: void&?) -> i32 effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_cmd_list_get_idx_buffer_size(cmd_list: void&?) -> i32 effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_cmd_list_get_cmd_buffer_size(cmd_list: void&?) -> i32 effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_cmd_list_get_cmd(cmd_list: void&?, index: i32) -> void&? effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_cmd_get_user_callback(cmd: void&?) -> void&? effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_cmd_is_reset_render_state(cmd: void&?) -> bool effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_cmd_invoke_user_callback(cmd: void&?, cmd_list: void&?) -> void effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_cmd_get_clip_rect_x(cmd: void&?) -> f32 effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_cmd_get_clip_rect_y(cmd: void&?) -> f32 effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_cmd_get_clip_rect_z(cmd: void&?) -> f32 effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_cmd_get_clip_rect_w(cmd: void&?) -> f32 effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_cmd_get_elem_count(cmd: void&?) -> u32 effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_cmd_get_idx_offset(cmd: void&?) -> u32 effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_cmd_get_vtx_offset(cmd: void&?) -> i32 effects[Vulkan.Draw, Unsafe.RawExtern]
+extern imgui_vk_cmd_get_texture_id(cmd: void&?) -> void&? effects[Vulkan.Draw, Unsafe.RawExtern]
+
+extern vk_is_moltenvk_safe_mode() -> bool effects[Unsafe.RawExtern]
+extern vk_is_finite_gpu_wait_timeout_enabled() -> bool effects[Unsafe.RawExtern]
+extern vk_gpu_wait_timeout_ns() -> u64 effects[Unsafe.RawExtern]
+extern vk_log_gpu_wait_timeout(name: static u8&?, timeout: u64) -> void effects[Unsafe.RawExtern]
+extern vk_create_fence(device: void&?, allocator: void&?, out: mutable u64&) -> i32 effects[Vulkan.Init, Unsafe.RawExtern]
+extern vk_destroy_fence(device: void&?, fence: u64, allocator: void&?) -> void effects[Vulkan.Init, Unsafe.RawExtern]
+extern vk_wait_for_fence(device: void&?, fence: u64, timeout: u64) -> i32 effects[Vulkan.Upload, Unsafe.RawExtern]
+extern vk_queue_submit_with_fence(queue: void&?, cmd_buf: void&?, fence: u64) -> i32 effects[Vulkan.Upload, Unsafe.RawExtern]
+
+# VkResult values
+const VK_SUCCESS: i32 = 0
+const VK_TIMEOUT: i32 = 2
+const VK_NULL_HANDLE_U64: u64 = 0u64
+
+# VkFormat values
+const VK_FORMAT_R8G8B8A8_UNORM: i32 = 37
+
+# VkImageLayout values
+const VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL: i32 = 5
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def imgui_vk_align_buffer_size(size: u64, alignment: u64) -> u64:
+    return (size + alignment - 1u64) & (alignment.bitnot())
+
+def imgui_vk_max_u64(a: u64, b: u64) -> u64:
+    if a >= b:
+        return a
+    return b
+
+def imgui_vk_submit_and_wait(queue: void&?, device: void&?, cmd_buf: void&?, wait_name: static u8&?) -> bool:
+    can Vulkan.Upload:
+        if not vk_is_finite_gpu_wait_timeout_enabled():
+            _ = vk_queue_submit(queue, cmd_buf)
+            _ = vk_queue_wait_idle(queue)
+            return true
+        fence: mutable u64 = VK_NULL_HANDLE_U64
+        result: i32 = vk_create_fence(device, null, fence.ref[mutable u64&])
+        if result != VK_SUCCESS:
+            return false
+        _ = vk_queue_submit_with_fence(queue, cmd_buf, fence)
+        timeout: u64 = vk_gpu_wait_timeout_ns()
+        wait_result: i32 = vk_wait_for_fence(device, fence, timeout)
+        if wait_result == VK_SUCCESS:
+            vk_destroy_fence(device, fence, null)
+            return true
+        if wait_result == VK_TIMEOUT:
+            vk_log_gpu_wait_timeout(wait_name, timeout)
+        vk_destroy_fence(device, fence, null)
+        return false
+
+# ---------------------------------------------------------------------------
+# UploadTextureData operations
+# ---------------------------------------------------------------------------
+
+def ImGui_Vulkan_UploadTextureData_Upload(upload_info: void&?) -> void:
+    can Vulkan.Upload:
+        _ = upload_info
+
+def ImGui_Vulkan_UploadTextureData_Destroy(upload_info: void&?) -> void:
+    can Vulkan.Memory:
+        _ = upload_info
+
+# ---------------------------------------------------------------------------
+# Texture registration
+# ---------------------------------------------------------------------------
+
+def ImGui_Vulkan_AddTexture(image_view: u64, image_layout: i32, sampler: u64) -> void&?:
+    can Vulkan.Draw:
+        descriptor_set: mutable u64 = 0u64
+        _ = vk_allocate_descriptor_sets(g_imgui_vk_backend.init_info.device, g_imgui_vk_backend.descriptor_pool, g_imgui_vk_backend.descriptor_set_layout, 1u32, descriptor_set.ref[mutable u64&])
+        effective_sampler: mutable u64 = sampler
+        if effective_sampler == VK_NULL_HANDLE_U64:
+            effective_sampler <- g_imgui_vk_backend.simple_sampler
+        vk_update_descriptor_sets_combined_image_sampler(g_imgui_vk_backend.init_info.device, descriptor_set, effective_sampler, image_view, image_layout)
+        return imgui_vk_new_texture(descriptor_set)
+
+def ImGui_Vulkan_RemoveTexture(texture: void&?) -> void:
+    can Vulkan.Draw:
+        descriptor_set: u64 = imgui_vk_texture_get_descriptor_set(texture)
+        _ = vk_free_descriptor_sets(g_imgui_vk_backend.init_info.device, g_imgui_vk_backend.descriptor_pool, descriptor_set)
+        imgui_vk_delete_texture(texture)
+
+# ---------------------------------------------------------------------------
+# Create / destroy render buffers
+# ---------------------------------------------------------------------------
+
+def imgui_vk_create_or_resize_buffer(rb: void&?, new_size: u64, usage_vertex: bool) -> void:
+    can Vulkan.Memory:
+        old_buf: u64 = imgui_vk_rb_get_buffer(rb)
+        old_mem: u64 = imgui_vk_rb_get_buffer_memory(rb)
+        if old_buf != VK_NULL_HANDLE_U64:
+            vk_destroy_buffer(g_imgui_vk_backend.init_info.device, old_buf, g_imgui_vk_backend.init_info.allocator)
+        if old_mem != VK_NULL_HANDLE_U64:
+            vk_free_memory(g_imgui_vk_backend.init_info.device, old_mem, g_imgui_vk_backend.init_info.allocator)
+
+        aligned_size: u64 = imgui_vk_align_buffer_size(imgui_vk_max_u64(g_imgui_vk_backend.init_info.min_allocation_size, new_size), g_imgui_vk_backend.buffer_memory_alignment)
+        usage: u32 = if usage_vertex: 0x80u32 else: 0x40u32  # VK_BUFFER_USAGE_VERTEX_BUFFER_BIT / INDEX
+        new_buf: mutable u64 = VK_NULL_HANDLE_U64
+        _ = vk_create_buffer(g_imgui_vk_backend.init_info.device, aligned_size, usage, g_imgui_vk_backend.init_info.allocator, new_buf.ref[mutable u64&])
+        imgui_vk_rb_set_buffer(rb, new_buf)
+
+        req_size: mutable u64 = 0u64
+        req_type_bits: mutable u32 = 0u32
+        req_align: mutable u64 = 0u64
+        vk_get_buffer_memory_requirements(g_imgui_vk_backend.init_info.device, new_buf, req_size.ref[mutable u64&], req_type_bits.ref[mutable u32&], req_align.ref[mutable u64&])
+        g_imgui_vk_backend.buffer_memory_alignment <- imgui_vk_max_u64(g_imgui_vk_backend.buffer_memory_alignment, req_align)
+
+        # VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT = 0x2
+        type_index: u32 = vk_find_memory_type(g_imgui_vk_backend.init_info.physical_device, 0x2u32, req_type_bits)
+        new_mem: mutable u64 = VK_NULL_HANDLE_U64
+        _ = vk_allocate_memory(g_imgui_vk_backend.init_info.device, req_size, type_index, g_imgui_vk_backend.init_info.allocator, new_mem.ref[mutable u64&])
+        imgui_vk_rb_set_buffer_memory(rb, new_mem)
+        _ = vk_bind_buffer_memory(g_imgui_vk_backend.init_info.device, new_buf, new_mem, 0u64)
+        imgui_vk_rb_set_buffer_size(rb, aligned_size)
+
+# ---------------------------------------------------------------------------
+# Render draw data
+# ---------------------------------------------------------------------------
+
+def ImGui_Vulkan_SetupRenderState(draw_data: void&?, pipeline: u64, cmd_buf: void&?, frb: void&?, fb_width: i32, fb_height: i32) -> void:
+    can Vulkan.Draw:
+        vk_cmd_bind_pipeline(cmd_buf, pipeline)
+        vtx_rb: void&? = imgui_vk_frb_get_vertex(frb)
+        idx_rb: void&? = imgui_vk_frb_get_index(frb)
+        total_vtx: i32 = imgui_vk_draw_data_get_total_vtx_count(draw_data)
+        if total_vtx > 0:
+            vk_cmd_bind_vertex_buffers(cmd_buf, imgui_vk_rb_get_buffer(vtx_rb))
+            vk_cmd_bind_index_buffer(cmd_buf, imgui_vk_rb_get_buffer(idx_rb), false)
+        vk_cmd_set_viewport(cmd_buf, 0.0, 0.0, fb_width.f32(), fb_height.f32())
+        display_size_x: f32 = imgui_vk_draw_data_get_display_size_x(draw_data)
+        display_size_y: f32 = imgui_vk_draw_data_get_display_size_y(draw_data)
+        display_pos_x: f32 = imgui_vk_draw_data_get_display_pos_x(draw_data)
+        display_pos_y: f32 = imgui_vk_draw_data_get_display_pos_y(draw_data)
+        scale_x: f32 = 2.0 / display_size_x
+        scale_y: f32 = 2.0 / display_size_y
+        translate_x: f32 = -1.0 - display_pos_x * scale_x
+        translate_y: f32 = -1.0 - display_pos_y * scale_y
+        vk_cmd_push_constants_scale_translate(cmd_buf, g_imgui_vk_backend.pipeline_layout, scale_x, scale_y, translate_x, translate_y)
+
+def ImGui_Vulkan_RenderDrawData(draw_data: void&?, cmd_buf: void&?, pipeline: u64) -> void:
+    can Vulkan.Draw:
+        fb_scale_x: f32 = imgui_vk_draw_data_get_framebuffer_scale_x(draw_data)
+        fb_scale_y: f32 = imgui_vk_draw_data_get_framebuffer_scale_y(draw_data)
+        display_size_x: f32 = imgui_vk_draw_data_get_display_size_x(draw_data)
+        display_size_y: f32 = imgui_vk_draw_data_get_display_size_y(draw_data)
+        fb_width: i32 = (display_size_x * fb_scale_x).i32()
+        fb_height: i32 = (display_size_y * fb_scale_y).i32()
+        if fb_width <= 0 or fb_height <= 0:
+            return
+
+        effective_pipeline: mutable u64 = pipeline
+        if effective_pipeline == VK_NULL_HANDLE_U64:
+            effective_pipeline <- g_imgui_vk_backend.pipeline
+
+        wrb_count: u32 = g_imgui_vk_backend.render_buf_count
+        next_index: u32 = (g_imgui_vk_backend.render_buf_index + 1u32) % wrb_count
+        g_imgui_vk_backend.render_buf_index <- next_index
+        frb: void&? = imgui_vk_get_frame_render_buffer(g_imgui_vk_backend.frame_render_buffers, next_index)
+
+        total_vtx: i32 = imgui_vk_draw_data_get_total_vtx_count(draw_data)
+        total_idx: i32 = imgui_vk_draw_data_get_total_idx_count(draw_data)
+        if total_vtx > 0:
+            vertex_size: u64 = imgui_vk_align_buffer_size((total_vtx.u64()) * 20u64, g_imgui_vk_backend.buffer_memory_alignment)
+            index_size: u64 = imgui_vk_align_buffer_size((total_idx.u64()) * 2u64, g_imgui_vk_backend.buffer_memory_alignment)
+            vtx_rb: void&? = imgui_vk_frb_get_vertex(frb)
+            idx_rb: void&? = imgui_vk_frb_get_index(frb)
+            if imgui_vk_rb_get_buffer(vtx_rb) == VK_NULL_HANDLE_U64 or imgui_vk_rb_get_buffer_size(vtx_rb) < vertex_size:
+                imgui_vk_create_or_resize_buffer(vtx_rb, vertex_size, true)
+            if imgui_vk_rb_get_buffer(idx_rb) == VK_NULL_HANDLE_U64 or imgui_vk_rb_get_buffer_size(idx_rb) < index_size:
+                imgui_vk_create_or_resize_buffer(idx_rb, index_size, false)
+
+            vtx_mapped: mutable void&? = null
+            idx_mapped: mutable void&? = null
+            _ = vk_map_memory(g_imgui_vk_backend.init_info.device, imgui_vk_rb_get_buffer_memory(vtx_rb), 0u64, vertex_size, vtx_mapped.ref[mutable void&?])
+            _ = vk_map_memory(g_imgui_vk_backend.init_info.device, imgui_vk_rb_get_buffer_memory(idx_rb), 0u64, index_size, idx_mapped.ref[mutable void&?])
+
+            n: mutable i32 = 0
+            while n < imgui_vk_draw_data_get_cmd_lists_count(draw_data):
+                cmd_list: void&? = imgui_vk_draw_data_get_cmd_list(draw_data, n)
+                imgui_vk_cmd_list_copy_vtx_to_mapped(cmd_list, vtx_mapped)
+                imgui_vk_cmd_list_copy_idx_to_mapped(cmd_list, idx_mapped)
+                n <- n + 1
+
+            _ = vk_flush_mapped_memory_ranges(g_imgui_vk_backend.init_info.device, imgui_vk_rb_get_buffer_memory(vtx_rb), 0xFFFFFFFFFFFFFFFFu64)
+            _ = vk_flush_mapped_memory_ranges(g_imgui_vk_backend.init_info.device, imgui_vk_rb_get_buffer_memory(idx_rb), 0xFFFFFFFFFFFFFFFFu64)
+            vk_unmap_memory(g_imgui_vk_backend.init_info.device, imgui_vk_rb_get_buffer_memory(vtx_rb))
+            vk_unmap_memory(g_imgui_vk_backend.init_info.device, imgui_vk_rb_get_buffer_memory(idx_rb))
+
+        ImGui_Vulkan_SetupRenderState(draw_data, effective_pipeline, cmd_buf, frb, fb_width, fb_height)
+
+        clip_off_x: f32 = imgui_vk_draw_data_get_display_pos_x(draw_data)
+        clip_off_y: f32 = imgui_vk_draw_data_get_display_pos_y(draw_data)
+        clip_scale_x: f32 = imgui_vk_draw_data_get_framebuffer_scale_x(draw_data)
+        clip_scale_y: f32 = imgui_vk_draw_data_get_framebuffer_scale_y(draw_data)
+
+        global_vtx_offset: mutable i32 = 0
+        global_idx_offset: mutable i32 = 0
+        n: mutable i32 = 0
+        while n < imgui_vk_draw_data_get_cmd_lists_count(draw_data):
+            cmd_list: void&? = imgui_vk_draw_data_get_cmd_list(draw_data, n)
+            cmd_i: mutable i32 = 0
+            while cmd_i < imgui_vk_cmd_list_get_cmd_buffer_size(cmd_list):
+                pcmd: void&? = imgui_vk_cmd_list_get_cmd(cmd_list, cmd_i)
+                user_cb: void&? = imgui_vk_cmd_get_user_callback(pcmd)
+                if user_cb != null:
+                    if imgui_vk_cmd_is_reset_render_state(pcmd):
+                        ImGui_Vulkan_SetupRenderState(draw_data, effective_pipeline, cmd_buf, frb, fb_width, fb_height)
+                    else:
+                        imgui_vk_cmd_invoke_user_callback(pcmd, cmd_list)
+                else:
+                    clip_x: f32 = (imgui_vk_cmd_get_clip_rect_x(pcmd) - clip_off_x) * clip_scale_x
+                    clip_y: f32 = (imgui_vk_cmd_get_clip_rect_y(pcmd) - clip_off_y) * clip_scale_y
+                    clip_z: f32 = (imgui_vk_cmd_get_clip_rect_z(pcmd) - clip_off_x) * clip_scale_x
+                    clip_w: f32 = (imgui_vk_cmd_get_clip_rect_w(pcmd) - clip_off_y) * clip_scale_y
+                    clip_min_x: mutable f32 = clip_x
+                    clip_min_y: mutable f32 = clip_y
+                    clip_max_x: mutable f32 = clip_z
+                    clip_max_y: mutable f32 = clip_w
+                    if clip_min_x < 0.0:
+                        clip_min_x <- 0.0
+                    if clip_min_y < 0.0:
+                        clip_min_y <- 0.0
+                    if clip_max_x > fb_width.f32():
+                        clip_max_x <- fb_width.f32()
+                    if clip_max_y > fb_height.f32():
+                        clip_max_y <- fb_height.f32()
+                    if clip_max_x <= clip_min_x or clip_max_y <= clip_min_y:
+                        cmd_i <- cmd_i + 1
+                        continue
+                    vk_cmd_set_scissor(cmd_buf, clip_min_x.i32(), clip_min_y.i32(), (clip_max_x - clip_min_x).u32(), (clip_max_y - clip_min_y).u32())
+                    tex: void&? = imgui_vk_cmd_get_texture_id(pcmd)
+                    desc_set: u64 = imgui_vk_texture_get_descriptor_set(tex)
+                    vk_cmd_bind_descriptor_sets(cmd_buf, g_imgui_vk_backend.pipeline_layout, desc_set)
+                    vk_cmd_draw_indexed(cmd_buf, imgui_vk_cmd_get_elem_count(pcmd), imgui_vk_cmd_get_idx_offset(pcmd) + global_idx_offset.u32(), imgui_vk_cmd_get_vtx_offset(pcmd) + global_vtx_offset)
+                cmd_i <- cmd_i + 1
+            global_idx_offset <- global_idx_offset + imgui_vk_cmd_list_get_idx_buffer_size(cmd_list)
+            global_vtx_offset <- global_vtx_offset + imgui_vk_cmd_list_get_vtx_buffer_size(cmd_list)
+            n <- n + 1
+
+# ---------------------------------------------------------------------------
+# Init / Shutdown
+# ---------------------------------------------------------------------------
+
+def ImGui_Vulkan_Init(info: ImGuiVkInitInfo) -> bool:
+    can Vulkan.Init:
+        io: void&? = imgui_vk_get_io()
+        imgui_vk_set_io_backend_renderer_name(io, "imgui_impl_vulkan_shadps4")
+        imgui_vk_set_io_backend_flags_has_renderer_or(io)
+
+        g_imgui_vk_backend.init_info <- info
+        g_imgui_vk_backend.buffer_memory_alignment <- 256u64
+        g_imgui_vk_backend.enabled_blending <- true
+        g_imgui_vk_backend.render_buf_count <- info.image_count
+        g_imgui_vk_backend.render_buf_index <- 0u32
+        g_imgui_vk_backend.frame_render_buffers <- imgui_vk_alloc_frame_render_buffers(info.image_count)
+
+        imgui_vk_set_io_backend_renderer_userdata(io, g_imgui_vk_backend.ref[mutable ImGuiVkData&].cast[void&?])
+
+        _ = vk_create_command_pool(info.device, info.queue_family, info.allocator, g_imgui_vk_backend.command_pool.ref[mutable u64&])
+        _ = vk_create_descriptor_pool(info.device, 1000u32, 0u32, null, info.allocator, g_imgui_vk_backend.descriptor_pool.ref[mutable u64&])
+        _ = vk_create_descriptor_set_layout(info.device, 1u32, null, info.allocator, g_imgui_vk_backend.descriptor_set_layout.ref[mutable u64&])
+        _ = vk_create_pipeline_layout(info.device, g_imgui_vk_backend.descriptor_set_layout, 16u32, info.allocator, g_imgui_vk_backend.pipeline_layout.ref[mutable u64&])
+        _ = vk_create_sampler(info.device, info.allocator, g_imgui_vk_backend.simple_sampler.ref[mutable u64&])
+
+        vert_size: mutable usize = 0usize
+        frag_size: mutable usize = 0usize
+        vert_code: void&? = vk_get_spir_v_vert_shader(vert_size.ref[mutable usize&])
+        frag_code: void&? = vk_get_spir_v_frag_shader(frag_size.ref[mutable usize&])
+        _ = vk_create_shader_module(info.device, vert_code, vert_size, info.allocator, g_imgui_vk_backend.shader_module_vert.ref[mutable u64&])
+        _ = vk_create_shader_module(info.device, frag_code, frag_size, info.allocator, g_imgui_vk_backend.shader_module_frag.ref[mutable u64&])
+        _ = vk_create_pipeline(info.device, info.pipeline_cache, g_imgui_vk_backend.shader_module_vert, g_imgui_vk_backend.shader_module_frag, g_imgui_vk_backend.pipeline_layout, info.color_attachment_format, info.allocator, g_imgui_vk_backend.pipeline.ref[mutable u64&])
+
+        return true
+
+def ImGui_Vulkan_Shutdown() -> void:
+    can Vulkan.Init:
+        io: void&? = imgui_vk_get_io()
+        dev: void&? = g_imgui_vk_backend.init_info.device
+        alloc: void&? = g_imgui_vk_backend.init_info.allocator
+
+        imgui_vk_free_frame_render_buffers(g_imgui_vk_backend.frame_render_buffers)
+        g_imgui_vk_backend.frame_render_buffers <- null
+
+        if g_imgui_vk_backend.font_view != VK_NULL_HANDLE_U64:
+            vk_destroy_image_view(dev, g_imgui_vk_backend.font_view, alloc)
+            g_imgui_vk_backend.font_view <- VK_NULL_HANDLE_U64
+        if g_imgui_vk_backend.font_image != VK_NULL_HANDLE_U64:
+            vk_destroy_image(dev, g_imgui_vk_backend.font_image, alloc)
+            g_imgui_vk_backend.font_image <- VK_NULL_HANDLE_U64
+        if g_imgui_vk_backend.font_memory != VK_NULL_HANDLE_U64:
+            vk_free_memory(dev, g_imgui_vk_backend.font_memory, alloc)
+            g_imgui_vk_backend.font_memory <- VK_NULL_HANDLE_U64
+        if g_imgui_vk_backend.font_texture != null:
+            ImGui_Vulkan_RemoveTexture(g_imgui_vk_backend.font_texture)
+            g_imgui_vk_backend.font_texture <- null
+
+        vk_destroy_shader_module(dev, g_imgui_vk_backend.shader_module_vert, alloc)
+        vk_destroy_shader_module(dev, g_imgui_vk_backend.shader_module_frag, alloc)
+        vk_destroy_pipeline(dev, g_imgui_vk_backend.pipeline, alloc)
+        vk_destroy_pipeline_layout(dev, g_imgui_vk_backend.pipeline_layout, alloc)
+        vk_destroy_descriptor_set_layout(dev, g_imgui_vk_backend.descriptor_set_layout, alloc)
+        vk_destroy_descriptor_pool(dev, g_imgui_vk_backend.descriptor_pool, alloc)
+        vk_destroy_sampler(dev, g_imgui_vk_backend.simple_sampler, alloc)
+        vk_destroy_command_pool(dev, g_imgui_vk_backend.command_pool, alloc)
+
+        imgui_vk_set_io_backend_renderer_userdata(io, null)
+        imgui_vk_set_io_backend_renderer_name(io, null)
+        imgui_vk_clear_io_backend_flags_renderer(io)
+
+        g_imgui_vk_backend <- zeroed
+
+def ImGui_Vulkan_OnSurfaceFormatChange(surface_format: i32) -> void:
+    can Vulkan.Init:
+        dev: void&? = g_imgui_vk_backend.init_info.device
+        alloc: void&? = g_imgui_vk_backend.init_info.allocator
+        vk_destroy_pipeline(dev, g_imgui_vk_backend.pipeline, alloc)
+        g_imgui_vk_backend.pipeline <- VK_NULL_HANDLE_U64
+        g_imgui_vk_backend.init_info.color_attachment_format <- surface_format
+        _ = vk_create_pipeline(dev, g_imgui_vk_backend.init_info.pipeline_cache, g_imgui_vk_backend.shader_module_vert, g_imgui_vk_backend.shader_module_frag, g_imgui_vk_backend.pipeline_layout, surface_format, alloc, g_imgui_vk_backend.pipeline.ref[mutable u64&])
+
+def ImGui_Vulkan_SetBlendEnabled(enabled: bool) -> void:
+    g_imgui_vk_backend.enabled_blending <- enabled

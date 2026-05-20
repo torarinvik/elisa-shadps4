@@ -1,0 +1,243 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+const MAX_RESULTS: int = 1024
+const MAX_QUEUE: int = 1024
+const KB_2: u32 = 2048u32
+const KB_64: u32 = 65536u32
+const Z_OK: int = 0
+const Z_BUF_ERROR: int = -5
+
+@fixed_layout
+struct ZlibResultSlot:
+    request_id: mutable u64
+    length: mutable u32
+    status: mutable int
+    used: mutable bool
+
+@fixed_layout
+struct ZlibPendingSlot:
+    request_id: mutable u64
+    ready_at_usec: mutable u64
+    used: mutable bool
+
+extern uncompress(dst: mutable u8&, dst_len: mutable usize&, src: u8&, src_len: usize) -> int
+extern usleep(usec: u32) -> int
+
+global mutable g_started: bool = false
+global mutable g_next_request_id: u64 = 1u64
+global mutable g_test_delay_usec: u64 = 0u64
+
+global mutable g_done_q: u64[1024] = zeroed
+global mutable g_done_head: int = 0
+global mutable g_done_count: int = 0
+
+global mutable g_pending_q: ZlibPendingSlot[1024] = zeroed
+global mutable g_pending_head: int = 0
+global mutable g_pending_count: int = 0
+
+global mutable g_results: ZlibResultSlot[1024] = zeroed
+
+def zlib_async_reset_native_state() -> void:
+    g_done_head <- 0
+    g_done_count <- 0
+    g_pending_head <- 0
+    g_pending_count <- 0
+    g_next_request_id <- 1u64
+    i: mutable int = 0
+    trusted Unsafe.AssumeProgress:
+        while i < MAX_RESULTS:
+            g_results[i].request_id <- 0u64
+            g_results[i].length <- 0u32
+            g_results[i].status <- 0
+            g_results[i].used <- false
+            i <- i + 1
+    i <- 0
+    trusted Unsafe.AssumeProgress:
+        while i < MAX_QUEUE:
+            g_done_q[i] <- 0u64
+            g_pending_q[i].request_id <- 0u64
+            g_pending_q[i].ready_at_usec <- 0u64
+            g_pending_q[i].used <- false
+            i <- i + 1
+
+def zlib_store_result(request_id: u64, length: u32, status: int) -> void:
+    i: mutable int = 0
+    trusted Unsafe.AssumeProgress:
+        while i < MAX_RESULTS:
+            if not g_results[i].used:
+                g_results[i].used <- true
+                g_results[i].request_id <- request_id
+                g_results[i].length <- length
+                g_results[i].status <- status
+                return
+            i <- i + 1
+
+def zlib_push_done(request_id: u64) -> void:
+    if g_done_count >= MAX_QUEUE:
+        return
+    slot_index: int = (g_done_head + g_done_count) % MAX_QUEUE
+    g_done_q[slot_index] <- request_id
+    g_done_count <- g_done_count + 1
+
+def zlib_enqueue_pending(request_id: u64, ready_at_usec: u64) -> void:
+    if g_pending_count >= MAX_QUEUE:
+        return
+    slot_index: int = (g_pending_head + g_pending_count) % MAX_QUEUE
+    g_pending_q[slot_index].request_id <- request_id
+    g_pending_q[slot_index].ready_at_usec <- ready_at_usec
+    g_pending_q[slot_index].used <- true
+    g_pending_count <- g_pending_count + 1
+
+def zlib_promote_ready(now_usec: u64) -> void:
+    trusted Unsafe.AssumeProgress:
+        while g_pending_count > 0:
+            head: int = g_pending_head
+            if not g_pending_q[head].used:
+                g_pending_head <- (g_pending_head + 1) % MAX_QUEUE
+                g_pending_count <- g_pending_count - 1
+            else:
+                if g_pending_q[head].ready_at_usec > now_usec:
+                    return
+                zlib_push_done(g_pending_q[head].request_id)
+                g_pending_q[head].used <- false
+                g_pending_head <- (g_pending_head + 1) % MAX_QUEUE
+                g_pending_count <- g_pending_count - 1
+
+def zlib_next_pending_ready_usec() -> u64:
+    if g_pending_count <= 0:
+        return 0u64
+    head: int = g_pending_head
+    if g_pending_q[head].used:
+        return g_pending_q[head].ready_at_usec
+    return 0u64
+
+def zlib_pop_done(out_request_id: mutable u64&) -> bool:
+    if g_done_count <= 0:
+        return false
+    out_request_id <- g_done_q[g_done_head]
+    g_done_head <- (g_done_head + 1) % MAX_QUEUE
+    g_done_count <- g_done_count - 1
+    return true
+
+def elisa_zlib_async_initialize(buffer: void&?, length: u32) -> int:
+    _ = buffer
+    _ = length
+    if g_started:
+        return ORBIS_ZLIB_ERROR_ALREADY_INITIALIZED
+    zlib_async_reset_native_state()
+    g_started <- true
+    return ORBIS_OK
+
+def elisa_zlib_async_inflate(src: void&?, src_len: u32, dst: void&?, dst_len: u32, request_id: mutable u64&?) -> int:
+    if not g_started:
+        return ORBIS_ZLIB_ERROR_NOT_INITIALIZED
+    if src == null or src_len == 0u32 or dst == null or dst_len == 0u32 or request_id == null:
+        return ORBIS_ZLIB_ERROR_INVALID
+    if dst_len > KB_64 or (dst_len % KB_2) != 0u32:
+        return ORBIS_ZLIB_ERROR_INVALID
+    if g_pending_count >= MAX_QUEUE:
+        return ORBIS_ZLIB_ERROR_FATAL
+
+    id: u64 = g_next_request_id
+    g_next_request_id <- g_next_request_id + 1u64
+    request_id <- id
+
+    src_ref: u8& = src.cast[u8&]
+    dst_ref: mutable u8& = dst.cast[mutable u8&]
+    produced: mutable usize = dst_len.usize()
+    ret: int = uncompress(dst_ref, produced.ref[mutable usize&], src_ref, src_len.usize())
+
+    status: mutable int = ORBIS_ZLIB_ERROR_FATAL
+    if ret == Z_BUF_ERROR or produced.u32() >= dst_len:
+        status <- ORBIS_ZLIB_ERROR_NOSPACE
+    else:
+        if ret == Z_OK:
+            status <- ORBIS_OK
+
+    zlib_store_result(id, produced.u32(), status)
+
+    if g_test_delay_usec == 0u64:
+        zlib_push_done(id)
+    else:
+        ready: u64 = g_test_delay_usec
+        zlib_enqueue_pending(id, ready)
+    return ORBIS_OK
+
+def elisa_zlib_async_wait_for_done(request_id: mutable u64&?, timeout_ms: u32&?) -> int:
+    if not g_started:
+        return ORBIS_ZLIB_ERROR_NOT_INITIALIZED
+    if request_id == null:
+        return ORBIS_ZLIB_ERROR_INVALID
+
+    zlib_promote_ready(0u64)
+
+    if timeout_ms == null:
+        trusted Unsafe.AssumeProgress:
+            while g_done_count == 0:
+                if g_pending_count == 0:
+                    return ORBIS_ZLIB_ERROR_TIMEDOUT
+                remaining_usec: u64 = zlib_next_pending_ready_usec()
+                if remaining_usec == 0u64:
+                    zlib_promote_ready(0u64)
+                else:
+                    _ = usleep(remaining_usec.u32())
+                    zlib_promote_ready(remaining_usec)
+    else:
+        timeout_value: u32 = timeout_ms.cast[u32&]
+        timeout_usec: u64 = timeout_value.u64() * 1000u64
+        trusted Unsafe.AssumeProgress:
+            while g_done_count == 0:
+                if g_pending_count == 0:
+                    return ORBIS_ZLIB_ERROR_TIMEDOUT
+                if g_test_delay_usec > timeout_usec:
+                    g_test_delay_usec <- g_test_delay_usec - timeout_usec
+                    head: int = g_pending_head
+                    if g_pending_q[head].used:
+                        g_pending_q[head].ready_at_usec <- g_test_delay_usec
+                    if timeout_usec > 0u64:
+                        _ = usleep(timeout_usec.u32())
+                    return ORBIS_ZLIB_ERROR_TIMEDOUT
+                remaining_usec: u64 = zlib_next_pending_ready_usec()
+                if remaining_usec > timeout_usec:
+                    head: int = g_pending_head
+                    if g_pending_q[head].used:
+                        g_pending_q[head].ready_at_usec <- remaining_usec - timeout_usec
+                    if timeout_usec > 0u64:
+                        _ = usleep(timeout_usec.u32())
+                    return ORBIS_ZLIB_ERROR_TIMEDOUT
+                sleep_us: mutable u64 = remaining_usec
+                _ = usleep(sleep_us.u32())
+                zlib_promote_ready(remaining_usec)
+
+    done_id: mutable u64 = 0u64
+    if not zlib_pop_done(done_id.ref[mutable u64&]):
+        return ORBIS_ZLIB_ERROR_TIMEDOUT
+    request_id <- done_id
+    return ORBIS_OK
+
+def elisa_zlib_async_get_result(request_id: u64, dst_length: mutable u32&?, status: mutable int&?) -> int:
+    if not g_started:
+        return ORBIS_ZLIB_ERROR_NOT_INITIALIZED
+    if dst_length == null or status == null:
+        return ORBIS_ZLIB_ERROR_INVALID
+
+    i: mutable int = 0
+    trusted Unsafe.AssumeProgress:
+        while i < MAX_RESULTS:
+            if g_results[i].used and g_results[i].request_id == request_id:
+                dst_length <- g_results[i].length
+                status <- g_results[i].status
+                return ORBIS_OK
+            i <- i + 1
+    return ORBIS_ZLIB_ERROR_NOT_FOUND
+
+def elisa_zlib_async_finalize() -> int:
+    if not g_started:
+        return ORBIS_ZLIB_ERROR_NOT_INITIALIZED
+    g_started <- false
+    zlib_async_reset_native_state()
+    return ORBIS_OK
+
+def elisa_zlib_async_set_test_delay_usec(usec: u64) -> void:
+    g_test_delay_usec <- usec

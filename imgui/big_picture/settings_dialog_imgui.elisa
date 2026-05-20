@@ -1,0 +1,204 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./big_picture.elisa"
+
+const SETTINGS_CATEGORY_PROFILES: int = 0
+const SETTINGS_CATEGORY_GENERAL: int = 1
+const SETTINGS_CATEGORY_GRAPHICS: int = 2
+const SETTINGS_CATEGORY_INPUT: int = 3
+const SETTINGS_CATEGORY_TROPHY: int = 4
+const SETTINGS_CATEGORY_FOLDERS: int = 5
+const SETTINGS_CATEGORY_LOG: int = 6
+const SETTINGS_CATEGORY_EXPERIMENTAL: int = 7
+
+struct SettingsWindow:
+    currentCategory: mutable int
+    currentProfile: mutable static u8&?
+    runningGameSerial: mutable static u8&?
+    deleteProfileIndex: mutable int
+    uiScale: mutable f32
+    profileCount: mutable u32
+    isGameRunning: mutable bool
+    closeOnSave: mutable bool
+    pendingSavePopup: mutable bool
+    pendingDeletePopup: mutable bool
+
+def SettingsWindow_Create(gameRunning: bool) -> SettingsWindow:
+    window: mutable SettingsWindow = zeroed
+    window.uiScale <- uiScale
+    window.currentProfile <- "Global"
+    window.runningGameSerial <- null
+    window.isGameRunning <- gameRunning
+    window.closeOnSave <- false
+    window.deleteProfileIndex <- -1
+    window.pendingSavePopup <- false
+    window.pendingDeletePopup <- false
+    window.profileCount <- 0
+    if gameRunning:
+        window.currentCategory <- SETTINGS_CATEGORY_GENERAL
+    else:
+        window.currentCategory <- SETTINGS_CATEGORY_PROFILES
+    return window
+
+def SettingsWindow_GetComboIndex(selection: static u8&?, options: static u8&?&, options_count: u32) -> int:
+    i: mutable u32 = 0
+    while i < options_count:
+        if selection == options[i.usize()]:
+            return i as int
+        i <- i + 1
+    return 0
+
+def SettingsWindow_CategoryFirst(window: mutable SettingsWindow&) -> int:
+    if window.isGameRunning:
+        return SETTINGS_CATEGORY_GENERAL
+    return SETTINGS_CATEGORY_PROFILES
+
+def SettingsWindow_CategoryLast(window: mutable SettingsWindow&) -> int:
+    if window.currentProfile != null and strcmp(window.currentProfile.cast[u8&], "Global") != 0:
+        return SETTINGS_CATEGORY_EXPERIMENTAL
+    return SETTINGS_CATEGORY_LOG
+
+def SettingsWindow_CycleCategoryNext(window: mutable SettingsWindow&) -> void:
+    first_category: int = SettingsWindow_CategoryFirst(window)
+    last_category: int = SettingsWindow_CategoryLast(window)
+    if window.currentCategory >= last_category:
+        window.currentCategory <- first_category
+    else:
+        window.currentCategory <- window.currentCategory + 1
+
+def SettingsWindow_CycleCategoryPrev(window: mutable SettingsWindow&) -> void:
+    first_category: int = SettingsWindow_CategoryFirst(window)
+    last_category: int = SettingsWindow_CategoryLast(window)
+    if window.currentCategory <= first_category:
+        window.currentCategory <- last_category
+    else:
+        window.currentCategory <- window.currentCategory - 1
+
+def SettingsWindow_LoadSettings(window: mutable SettingsWindow&, profile: static u8&?) -> void:
+    if profile == null:
+        window.currentProfile <- "Global"
+        return
+    window.currentProfile <- profile
+    last_category: int = SettingsWindow_CategoryLast(window)
+    if window.currentCategory > last_category:
+        window.currentCategory <- last_category
+
+def SettingsWindow_SaveSettings(window: mutable SettingsWindow&, profile: static u8&?) -> void:
+    _ = profile
+    if window.currentProfile == null:
+        window.currentProfile <- "Global"
+    window.pendingSavePopup <- false
+
+def SettingsWindow_SaveInstallDirs(window: mutable SettingsWindow&) -> void:
+    window.profileCount <- window.profileCount
+    if not window.isGameRunning:
+        SettingsWindow_GetProfileInfo(window)
+
+def SettingsWindow_GetProfileInfo(window: mutable SettingsWindow&) -> void:
+    window.profileCount <- GetGameIconInfo() + 1
+
+def SettingsWindow_SetupWindow(window: mutable SettingsWindow&) -> void:
+    if window.currentProfile == null:
+        window.currentProfile <- "Global"
+    if window.uiScale < 0.25:
+        window.uiScale <- 0.25
+    if window.uiScale > 3.0:
+        window.uiScale <- 3.0
+
+def SettingsWindow_DeInit(window: mutable SettingsWindow&) -> void:
+    if window.currentProfile != null and strcmp(window.currentProfile.cast[u8&], "Global") != 0:
+        window.runningGameSerial <- window.currentProfile
+
+def SettingsWindow_DrawCategoryTabs(window: mutable SettingsWindow&) -> void:
+    first_category: int = SettingsWindow_CategoryFirst(window)
+    last_category: int = SettingsWindow_CategoryLast(window)
+    if window.currentCategory < first_category:
+        window.currentCategory <- first_category
+    if window.currentCategory > last_category:
+        window.currentCategory <- last_category
+
+def SettingsWindow_AddCategory(window: mutable SettingsWindow&, name: static u8&?, texture: void&?, category: int) -> void:
+    _ = name
+    _ = texture
+    if category >= SettingsWindow_CategoryFirst(window) and category <= SettingsWindow_CategoryLast(window):
+        window.currentCategory <- category
+
+def SettingsWindow_DrawProfileSelector(window: mutable SettingsWindow&) -> void:
+    if window.deleteProfileIndex != -1:
+        window.pendingDeletePopup <- true
+    if window.pendingDeletePopup and window.deleteProfileIndex >= 0:
+        window.currentProfile <- "Global"
+        window.deleteProfileIndex <- -1
+        window.pendingDeletePopup <- false
+        SettingsWindow_LoadSettings(window, "Global")
+
+def SettingsWindow_DrawGameFolderManager(window: mutable SettingsWindow&) -> void:
+    window.profileCount <- window.profileCount
+    SettingsWindow_SaveInstallDirs(window)
+
+def SettingsWindow_DrawSettingsTable(window: mutable SettingsWindow&, category: int) -> void:
+    if category < SettingsWindow_CategoryFirst(window):
+        window.currentCategory <- SettingsWindow_CategoryFirst(window)
+        return
+    if category > SettingsWindow_CategoryLast(window):
+        window.currentCategory <- SettingsWindow_CategoryLast(window)
+        return
+    window.currentCategory <- category
+
+def SettingsWindow_AddSettingCheckbox(window: mutable SettingsWindow&, name: static u8&?, value: mutable bool&) -> void:
+    _ = window
+    _ = name
+    _ = value
+
+def SettingsWindow_AddSettingSliderInt(window: mutable SettingsWindow&, name: static u8&?, value: mutable int&, min: int, max: int) -> void:
+    _ = window
+    _ = name
+    if value < min:
+        value <- min
+    if value > max:
+        value <- max
+
+def SettingsWindow_AddSettingSliderFloat(window: mutable SettingsWindow&, name: static u8&?, value: mutable f32&, min: f32, max: f32, precision: int) -> void:
+    _ = window
+    _ = name
+    _ = precision
+    if value < min:
+        value <- min
+    if value > max:
+        value <- max
+
+def SettingsWindow_AddSettingCombo(window: mutable SettingsWindow&, name: static u8&?, value: mutable int&, options_count: int) -> void:
+    _ = window
+    _ = name
+    if options_count <= 0:
+        value <- 0
+        return
+    if value < 0:
+        value <- 0
+    if value >= options_count:
+        value <- options_count - 1
+
+def SettingsWindow_DrawMainContent(window: mutable SettingsWindow&, open: mutable bool&, save_clicked: bool, apply_clicked: bool, cancel_clicked: bool) -> void:
+    if save_clicked:
+        window.closeOnSave <- true
+        window.pendingSavePopup <- true
+    if apply_clicked:
+        window.pendingSavePopup <- true
+
+    if window.pendingSavePopup:
+        profile: static u8&? = window.currentProfile
+        SettingsWindow_SaveSettings(window, profile)
+        if window.closeOnSave:
+            SettingsWindow_DeInit(window)
+            open <- false
+            window.closeOnSave <- false
+
+    if cancel_clicked:
+        SettingsWindow_DeInit(window)
+        open <- false
+
+def SettingsWindow_DrawSettings(window: mutable SettingsWindow&, open: mutable bool&) -> void:
+    SettingsWindow_SetupWindow(window)
+    SettingsWindow_DrawCategoryTabs(window)
+    SettingsWindow_DrawMainContent(window, open, false, false, false)

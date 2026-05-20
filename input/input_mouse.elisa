@@ -1,0 +1,125 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "./controller.elisa"
+
+enum MouseMode:
+    Off
+    Joystick
+    Gyro
+    Touchpad
+
+global mutable g_mouse_joystick_binding: int = 0
+global mutable g_mouse_deadzone_offset: f32 = 0.5f32
+global mutable g_mouse_speed: f32 = 1.0f32
+global mutable g_mouse_speed_offset: f32 = 0.125f32
+global mutable g_mouse_gyro_roll_mode: bool = false
+global mutable g_mouse_mode: MouseMode = MouseMode.Off
+global mutable g_mouse_dx: f32 = 0.0f32
+global mutable g_mouse_dy: f32 = 0.0f32
+global mutable g_mouse_left: bool = false
+global mutable g_mouse_right: bool = false
+
+def Input_ToggleMouseModeTo(m: MouseMode) -> bool:
+    if g_mouse_mode == m:
+        g_mouse_mode <- MouseMode.Off
+    else:
+        g_mouse_mode <- m
+    return g_mouse_mode == m
+
+def Input_SetMouseToJoystick(joystick: int) -> void:
+    g_mouse_joystick_binding <- joystick
+
+def Input_SetMouseParams(mouse_deadzone_offset: f32, mouse_speed: f32, mouse_speed_offset: f32) -> void:
+    g_mouse_deadzone_offset <- mouse_deadzone_offset
+    g_mouse_speed <- mouse_speed
+    g_mouse_speed_offset <- mouse_speed_offset
+
+def Input_SetMouseGyroRollMode(mode: bool) -> void:
+    g_mouse_gyro_roll_mode <- mode
+
+def Input_SetMouseRelativeDelta(dx: f32, dy: f32) -> void:
+    g_mouse_dx <- dx
+    g_mouse_dy <- dy
+
+def Input_SetMouseButtons(left_down: bool, right_down: bool) -> void:
+    g_mouse_left <- left_down
+    g_mouse_right <- right_down
+
+def Input_AbsF32(v: f32) -> f32:
+    if v < 0.0f32:
+        return -v
+    return v
+
+def Input_MouseClamp(v: f32, lo: f32, hi: f32) -> f32:
+    if v < lo:
+        return lo
+    if v > hi:
+        return hi
+    return v
+
+def Input_EmulateJoystick(controller: mutable InputGameController&, interval: u32) -> void:
+    _ = interval
+    axis_x: Axis = Axis.LeftX
+    axis_y: Axis = Axis.LeftY
+    if g_mouse_joystick_binding == 2:
+        axis_x <- Axis.RightX
+        axis_y <- Axis.RightY
+    elif g_mouse_joystick_binding != 1:
+        return
+
+    d_x: f32 = g_mouse_dx
+    d_y: f32 = g_mouse_dy
+    # Avoid non-Elisa math bridge dependencies here; use per-axis scaling parity fallback.
+    raw_x: int = (d_x * (127.0f32 * g_mouse_speed)).int()
+    raw_y: int = (d_y * (127.0f32 * g_mouse_speed)).int()
+    if Input_AbsF32(d_x) > 0.0f32:
+        raw_x <- raw_x + (g_mouse_speed_offset * 128.0f32).int()
+    if Input_AbsF32(d_y) > 0.0f32:
+        raw_y <- raw_y + (g_mouse_speed_offset * 128.0f32).int()
+    min_abs: int = (g_mouse_deadzone_offset * 128.0f32).int()
+    if raw_x > 0 and raw_x < min_abs:
+        raw_x <- min_abs
+    if raw_x < 0 and raw_x > -min_abs:
+        raw_x <- -min_abs
+    if raw_y > 0 and raw_y < min_abs:
+        raw_y <- min_abs
+    if raw_y < 0 and raw_y > -min_abs:
+        raw_y <- -min_abs
+    raw_x <- Input_MouseClamp(raw_x.f32(), -128.0f32, 127.0f32).int()
+    raw_y <- Input_MouseClamp(raw_y.f32(), -128.0f32, 127.0f32).int()
+    Input_GameControllerAxis(controller.ref[mutable InputGameController&], axis_x, Input_GetAxis(-0x80, 0x7f, raw_x), false)
+    Input_GameControllerAxis(controller.ref[mutable InputGameController&], axis_y, Input_GetAxis(-0x80, 0x7f, raw_y), false)
+
+def Input_EmulateGyro(controller: mutable InputGameController&, interval: u32) -> void:
+    _ = interval
+    Input_GameControllerUpdateAcceleration(controller.ref[mutable InputGameController&], 0.0f32, 9.81f32, 0.0f32)
+    gy_x: f32 = -g_mouse_dy / 100.0f32
+    gy_y: f32 = -g_mouse_dx / 100.0f32
+    gy_z: f32 = 0.0f32
+    if g_mouse_gyro_roll_mode:
+        gy_y <- 0.0f32
+        gy_z <- -g_mouse_dx / 100.0f32
+    Input_GameControllerUpdateGyro(controller.ref[mutable InputGameController&], gy_x, gy_y, gy_z)
+
+def Input_EmulateTouchpad(controller: mutable InputGameController&, interval: u32) -> void:
+    _ = interval
+    # Coordinates are injected in normalized space via relative-delta channels in Elisa mode.
+    x: f32 = Input_MouseClamp(g_mouse_dx, 0.0f32, 1.0f32)
+    y: f32 = Input_MouseClamp(g_mouse_dy, 0.0f32, 1.0f32)
+    Input_GameControllerSetTouchpadState(controller.ref[mutable InputGameController&], 0, g_mouse_left, x, y)
+    Input_GameControllerButton(controller.ref[mutable InputGameController&], ORBIS_PAD_BUTTON_TOUCHPAD, g_mouse_right)
+
+def Input_ApplyMouseInputBlockers() -> void:
+    # In Elisa path this is handled by input binding-level gating.
+    return
+
+def Input_MousePolling(controller: mutable InputGameController&, interval: u32) -> u32:
+    if g_mouse_mode == MouseMode.Joystick:
+        Input_EmulateJoystick(controller.ref[mutable InputGameController&], interval)
+    elif g_mouse_mode == MouseMode.Gyro:
+        Input_EmulateGyro(controller.ref[mutable InputGameController&], interval)
+    elif g_mouse_mode == MouseMode.Touchpad:
+        Input_EmulateTouchpad(controller.ref[mutable InputGameController&], interval)
+    return interval

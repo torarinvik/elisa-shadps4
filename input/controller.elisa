@@ -1,0 +1,305 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+
+const INPUT_MAX_CONTROLLERS: usize = 5
+const INPUT_STATE_QUEUE_CAP: usize = 64
+const INPUT_AXIS_MAX: usize = 6
+const INPUT_AXIS_SMOOTHING_TIME_US: u64 = 33000u64
+
+const ORBIS_PAD_BUTTON_NONE: u32 = 0u32
+const ORBIS_PAD_BUTTON_L3: u32 = 0x2u32
+const ORBIS_PAD_BUTTON_R3: u32 = 0x4u32
+const ORBIS_PAD_BUTTON_OPTIONS: u32 = 0x8u32
+const ORBIS_PAD_BUTTON_UP: u32 = 0x10u32
+const ORBIS_PAD_BUTTON_RIGHT: u32 = 0x20u32
+const ORBIS_PAD_BUTTON_DOWN: u32 = 0x40u32
+const ORBIS_PAD_BUTTON_LEFT: u32 = 0x80u32
+const ORBIS_PAD_BUTTON_L2: u32 = 0x100u32
+const ORBIS_PAD_BUTTON_R2: u32 = 0x200u32
+const ORBIS_PAD_BUTTON_L1: u32 = 0x400u32
+const ORBIS_PAD_BUTTON_R1: u32 = 0x800u32
+const ORBIS_PAD_BUTTON_TRIANGLE: u32 = 0x1000u32
+const ORBIS_PAD_BUTTON_CIRCLE: u32 = 0x2000u32
+const ORBIS_PAD_BUTTON_CROSS: u32 = 0x4000u32
+const ORBIS_PAD_BUTTON_SQUARE: u32 = 0x8000u32
+const ORBIS_PAD_BUTTON_TOUCHPAD: u32 = 0x100000u32
+
+enum ControllerType:
+    Standard
+
+enum Axis:
+    LeftX
+    LeftY
+    RightX
+    RightY
+    TriggerLeft
+    TriggerRight
+
+struct InputTouchpadEntry:
+    ID: u8
+    state: bool
+    x: u16
+    y: u16
+
+struct InputColour:
+    r: u8
+    g: u8
+    b: u8
+
+struct InputVector3:
+    x: f32
+    y: f32
+    z: f32
+
+struct InputQuaternion:
+    x: f32
+    y: f32
+    z: f32
+    w: f32
+
+struct InputState:
+    buttonsState: u32
+    time: u64
+    axes: s32[INPUT_AXIS_MAX]
+    touchpad: InputTouchpadEntry[2]
+    acceleration: InputVector3
+    angularVelocity: InputVector3
+    orientation: InputQuaternion
+    axis_smoothing_flags: bool[INPUT_AXIS_MAX]
+    axis_smoothing_start_times: u64[INPUT_AXIS_MAX]
+    axis_smoothing_start_values: s32[INPUT_AXIS_MAX]
+    axis_smoothing_end_values: s32[INPUT_AXIS_MAX]
+
+struct InputGameController:
+    connected: bool
+    connected_count: int
+    touch_count: u8
+    secondary_touch_count: u8
+    previous_touchnum: u8
+    was_secondary_reset: bool
+    last_update_us: u64
+    last_orientation: InputQuaternion
+    colour: InputColour
+    override_colour_enabled: bool
+    override_colour: InputColour
+    state: InputState
+    queue_begin: usize
+    queue_size: usize
+    queue_storage: InputState[INPUT_STATE_QUEUE_CAP]
+    gyro_poll_rate: f32
+    accel_poll_rate: f32
+    gyro_buf: f32[3]
+    accel_buf: f32[3]
+    user_id: s32
+    last_touch_down_timestamp: u64
+
+struct InputGameControllers:
+    controllers: InputGameController[INPUT_MAX_CONTROLLERS]
+
+global mutable g_input_fake_time_us: u64 = 1u64
+
+def Input_NextTimeUs() -> u64:
+    g_input_fake_time_us <- g_input_fake_time_us + 1000u64
+    return g_input_fake_time_us
+
+def Input_GetAxis(min: int, max: int, value: int) -> int:
+    if max == min:
+        return 0
+    v: int = (255 * (value - min)) / (max - min)
+    if v < 0:
+        return 0
+    if v > 255:
+        return 255
+    return v
+
+def Input_AxisIndex(axis: Axis) -> usize:
+    return axis.int().usize()
+
+def Input_StateDefaults() -> InputState:
+    s: mutable InputState = zeroed
+    i: mutable usize = 0
+    while i < INPUT_AXIS_MAX:
+        s.axes[i] <- 128
+        s.axis_smoothing_start_values[i] <- 128
+        s.axis_smoothing_end_values[i] <- 128
+        s.axis_smoothing_flags[i] <- true
+        i <- i + 1
+    s.acceleration <- InputVector3(0.0f32, -9.81f32, 0.0f32)
+    s.angularVelocity <- InputVector3(0.0f32, 0.0f32, 0.0f32)
+    s.orientation <- InputQuaternion(0.0f32, 0.0f32, 0.0f32, 1.0f32)
+    return s
+
+def Input_GameControllerNew() -> InputGameController:
+    c: mutable InputGameController = zeroed
+    c.connected <- true
+    c.connected_count <- 1
+    c.last_orientation <- InputQuaternion(0.0f32, 0.0f32, 0.0f32, 1.0f32)
+    c.accel_buf <- [0.0f32, 9.81f32, 0.0f32]
+    c.user_id <- -1
+    c.state <- Input_StateDefaults()
+    return c
+
+def Input_GameControllersNew() -> InputGameControllers:
+    out: mutable InputGameControllers = zeroed
+    i: mutable usize = 0
+    while i < INPUT_MAX_CONTROLLERS:
+        out.controllers[i] <- Input_GameControllerNew()
+        i <- i + 1
+    return out
+
+def Input_StateOnButton(state: mutable InputState&, button: u32, isPressed: bool) -> void:
+    if isPressed:
+        state.buttonsState <- state.buttonsState | button
+    else:
+        if (state.buttonsState & button) != 0u32:
+            state.buttonsState <- state.buttonsState - button
+
+def Input_StateOnAxis(state: mutable InputState&, axis: Axis, value: int, smooth: bool = true) -> void:
+    i: usize = Input_AxisIndex(axis)
+    state.axes[i] <- state.axis_smoothing_end_values[i]
+    state.axis_smoothing_start_times[i] <- state.time
+    state.axis_smoothing_start_values[i] <- state.axes[i]
+    state.axis_smoothing_end_values[i] <- value.s32()
+    state.axis_smoothing_flags[i] <- smooth
+    if axis == Axis.TriggerLeft:
+        Input_StateOnButton(state.ref[mutable InputState&], ORBIS_PAD_BUTTON_L2, value > 0)
+    elif axis == Axis.TriggerRight:
+        Input_StateOnButton(state.ref[mutable InputState&], ORBIS_PAD_BUTTON_R2, value > 0)
+
+def Input_StateOnTouchpad(state: mutable InputState&, touchIndex: int, isDown: bool, x: f32, y: f32) -> void:
+    if touchIndex < 0 or touchIndex > 1:
+        return
+    i: usize = touchIndex.usize()
+    state.touchpad[i].state <- isDown
+    state.touchpad[i].x <- (x * 1920.0f32).u16()
+    state.touchpad[i].y <- (y * 941.0f32).u16()
+
+def Input_StateOnGyro(state: mutable InputState&, gx: f32, gy: f32, gz: f32) -> void:
+    state.angularVelocity.x <- gx
+    state.angularVelocity.y <- gy
+    state.angularVelocity.z <- gz
+
+def Input_StateOnAccel(state: mutable InputState&, ax: f32, ay: f32, az: f32) -> void:
+    state.acceleration.x <- ax
+    state.acceleration.y <- ay
+    state.acceleration.z <- az
+
+def Input_AbsS32(v: s32) -> s32:
+    if v < 0:
+        return -v
+    return v
+
+def Input_StateUpdateAxisSmoothing(state: mutable InputState&) -> void:
+    now: u64 = Input_NextTimeUs()
+    i: mutable usize = 0
+    while i < INPUT_AXIS_MAX:
+        cur: s32 = state.axes[i]
+        endv: s32 = state.axis_smoothing_end_values[i]
+        if (not state.axis_smoothing_flags[i]) or Input_AbsS32(cur - endv) < 16:
+            state.axes[i] <- endv
+            i <- i + 1
+            continue
+        dt: u64 = now - state.axis_smoothing_start_times[i]
+        if dt >= INPUT_AXIS_SMOOTHING_TIME_US:
+            state.axes[i] <- endv
+        else:
+            startv: s32 = state.axis_smoothing_start_values[i]
+            num: s64 = (endv - startv).s64() * dt.s64()
+            interp: s32 = (startv.s64() + (num / INPUT_AXIS_SMOOTHING_TIME_US.s64())).s32()
+            state.axes[i] <- interp
+        i <- i + 1
+
+def Input_GameControllerPushState(controller: mutable InputGameController&) -> void:
+    controller.state.time <- Input_NextTimeUs()
+    idx: usize = (controller.queue_begin + controller.queue_size) % INPUT_STATE_QUEUE_CAP
+    controller.queue_storage[idx] <- controller.state
+    if controller.queue_size < INPUT_STATE_QUEUE_CAP:
+        controller.queue_size <- controller.queue_size + 1
+    else:
+        controller.queue_begin <- (controller.queue_begin + 1) % INPUT_STATE_QUEUE_CAP
+
+def Input_GameControllerReadState(controller: InputGameController&, state_out: mutable InputState&, isConnected: mutable bool&, connectedCount: mutable int&) -> void:
+    isConnected <- controller.connected
+    connectedCount <- controller.connected_count
+    state_out <- controller.state
+
+def Input_GameControllerReadStates(controller: mutable InputGameController&, states: mutable InputState&, states_num: int, isConnected: mutable bool&, connectedCount: mutable int&) -> int:
+    isConnected <- controller.connected
+    connectedCount <- controller.connected_count
+    ret_num: mutable int = 0
+    if not controller.connected:
+        return 0
+    i: mutable int = 0
+    while i < states_num and controller.queue_size > 0:
+        idx: usize = controller.queue_begin
+        states[i.usize()] <- controller.queue_storage[idx]
+        controller.queue_begin <- (controller.queue_begin + 1) % INPUT_STATE_QUEUE_CAP
+        controller.queue_size <- controller.queue_size - 1
+        ret_num <- ret_num + 1
+        i <- i + 1
+    return ret_num
+
+def Input_GameControllerButton(controller: mutable InputGameController&, button: u32, is_pressed: bool) -> void:
+    Input_StateOnButton(controller.state.ref[mutable InputState&], button, is_pressed)
+    Input_GameControllerPushState(controller.ref[mutable InputGameController&])
+
+def Input_GameControllerAxis(controller: mutable InputGameController&, axis: Axis, value: int, smooth: bool = true) -> void:
+    Input_StateOnAxis(controller.state.ref[mutable InputState&], axis, value, smooth)
+    Input_GameControllerPushState(controller.ref[mutable InputGameController&])
+
+def Input_GameControllerUpdateGyro(controller: mutable InputGameController&, x: f32, y: f32, z: f32) -> void:
+    controller.gyro_buf <- [x, y, z]
+
+def Input_GameControllerUpdateAcceleration(controller: mutable InputGameController&, x: f32, y: f32, z: f32) -> void:
+    controller.accel_buf <- [x, y, z]
+
+def Input_GameControllerGyro(controller: mutable InputGameController&) -> void:
+    Input_StateOnGyro(controller.state.ref[mutable InputState&], controller.gyro_buf[0], controller.gyro_buf[1], controller.gyro_buf[2])
+    Input_GameControllerPushState(controller.ref[mutable InputGameController&])
+
+def Input_GameControllerAcceleration(controller: mutable InputGameController&) -> void:
+    Input_StateOnAccel(controller.state.ref[mutable InputState&], controller.accel_buf[0], controller.accel_buf[1], controller.accel_buf[2])
+    Input_GameControllerPushState(controller.ref[mutable InputGameController&])
+
+def Input_GameControllerUpdateAxisSmoothing(controller: mutable InputGameController&) -> void:
+    Input_StateUpdateAxisSmoothing(controller.state.ref[mutable InputState&])
+
+def Input_GameControllerSetLightBarRGB(controller: mutable InputGameController&, r: u8, g: u8, b: u8) -> void:
+    if controller.override_colour_enabled:
+        return
+    controller.colour <- InputColour(r, g, b)
+
+def Input_GameControllerSetVibration(controller: mutable InputGameController&, smallMotor: u8, largeMotor: u8) -> bool:
+    _ = controller
+    _ = smallMotor
+    _ = largeMotor
+    return true
+
+def Input_GameControllerSetTouchpadState(controller: mutable InputGameController&, touchIndex: int, touchDown: bool, x: f32, y: f32) -> void:
+    if touchIndex < 0 or touchIndex > 1:
+        return
+    was_pressed: bool = controller.state.touchpad[0].state or controller.state.touchpad[1].state
+    Input_StateOnTouchpad(controller.state.ref[mutable InputState&], touchIndex, touchDown, x, y)
+    Input_GameControllerPushState(controller.ref[mutable InputGameController&])
+    now_pressed: bool = controller.state.touchpad[0].state or controller.state.touchpad[1].state
+    if (not now_pressed) and was_pressed:
+        controller.last_touch_down_timestamp <- 0u64
+    elif now_pressed and (not was_pressed):
+        controller.last_touch_down_timestamp <- controller.state.time
+
+def Input_GameControllersTryOpenSDLControllers(controllers: mutable InputGameControllers&) -> void:
+    # Elisa runtime path: treat slot 0 as available if no user is assigned yet.
+    if controllers.controllers[0].user_id < 0:
+        controllers.controllers[0].user_id <- 1
+
+def Input_GamepadIndexFromControllerId(controller_id: s32) -> u8?:
+    if controller_id < 1 or controller_id > 5:
+        return null
+    return (controller_id - 1).u8()
+
+def Input_GamepadIndexFromUserId(user_id: s32) -> u8?:
+    if user_id < 1 or user_id > 5:
+        return null
+    return (user_id - 1).u8()

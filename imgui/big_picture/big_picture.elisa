@@ -1,0 +1,178 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./imgui_big_picture_ffi_bridge.elisa"
+
+const BIG_PICTURE_MAX_ICONS: int = 256
+const BIG_PICTURE_EVENT_NONE: int = 0
+const BIG_PICTURE_EVENT_QUIT: int = 1
+
+global mutable done: bool = false
+global mutable showSettings: bool = false
+global mutable runEbootPath: static u8&? = null
+global mutable uiScale: f32 = 1.0
+global mutable renderer: void&? = null
+global mutable g_big_picture_last_launch_has_executable: bool = false
+global mutable g_big_picture_launch_frames: int = 0
+global mutable g_big_picture_selected_icon_for_tests: int = -1
+
+global mutable g_big_picture_icon_count: u32 = 0
+
+struct IconInfo:
+    textureId: mutable void&?
+    ebootPath: mutable static u8&?
+    title: mutable static u8&?
+    serial: mutable static u8&?
+    focusState: mutable bool
+
+global mutable gameIcons: IconInfo[256] = zeroed
+
+def BigPicture_ResetForTests() -> void:
+    done <- false
+    showSettings <- false
+    runEbootPath <- null
+    uiScale <- 1.0
+    renderer <- null
+    g_big_picture_last_launch_has_executable <- false
+    g_big_picture_launch_frames <- 0
+    g_big_picture_selected_icon_for_tests <- -1
+    g_big_picture_icon_count <- 0
+    gameIcons <- zeroed
+    ImguiBigPictureBridge_Reset()
+
+def BigPicture_AddIconForTests(title: static u8&?, serial: static u8&?, eboot_path: static u8&?) -> int:
+    if g_big_picture_icon_count >= BIG_PICTURE_MAX_ICONS.cast[u32]:
+        return -1
+    idx: mutable u32 = g_big_picture_icon_count
+    gameIcons[idx.usize()].title <- title
+    gameIcons[idx.usize()].serial <- serial
+    gameIcons[idx.usize()].ebootPath <- eboot_path
+    gameIcons[idx.usize()].textureId <- null
+    gameIcons[idx.usize()].focusState <- false
+    g_big_picture_icon_count <- g_big_picture_icon_count + 1
+    return 0
+
+def big_picture_cstr_less(lhs: static u8&?, rhs: static u8&?) -> bool:
+    if lhs == null and rhs == null:
+        return false
+    if lhs == null:
+        return true
+    if rhs == null:
+        return false
+    return strcmp(lhs, rhs) < 0
+
+def big_picture_swap_icons(a: u32, b: u32) -> void:
+    tmp: mutable IconInfo = gameIcons[a.usize()]
+    gameIcons[a.usize()] <- gameIcons[b.usize()]
+    gameIcons[b.usize()] <- tmp
+
+def big_picture_sort_icons_by_title() -> void:
+    if g_big_picture_icon_count <= 1:
+        return
+    i: mutable u32 = 0
+    while i < g_big_picture_icon_count:
+        j: mutable u32 = i + 1
+        while j < g_big_picture_icon_count:
+            if big_picture_cstr_less(gameIcons[j.usize()].title, gameIcons[i.usize()].title):
+                big_picture_swap_icons(i, j)
+            j <- j + 1
+        i <- i + 1
+
+def SetGameIcons(icon_count: u32) -> void:
+    count: mutable u32 = icon_count
+    if count > g_big_picture_icon_count:
+        count <- g_big_picture_icon_count
+    i: mutable u32 = 0
+    while i < count:
+        focused: bool = g_big_picture_selected_icon_for_tests >= 0 and i == g_big_picture_selected_icon_for_tests.cast[u32]
+        gameIcons[i.usize()].focusState <- focused
+        if focused and gameIcons[i.usize()].textureId != null:
+            done <- true
+            runEbootPath <- gameIcons[i.usize()].ebootPath
+            g_big_picture_selected_icon_for_tests <- -1
+        i <- i + 1
+
+# C++ helper currently probes update/patch folders first; parity contract here keeps
+# the same decision slot while avoiding host FS traversal in pure tests.
+def UpdateChecker(sce_item: static u8&?, game_folder: static u8&?) -> static u8&?:
+    _ = sce_item
+    return game_folder
+
+def GetGameIconInfo() -> u32:
+    big_picture_sort_icons_by_title()
+    g_big_picture_icon_count <- g_big_picture_icon_count
+    return g_big_picture_icon_count
+
+def BigPicture_GetIconTitleAtForTests(index: u32) -> static u8&?:
+    if index >= g_big_picture_icon_count:
+        return null
+    return gameIcons[index.usize()].title
+
+def BigPicture_SelectIconForTests(index: int) -> void:
+    g_big_picture_selected_icon_for_tests <- index
+
+def LoadSdlTextureData(data: void&?, size: u32) -> void&?:
+    return ImguiBigPictureBridge_LoadTextureFromBytes(data, size)
+
+def LoadSdlTextureDataFromFile(file_path: static u8&?) -> void&?:
+    return ImguiBigPictureBridge_LoadTextureFromFile(file_path)
+
+def Launch(executable_name: void&?) -> void:
+    done <- false
+    g_big_picture_launch_frames <- 0
+    g_big_picture_last_launch_has_executable <- executable_name != null
+    ImguiBigPictureBridge_LaunchBegin(executable_name)
+    ImguiBigPictureBridge_LaunchCreateWindowAndRenderer()
+    if ImguiBigPictureBridge_GetLaunchRendererLive() == 0:
+        renderer <- null
+    else:
+        renderer <- 2.cast[void&?]
+
+    if renderer == null:
+        done <- true
+        ImguiBigPictureBridge_LaunchEnd()
+        return
+
+    ImguiBigPictureBridge_LaunchCreateImGuiContext()
+    if not ImGui_ImplSDL3_InitForSDLRenderer(1.cast[void&?], renderer):
+        done <- true
+        ImguiBigPictureBridge_LaunchDestroyImGuiContext()
+        ImguiBigPictureBridge_LaunchDestroyWindowAndRenderer()
+        renderer <- null
+        ImguiBigPictureBridge_LaunchEnd()
+        return
+    if not ImGui_ImplSDLRenderer3_Init(renderer):
+        done <- true
+        ImGui_ImplSDL3_Shutdown()
+        ImguiBigPictureBridge_LaunchDestroyImGuiContext()
+        ImguiBigPictureBridge_LaunchDestroyWindowAndRenderer()
+        renderer <- null
+        ImguiBigPictureBridge_LaunchEnd()
+        return
+    _ = GetGameIconInfo()
+
+    while not done:
+        event_type: int = ImguiBigPictureBridge_LaunchPollEventType()
+        if event_type == BIG_PICTURE_EVENT_QUIT:
+            done <- true
+
+        ImGui_ImplSDLRenderer3_NewFrame()
+        ImGui_ImplSDL3_NewFrame()
+        SetGameIcons(g_big_picture_icon_count)
+        if showSettings:
+            ImguiBigPictureBridge_LaunchRecordSettingsOpen()
+            showSettings <- false
+            _ = GetGameIconInfo()
+        ImGui_ImplSDLRenderer3_RenderDrawData(null, renderer)
+        ImguiBigPictureBridge_LaunchRenderPresent()
+
+        g_big_picture_launch_frames <- g_big_picture_launch_frames + 1
+        if ImguiBigPictureBridge_LaunchShouldContinue() == 0:
+            done <- true
+
+    ImGui_ImplSDLRenderer3_Shutdown()
+    ImGui_ImplSDL3_Shutdown()
+    ImguiBigPictureBridge_LaunchDestroyImGuiContext()
+    ImguiBigPictureBridge_LaunchDestroyWindowAndRenderer()
+    renderer <- null
+    ImguiBigPictureBridge_LaunchEnd()

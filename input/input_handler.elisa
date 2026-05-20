@@ -1,0 +1,358 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../common/config.elisa"
+include "./controller.elisa"
+include "./input_mouse.elisa"
+
+const SDL_MOUSE_WHEEL_UP: u32 = 0x1003u32
+const SDL_MOUSE_WHEEL_DOWN: u32 = 0x1004u32
+const SDL_MOUSE_WHEEL_LEFT: u32 = 0x1005u32
+const SDL_MOUSE_WHEEL_RIGHT: u32 = 0x1007u32
+
+const SDL_GAMEPAD_BUTTON_TOUCHPAD_LEFT: u32 = 0x2001u32
+const SDL_GAMEPAD_BUTTON_TOUCHPAD_CENTER: u32 = 0x2002u32
+const SDL_GAMEPAD_BUTTON_TOUCHPAD_RIGHT: u32 = 0x2003u32
+
+const LEFTJOYSTICK_HALFMODE: u32 = 0x00010000u32
+const RIGHTJOYSTICK_HALFMODE: u32 = 0x00020000u32
+const KEY_TOGGLE: u32 = 0x00200000u32
+const MOUSE_GYRO_ROLL_MODE: u32 = 0x00400000u32
+
+const HOTKEY_FULLSCREEN: u32 = 0xf0000001u32
+const HOTKEY_PAUSE: u32 = 0xf0000002u32
+const HOTKEY_SIMPLE_FPS: u32 = 0xf0000003u32
+const HOTKEY_QUIT: u32 = 0xf0000004u32
+const HOTKEY_RELOAD_INPUTS: u32 = 0xf0000005u32
+const HOTKEY_TOGGLE_MOUSE_TO_JOYSTICK: u32 = 0xf0000006u32
+const HOTKEY_TOGGLE_MOUSE_TO_GYRO: u32 = 0xf0000007u32
+const HOTKEY_TOGGLE_MOUSE_TO_TOUCHPAD: u32 = 0xf0000008u32
+const HOTKEY_RENDERDOC: u32 = 0xf0000009u32
+const HOTKEY_VOLUME_UP: u32 = 0xf000000au32
+const HOTKEY_VOLUME_DOWN: u32 = 0xf000000bu32
+const HOTKEY_ADD_VIRTUAL_USER: u32 = 0xf000000cu32
+const HOTKEY_REMOVE_VIRTUAL_USER: u32 = 0xf000000du32
+const HOTKEY_SCREENSHOT_WITH_OVERLAYS: u32 = 0xf000000eu32
+const HOTKEY_OPEN_EMULATOR_SETTINGS: u32 = 0xf000000fu32
+
+const SDL_UNMAPPED: u32 = 0xfffffffeu32
+const INPUT_CONTROLLER_OUTPUT_COUNT: usize = 42
+
+const SDL_GAMEPAD_AXIS_INVALID: u32 = 0xffffffffu32
+const SDL_GAMEPAD_AXIS_LEFTX: u32 = 0u32
+const SDL_GAMEPAD_AXIS_LEFTY: u32 = 1u32
+const SDL_GAMEPAD_AXIS_RIGHTX: u32 = 2u32
+const SDL_GAMEPAD_AXIS_RIGHTY: u32 = 3u32
+const SDL_GAMEPAD_AXIS_LEFT_TRIGGER: u32 = 4u32
+const SDL_GAMEPAD_AXIS_RIGHT_TRIGGER: u32 = 5u32
+
+const SDL_GAMEPAD_BUTTON_INVALID: u32 = 0xffffffffu32
+const SDL_GAMEPAD_BUTTON_NORTH: u32 = 0u32
+const SDL_GAMEPAD_BUTTON_EAST: u32 = 1u32
+const SDL_GAMEPAD_BUTTON_SOUTH: u32 = 2u32
+const SDL_GAMEPAD_BUTTON_WEST: u32 = 3u32
+const SDL_GAMEPAD_BUTTON_LEFT_SHOULDER: u32 = 4u32
+const SDL_GAMEPAD_BUTTON_LEFT_STICK: u32 = 5u32
+const SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER: u32 = 6u32
+const SDL_GAMEPAD_BUTTON_RIGHT_STICK: u32 = 7u32
+const SDL_GAMEPAD_BUTTON_START: u32 = 8u32
+const SDL_GAMEPAD_BUTTON_DPAD_UP: u32 = 9u32
+const SDL_GAMEPAD_BUTTON_DPAD_DOWN: u32 = 10u32
+const SDL_GAMEPAD_BUTTON_DPAD_LEFT: u32 = 11u32
+const SDL_GAMEPAD_BUTTON_DPAD_RIGHT: u32 = 12u32
+
+enum InputType:
+    Axis
+    KeyboardMouse
+    Controller
+    Count
+
+struct InputID:
+    input_type: InputType
+    sdl_id: u32
+    gamepad_id: u8
+
+struct InputEvent:
+    input: InputID
+    active: bool
+    axis_value: s8
+
+struct InputBinding:
+    keys: InputID[3]
+
+struct InputControllerOutput:
+    button: u32
+    axis: u32
+    gamepad_id: u8
+    old_param: s16
+    new_param: s16
+    old_button_state: bool
+    new_button_state: bool
+    state_changed: bool
+    positive_axis: bool
+
+struct InputControllerOutputSet:
+    data: InputControllerOutput[INPUT_CONTROLLER_OUTPUT_COUNT]
+
+struct BindingConnection:
+    binding: InputBinding
+    output_set_index: usize
+    output_index: usize
+    axis_param: u32
+    toggle: InputID
+
+struct InputPressedKey:
+    event: InputEvent
+    active: bool
+
+global mutable g_input_connections: darray[BindingConnection] = []
+global mutable g_pressed_keys: darray[InputPressedKey] = []
+global mutable g_toggled_keys: darray[InputID] = []
+global mutable g_output_sets: InputControllerOutputSet[9] = zeroed
+global mutable g_game_controllers: InputGameControllers = zeroed
+global mutable g_input_initialized: bool = false
+
+def Input_IDNew(t: InputType = InputType.Count, sid: u32 = 0xffffffffu32, gid: u8 = 1u8) -> InputID:
+    return InputID(t, sid, gid)
+
+def Input_IDEquals(a: InputID, b: InputID) -> bool:
+    return a.input_type == b.input_type and a.sdl_id == b.sdl_id and a.gamepad_id == b.gamepad_id
+
+def Input_IDIsValid(id: InputID) -> bool:
+    return not Input_IDEquals(id, Input_IDNew())
+
+def Input_InputEventNew(input: InputID = Input_IDNew(), active: bool = false, axis_value: s8 = 0.s8()) -> InputEvent:
+    return InputEvent(input, active, axis_value)
+
+def Input_InputBindingNew(k1: InputID = Input_IDNew(), k2: InputID = Input_IDNew(), k3: InputID = Input_IDNew()) -> InputBinding:
+    out: mutable InputBinding = zeroed
+    a: mutable InputID = k1
+    b: mutable InputID = k2
+    c: mutable InputID = k3
+    if Input_IDEquals(a, b) and Input_IDIsValid(a):
+        b <- Input_IDNew()
+    if Input_IDEquals(a, c) and Input_IDIsValid(a):
+        c <- Input_IDNew()
+    if Input_IDEquals(b, c) and Input_IDIsValid(b):
+        c <- Input_IDNew()
+    out.keys[0] <- a
+    out.keys[1] <- b
+    out.keys[2] <- c
+    return out
+
+def Input_BindingHasControllerInput(binding: InputBinding) -> bool:
+    i: mutable usize = 0
+    while i < 3:
+        if binding.keys[i].input_type == InputType.Controller or binding.keys[i].input_type == InputType.Axis:
+            return true
+        i <- i + 1
+    return false
+
+def Input_MapSdlButtonToOrbis(button: u32) -> u32:
+    if button == SDL_GAMEPAD_BUTTON_DPAD_DOWN:
+        return ORBIS_PAD_BUTTON_DOWN
+    if button == SDL_GAMEPAD_BUTTON_DPAD_UP:
+        return ORBIS_PAD_BUTTON_UP
+    if button == SDL_GAMEPAD_BUTTON_DPAD_LEFT:
+        return ORBIS_PAD_BUTTON_LEFT
+    if button == SDL_GAMEPAD_BUTTON_DPAD_RIGHT:
+        return ORBIS_PAD_BUTTON_RIGHT
+    if button == SDL_GAMEPAD_BUTTON_SOUTH:
+        return ORBIS_PAD_BUTTON_CROSS
+    if button == SDL_GAMEPAD_BUTTON_NORTH:
+        return ORBIS_PAD_BUTTON_TRIANGLE
+    if button == SDL_GAMEPAD_BUTTON_WEST:
+        return ORBIS_PAD_BUTTON_SQUARE
+    if button == SDL_GAMEPAD_BUTTON_EAST:
+        return ORBIS_PAD_BUTTON_CIRCLE
+    if button == SDL_GAMEPAD_BUTTON_START:
+        return ORBIS_PAD_BUTTON_OPTIONS
+    if button == SDL_GAMEPAD_BUTTON_LEFT_SHOULDER:
+        return ORBIS_PAD_BUTTON_L1
+    if button == SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER:
+        return ORBIS_PAD_BUTTON_R1
+    if button == SDL_GAMEPAD_BUTTON_LEFT_STICK:
+        return ORBIS_PAD_BUTTON_L3
+    if button == SDL_GAMEPAD_BUTTON_RIGHT_STICK:
+        return ORBIS_PAD_BUTTON_R3
+    if button == SDL_GAMEPAD_BUTTON_TOUCHPAD_LEFT or button == SDL_GAMEPAD_BUTTON_TOUCHPAD_CENTER or button == SDL_GAMEPAD_BUTTON_TOUCHPAD_RIGHT:
+        return ORBIS_PAD_BUTTON_TOUCHPAD
+    return ORBIS_PAD_BUTTON_NONE
+
+def Input_AxisFromSdlAxis(axis: u32) -> Axis:
+    if axis == SDL_GAMEPAD_AXIS_LEFTX:
+        return Axis.LeftX
+    if axis == SDL_GAMEPAD_AXIS_LEFTY:
+        return Axis.LeftY
+    if axis == SDL_GAMEPAD_AXIS_RIGHTX:
+        return Axis.RightX
+    if axis == SDL_GAMEPAD_AXIS_RIGHTY:
+        return Axis.RightY
+    if axis == SDL_GAMEPAD_AXIS_LEFT_TRIGGER:
+        return Axis.TriggerLeft
+    return Axis.TriggerRight
+
+def Input_ControllerOutputNew(button: u32, axis: u32 = SDL_GAMEPAD_AXIS_INVALID, positive_axis: bool = true) -> InputControllerOutput:
+    return InputControllerOutput(button, axis, 0u8, 0.s16(), 0.s16(), false, false, false, positive_axis)
+
+def Input_ControllerOutputResetUpdate(output: mutable InputControllerOutput&) -> void:
+    output.state_changed <- false
+    output.new_button_state <- output.old_button_state
+    output.new_param <- output.old_param
+
+def Input_ControllerOutputAddUpdate(output: mutable InputControllerOutput&, event: InputEvent) -> void:
+    if output.axis != SDL_GAMEPAD_AXIS_INVALID:
+        if event.active:
+            output.new_param <- output.new_param + event.axis_value.s16()
+        else:
+            output.new_param <- output.new_param - event.axis_value.s16()
+        output.state_changed <- output.new_param != output.old_param
+    elif output.button != SDL_GAMEPAD_BUTTON_INVALID:
+        output.new_button_state <- event.active
+        output.state_changed <- output.new_button_state != output.old_button_state
+
+def Input_ControllerOutputFinalizeUpdate(output: mutable InputControllerOutput&) -> void:
+    if not output.state_changed:
+        return
+    gix: usize = output.gamepad_id.usize()
+    if gix >= INPUT_MAX_CONTROLLERS:
+        return
+    controller: mutable InputGameController& = g_game_controllers.controllers[gix]
+    if output.axis != SDL_GAMEPAD_AXIS_INVALID:
+        Input_GameControllerAxis(controller.ref[mutable InputGameController&], Input_AxisFromSdlAxis(output.axis), output.new_param.int(), false)
+        output.old_param <- output.new_param
+    elif output.button != SDL_GAMEPAD_BUTTON_INVALID:
+        Input_GameControllerButton(controller.ref[mutable InputGameController&], Input_MapSdlButtonToOrbis(output.button), output.new_button_state)
+        output.old_button_state <- output.new_button_state
+
+def Input_ConnectionProcessBinding(connection: BindingConnection) -> InputEvent:
+    if connection.binding.keys[0].input_type == InputType.Count and connection.binding.keys[1].input_type == InputType.Count and connection.binding.keys[2].input_type == InputType.Count:
+        return Input_InputEventNew()
+    i: mutable usize = 0
+    while i < 3:
+        k: InputID = connection.binding.keys[i]
+        if not Input_IDIsValid(k):
+            i <- i + 1
+            continue
+        found: bool = false
+        j: mutable usize = 0
+        while j < g_pressed_keys.len:
+            e: InputPressedKey = g_pressed_keys[j]
+            if e.active and Input_IDEquals(e.event.input, k):
+                found <- true
+                break
+            j <- j + 1
+        if not found:
+            return Input_InputEventNew()
+        i <- i + 1
+    out_set: InputControllerOutputSet = g_output_sets[connection.output_set_index]
+    out: InputControllerOutput = out_set.data[connection.output_index]
+    return Input_InputEventNew(Input_IDNew(InputType.Controller, out.button, out.gamepad_id), true, 127.s8())
+
+def Input_OutputSetInit(set_out: mutable InputControllerOutputSet&, gamepad_id: u8) -> void:
+    i: mutable usize = 0
+    while i < INPUT_CONTROLLER_OUTPUT_COUNT:
+        set_out.data[i] <- Input_ControllerOutputNew(SDL_GAMEPAD_BUTTON_INVALID, SDL_GAMEPAD_AXIS_INVALID)
+        set_out.data[i].gamepad_id <- gamepad_id
+        i <- i + 1
+    set_out.data[0] <- Input_ControllerOutputNew(LEFTJOYSTICK_HALFMODE)
+    set_out.data[1] <- Input_ControllerOutputNew(RIGHTJOYSTICK_HALFMODE)
+    set_out.data[2] <- Input_ControllerOutputNew(KEY_TOGGLE)
+    set_out.data[3] <- Input_ControllerOutputNew(MOUSE_GYRO_ROLL_MODE)
+    set_out.data[4] <- Input_ControllerOutputNew(SDL_GAMEPAD_BUTTON_NORTH)
+    set_out.data[5] <- Input_ControllerOutputNew(SDL_GAMEPAD_BUTTON_EAST)
+    set_out.data[6] <- Input_ControllerOutputNew(SDL_GAMEPAD_BUTTON_SOUTH)
+    set_out.data[7] <- Input_ControllerOutputNew(SDL_GAMEPAD_BUTTON_WEST)
+    set_out.data[8] <- Input_ControllerOutputNew(SDL_GAMEPAD_BUTTON_LEFT_SHOULDER)
+    set_out.data[9] <- Input_ControllerOutputNew(SDL_GAMEPAD_BUTTON_LEFT_STICK)
+    set_out.data[10] <- Input_ControllerOutputNew(SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER)
+    set_out.data[11] <- Input_ControllerOutputNew(SDL_GAMEPAD_BUTTON_RIGHT_STICK)
+    set_out.data[12] <- Input_ControllerOutputNew(SDL_GAMEPAD_BUTTON_START)
+    set_out.data[13] <- Input_ControllerOutputNew(SDL_GAMEPAD_BUTTON_TOUCHPAD_LEFT)
+    set_out.data[14] <- Input_ControllerOutputNew(SDL_GAMEPAD_BUTTON_TOUCHPAD_CENTER)
+    set_out.data[15] <- Input_ControllerOutputNew(SDL_GAMEPAD_BUTTON_TOUCHPAD_RIGHT)
+    set_out.data[16] <- Input_ControllerOutputNew(SDL_GAMEPAD_BUTTON_DPAD_UP)
+    set_out.data[17] <- Input_ControllerOutputNew(SDL_GAMEPAD_BUTTON_DPAD_DOWN)
+    set_out.data[18] <- Input_ControllerOutputNew(SDL_GAMEPAD_BUTTON_DPAD_LEFT)
+    set_out.data[19] <- Input_ControllerOutputNew(SDL_GAMEPAD_BUTTON_DPAD_RIGHT)
+    set_out.data[20] <- Input_ControllerOutputNew(SDL_GAMEPAD_BUTTON_INVALID, SDL_GAMEPAD_AXIS_LEFTX)
+    set_out.data[21] <- Input_ControllerOutputNew(SDL_GAMEPAD_BUTTON_INVALID, SDL_GAMEPAD_AXIS_LEFTY)
+    set_out.data[22] <- Input_ControllerOutputNew(SDL_GAMEPAD_BUTTON_INVALID, SDL_GAMEPAD_AXIS_RIGHTX)
+    set_out.data[23] <- Input_ControllerOutputNew(SDL_GAMEPAD_BUTTON_INVALID, SDL_GAMEPAD_AXIS_RIGHTY)
+    set_out.data[24] <- Input_ControllerOutputNew(SDL_GAMEPAD_BUTTON_INVALID, SDL_GAMEPAD_AXIS_LEFT_TRIGGER)
+    set_out.data[25] <- Input_ControllerOutputNew(SDL_GAMEPAD_BUTTON_INVALID, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER)
+    set_out.data[26] <- Input_ControllerOutputNew(HOTKEY_FULLSCREEN)
+    set_out.data[27] <- Input_ControllerOutputNew(HOTKEY_PAUSE)
+    set_out.data[28] <- Input_ControllerOutputNew(HOTKEY_SIMPLE_FPS)
+    set_out.data[29] <- Input_ControllerOutputNew(HOTKEY_QUIT)
+    set_out.data[30] <- Input_ControllerOutputNew(HOTKEY_RELOAD_INPUTS)
+    set_out.data[31] <- Input_ControllerOutputNew(HOTKEY_TOGGLE_MOUSE_TO_JOYSTICK)
+    set_out.data[32] <- Input_ControllerOutputNew(HOTKEY_TOGGLE_MOUSE_TO_GYRO)
+    set_out.data[33] <- Input_ControllerOutputNew(HOTKEY_TOGGLE_MOUSE_TO_TOUCHPAD)
+    set_out.data[34] <- Input_ControllerOutputNew(HOTKEY_RENDERDOC)
+    set_out.data[35] <- Input_ControllerOutputNew(HOTKEY_SCREENSHOT_WITH_OVERLAYS)
+    set_out.data[36] <- Input_ControllerOutputNew(HOTKEY_ADD_VIRTUAL_USER)
+    set_out.data[37] <- Input_ControllerOutputNew(HOTKEY_REMOVE_VIRTUAL_USER)
+    set_out.data[38] <- Input_ControllerOutputNew(HOTKEY_VOLUME_UP)
+    set_out.data[39] <- Input_ControllerOutputNew(HOTKEY_VOLUME_DOWN)
+    set_out.data[40] <- Input_ControllerOutputNew(HOTKEY_OPEN_EMULATOR_SETTINGS)
+    set_out.data[41] <- Input_ControllerOutputNew(SDL_GAMEPAD_BUTTON_INVALID, SDL_GAMEPAD_AXIS_INVALID)
+    i <- 0
+    while i < INPUT_CONTROLLER_OUTPUT_COUNT:
+        set_out.data[i].gamepad_id <- gamepad_id
+        i <- i + 1
+
+def Input_ParseInputConfig(game_id: static u8& = "") -> void:
+    _ = GetInputConfigFile(game_id)
+    g_input_connections.clear()
+    i: mutable usize = 0
+    while i < 9:
+        Input_OutputSetInit(g_output_sets[i].ref[mutable InputControllerOutputSet&], i.u8())
+        i <- i + 1
+    g_input_initialized <- true
+
+def Input_UpdatePressedKeys(event: InputEvent) -> bool:
+    i: mutable usize = 0
+    while i < g_pressed_keys.len:
+        if Input_IDEquals(g_pressed_keys[i].event.input, event.input):
+            g_pressed_keys[i].event <- event
+            g_pressed_keys[i].active <- event.active
+            return true
+        i <- i + 1
+    g_pressed_keys.append(InputPressedKey(event, event.active))
+    return true
+
+def Input_ActivateOutputsFromInputs() -> void:
+    if not g_input_initialized:
+        Input_ParseInputConfig()
+    set_i: mutable usize = 0
+    while set_i < 9:
+        out_i: mutable usize = 0
+        while out_i < INPUT_CONTROLLER_OUTPUT_COUNT:
+            Input_ControllerOutputResetUpdate(g_output_sets[set_i].data[out_i].ref[mutable InputControllerOutput&])
+            out_i <- out_i + 1
+        set_i <- set_i + 1
+
+    i: mutable usize = 0
+    while i < g_input_connections.len:
+        c: BindingConnection = g_input_connections[i]
+        if c.output_set_index < 9 and c.output_index < INPUT_CONTROLLER_OUTPUT_COUNT:
+            ev: InputEvent = Input_ConnectionProcessBinding(c)
+            if Input_IDIsValid(ev.input):
+                Input_ControllerOutputAddUpdate(g_output_sets[c.output_set_index].data[c.output_index].ref[mutable InputControllerOutput&], ev)
+        i <- i + 1
+
+    set_i <- 0
+    while set_i < 9:
+        out_i <- 0
+        while out_i < INPUT_CONTROLLER_OUTPUT_COUNT:
+            Input_ControllerOutputFinalizeUpdate(g_output_sets[set_i].data[out_i].ref[mutable InputControllerOutput&])
+            out_i <- out_i + 1
+        set_i <- set_i + 1
+
+def Input_GetDefaultGlobalConfig() -> static u8&:
+    return "# Anything put here will be loaded for all games.\n"
+
+def Input_GetDefaultInputConfig() -> static u8&:
+    return "# Default input config (Elisa port)\ntriangle = kp8\ncircle = kp6\ncross = kp2\nsquare = kp4\n"

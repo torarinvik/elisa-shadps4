@@ -1,0 +1,707 @@
+# SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+# Based on imgui_impl_sdl3.cpp from Dear ImGui repository
+
+permission Window:
+    Event
+    Cursor
+    Resize
+
+permission Input:
+    Mouse
+    Keyboard
+    Gamepad
+
+# ---------------------------------------------------------------------------
+# Data structures
+# ---------------------------------------------------------------------------
+
+struct ImGuiSdlData:
+    window: mutable void&?          # SDL_Window*
+    window_id: mutable u32          # SDL_WindowID
+    time: mutable u64
+    non_reused_time: mutable u64
+    clipboard_text_data: mutable static u8&?
+    ime_window: mutable void&?      # SDL_Window* for IME
+    mouse_window_id: mutable u32
+    mouse_buttons_down: mutable int
+    # mouse_cursors[ImGuiMouseCursor_COUNT] stored as opaque pointer
+    mouse_cursors: mutable void&?
+    mouse_last_cursor: mutable void&?
+    mouse_pending_leave_frame: mutable int
+    prev_mouse_pos_x: mutable f32
+    prev_mouse_pos_y: mutable f32
+    last_cursor_move_time: mutable u64
+    gamepad_mode: mutable int
+    want_update_gamepads_list: mutable bool
+    framerate_sec_per_frame_idx: mutable int
+    framerate_sec_per_frame_acc: mutable f32
+    # framerate_sec_per_frame[60] stored as opaque pointer
+    framerate_sec_per_frame_buf: mutable void&?
+
+global mutable g_imgui_sdl_data: ImGuiSdlData = zeroed
+
+# ---------------------------------------------------------------------------
+# External SDL3 API declarations
+# ---------------------------------------------------------------------------
+
+extern SDL_GetPerformanceFrequency() -> u64 effects[Unsafe.RawExtern]
+extern SDL_GetPerformanceCounter() -> u64 effects[Unsafe.RawExtern]
+extern SDL_GetWindowID(window: void&?) -> u32 effects[Window.Event, Unsafe.RawExtern]
+extern SDL_GetWindowFromID(id: u32) -> void&? effects[Window.Event, Unsafe.RawExtern]
+extern SDL_GetWindowFlags(window: void&?) -> u64 effects[Window.Event, Unsafe.RawExtern]
+extern SDL_GetWindowSize(window: void&?, w: mutable int&, h: mutable int&) -> bool effects[Window.Resize, Unsafe.RawExtern]
+extern SDL_GetWindowSizeInPixels(window: void&?, w: mutable int&, h: mutable int&) -> bool effects[Window.Resize, Unsafe.RawExtern]
+extern SDL_GetWindowPosition(window: void&?, x: mutable int&, y: mutable int&) -> bool effects[Window.Event, Unsafe.RawExtern]
+extern SDL_GetKeyboardFocus() -> void&? effects[Input.Keyboard, Unsafe.RawExtern]
+extern SDL_GetGlobalMouseState(x: mutable f32&, y: mutable f32&) -> u32 effects[Input.Mouse, Unsafe.RawExtern]
+extern SDL_CaptureMouse(enabled: bool) -> bool effects[Input.Mouse, Unsafe.RawExtern]
+extern SDL_WarpMouseInWindow(window: void&?, x: f32, y: f32) -> bool effects[Input.Mouse, Unsafe.RawExtern]
+extern SDL_HideCursor() -> bool effects[Window.Cursor, Unsafe.RawExtern]
+extern SDL_ShowCursor() -> bool effects[Window.Cursor, Unsafe.RawExtern]
+extern SDL_CursorVisible() -> bool effects[Window.Cursor, Unsafe.RawExtern]
+extern SDL_SetCursor(cursor: void&?) -> bool effects[Window.Cursor, Unsafe.RawExtern]
+extern SDL_CreateSystemCursor(id: int) -> void&? effects[Window.Cursor, Unsafe.RawExtern]
+extern SDL_DestroyCursor(cursor: void&?) -> void effects[Window.Cursor, Unsafe.RawExtern]
+extern SDL_free(mem: void&?) -> void effects[Unsafe.RawExtern]
+extern SDL_GetClipboardText() -> static u8&? effects[Unsafe.RawExtern]
+extern SDL_SetClipboardText(text: static u8&?) -> bool effects[Unsafe.RawExtern]
+extern SDL_RunOnMainThread_stop_text_input(window: void&?) -> void effects[Unsafe.RawExtern]
+extern SDL_RunOnMainThread_start_text_input(window: void&?, x: int, y: int, w: int, h: int) -> void effects[Unsafe.RawExtern]
+extern SDL_SetHint(name: static u8&?, value: static u8&?) -> bool effects[Unsafe.RawExtern]
+extern SDL_GetGamepads(count: mutable int&) -> void&? effects[Input.Gamepad, Unsafe.RawExtern]
+extern SDL_OpenGamepad(id: u32) -> void&? effects[Input.Gamepad, Unsafe.RawExtern]
+extern SDL_CloseGamepad(gamepad: void&?) -> void effects[Input.Gamepad, Unsafe.RawExtern]
+extern SDL_GetGamepadButton(gamepad: void&?, button: int) -> u8 effects[Input.Gamepad, Unsafe.RawExtern]
+extern SDL_GetGamepadAxis(gamepad: void&?, axis: int) -> i16 effects[Input.Gamepad, Unsafe.RawExtern]
+extern SDL_GetWindowDisplayScale(window: void&?) -> f32 effects[Window.Event, Unsafe.RawExtern]
+
+# ---------------------------------------------------------------------------
+# External ImGui C API declarations
+# ---------------------------------------------------------------------------
+
+extern imgui_sdl_get_io() -> void&? effects[Unsafe.RawExtern]
+extern imgui_sdl_get_current_context() -> void&? effects[Unsafe.RawExtern]
+extern imgui_sdl_io_get_backend_platform_userdata(io: void&?) -> void&? effects[Unsafe.RawExtern]
+extern imgui_sdl_io_set_backend_platform_userdata(io: void&?, data: void&?) -> void effects[Unsafe.RawExtern]
+extern imgui_sdl_io_set_backend_platform_name(io: void&?, name: static u8&?) -> void effects[Unsafe.RawExtern]
+extern imgui_sdl_io_set_backend_flags_mouse_cursors(io: void&?) -> void effects[Unsafe.RawExtern]
+extern imgui_sdl_io_set_backend_flags_set_mouse_pos(io: void&?) -> void effects[Unsafe.RawExtern]
+extern imgui_sdl_io_clear_backend_flags_platform(io: void&?) -> void effects[Unsafe.RawExtern]
+extern imgui_sdl_io_get_want_capture_mouse(io: void&?) -> bool effects[Unsafe.RawExtern]
+extern imgui_sdl_io_get_want_capture_keyboard(io: void&?) -> bool effects[Unsafe.RawExtern]
+extern imgui_sdl_io_get_want_set_mouse_pos(io: void&?) -> bool effects[Unsafe.RawExtern]
+extern imgui_sdl_io_get_mouse_pos_x(io: void&?) -> f32 effects[Unsafe.RawExtern]
+extern imgui_sdl_io_get_mouse_pos_y(io: void&?) -> f32 effects[Unsafe.RawExtern]
+extern imgui_sdl_io_get_config_flags(io: void&?) -> u32 effects[Unsafe.RawExtern]
+extern imgui_sdl_io_get_nav_active(io: void&?) -> bool effects[Unsafe.RawExtern]
+extern imgui_sdl_io_get_mouse_draw_cursor(io: void&?) -> bool effects[Unsafe.RawExtern]
+extern imgui_sdl_io_add_mouse_source_event(io: void&?, source: int) -> void effects[Unsafe.RawExtern]
+extern imgui_sdl_io_add_mouse_pos_event(io: void&?, x: f32, y: f32) -> void effects[Unsafe.RawExtern]
+extern imgui_sdl_io_add_mouse_wheel_event(io: void&?, x: f32, y: f32) -> void effects[Unsafe.RawExtern]
+extern imgui_sdl_io_add_mouse_button_event(io: void&?, button: int, down: bool) -> void effects[Unsafe.RawExtern]
+extern imgui_sdl_io_add_input_characters_utf8(io: void&?, text: static u8&?) -> void effects[Unsafe.RawExtern]
+extern imgui_sdl_io_add_key_event(io: void&?, key: int, down: bool) -> void effects[Unsafe.RawExtern]
+extern imgui_sdl_io_add_key_analog_event(io: void&?, key: int, down: bool, value: f32) -> void effects[Unsafe.RawExtern]
+extern imgui_sdl_io_add_focus_event(io: void&?, focused: bool) -> void effects[Unsafe.RawExtern]
+extern imgui_sdl_io_set_key_event_native_data(io: void&?, key: int, keycode: i32, scancode: i32) -> void effects[Unsafe.RawExtern]
+extern imgui_sdl_io_set_display_size(io: void&?, w: f32, h: f32) -> void effects[Unsafe.RawExtern]
+extern imgui_sdl_io_set_display_framebuffer_scale(io: void&?, x: f32, y: f32) -> void effects[Unsafe.RawExtern]
+extern imgui_sdl_io_set_delta_time(io: void&?, dt: f32) -> void effects[Unsafe.RawExtern]
+extern imgui_sdl_io_set_font_global_scale(io: void&?, scale: f32) -> void effects[Unsafe.RawExtern]
+extern imgui_sdl_io_get_font_global_scale(io: void&?) -> f32 effects[Unsafe.RawExtern]
+extern imgui_sdl_io_set_ini_filename(io: void&?, path: void&?) -> void effects[Unsafe.RawExtern]
+extern imgui_sdl_io_set_log_filename(io: void&?, path: void&?) -> void effects[Unsafe.RawExtern]
+extern imgui_sdl_platform_io_set_clipboard_get(set_fn: void&?) -> void effects[Unsafe.RawExtern]
+extern imgui_sdl_platform_io_set_clipboard_set(get_fn: void&?) -> void effects[Unsafe.RawExtern]
+extern imgui_sdl_platform_io_set_ime_data(fn: void&?) -> void effects[Unsafe.RawExtern]
+
+extern imgui_sdl_get_frame_count() -> int effects[Unsafe.RawExtern]
+extern imgui_sdl_get_mouse_cursor() -> int effects[Unsafe.RawExtern]
+extern imgui_sdl_get_main_viewport() -> void&? effects[Unsafe.RawExtern]
+extern imgui_sdl_viewport_get_platform_handle(viewport: void&?) -> void&? effects[Unsafe.RawExtern]
+extern imgui_sdl_viewport_set_platform_handle(viewport: void&?, handle: void&?) -> void effects[Unsafe.RawExtern]
+extern imgui_sdl_nav_window_id(io: void&?) -> u32 effects[Unsafe.RawExtern]
+extern imgui_sdl_nav_window_flags(io: void&?) -> u32 effects[Unsafe.RawExtern]
+
+extern imgui_sdl_alloc_cursor_array(count: int) -> void&? effects[Unsafe.RawExtern]
+extern imgui_sdl_set_cursor_in_array(arr: void&?, index: int, cursor: void&?) -> void effects[Unsafe.RawExtern]
+extern imgui_sdl_get_cursor_from_array(arr: void&?, index: int) -> void&? effects[Unsafe.RawExtern]
+extern imgui_sdl_free_cursor_array(arr: void&?) -> void effects[Unsafe.RawExtern]
+
+extern imgui_sdl_alloc_framerate_buf(count: int) -> void&? effects[Unsafe.RawExtern]
+extern imgui_sdl_free_framerate_buf(buf: void&?) -> void effects[Unsafe.RawExtern]
+extern imgui_sdl_framerate_buf_get(buf: void&?, index: int) -> f32 effects[Unsafe.RawExtern]
+extern imgui_sdl_framerate_buf_set(buf: void&?, index: int, val: f32) -> void effects[Unsafe.RawExtern]
+
+extern imgui_sdl_alloc_gamepad_list() -> void&? effects[Input.Gamepad, Unsafe.RawExtern]
+extern imgui_sdl_free_gamepad_list(list: void&?) -> void effects[Input.Gamepad, Unsafe.RawExtern]
+extern imgui_sdl_gamepad_list_size(list: void&?) -> int effects[Input.Gamepad, Unsafe.RawExtern]
+extern imgui_sdl_gamepad_list_get(list: void&?, index: int) -> void&? effects[Input.Gamepad, Unsafe.RawExtern]
+extern imgui_sdl_gamepad_list_push(list: void&?, gamepad: void&?) -> void effects[Input.Gamepad, Unsafe.RawExtern]
+extern imgui_sdl_gamepad_list_clear(list: void&?) -> void effects[Input.Gamepad, Unsafe.RawExtern]
+
+extern emulator_settings_get_cursor_state() -> i16 effects[Unsafe.RawExtern]
+extern emulator_settings_get_cursor_hide_timeout() -> f64 effects[Unsafe.RawExtern]
+extern debug_state_set_frame_delta_time(dt: f32) -> void effects[Unsafe.RawExtern]
+extern debug_state_set_framerate(rate: f32) -> void effects[Unsafe.RawExtern]
+
+extern input_get_sdl_gamepad_0() -> void&? effects[Input.Gamepad, Unsafe.RawExtern]
+
+# SDL_WindowID from SDL_Event fields
+extern sdl_event_get_type(event: void&?) -> u32 effects[Unsafe.RawExtern]
+extern sdl_event_motion_window_id(event: void&?) -> u32 effects[Unsafe.RawExtern]
+extern sdl_event_motion_x(event: void&?) -> f32 effects[Unsafe.RawExtern]
+extern sdl_event_motion_y(event: void&?) -> f32 effects[Unsafe.RawExtern]
+extern sdl_event_motion_which(event: void&?) -> u32 effects[Unsafe.RawExtern]
+extern sdl_event_wheel_window_id(event: void&?) -> u32 effects[Unsafe.RawExtern]
+extern sdl_event_wheel_x(event: void&?) -> f32 effects[Unsafe.RawExtern]
+extern sdl_event_wheel_y(event: void&?) -> f32 effects[Unsafe.RawExtern]
+extern sdl_event_wheel_which(event: void&?) -> u32 effects[Unsafe.RawExtern]
+extern sdl_event_button_window_id(event: void&?) -> u32 effects[Unsafe.RawExtern]
+extern sdl_event_button_button(event: void&?) -> u8 effects[Unsafe.RawExtern]
+extern sdl_event_button_which(event: void&?) -> u32 effects[Unsafe.RawExtern]
+extern sdl_event_text_window_id(event: void&?) -> u32 effects[Unsafe.RawExtern]
+extern sdl_event_text_text(event: void&?) -> static u8&? effects[Unsafe.RawExtern]
+extern sdl_event_key_window_id(event: void&?) -> u32 effects[Unsafe.RawExtern]
+extern sdl_event_key_key(event: void&?) -> i32 effects[Unsafe.RawExtern]
+extern sdl_event_key_scancode(event: void&?) -> i32 effects[Unsafe.RawExtern]
+extern sdl_event_key_mod(event: void&?) -> u32 effects[Unsafe.RawExtern]
+extern sdl_event_window_window_id(event: void&?) -> u32 effects[Unsafe.RawExtern]
+
+# SDL event type constants
+const SDL_EVENT_MOUSE_MOTION: u32 = 0x400u32
+const SDL_EVENT_MOUSE_WHEEL: u32 = 0x403u32
+const SDL_EVENT_MOUSE_BUTTON_DOWN: u32 = 0x401u32
+const SDL_EVENT_MOUSE_BUTTON_UP: u32 = 0x402u32
+const SDL_EVENT_TEXT_INPUT: u32 = 0x303u32
+const SDL_EVENT_KEY_DOWN: u32 = 0x300u32
+const SDL_EVENT_KEY_UP: u32 = 0x301u32
+const SDL_EVENT_WINDOW_MOUSE_ENTER: u32 = 0x206u32
+const SDL_EVENT_WINDOW_MOUSE_LEAVE: u32 = 0x207u32
+const SDL_EVENT_WINDOW_FOCUS_GAINED: u32 = 0x208u32
+const SDL_EVENT_WINDOW_FOCUS_LOST: u32 = 0x209u32
+const SDL_EVENT_GAMEPAD_ADDED: u32 = 0x651u32
+const SDL_EVENT_GAMEPAD_REMOVED: u32 = 0x652u32
+const SDL_EVENT_CHANGE_CONTROLLER: u32 = 0x350u32
+const SDL_WINDOW_MINIMIZED: u64 = 0x40u64
+const SDL_TOUCH_MOUSEID: u32 = 0xFFFFFFFFu32
+const SDL_BUTTON_LEFT: u8 = 1u8
+const SDL_BUTTON_RIGHT: u8 = 3u8
+const SDL_BUTTON_MIDDLE: u8 = 2u8
+const SDL_BUTTON_X1: u8 = 4u8
+const SDL_BUTTON_X2: u8 = 5u8
+const SDL_KMOD_CTRL: u32 = 0x00C0u32
+const SDL_KMOD_SHIFT: u32 = 0x0003u32
+const SDL_KMOD_ALT: u32 = 0x0300u32
+const SDL_KMOD_GUI: u32 = 0x0C00u32
+
+# ImGuiMouseSource
+const ImGuiMouseSource_Mouse: int = 0
+const ImGuiMouseSource_TouchScreen: int = 1
+
+# ImGuiKey values (abbreviated; full mapping via helper)
+const ImGuiKey_None: int = 0
+const ImGuiKey_Tab: int = 512
+const ImGuiKey_LeftArrow: int = 513
+const ImGuiKey_RightArrow: int = 514
+const ImGuiKey_UpArrow: int = 515
+const ImGuiKey_DownArrow: int = 516
+const ImGuiKey_PageUp: int = 517
+const ImGuiKey_PageDown: int = 518
+const ImGuiKey_Home: int = 519
+const ImGuiKey_End: int = 520
+const ImGuiKey_Insert: int = 521
+const ImGuiKey_Delete: int = 522
+const ImGuiKey_Backspace: int = 523
+const ImGuiKey_Space: int = 524
+const ImGuiKey_Enter: int = 525
+const ImGuiKey_Escape: int = 526
+const ImGuiMod_Ctrl: int = 0x1000
+const ImGuiMod_Shift: int = 0x2000
+const ImGuiMod_Alt: int = 0x4000
+const ImGuiMod_Super: int = 0x8000
+
+# SDL scancode constants for keypad
+const SDL_SCANCODE_KP_0: i32 = 98
+const SDL_SCANCODE_KP_1: i32 = 89
+const SDL_SCANCODE_KP_2: i32 = 90
+const SDL_SCANCODE_KP_3: i32 = 91
+const SDL_SCANCODE_KP_4: i32 = 92
+const SDL_SCANCODE_KP_5: i32 = 93
+const SDL_SCANCODE_KP_6: i32 = 94
+const SDL_SCANCODE_KP_7: i32 = 95
+const SDL_SCANCODE_KP_8: i32 = 96
+const SDL_SCANCODE_KP_9: i32 = 97
+const SDL_SCANCODE_KP_PERIOD: i32 = 99
+const SDL_SCANCODE_KP_DIVIDE: i32 = 84
+const SDL_SCANCODE_KP_MULTIPLY: i32 = 85
+const SDL_SCANCODE_KP_MINUS: i32 = 86
+const SDL_SCANCODE_KP_PLUS: i32 = 87
+const SDL_SCANCODE_KP_ENTER: i32 = 88
+const SDL_SCANCODE_KP_EQUALS: i32 = 103
+
+# ImGuiKey keypad
+const ImGuiKey_Keypad0: int = 637
+const ImGuiKey_Keypad1: int = 638
+const ImGuiKey_Keypad2: int = 639
+const ImGuiKey_Keypad3: int = 640
+const ImGuiKey_Keypad4: int = 641
+const ImGuiKey_Keypad5: int = 642
+const ImGuiKey_Keypad6: int = 643
+const ImGuiKey_Keypad7: int = 644
+const ImGuiKey_Keypad8: int = 645
+const ImGuiKey_Keypad9: int = 646
+const ImGuiKey_KeypadDecimal: int = 647
+const ImGuiKey_KeypadDivide: int = 648
+const ImGuiKey_KeypadMultiply: int = 649
+const ImGuiKey_KeypadSubtract: int = 650
+const ImGuiKey_KeypadAdd: int = 651
+const ImGuiKey_KeypadEnter: int = 652
+const ImGuiKey_KeypadEqual: int = 653
+
+# SDL keycode -> ImGuiKey mapping via external shim (handles the large switch)
+extern sdl_keycode_to_imgui_key(keycode: i32, scancode: i32) -> int effects[Unsafe.RawExtern]
+
+# GamepadMode constants
+const ImGui_ImplSDL3_GamepadMode_AutoFirst: int = 0
+const ImGui_ImplSDL3_GamepadMode_AutoAll: int = 1
+const ImGui_ImplSDL3_GamepadMode_Manual: int = 2
+
+# SDL cursor system IDs
+const SDL_SYSTEM_CURSOR_DEFAULT: int = 0
+const SDL_SYSTEM_CURSOR_TEXT: int = 1
+const SDL_SYSTEM_CURSOR_MOVE: int = 7
+const SDL_SYSTEM_CURSOR_NS_RESIZE: int = 9
+const SDL_SYSTEM_CURSOR_EW_RESIZE: int = 10
+const SDL_SYSTEM_CURSOR_NESW_RESIZE: int = 11
+const SDL_SYSTEM_CURSOR_NWSE_RESIZE: int = 12
+const SDL_SYSTEM_CURSOR_POINTER: int = 4
+const SDL_SYSTEM_CURSOR_NOT_ALLOWED: int = 13
+
+# ImGuiMouseCursor values
+const ImGuiMouseCursor_Arrow: int = 0
+const ImGuiMouseCursor_TextInput: int = 1
+const ImGuiMouseCursor_ResizeAll: int = 2
+const ImGuiMouseCursor_ResizeNS: int = 3
+const ImGuiMouseCursor_ResizeEW: int = 4
+const ImGuiMouseCursor_ResizeNESW: int = 5
+const ImGuiMouseCursor_ResizeNWSE: int = 6
+const ImGuiMouseCursor_Hand: int = 7
+const ImGuiMouseCursor_NotAllowed: int = 8
+const ImGuiMouseCursor_None: int = -1
+const ImGuiMouseCursor_COUNT: int = 9
+
+# HideCursorState constants
+const HideCursorState_Never: i16 = 0
+const HideCursorState_Always: i16 = 1
+const HideCursorState_Idle: i16 = 2
+
+# ImGuiConfigFlags
+const ImGuiConfigFlags_NoMouseCursorChange: u32 = 0x20u32
+const ImGuiConfigFlags_NavEnableGamepad: u32 = 0x2u32
+const ImGuiBackendFlags_HasGamepad: u32 = 0x4u32
+
+# ImGuiWindowFlags
+const ImGuiWindowFlags_NoNav: u32 = 0x40000u32
+
+# ---------------------------------------------------------------------------
+# Helper: key modifier update
+# ---------------------------------------------------------------------------
+
+def imgui_sdl_update_key_modifiers(sdl_key_mods: u32) -> void:
+    can Input.Keyboard:
+        io: void&? = imgui_sdl_get_io()
+        imgui_sdl_io_add_key_event(io, ImGuiMod_Ctrl, (sdl_key_mods & SDL_KMOD_CTRL) != 0u32)
+        imgui_sdl_io_add_key_event(io, ImGuiMod_Shift, (sdl_key_mods & SDL_KMOD_SHIFT) != 0u32)
+        imgui_sdl_io_add_key_event(io, ImGuiMod_Alt, (sdl_key_mods & SDL_KMOD_ALT) != 0u32)
+        imgui_sdl_io_add_key_event(io, ImGuiMod_Super, (sdl_key_mods & SDL_KMOD_GUI) != 0u32)
+
+def imgui_sdl_get_viewport_for_window_id(window_id: u32) -> void&?:
+    if window_id == g_imgui_sdl_data.window_id:
+        return imgui_sdl_get_main_viewport()
+    return null
+
+# ---------------------------------------------------------------------------
+# ProcessEvent
+# ---------------------------------------------------------------------------
+
+def ImGui_Sdl_ProcessEvent(event: void&?) -> bool:
+    can Window.Event, Input.Mouse, Input.Keyboard, Input.Gamepad:
+        io: void&? = imgui_sdl_get_io()
+        event_type: u32 = sdl_event_get_type(event)
+
+        if event_type == SDL_EVENT_MOUSE_MOTION:
+            viewport: void&? = imgui_sdl_get_viewport_for_window_id(sdl_event_motion_window_id(event))
+            if viewport == null:
+                return false
+            source: int = if sdl_event_motion_which(event) == SDL_TOUCH_MOUSEID: ImGuiMouseSource_TouchScreen else: ImGuiMouseSource_Mouse
+            imgui_sdl_io_add_mouse_source_event(io, source)
+            mx: f32 = sdl_event_motion_x(event)
+            my: f32 = sdl_event_motion_y(event)
+            imgui_sdl_io_add_mouse_pos_event(io, mx, my)
+            if mx != g_imgui_sdl_data.prev_mouse_pos_x or my != g_imgui_sdl_data.prev_mouse_pos_y:
+                g_imgui_sdl_data.prev_mouse_pos_x <- mx
+                g_imgui_sdl_data.prev_mouse_pos_y <- my
+                if emulator_settings_get_cursor_state() == HideCursorState_Idle:
+                    g_imgui_sdl_data.last_cursor_move_time <- g_imgui_sdl_data.time
+            return true
+
+        if event_type == SDL_EVENT_MOUSE_WHEEL:
+            if imgui_sdl_get_viewport_for_window_id(sdl_event_wheel_window_id(event)) == null:
+                return false
+            source: int = if sdl_event_wheel_which(event) == SDL_TOUCH_MOUSEID: ImGuiMouseSource_TouchScreen else: ImGuiMouseSource_Mouse
+            imgui_sdl_io_add_mouse_source_event(io, source)
+            imgui_sdl_io_add_mouse_wheel_event(io, -sdl_event_wheel_x(event), sdl_event_wheel_y(event))
+            return true
+
+        if event_type == SDL_EVENT_MOUSE_BUTTON_DOWN or event_type == SDL_EVENT_MOUSE_BUTTON_UP:
+            if imgui_sdl_get_viewport_for_window_id(sdl_event_button_window_id(event)) == null:
+                return false
+            btn: u8 = sdl_event_button_button(event)
+            mouse_button: mutable int = -1
+            if btn == SDL_BUTTON_LEFT:
+                mouse_button <- 0
+            if btn == SDL_BUTTON_RIGHT:
+                mouse_button <- 1
+            if btn == SDL_BUTTON_MIDDLE:
+                mouse_button <- 2
+            if btn == SDL_BUTTON_X1:
+                mouse_button <- 3
+            if btn == SDL_BUTTON_X2:
+                mouse_button <- 4
+            if mouse_button == -1:
+                return false
+            source: int = if sdl_event_button_which(event) == SDL_TOUCH_MOUSEID: ImGuiMouseSource_TouchScreen else: ImGuiMouseSource_Mouse
+            imgui_sdl_io_add_mouse_source_event(io, source)
+            is_down: bool = event_type == SDL_EVENT_MOUSE_BUTTON_DOWN
+            imgui_sdl_io_add_mouse_button_event(io, mouse_button, is_down)
+            if is_down:
+                g_imgui_sdl_data.mouse_buttons_down <- g_imgui_sdl_data.mouse_buttons_down | (1 << mouse_button)
+            else:
+                g_imgui_sdl_data.mouse_buttons_down <- g_imgui_sdl_data.mouse_buttons_down & (1 << mouse_button).bitnot()
+            return true
+
+        if event_type == SDL_EVENT_TEXT_INPUT:
+            if imgui_sdl_get_viewport_for_window_id(sdl_event_text_window_id(event)) == null:
+                return false
+            imgui_sdl_io_add_input_characters_utf8(io, sdl_event_text_text(event))
+            return true
+
+        if event_type == SDL_EVENT_KEY_DOWN or event_type == SDL_EVENT_KEY_UP:
+            if imgui_sdl_get_viewport_for_window_id(sdl_event_key_window_id(event)) == null:
+                return false
+            imgui_sdl_update_key_modifiers(sdl_event_key_mod(event))
+            keycode: i32 = sdl_event_key_key(event)
+            scancode: i32 = sdl_event_key_scancode(event)
+            key: int = sdl_keycode_to_imgui_key(keycode, scancode)
+            imgui_sdl_io_add_key_event(io, key, event_type == SDL_EVENT_KEY_DOWN)
+            imgui_sdl_io_set_key_event_native_data(io, key, keycode, scancode)
+            return true
+
+        if event_type == SDL_EVENT_WINDOW_MOUSE_ENTER:
+            if imgui_sdl_get_viewport_for_window_id(sdl_event_window_window_id(event)) == null:
+                return false
+            g_imgui_sdl_data.mouse_window_id <- sdl_event_window_window_id(event)
+            g_imgui_sdl_data.mouse_pending_leave_frame <- 0
+            g_imgui_sdl_data.last_cursor_move_time <- g_imgui_sdl_data.time
+            return true
+
+        if event_type == SDL_EVENT_WINDOW_MOUSE_LEAVE:
+            if imgui_sdl_get_viewport_for_window_id(sdl_event_window_window_id(event)) == null:
+                return false
+            g_imgui_sdl_data.mouse_pending_leave_frame <- imgui_sdl_get_frame_count() + 1
+            g_imgui_sdl_data.last_cursor_move_time <- g_imgui_sdl_data.time
+            return true
+
+        if event_type == SDL_EVENT_WINDOW_FOCUS_GAINED or event_type == SDL_EVENT_WINDOW_FOCUS_LOST:
+            if imgui_sdl_get_viewport_for_window_id(sdl_event_window_window_id(event)) == null:
+                return false
+            imgui_sdl_io_add_focus_event(io, event_type == SDL_EVENT_WINDOW_FOCUS_GAINED)
+            return true
+
+        if event_type == SDL_EVENT_GAMEPAD_ADDED or event_type == SDL_EVENT_GAMEPAD_REMOVED:
+            g_imgui_sdl_data.want_update_gamepads_list <- true
+            return true
+
+        if event_type == SDL_EVENT_CHANGE_CONTROLLER:
+            g_imgui_sdl_data.want_update_gamepads_list <- true
+            return false
+
+        return false
+
+# ---------------------------------------------------------------------------
+# Mouse update helpers
+# ---------------------------------------------------------------------------
+
+def imgui_sdl_update_mouse_data() -> void:
+    can Input.Mouse, Window.Event:
+        io: void&? = imgui_sdl_get_io()
+        _ = SDL_CaptureMouse(g_imgui_sdl_data.mouse_buttons_down != 0)
+        focused: void&? = SDL_GetKeyboardFocus()
+        is_app_focused: bool = g_imgui_sdl_data.window == focused
+        if is_app_focused:
+            if imgui_sdl_io_get_want_set_mouse_pos(io):
+                _ = SDL_WarpMouseInWindow(g_imgui_sdl_data.window, imgui_sdl_io_get_mouse_pos_x(io), imgui_sdl_io_get_mouse_pos_y(io))
+            if g_imgui_sdl_data.mouse_buttons_down == 0:
+                gx: mutable f32 = 0.0
+                gy: mutable f32 = 0.0
+                wx: mutable int = 0
+                wy: mutable int = 0
+                _ = SDL_GetGlobalMouseState(gx.ref[mutable f32&], gy.ref[mutable f32&])
+                _ = SDL_GetWindowPosition(focused, wx.ref[mutable int&], wy.ref[mutable int&])
+                gx <- gx - wx.f32()
+                gy <- gy - wy.f32()
+                imgui_sdl_io_add_mouse_pos_event(io, gx, gy)
+                if gx != g_imgui_sdl_data.prev_mouse_pos_x or gy != g_imgui_sdl_data.prev_mouse_pos_y:
+                    if g_imgui_sdl_data.prev_mouse_pos_x == 0.0 and g_imgui_sdl_data.prev_mouse_pos_y == 0.0:
+                        g_imgui_sdl_data.prev_mouse_pos_x <- gx
+                        g_imgui_sdl_data.prev_mouse_pos_y <- gy
+                        g_imgui_sdl_data.last_cursor_move_time <- g_imgui_sdl_data.time
+
+def imgui_sdl_update_mouse_cursor() -> void:
+    can Window.Cursor:
+        io: void&? = imgui_sdl_get_io()
+        if imgui_sdl_io_get_config_flags(io) & ImGuiConfigFlags_NoMouseCursorChange != 0u32:
+            return
+        cursor_state: i16 = emulator_settings_get_cursor_state()
+        imgui_cursor: int = imgui_sdl_get_mouse_cursor()
+        if imgui_sdl_io_get_mouse_draw_cursor(io) or imgui_cursor == ImGuiMouseCursor_None or cursor_state == HideCursorState_Always:
+            _ = SDL_HideCursor()
+        else:
+            freq: u64 = SDL_GetPerformanceFrequency()
+            timeout_ticks: u64 = (emulator_settings_get_cursor_hide_timeout() * freq.f64()).u64()
+            if cursor_state == HideCursorState_Idle and g_imgui_sdl_data.time - g_imgui_sdl_data.last_cursor_move_time >= timeout_ticks:
+                was_visible: bool = SDL_CursorVisible()
+                _ = SDL_HideCursor()
+                if was_visible:
+                    _ = SDL_WarpMouseInWindow(SDL_GetKeyboardFocus(), g_imgui_sdl_data.prev_mouse_pos_x, g_imgui_sdl_data.prev_mouse_pos_y)
+            else:
+                effective_cursor: void&? = imgui_sdl_get_cursor_from_array(g_imgui_sdl_data.mouse_cursors, imgui_cursor)
+                if effective_cursor == null:
+                    effective_cursor <- imgui_sdl_get_cursor_from_array(g_imgui_sdl_data.mouse_cursors, ImGuiMouseCursor_Arrow)
+                if g_imgui_sdl_data.mouse_last_cursor != effective_cursor:
+                    _ = SDL_SetCursor(effective_cursor)
+                    g_imgui_sdl_data.mouse_last_cursor <- effective_cursor
+                _ = SDL_ShowCursor()
+
+# ---------------------------------------------------------------------------
+# Gamepad update
+# ---------------------------------------------------------------------------
+
+def imgui_sdl_close_gamepads() -> void:
+    can Input.Gamepad:
+        if g_imgui_sdl_data.gamepad_mode != ImGui_ImplSDL3_GamepadMode_Manual:
+            i: mutable int = 0
+            list: void&? = g_imgui_sdl_data.mouse_cursors  # reusing field; gamepads stored separately below
+            _ = i
+        imgui_sdl_gamepad_list_clear(g_imgui_sdl_data.mouse_last_cursor)  # gamepads list at mouse_last_cursor slot
+
+def imgui_sdl_update_gamepad_button(io: void&?, key: int, gamepad_button: int) -> void:
+    can Input.Gamepad:
+        merged: mutable bool = false
+        i: mutable int = 0
+        list: void&? = g_imgui_sdl_data.mouse_last_cursor
+        count: int = imgui_sdl_gamepad_list_size(list)
+        while i < count:
+            gp: void&? = imgui_sdl_gamepad_list_get(list, i)
+            if SDL_GetGamepadButton(gp, gamepad_button) != 0u8:
+                merged <- true
+            i <- i + 1
+        imgui_sdl_io_add_key_event(io, key, merged)
+
+def imgui_sdl_saturate(v: f32) -> f32:
+    if v < 0.0:
+        return 0.0
+    if v > 1.0:
+        return 1.0
+    return v
+
+def imgui_sdl_update_gamepad_analog(io: void&?, key: int, axis_no: int, v0: f32, v1: f32) -> void:
+    can Input.Gamepad:
+        merged: mutable f32 = 0.0
+        i: mutable int = 0
+        list: void&? = g_imgui_sdl_data.mouse_last_cursor
+        count: int = imgui_sdl_gamepad_list_size(list)
+        while i < count:
+            gp: void&? = imgui_sdl_gamepad_list_get(list, i)
+            raw_val: i16 = SDL_GetGamepadAxis(gp, axis_no)
+            vn: f32 = imgui_sdl_saturate((raw_val.f32() - v0) / (v1 - v0))
+            if merged < vn:
+                merged <- vn
+            i <- i + 1
+        imgui_sdl_io_add_key_analog_event(io, key, merged > 0.1, merged)
+
+def imgui_sdl_update_gamepads() -> void:
+    can Input.Gamepad:
+        io: void&? = imgui_sdl_get_io()
+        sdl_gamepad_0: void&? = input_get_sdl_gamepad_0()
+        list: void&? = g_imgui_sdl_data.mouse_last_cursor
+        if g_imgui_sdl_data.want_update_gamepads_list and g_imgui_sdl_data.gamepad_mode != ImGui_ImplSDL3_GamepadMode_Manual:
+            if sdl_gamepad_0 != null:
+                imgui_sdl_gamepad_list_push(list, sdl_gamepad_0)
+                g_imgui_sdl_data.want_update_gamepads_list <- false
+            else:
+                imgui_sdl_gamepad_list_clear(list)
+                count: mutable int = 0
+                gamepads_ptr: void&? = SDL_GetGamepads(count.ref[mutable int&])
+                _ = gamepads_ptr
+                g_imgui_sdl_data.want_update_gamepads_list <- false
+
+        if imgui_sdl_io_get_config_flags(io) & ImGuiConfigFlags_NavEnableGamepad == 0u32:
+            return
+        imgui_sdl_io_clear_backend_flags_platform(io)
+        if imgui_sdl_gamepad_list_size(list) == 0:
+            return
+        imgui_sdl_io_set_backend_flags_mouse_cursors(io)
+
+        # SDL_GAMEPAD_BUTTON_* and SDL_GAMEPAD_AXIS_* integer constants
+        imgui_sdl_update_gamepad_button(io, 0x105, 9)   # ImGuiKey_GamepadStart, SDL_GAMEPAD_BUTTON_START
+        imgui_sdl_update_gamepad_button(io, 0x106, 10)  # ImGuiKey_GamepadBack, SDL_GAMEPAD_BUTTON_BACK
+        imgui_sdl_update_gamepad_button(io, 0x10A, 2)   # ImGuiKey_GamepadFaceRight (Circle)
+        imgui_sdl_update_gamepad_button(io, 0x10B, 3)   # ImGuiKey_GamepadFaceUp (Triangle)
+        imgui_sdl_update_gamepad_button(io, 0x10C, 0)   # ImGuiKey_GamepadFaceDown (Cross)
+        imgui_sdl_update_gamepad_button(io, 0x10D, 13)  # ImGuiKey_GamepadDpadLeft
+        imgui_sdl_update_gamepad_button(io, 0x10E, 14)  # ImGuiKey_GamepadDpadRight
+        imgui_sdl_update_gamepad_button(io, 0x10F, 11)  # ImGuiKey_GamepadDpadUp
+        imgui_sdl_update_gamepad_button(io, 0x110, 12)  # ImGuiKey_GamepadDpadDown
+        imgui_sdl_update_gamepad_button(io, 0x111, 9)   # ImGuiKey_GamepadL1, SDL_GAMEPAD_BUTTON_LEFT_SHOULDER (=9)
+        imgui_sdl_update_gamepad_button(io, 0x112, 10)  # ImGuiKey_GamepadR1
+        imgui_sdl_update_gamepad_analog(io, 0x113, 4, 0.0, 32767.0)  # L2
+        imgui_sdl_update_gamepad_analog(io, 0x114, 5, 0.0, 32767.0)  # R2
+        imgui_sdl_update_gamepad_button(io, 0x115, 7)   # L3
+        imgui_sdl_update_gamepad_button(io, 0x116, 8)   # R3
+        imgui_sdl_update_gamepad_analog(io, 0x117, 0, -8000.0, -32768.0)  # LStickLeft
+        imgui_sdl_update_gamepad_analog(io, 0x118, 0, 8000.0, 32767.0)   # LStickRight
+        imgui_sdl_update_gamepad_analog(io, 0x119, 1, -8000.0, -32768.0) # LStickUp
+        imgui_sdl_update_gamepad_analog(io, 0x11A, 1, 8000.0, 32767.0)   # LStickDown
+        imgui_sdl_update_gamepad_analog(io, 0x11B, 2, -8000.0, -32768.0) # RStickLeft
+        imgui_sdl_update_gamepad_analog(io, 0x11C, 2, 8000.0, 32767.0)   # RStickRight
+        imgui_sdl_update_gamepad_analog(io, 0x11D, 3, -8000.0, -32768.0) # RStickUp
+        imgui_sdl_update_gamepad_analog(io, 0x11E, 3, 8000.0, 32767.0)   # RStickDown
+
+# ---------------------------------------------------------------------------
+# NewFrame / OnResize
+# ---------------------------------------------------------------------------
+
+def ImGui_Sdl_NewFrame(is_reusing_frame: bool) -> void:
+    can Window.Event, Input.Mouse, Input.Keyboard, Input.Gamepad:
+        io: void&? = imgui_sdl_get_io()
+        freq: u64 = SDL_GetPerformanceFrequency()
+        current_time: mutable u64 = SDL_GetPerformanceCounter()
+        if current_time <= g_imgui_sdl_data.time:
+            current_time <- g_imgui_sdl_data.time + 1u64
+        dt: f32 = if g_imgui_sdl_data.time > 0u64: ((current_time - g_imgui_sdl_data.time).f64() / freq.f64()).f32() else: 0.016666667
+        imgui_sdl_io_set_delta_time(io, dt)
+        g_imgui_sdl_data.time <- current_time
+
+        if not is_reusing_frame:
+            if current_time <= g_imgui_sdl_data.non_reused_time:
+                current_time <- g_imgui_sdl_data.non_reused_time + 1u64
+            non_reused_dt: f32 = if g_imgui_sdl_data.non_reused_time > 0u64: ((current_time - g_imgui_sdl_data.non_reused_time).f64() / freq.f64()).f32() else: 0.016666667
+            g_imgui_sdl_data.non_reused_time <- current_time
+            debug_state_set_frame_delta_time(non_reused_dt)
+
+            count: int = 60
+            frame_idx: mutable int = g_imgui_sdl_data.framerate_sec_per_frame_idx
+            old_val: f32 = imgui_sdl_framerate_buf_get(g_imgui_sdl_data.framerate_sec_per_frame_buf, frame_idx)
+            acc: mutable f32 = g_imgui_sdl_data.framerate_sec_per_frame_acc
+            acc <- acc + non_reused_dt - old_val
+            imgui_sdl_framerate_buf_set(g_imgui_sdl_data.framerate_sec_per_frame_buf, frame_idx, non_reused_dt)
+            g_imgui_sdl_data.framerate_sec_per_frame_acc <- acc
+            g_imgui_sdl_data.framerate_sec_per_frame_idx <- (frame_idx + 1) % count
+            framerate: f32 = if acc > 0.0: 1.0 / (acc / count.f32()) else: 3.4028235e38
+            debug_state_set_framerate(framerate)
+
+        if g_imgui_sdl_data.mouse_pending_leave_frame != 0 and g_imgui_sdl_data.mouse_pending_leave_frame >= imgui_sdl_get_frame_count() and g_imgui_sdl_data.mouse_buttons_down == 0:
+            g_imgui_sdl_data.mouse_window_id <- 0u32
+            g_imgui_sdl_data.mouse_pending_leave_frame <- 0
+            imgui_sdl_io_add_mouse_pos_event(io, -3.4028235e38, -3.4028235e38)
+
+        imgui_sdl_update_mouse_data()
+        imgui_sdl_update_mouse_cursor()
+        imgui_sdl_update_gamepads()
+
+def ImGui_Sdl_OnResize() -> void:
+    can Window.Resize:
+        io: void&? = imgui_sdl_get_io()
+        w: mutable int = 0
+        h: mutable int = 0
+        dw: mutable int = 0
+        dh: mutable int = 0
+        _ = SDL_GetWindowSize(g_imgui_sdl_data.window, w.ref[mutable int&], h.ref[mutable int&])
+        if SDL_GetWindowFlags(g_imgui_sdl_data.window) & SDL_WINDOW_MINIMIZED != 0u64:
+            w <- 0
+            h <- 0
+        _ = SDL_GetWindowSizeInPixels(g_imgui_sdl_data.window, dw.ref[mutable int&], dh.ref[mutable int&])
+        imgui_sdl_io_set_display_size(io, w.f32(), h.f32())
+        if w > 0 and h > 0:
+            imgui_sdl_io_set_display_framebuffer_scale(io, dw.f32() / w.f32(), dh.f32() / h.f32())
+
+# ---------------------------------------------------------------------------
+# Init / Shutdown
+# ---------------------------------------------------------------------------
+
+def ImGui_Sdl_Init(window: void&?) -> bool:
+    can Window.Event, Window.Cursor:
+        io: void&? = imgui_sdl_get_io()
+        imgui_sdl_io_set_backend_platform_name(io, "imgui_impl_sdl3_shadps4")
+        imgui_sdl_io_set_backend_flags_mouse_cursors(io)
+        imgui_sdl_io_set_backend_flags_set_mouse_pos(io)
+        imgui_sdl_io_set_backend_platform_userdata(io, g_imgui_sdl_data.ref[mutable ImGuiSdlData&].cast[void&?])
+
+        g_imgui_sdl_data.window <- window
+        g_imgui_sdl_data.window_id <- SDL_GetWindowID(window)
+        g_imgui_sdl_data.gamepad_mode <- ImGui_ImplSDL3_GamepadMode_AutoFirst
+        g_imgui_sdl_data.want_update_gamepads_list <- true
+        g_imgui_sdl_data.mouse_last_cursor <- imgui_sdl_alloc_gamepad_list()
+        g_imgui_sdl_data.mouse_cursors <- imgui_sdl_alloc_cursor_array(ImGuiMouseCursor_COUNT)
+        g_imgui_sdl_data.framerate_sec_per_frame_buf <- imgui_sdl_alloc_framerate_buf(60)
+
+        imgui_sdl_set_cursor_in_array(g_imgui_sdl_data.mouse_cursors, ImGuiMouseCursor_Arrow, SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_DEFAULT))
+        imgui_sdl_set_cursor_in_array(g_imgui_sdl_data.mouse_cursors, ImGuiMouseCursor_TextInput, SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_TEXT))
+        imgui_sdl_set_cursor_in_array(g_imgui_sdl_data.mouse_cursors, ImGuiMouseCursor_ResizeAll, SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_MOVE))
+        imgui_sdl_set_cursor_in_array(g_imgui_sdl_data.mouse_cursors, ImGuiMouseCursor_ResizeNS, SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_NS_RESIZE))
+        imgui_sdl_set_cursor_in_array(g_imgui_sdl_data.mouse_cursors, ImGuiMouseCursor_ResizeEW, SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_EW_RESIZE))
+        imgui_sdl_set_cursor_in_array(g_imgui_sdl_data.mouse_cursors, ImGuiMouseCursor_ResizeNESW, SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_NESW_RESIZE))
+        imgui_sdl_set_cursor_in_array(g_imgui_sdl_data.mouse_cursors, ImGuiMouseCursor_ResizeNWSE, SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_NWSE_RESIZE))
+        imgui_sdl_set_cursor_in_array(g_imgui_sdl_data.mouse_cursors, ImGuiMouseCursor_Hand, SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_POINTER))
+        imgui_sdl_set_cursor_in_array(g_imgui_sdl_data.mouse_cursors, ImGuiMouseCursor_NotAllowed, SDL_CreateSystemCursor(SDL_SYSTEM_CURSOR_NOT_ALLOWED))
+
+        main_viewport: void&? = imgui_sdl_get_main_viewport()
+        imgui_sdl_viewport_set_platform_handle(main_viewport, SDL_GetWindowID(window).cast[void&?])
+
+        return true
+
+def ImGui_Sdl_Shutdown() -> void:
+    can Window.Cursor, Input.Gamepad:
+        io: void&? = imgui_sdl_get_io()
+        if g_imgui_sdl_data.clipboard_text_data != null:
+            SDL_free(g_imgui_sdl_data.clipboard_text_data.cast[void&?])
+        i: mutable int = 0
+        while i < ImGuiMouseCursor_COUNT:
+            SDL_DestroyCursor(imgui_sdl_get_cursor_from_array(g_imgui_sdl_data.mouse_cursors, i))
+            i <- i + 1
+        imgui_sdl_free_cursor_array(g_imgui_sdl_data.mouse_cursors)
+        imgui_sdl_free_gamepad_list(g_imgui_sdl_data.mouse_last_cursor)
+        imgui_sdl_free_framerate_buf(g_imgui_sdl_data.framerate_sec_per_frame_buf)
+
+        imgui_sdl_io_set_backend_platform_name(io, null)
+        imgui_sdl_io_set_backend_platform_userdata(io, null)
+        imgui_sdl_io_clear_backend_flags_platform(io)
+
+        g_imgui_sdl_data <- zeroed
+
+def ImGui_Sdl_SetGamepadMode(mode: int, manual_gamepads_array: void&?, manual_gamepads_count: int) -> void:
+    can Input.Gamepad:
+        imgui_sdl_gamepad_list_clear(g_imgui_sdl_data.mouse_last_cursor)
+        if mode == ImGui_ImplSDL3_GamepadMode_Manual:
+            i: mutable int = 0
+            while i < manual_gamepads_count:
+                gp: void&? = imgui_sdl_gamepad_list_get(manual_gamepads_array, i)
+                imgui_sdl_gamepad_list_push(g_imgui_sdl_data.mouse_last_cursor, gp)
+                i <- i + 1
+        else:
+            g_imgui_sdl_data.want_update_gamepads_list <- true
+        g_imgui_sdl_data.gamepad_mode <- mode

@@ -1,0 +1,120 @@
+# SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+# Export instruction translation (EXP).
+
+# Export target constants
+const ExportTarget_MrtZ:      int = 61
+const ExportTarget_Null:      int = 63
+const ExportTarget_Pos0:      int = 12
+const ExportTarget_Param0:    int = 32
+
+# Export component swizzle / format constants (NumberFormatCompressed)
+const ExportNumFmt_FP32:     int = 0
+const ExportNumFmt_FP16:     int = 1
+const ExportNumFmt_UNORM16:  int = 2
+const ExportNumFmt_SNORM16:  int = 3
+const ExportNumFmt_UINT16:   int = 4
+const ExportNumFmt_SINT16:   int = 5
+const ExportNumFmt_Unorm8:   int = 6
+
+# C shims for export helpers
+extern export_inst_target(inst: void&?) -> int effects[Unsafe.RawExtern]
+extern export_inst_compr(inst: void&?) -> bool effects[Unsafe.RawExtern]
+extern export_inst_en(inst: void&?) -> u32 effects[Unsafe.RawExtern]
+extern export_inst_vsrc(inst: void&?, idx: u32) -> u32 effects[Unsafe.RawExtern]
+extern export_get_number_format(inst: void&?) -> int effects[Unsafe.RawExtern]
+extern export_build_target(inst: void&?) -> void&? effects[Translate.Emit, Unsafe.RawExtern]
+extern export_mrtz_is_depth(inst: void&?) -> bool effects[Unsafe.RawExtern]
+extern export_mrtz_is_stencil_ref(inst: void&?) -> bool effects[Unsafe.RawExtern]
+extern export_mrtz_is_sample_mask(inst: void&?) -> bool effects[Unsafe.RawExtern]
+
+def EmitExport(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        target: int = export_inst_target(inst)
+        if target == ExportTarget_Null:
+            return
+        if target == ExportTarget_MrtZ:
+            ExportDepth(t, inst)
+            return
+        if target >= ExportTarget_Pos0 and target < ExportTarget_Param0:
+            ExportPosition(t, inst, target)
+            return
+        if target >= ExportTarget_Param0:
+            ExportParam(t, inst, target)
+            return
+        ExportRenderTarget(t, inst, target)
+
+def ExportRenderTarget(t: void&?, inst: void&?, target: int) -> void:
+    can Translate.Emit:
+        compr: bool = export_inst_compr(inst)
+        en: u32 = export_inst_en(inst)
+        num_fmt: int = export_get_number_format(inst)
+        export_target: void&? = export_build_target(inst)
+
+        val: mutable void&? = null
+        if compr:
+            src0: void&? = ir_get_vector_reg_u32(t, export_inst_vsrc(inst, 0u32))
+            src1: void&? = ir_get_vector_reg_u32(t, export_inst_vsrc(inst, 1u32))
+            c0: void&? = ir_composite_extract(t, ir_unpack2x16(t, num_fmt, src0), 0u32)
+            c1: void&? = ir_composite_extract(t, ir_unpack2x16(t, num_fmt, src0), 1u32)
+            c2: void&? = ir_composite_extract(t, ir_unpack2x16(t, num_fmt, src1), 0u32)
+            c3: void&? = ir_composite_extract(t, ir_unpack2x16(t, num_fmt, src1), 1u32)
+            val <- ir_composite_construct4(t, c0, c1, c2, c3)
+        else:
+            c0: mutable void&? = ir_imm32_f(t, 0.0f32)
+            c1: mutable void&? = ir_imm32_f(t, 0.0f32)
+            c2: mutable void&? = ir_imm32_f(t, 0.0f32)
+            c3: mutable void&? = ir_imm32_f(t, 0.0f32)
+            if (en >> 0u32) & 1u32 != 0u32:
+                c0 <- ir_get_vector_reg_f32(t, export_inst_vsrc(inst, 0u32))
+            if (en >> 1u32) & 1u32 != 0u32:
+                c1 <- ir_get_vector_reg_f32(t, export_inst_vsrc(inst, 1u32))
+            if (en >> 2u32) & 1u32 != 0u32:
+                c2 <- ir_get_vector_reg_f32(t, export_inst_vsrc(inst, 2u32))
+            if (en >> 3u32) & 1u32 != 0u32:
+                c3 <- ir_get_vector_reg_f32(t, export_inst_vsrc(inst, 3u32))
+            val <- ir_composite_construct4(t, c0, c1, c2, c3)
+        ir_export_value(t, export_target, val)
+
+def ExportDepth(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        export_target: void&? = export_build_target(inst)
+        en: u32 = export_inst_en(inst)
+        c0: mutable void&? = ir_imm32_f(t, 0.0f32)
+        c1: mutable void&? = ir_imm32_f(t, 0.0f32)
+        c2: mutable void&? = ir_imm32_f(t, 0.0f32)
+        c3: mutable void&? = ir_imm32_f(t, 0.0f32)
+        if (en >> 0u32) & 1u32 != 0u32:
+            c0 <- ir_get_vector_reg_f32(t, export_inst_vsrc(inst, 0u32))
+        if (en >> 1u32) & 1u32 != 0u32:
+            c1 <- ir_get_vector_reg_f32(t, export_inst_vsrc(inst, 1u32))
+        if (en >> 2u32) & 1u32 != 0u32:
+            c2 <- ir_get_vector_reg_f32(t, export_inst_vsrc(inst, 2u32))
+        if (en >> 3u32) & 1u32 != 0u32:
+            c3 <- ir_get_vector_reg_f32(t, export_inst_vsrc(inst, 3u32))
+        val: void&? = ir_composite_construct4(t, c0, c1, c2, c3)
+        ir_export_value(t, export_target, val)
+
+def ExportPosition(t: void&?, inst: void&?, target: int) -> void:
+    can Translate.Emit:
+        en: u32 = export_inst_en(inst)
+        export_target: void&? = export_build_target(inst)
+        c0: mutable void&? = ir_imm32_f(t, 0.0f32)
+        c1: mutable void&? = ir_imm32_f(t, 0.0f32)
+        c2: mutable void&? = ir_imm32_f(t, 0.0f32)
+        c3: mutable void&? = ir_imm32_f(t, 0.0f32)
+        if (en >> 0u32) & 1u32 != 0u32:
+            c0 <- ir_get_vector_reg_f32(t, export_inst_vsrc(inst, 0u32))
+        if (en >> 1u32) & 1u32 != 0u32:
+            c1 <- ir_get_vector_reg_f32(t, export_inst_vsrc(inst, 1u32))
+        if (en >> 2u32) & 1u32 != 0u32:
+            c2 <- ir_get_vector_reg_f32(t, export_inst_vsrc(inst, 2u32))
+        if (en >> 3u32) & 1u32 != 0u32:
+            c3 <- ir_get_vector_reg_f32(t, export_inst_vsrc(inst, 3u32))
+        val: void&? = ir_composite_construct4(t, c0, c1, c2, c3)
+        ir_export_value(t, export_target, val)
+
+def ExportParam(t: void&?, inst: void&?, target: int) -> void:
+    can Translate.Emit:
+        ExportPosition(t, inst, target)

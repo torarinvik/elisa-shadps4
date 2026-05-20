@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+# Scalar flow-control instruction translation.
+
+const Opcode_S_BARRIER:    int = 0xBB
+const Opcode_S_GETPC_B64:  int = 0xBC
+const Opcode_S_SENDMSG:    int = 0xBD
+
+# GS message type constants
+const GsMsgEmitCut:    int = 1
+const GsMsgCut:        int = 2
+const GsMsgGsDone:     int = 3
+
+extern ir_emit_gs_emit(t: void&?, stream: u32) -> void effects[Translate.Emit, Unsafe.RawExtern]
+extern ir_emit_gs_cut(t: void&?, stream: u32) -> void effects[Translate.Emit, Unsafe.RawExtern]
+extern ir_emit_gs_done(t: void&?) -> void effects[Translate.Emit, Unsafe.RawExtern]
+extern inst_sendmsg_type(inst: void&?) -> int effects[Unsafe.RawExtern]
+extern inst_sendmsg_stream(inst: void&?) -> u32 effects[Unsafe.RawExtern]
+
+def EmitFlowControl(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        op: int = gcn_inst_opcode(inst)
+        if op == Opcode_S_BARRIER:
+            ir_barrier(t)
+            return
+        if op == Opcode_S_GETPC_B64:
+            S_GETPC_B64(t, inst)
+            return
+        if op == Opcode_S_SENDMSG:
+            S_SENDMSG(t, inst)
+            return
+        scalar_log_missing_opcode(t, inst)
+
+def S_GETPC_B64(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        pc_val: void&? = ir_get_pc(t)
+        scalar_set_dst_u64(t, gcn_inst_dst(inst, 0u32), pc_val)
+
+def S_SENDMSG(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        msg_type: int = inst_sendmsg_type(inst)
+        stream: u32 = inst_sendmsg_stream(inst)
+        if msg_type == GsMsgEmitCut:
+            ir_emit_gs_emit(t, stream)
+            ir_emit_gs_cut(t, stream)
+            return
+        if msg_type == GsMsgCut:
+            ir_emit_gs_cut(t, stream)
+            return
+        if msg_type == GsMsgGsDone:
+            ir_emit_gs_done(t)
+            return

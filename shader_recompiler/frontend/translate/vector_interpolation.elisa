@@ -1,0 +1,88 @@
+# SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+# Vector interpolation instruction translation (VINTRP).
+
+const Opcode_V_INTERP_P1_F32:  int = 0
+const Opcode_V_INTERP_P2_F32:  int = 1
+const Opcode_V_INTERP_MOV_F32: int = 2
+
+# Interpolation mode constants
+const InterpMode_Perspective:      int = 0
+const InterpMode_Linear:           int = 1
+const InterpMode_Flat:             int = 2
+const InterpMode_None:             int = 3
+
+# Default (invalid) barycentrics value
+const DefaultBary_Val: f32 = 0.0f32
+
+extern vintrp_get_attrib_component(t: void&?, inst: void&?) -> void&? effects[Translate.Emit, Unsafe.RawExtern]
+extern vintrp_get_attrib_index(t: void&?, inst: void&?) -> void&? effects[Translate.Emit, Unsafe.RawExtern]
+extern vintrp_get_interp_mode(t: void&?, attrib: void&?) -> int effects[Unsafe.RawExtern]
+extern vintrp_is_manual_mode(t: void&?, attrib: void&?) -> bool effects[Unsafe.RawExtern]
+extern vintrp_get_bary_i(t: void&?) -> void&? effects[Translate.Emit, Unsafe.RawExtern]
+extern vintrp_get_bary_j(t: void&?) -> void&? effects[Translate.Emit, Unsafe.RawExtern]
+extern vintrp_get_attrib_p0(t: void&?, attrib: void&?, comp: u32) -> void&? effects[Translate.Emit, Unsafe.RawExtern]
+extern vintrp_get_attrib_p10(t: void&?, attrib: void&?, comp: u32) -> void&? effects[Translate.Emit, Unsafe.RawExtern]
+extern vintrp_get_attrib_p20(t: void&?, attrib: void&?, comp: u32) -> void&? effects[Translate.Emit, Unsafe.RawExtern]
+
+def EmitVectorInterpolation(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        op: int = gcn_inst_opcode(inst)
+        if op == Opcode_V_INTERP_P1_F32:
+            V_INTERP_P1_F32(t, inst)
+            return
+        if op == Opcode_V_INTERP_P2_F32:
+            V_INTERP_P2_F32(t, inst)
+            return
+        if op == Opcode_V_INTERP_MOV_F32:
+            V_INTERP_MOV_F32(t, inst)
+            return
+        valu_log_missing_opcode(t, inst)
+
+def V_INTERP_P1_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        attrib: void&? = vintrp_get_attrib_index(t, inst)
+        comp: u32 = operand_code(vintrp_get_attrib_component(t, inst))
+        is_manual: bool = vintrp_is_manual_mode(t, attrib)
+        dst_op: void&? = gcn_inst_dst(inst, 0u32)
+
+        if is_manual:
+            bary_i: void&? = vintrp_get_bary_i(t)
+            p0: void&? = vintrp_get_attrib_p0(t, attrib, comp)
+            p10: void&? = vintrp_get_attrib_p10(t, attrib, comp)
+            result: void&? = ir_fp_fma_f32(t, ir_fp_sub_f32(t, p10, p0), bary_i, p0)
+            valu_set_dst_f32(t, dst_op, result)
+        else:
+            valu_set_dst_f32(t, dst_op, ir_imm32_f(t, DefaultBary_Val))
+
+def V_INTERP_P2_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        attrib: void&? = vintrp_get_attrib_index(t, inst)
+        comp: u32 = operand_code(vintrp_get_attrib_component(t, inst))
+        is_manual: bool = vintrp_is_manual_mode(t, attrib)
+        dst_op: void&? = gcn_inst_dst(inst, 0u32)
+
+        if not is_manual:
+            result: void&? = ir_get_attribute(t, attrib, comp)
+            valu_set_dst_f32(t, dst_op, result)
+        else:
+            bary_j: void&? = vintrp_get_bary_j(t)
+            p0: void&? = vintrp_get_attrib_p0(t, attrib, comp)
+            p20: void&? = vintrp_get_attrib_p20(t, attrib, comp)
+            vdst: void&? = valu_get_src_f32(t, dst_op)
+            result: void&? = ir_fp_fma_f32(t, ir_fp_sub_f32(t, p20, p0), bary_j, vdst)
+            valu_set_dst_f32(t, dst_op, result)
+
+def V_INTERP_MOV_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        attrib: void&? = vintrp_get_attrib_index(t, inst)
+        comp: u32 = operand_code(vintrp_get_attrib_component(t, inst))
+        interp_mode: int = vintrp_get_interp_mode(t, attrib)
+        dst_op: void&? = gcn_inst_dst(inst, 0u32)
+
+        if interp_mode == InterpMode_Flat:
+            valu_set_dst_f32(t, dst_op, ir_get_attribute(t, attrib, comp))
+        else:
+            result: void&? = ir_get_attribute(t, attrib, comp)
+            valu_set_dst_f32(t, dst_op, result)

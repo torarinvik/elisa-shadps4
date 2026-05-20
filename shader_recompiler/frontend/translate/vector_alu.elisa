@@ -1,0 +1,1052 @@
+# SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+# Vector ALU instruction translation for GCN → IR.
+
+# GetSrc / SetDst shims for vector operands
+extern valu_get_src_f32(t: void&?, operand: void&?) -> void&? effects[Unsafe.RawExtern]
+extern valu_get_src_u32(t: void&?, operand: void&?) -> void&? effects[Unsafe.RawExtern]
+extern valu_get_src_f64(t: void&?, operand: void&?) -> void&? effects[Unsafe.RawExtern]
+extern valu_get_src_u64(t: void&?, operand: void&?) -> void&? effects[Unsafe.RawExtern]
+extern valu_get_src16_f32(t: void&?, operand: void&?) -> void&? effects[Unsafe.RawExtern]
+extern valu_get_src16_u32(t: void&?, operand: void&?) -> void&? effects[Unsafe.RawExtern]
+extern valu_get_src16_u32_signed(t: void&?, operand: void&?) -> void&? effects[Unsafe.RawExtern]
+extern valu_get_src_mix(t: void&?, operand: void&?) -> void&? effects[Unsafe.RawExtern]
+extern valu_get_src_pk_f32(t: void&?, operand: void&?) -> void&? effects[Unsafe.RawExtern]
+extern valu_get_src_pk_u32(t: void&?, operand: void&?) -> void&? effects[Unsafe.RawExtern]
+extern valu_get_src_pk_u32_signed(t: void&?, operand: void&?) -> void&? effects[Unsafe.RawExtern]
+extern valu_set_dst_u32(t: void&?, operand: void&?, val: void&?) -> void effects[Unsafe.RawExtern]
+extern valu_set_dst_f32(t: void&?, operand: void&?, val: void&?) -> void effects[Unsafe.RawExtern]
+extern valu_set_dst1(t: void&?, operand: void&?, val: void&?) -> void effects[Unsafe.RawExtern]
+extern valu_set_dst64(t: void&?, operand: void&?, val: void&?) -> void effects[Unsafe.RawExtern]
+extern valu_set_dst16_f32(t: void&?, operand: void&?, val: void&?) -> void effects[Unsafe.RawExtern]
+extern valu_set_dst16_u32(t: void&?, operand: void&?, val: void&?) -> void effects[Unsafe.RawExtern]
+extern valu_set_dst16_u32_signed(t: void&?, operand: void&?, val: void&?) -> void effects[Unsafe.RawExtern]
+
+# Packed operand pair helpers (returns two-element handle)
+extern valu_pk_first(pair: void&?) -> void&? effects[Unsafe.RawExtern]
+extern valu_pk_second(pair: void&?) -> void&? effects[Unsafe.RawExtern]
+extern valu_set_dst_pk_f32(t: void&?, operand: void&?, lo: void&?, hi: void&?) -> void effects[Unsafe.RawExtern]
+extern valu_set_dst_pk_u32(t: void&?, operand: void&?, lo: void&?, hi: void&?) -> void effects[Unsafe.RawExtern]
+extern valu_set_dst_pk_u32_signed(t: void&?, operand: void&?, lo: void&?, hi: void&?) -> void effects[Unsafe.RawExtern]
+
+extern valu_log_missing_opcode(t: void&?, inst: void&?) -> void effects[Unsafe.RawExtern]
+
+# Number format constants (AmdGpu::NumberFormat)
+const NumFmt_Unorm: int = 1
+const NumFmt_Snorm: int = 2
+const NumFmt_Float: int = 9
+const NumFmt_Uint:  int = 4
+const NumFmt_Sint:  int = 5
+
+def EmitVectorAlu(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        op: int = gcn_inst_opcode(inst)
+        # dispatch is handled entirely by C++ side via translator_translate;
+        # individual handlers below are called from C++ or from tests.
+        valu_log_missing_opcode(t, inst)
+
+# ---------------------------------------------------------------------------
+# VOP2
+# ---------------------------------------------------------------------------
+
+def V_CNDMASK_B32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src2_op: void&? = gcn_inst_src(inst, 2u32)
+        flag: mutable void&? = null
+        if operand_field_is_scalar_gpr(src2_op):
+            flag <- ir_get_thread_bit_scalar_reg(t, operand_code(src2_op))
+        else:
+            flag <- ir_get_vcc(t)
+        src0: void&? = valu_get_src_f32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_f32(t, gcn_inst_src(inst, 1u32))
+        result: void&? = ir_select(t, flag, src1, src0)
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), result)
+
+def V_ADD_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_add_f32(t, valu_get_src_f32(t, gcn_inst_src(inst, 0u32)), valu_get_src_f32(t, gcn_inst_src(inst, 1u32))))
+
+def V_ADD_F64(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst64(t, gcn_inst_dst(inst, 0u32), ir_fp_add_f64(t, valu_get_src_f64(t, gcn_inst_src(inst, 0u32)), valu_get_src_f64(t, gcn_inst_src(inst, 1u32))))
+
+def V_SUB_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_sub_f32(t, valu_get_src_f32(t, gcn_inst_src(inst, 0u32)), valu_get_src_f32(t, gcn_inst_src(inst, 1u32))))
+
+def V_SUBREV_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_sub_f32(t, valu_get_src_f32(t, gcn_inst_src(inst, 1u32)), valu_get_src_f32(t, gcn_inst_src(inst, 0u32))))
+
+def V_MUL_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_mul_f32(t, valu_get_src_f32(t, gcn_inst_src(inst, 0u32)), valu_get_src_f32(t, gcn_inst_src(inst, 1u32))))
+
+def V_MUL_LEGACY_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_f32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_f32(t, gcn_inst_src(inst, 1u32))
+        zero: void&? = ir_imm32_f(t, 0.0f32)
+        src0_zero: void&? = ir_fp_equal_f32(t, src0, zero)
+        src1_zero: void&? = ir_fp_equal_f32(t, src1, zero)
+        either_zero: void&? = ir_logical_or(t, src0_zero, src1_zero)
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), ir_select(t, either_zero, zero, ir_fp_mul_f32(t, src0, src1)))
+
+def V_MUL_I32_I24(t: void&?, is_signed: bool, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = ir_bit_field_extract(t, valu_get_src_u32(t, gcn_inst_src(inst, 0u32)), ir_imm32_u(t, 0u32), ir_imm32_u(t, 24u32), is_signed)
+        src1: void&? = ir_bit_field_extract(t, valu_get_src_u32(t, gcn_inst_src(inst, 1u32)), ir_imm32_u(t, 0u32), ir_imm32_u(t, 24u32), is_signed)
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_imul(t, src0, src1))
+
+def V_MIN_F32(t: void&?, is_legacy: bool, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_f32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_f32(t, gcn_inst_src(inst, 1u32))
+        fpmin: void&? = ir_fp_min_f32(t, src0, src1)
+        result: mutable void&? = fpmin
+        if is_legacy:
+            nan_cond: void&? = ir_logical_or(t, ir_fp_is_nan_f32(t, src0), ir_fp_is_nan_f32(t, src1))
+            result <- ir_select(t, nan_cond, src1, fpmin)
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), result)
+
+def V_MAX_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_max_f32(t, valu_get_src_f32(t, gcn_inst_src(inst, 0u32)), valu_get_src_f32(t, gcn_inst_src(inst, 1u32))))
+
+def V_MAX_F32_LEGACY(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_f32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_f32(t, gcn_inst_src(inst, 1u32))
+        fpmax: void&? = ir_fp_max_f32(t, src0, src1)
+        nan_cond: void&? = ir_logical_or(t, ir_fp_is_nan_f32(t, src0), ir_fp_is_nan_f32(t, src1))
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), ir_select(t, nan_cond, src1, fpmax))
+
+def V_MIN_I32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_smin(t, valu_get_src_u32(t, gcn_inst_src(inst, 0u32)), valu_get_src_u32(t, gcn_inst_src(inst, 1u32))))
+
+def V_MIN_U32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_imin(t, valu_get_src_u32(t, gcn_inst_src(inst, 0u32)), valu_get_src_u32(t, gcn_inst_src(inst, 1u32)), false))
+
+def V_MAX_U32(t: void&?, is_signed: bool, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_imax(t, valu_get_src_u32(t, gcn_inst_src(inst, 0u32)), valu_get_src_u32(t, gcn_inst_src(inst, 1u32)), is_signed))
+
+def V_LSHR_B32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 1u32))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_shift_right_logical(t, src0, ir_bitwise_and(t, src1, ir_imm32_u(t, 0x1Fu32))))
+
+def V_LSHRREV_B32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 1u32))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_shift_right_logical(t, src1, ir_bitwise_and(t, src0, ir_imm32_u(t, 0x1Fu32))))
+
+def V_ASHR_I32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 1u32))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_shift_right_arithmetic(t, src0, ir_bitwise_and(t, src1, ir_imm32_u(t, 0x1Fu32))))
+
+def V_ASHRREV_I32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 1u32))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_shift_right_arithmetic(t, src1, ir_bitwise_and(t, src0, ir_imm32_u(t, 0x1Fu32))))
+
+def V_LSHL_B32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 1u32))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_shift_left_logical(t, src0, ir_bitwise_and(t, src1, ir_imm32_u(t, 0x1Fu32))))
+
+def V_LSHLREV_B32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 1u32))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_shift_left_logical(t, src1, ir_bitwise_and(t, src0, ir_imm32_u(t, 0x1Fu32))))
+
+def V_AND_B32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_bitwise_and(t, valu_get_src_u32(t, gcn_inst_src(inst, 0u32)), valu_get_src_u32(t, gcn_inst_src(inst, 1u32))))
+
+def V_OR_B32(t: void&?, is_xor: bool, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 1u32))
+        result: mutable void&? = null
+        if is_xor:
+            result <- ir_bitwise_xor(t, src0, src1)
+        else:
+            result <- ir_bitwise_or(t, src0, src1)
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), result)
+
+def V_BFM_B32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = ir_bit_field_extract(t, valu_get_src_u32(t, gcn_inst_src(inst, 0u32)), ir_imm32_u(t, 0u32), ir_imm32_u(t, 4u32), false)
+        src1: void&? = ir_bit_field_extract(t, valu_get_src_u32(t, gcn_inst_src(inst, 1u32)), ir_imm32_u(t, 0u32), ir_imm32_u(t, 4u32), false)
+        ones: void&? = ir_isub(t, ir_shift_left_logical(t, ir_imm32_u(t, 1u32), src0), ir_imm32_u(t, 1u32))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_shift_left_logical(t, ones, src1))
+
+def V_MAC_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        dst_op: void&? = gcn_inst_dst(inst, 0u32)
+        valu_set_dst_f32(t, dst_op, ir_fp_fma_f32(t, valu_get_src_f32(t, gcn_inst_src(inst, 0u32)), valu_get_src_f32(t, gcn_inst_src(inst, 1u32)), valu_get_src_f32(t, dst_op)))
+
+def V_MADMK_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_f32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_f32(t, gcn_inst_src(inst, 1u32))
+        k: void&? = valu_get_src_f32(t, gcn_inst_src(inst, 2u32))
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_fma_f32(t, src0, k, src1))
+
+def V_BCNT_U32_B32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 1u32))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_iadd(t, ir_bit_count(t, src0), src1))
+
+def V_ADD_I32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        result: void&? = ir_iadd(t, valu_get_src_u32(t, gcn_inst_src(inst, 0u32)), valu_get_src_u32(t, gcn_inst_src(inst, 1u32)))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), result)
+
+def V_SUB_I32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 1u32))
+        result: void&? = ir_isub(t, src0, src1)
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), result)
+        did_underflow: void&? = ir_igreater_than(t, src1, src0, false)
+        V_set_carry_out(t, gcn_inst_dst(inst, 1u32), inst, did_underflow)
+
+def V_SUBREV_I32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 1u32))
+        result: void&? = ir_isub(t, src1, src0)
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), result)
+        did_underflow: void&? = ir_igreater_than(t, src0, src1, false)
+        V_set_carry_out(t, gcn_inst_dst(inst, 1u32), inst, did_underflow)
+
+def V_ADDC_U32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 1u32))
+        carry: void&? = V_get_carry_in(t, inst)
+        tmp1: void&? = ir_iadd_carry(t, src0, src1)
+        r1: void&? = ir_composite_extract(t, tmp1, 0u32)
+        c1: void&? = ir_composite_extract(t, tmp1, 1u32)
+        tmp2: void&? = ir_iadd_carry(t, r1, carry)
+        r2: void&? = ir_composite_extract(t, tmp2, 0u32)
+        c2: void&? = ir_composite_extract(t, tmp2, 1u32)
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), r2)
+        overflow: void&? = ir_inot_equal(t, ir_bitwise_or(t, c1, c2), ir_imm32_u(t, 0u32))
+        V_set_carry_out(t, gcn_inst_dst(inst, 1u32), inst, overflow)
+
+def V_SUBB_U32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 1u32))
+        carry: void&? = V_get_carry_in(t, inst)
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_isub(t, ir_isub(t, src0, src1), carry))
+
+def V_SUBBREV_U32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 1u32))
+        carry: void&? = V_get_carry_in(t, inst)
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_isub(t, ir_isub(t, src1, src0), carry))
+
+def V_LDEXP_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_ldexp_f32(t, valu_get_src_f32(t, gcn_inst_src(inst, 0u32)), valu_get_src_u32(t, gcn_inst_src(inst, 1u32))))
+
+def V_CVT_PKNORM_U16_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        vec: void&? = ir_composite_construct2(t, valu_get_src_f32(t, gcn_inst_src(inst, 0u32)), valu_get_src_f32(t, gcn_inst_src(inst, 1u32)))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_pack2x16(t, NumFmt_Unorm, vec))
+
+def V_CVT_PKNORM_I16_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        vec: void&? = ir_composite_construct2(t, valu_get_src_f32(t, gcn_inst_src(inst, 0u32)), valu_get_src_f32(t, gcn_inst_src(inst, 1u32)))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_pack2x16(t, NumFmt_Snorm, vec))
+
+def V_CVT_PKRTZ_F16_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        vec: void&? = ir_composite_construct2(t, valu_get_src_f32(t, gcn_inst_src(inst, 0u32)), valu_get_src_f32(t, gcn_inst_src(inst, 1u32)))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_pack2x16(t, NumFmt_Float, vec))
+
+def V_CVT_PKACCUM_U8_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        value: void&? = ir_bitwise_and(t, ir_convert_f_to_u(t, 32u32, valu_get_src_f32(t, gcn_inst_src(inst, 0u32))), ir_imm32_u(t, 0xFFu32))
+        accum: void&? = ir_shift_left_logical(t, valu_get_src_u32(t, gcn_inst_src(inst, 1u32)), ir_imm32_u(t, 8u32))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_bitwise_or(t, accum, value))
+
+# F16 VOP2
+def V_ADD_F16(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst16_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_add_f32(t, valu_get_src16_f32(t, gcn_inst_src(inst, 0u32)), valu_get_src16_f32(t, gcn_inst_src(inst, 1u32))))
+
+def V_SUB_F16(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst16_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_sub_f32(t, valu_get_src16_f32(t, gcn_inst_src(inst, 0u32)), valu_get_src16_f32(t, gcn_inst_src(inst, 1u32))))
+
+def V_MUL_F16(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst16_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_mul_f32(t, valu_get_src16_f32(t, gcn_inst_src(inst, 0u32)), valu_get_src16_f32(t, gcn_inst_src(inst, 1u32))))
+
+def V_MAX_F16(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst16_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_max_f32(t, valu_get_src16_f32(t, gcn_inst_src(inst, 0u32)), valu_get_src16_f32(t, gcn_inst_src(inst, 1u32))))
+
+def V_MIN_F16(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst16_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_min_f32(t, valu_get_src16_f32(t, gcn_inst_src(inst, 0u32)), valu_get_src16_f32(t, gcn_inst_src(inst, 1u32))))
+
+# ---------------------------------------------------------------------------
+# VOP1
+# ---------------------------------------------------------------------------
+
+def V_MOV(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), valu_get_src_f32(t, gcn_inst_src(inst, 0u32)))
+
+def V_CVT_I32_F64(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_convert_f_to_s(t, 32u32, valu_get_src_f64(t, gcn_inst_src(inst, 0u32))))
+
+def V_CVT_F64_I32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst64(t, gcn_inst_dst(inst, 0u32), ir_convert_s_to_f(t, 64u32, 32u32, valu_get_src_u32(t, gcn_inst_src(inst, 0u32))))
+
+def V_CVT_F64_U32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst64(t, gcn_inst_dst(inst, 0u32), ir_convert_u_to_f(t, 64u32, 32u32, valu_get_src_u32(t, gcn_inst_src(inst, 0u32))))
+
+def V_CVT_F32_I32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), ir_convert_s_to_f(t, 32u32, 32u32, valu_get_src_u32(t, gcn_inst_src(inst, 0u32))))
+
+def V_CVT_F32_U32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), ir_convert_u_to_f(t, 32u32, 32u32, valu_get_src_u32(t, gcn_inst_src(inst, 0u32))))
+
+def V_CVT_U32_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_convert_f_to_u(t, 32u32, valu_get_src_f32(t, gcn_inst_src(inst, 0u32))))
+
+def V_CVT_I32_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_convert_f_to_s(t, 32u32, valu_get_src_f32(t, gcn_inst_src(inst, 0u32))))
+
+def V_CVT_F16_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_f32(t, gcn_inst_src(inst, 0u32))
+        support_f16: bool = profile_support_float16(t)
+        result: mutable void&? = null
+        if support_f16:
+            f16: void&? = ir_fp_convert(t, 16u32, src0)
+            result <- ir_u_convert(t, 32u32, ir_bit_cast_f16_to_u16(t, f16))
+        else:
+            packed: void&? = ir_pack2x16(t, NumFmt_Float, ir_composite_construct2(t, src0, ir_imm32_f(t, 0.0f32)))
+            result <- ir_bit_field_extract(t, packed, ir_imm32_u(t, 0u32), ir_imm32_u(t, 16u32), false)
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), result)
+
+def V_CVT_F32_F16(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 0u32))
+        support_f16: bool = profile_support_float16(t)
+        result: mutable void&? = null
+        if support_f16:
+            u16: void&? = ir_u_convert(t, 16u32, src0)
+            result <- ir_fp_convert(t, 32u32, ir_bit_cast_u16_to_f16(t, u16))
+        else:
+            unpacked: void&? = ir_unpack2x16(t, NumFmt_Float, src0)
+            result <- ir_composite_extract(t, unpacked, 0u32)
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), result)
+
+def V_CVT_RPI_I32_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_f32(t, gcn_inst_src(inst, 0u32))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_convert_f_to_i(t, 32u32, true, ir_fp_floor_f32(t, ir_fp_add_f32(t, src0, ir_imm32_f(t, 0.5f32)))))
+
+def V_CVT_FLR_I32_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_f32(t, gcn_inst_src(inst, 0u32))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_convert_f_to_i(t, 32u32, true, ir_fp_floor_f32(t, src0)))
+
+def V_CVT_F32_F64(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_convert(t, 32u32, valu_get_src_f64(t, gcn_inst_src(inst, 0u32))))
+
+def V_CVT_F64_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst64(t, gcn_inst_dst(inst, 0u32), ir_fp_convert(t, 64u32, valu_get_src_f32(t, gcn_inst_src(inst, 0u32))))
+
+extern valu_cvt_f32_ubyte(t: void&?, index: u32, inst: void&?) -> void effects[Translate.Emit, Unsafe.RawExtern]
+
+def V_FLOOR_F64(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst64(t, gcn_inst_dst(inst, 0u32), ir_fp_floor_f64(t, valu_get_src_f64(t, gcn_inst_src(inst, 0u32))))
+
+def V_FRACT_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_fract_f32(t, valu_get_src_f32(t, gcn_inst_src(inst, 0u32))))
+
+def V_TRUNC_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_trunc_f32(t, valu_get_src_f32(t, gcn_inst_src(inst, 0u32))))
+
+def V_CEIL_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_ceil_f32(t, valu_get_src_f32(t, gcn_inst_src(inst, 0u32))))
+
+def V_RNDNE_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_round_even_f32(t, valu_get_src_f32(t, gcn_inst_src(inst, 0u32))))
+
+def V_FLOOR_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_floor_f32(t, valu_get_src_f32(t, gcn_inst_src(inst, 0u32))))
+
+def V_EXP_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_exp2_f32(t, valu_get_src_f32(t, gcn_inst_src(inst, 0u32))))
+
+def V_LOG_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_log2_f32(t, valu_get_src_f32(t, gcn_inst_src(inst, 0u32))))
+
+def V_RCP_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_recip_f32(t, valu_get_src_f32(t, gcn_inst_src(inst, 0u32))))
+
+def V_RCP_LEGACY_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_f32(t, gcn_inst_src(inst, 0u32))
+        result: void&? = ir_fp_recip_f32(t, src0)
+        inf: void&? = ir_fp_is_inf_f32(t, result)
+        raw: void&? = ir_convert_f_to_u(t, 32u32, result)
+        sign_bit: void&? = ir_shift_right_logical(t, raw, ir_imm32_u(t, 31u32))
+        sign_set: void&? = ir_inot_equal(t, sign_bit, ir_imm32_u(t, 0u32))
+        inf_result: void&? = ir_select(t, sign_set, ir_imm32_f(t, -0.0f32), ir_imm32_f(t, 0.0f32))
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), ir_select(t, inf, inf_result, result))
+
+def V_RCP_F64(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst64(t, gcn_inst_dst(inst, 0u32), ir_fp_recip_f64(t, valu_get_src_f64(t, gcn_inst_src(inst, 0u32))))
+
+def V_RSQ_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_recip_sqrt_f32(t, valu_get_src_f32(t, gcn_inst_src(inst, 0u32))))
+
+def V_SQRT_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_sqrt_f32(t, valu_get_src_f32(t, gcn_inst_src(inst, 0u32))))
+
+def V_SIN_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_sin_f32(t, valu_get_src_f32(t, gcn_inst_src(inst, 0u32))))
+
+def V_COS_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_cos_f32(t, valu_get_src_f32(t, gcn_inst_src(inst, 0u32))))
+
+def V_NOT_B32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_bitwise_not(t, valu_get_src_u32(t, gcn_inst_src(inst, 0u32))))
+
+def V_BFREV_B32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_bit_reverse(t, valu_get_src_u32(t, gcn_inst_src(inst, 0u32))))
+
+def V_FFBH_U32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 0u32))
+        msb: void&? = ir_find_u_msb(t, src0)
+        pos: void&? = ir_isub(t, ir_imm32_u(t, 31u32), msb)
+        cond: void&? = ir_inot_equal(t, src0, ir_imm32_u(t, 0u32))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_select(t, cond, pos, ir_imm32_u(t, 0xFFFFFFFFu32)))
+
+def V_FFBL_B32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_find_i_lsb(t, valu_get_src_u32(t, gcn_inst_src(inst, 0u32))))
+
+def V_FFBH_I32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 0u32))
+        msb: void&? = ir_find_s_msb(t, src0)
+        pos: void&? = ir_isub(t, ir_imm32_u(t, 31u32), msb)
+        minus_one: void&? = ir_imm32_u(t, 0xFFFFFFFFu32)
+        cond: void&? = ir_logical_and(t, ir_inot_equal(t, src0, ir_imm32_u(t, 0u32)), ir_inot_equal(t, src0, minus_one))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_select(t, cond, pos, minus_one))
+
+def V_FREXP_EXP_I32_F64(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_fp_frexp_exp_f64(t, valu_get_src_f64(t, gcn_inst_src(inst, 0u32))))
+
+def V_FREXP_MANT_F64(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst64(t, gcn_inst_dst(inst, 0u32), ir_fp_frexp_sig_f64(t, valu_get_src_f64(t, gcn_inst_src(inst, 0u32))))
+
+def V_FRACT_F64(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst64(t, gcn_inst_dst(inst, 0u32), ir_fp_fract_f64(t, valu_get_src_f64(t, gcn_inst_src(inst, 0u32))))
+
+def V_FREXP_EXP_I32_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_fp_frexp_exp_f32(t, valu_get_src_f32(t, gcn_inst_src(inst, 0u32))))
+
+def V_FREXP_MANT_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_fp_frexp_sig_f32(t, valu_get_src_f32(t, gcn_inst_src(inst, 0u32))))
+
+# V_MOVRELD/S/SD delegate to C shims that use the M0 relative addressing logic
+extern valu_v_movreld_b32(t: void&?, inst: void&?) -> void effects[Translate.Emit, Unsafe.RawExtern]
+extern valu_v_movrels_b32(t: void&?, inst: void&?) -> void effects[Translate.Emit, Unsafe.RawExtern]
+extern valu_v_movrelsd_b32(t: void&?, inst: void&?) -> void effects[Translate.Emit, Unsafe.RawExtern]
+
+# ---------------------------------------------------------------------------
+# VOPC
+# ---------------------------------------------------------------------------
+
+def V_CMP_F32(t: void&?, op: int, set_exec: bool, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_f32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_f32(t, gcn_inst_src(inst, 1u32))
+        result: mutable void&? = null
+        if op == ConditionOp_F:
+            result <- ir_imm1(t, false)
+        if op == ConditionOp_TRU:
+            result <- ir_imm1(t, true)
+        if op == ConditionOp_EQ:
+            result <- ir_fp_equal_f32(t, src0, src1)
+        if op == ConditionOp_LG:
+            result <- ir_fp_not_equal_f32(t, src0, src1)
+        if op == ConditionOp_GT:
+            result <- ir_fp_greater_than_f32(t, src0, src1)
+        if op == ConditionOp_LT:
+            result <- ir_fp_less_than_f32(t, src0, src1)
+        if op == ConditionOp_LE:
+            result <- ir_fp_less_than_equal_f32(t, src0, src1)
+        if op == ConditionOp_GE:
+            result <- ir_fp_greater_than_equal_f32(t, src0, src1)
+        if op == ConditionOp_U:
+            result <- ir_logical_or(t, ir_fp_is_nan_f32(t, src0), ir_fp_is_nan_f32(t, src1))
+        if set_exec:
+            ir_set_exec(t, result)
+        dst1_op: void&? = gcn_inst_dst(inst, 1u32)
+        if operand_field_is_undefined(dst1_op):
+            ir_set_vcc(t, result)
+        else:
+            valu_set_dst1(t, dst1_op, result)
+
+def V_CMP_F64(t: void&?, op: int, set_exec: bool, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_f64(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_f64(t, gcn_inst_src(inst, 1u32))
+        result: mutable void&? = null
+        if op == ConditionOp_F:
+            result <- ir_imm1(t, false)
+        if op == ConditionOp_EQ:
+            result <- ir_fp_equal_f64(t, src0, src1)
+        if op == ConditionOp_LG:
+            result <- ir_fp_not_equal_f64(t, src0, src1)
+        if op == ConditionOp_GT:
+            result <- ir_fp_greater_than_f64(t, src0, src1)
+        if op == ConditionOp_LT:
+            result <- ir_fp_less_than_f64(t, src0, src1)
+        if op == ConditionOp_LE:
+            result <- ir_fp_less_than_equal_f64(t, src0, src1)
+        if op == ConditionOp_GE:
+            result <- ir_fp_greater_than_equal_f64(t, src0, src1)
+        if op == ConditionOp_U:
+            result <- ir_logical_or(t, ir_fp_is_nan_f32(t, src0), ir_fp_is_nan_f32(t, src1))
+        if set_exec:
+            ir_set_exec(t, result)
+        dst1_op: void&? = gcn_inst_dst(inst, 1u32)
+        if operand_field_is_undefined(dst1_op):
+            ir_set_vcc(t, result)
+        else:
+            valu_set_dst1(t, dst1_op, result)
+
+def V_CMP_U32(t: void&?, op: int, is_signed: bool, set_exec: bool, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 1u32))
+        result: mutable void&? = null
+        if op == ConditionOp_F:
+            result <- ir_imm1(t, false)
+        if op == ConditionOp_TRU:
+            result <- ir_imm1(t, true)
+        if op == ConditionOp_EQ:
+            result <- ir_iequal(t, src0, src1)
+        if op == ConditionOp_LG:
+            result <- ir_inot_equal(t, src0, src1)
+        if op == ConditionOp_GT:
+            result <- ir_igreater_than(t, src0, src1, is_signed)
+        if op == ConditionOp_LT:
+            result <- ir_iless_than(t, src0, src1, is_signed)
+        if op == ConditionOp_LE:
+            result <- ir_iless_than_equal(t, src0, src1, is_signed)
+        if op == ConditionOp_GE:
+            result <- ir_igreater_than_equal(t, src0, src1, is_signed)
+        if set_exec:
+            ir_set_exec(t, result)
+        dst1_op: void&? = gcn_inst_dst(inst, 1u32)
+        if operand_field_is_undefined(dst1_op):
+            ir_set_vcc(t, result)
+        else:
+            valu_set_dst1(t, dst1_op, result)
+
+extern valu_v_cmp_u64(t: void&?, op: int, is_signed: bool, set_exec: bool, inst: void&?) -> void effects[Translate.Emit, Unsafe.RawExtern]
+extern valu_v_cmp_class_f32(t: void&?, inst: void&?) -> void effects[Translate.Emit, Unsafe.RawExtern]
+
+# ---------------------------------------------------------------------------
+# VOP3a
+# ---------------------------------------------------------------------------
+
+def V_MAD_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_fma_f32(t, valu_get_src_f32(t, gcn_inst_src(inst, 0u32)), valu_get_src_f32(t, gcn_inst_src(inst, 1u32)), valu_get_src_f32(t, gcn_inst_src(inst, 2u32))))
+
+def V_MAD_I32_I24(t: void&?, is_signed: bool, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = ir_bit_field_extract(t, valu_get_src_u32(t, gcn_inst_src(inst, 0u32)), ir_imm32_u(t, 0u32), ir_imm32_u(t, 24u32), is_signed)
+        src1: void&? = ir_bit_field_extract(t, valu_get_src_u32(t, gcn_inst_src(inst, 1u32)), ir_imm32_u(t, 0u32), ir_imm32_u(t, 24u32), is_signed)
+        src2: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 2u32))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_iadd(t, ir_imul(t, src0, src1), src2))
+
+def V_BFE_U32(t: void&?, is_signed: bool, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 1u32))
+        src2: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 2u32))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_bit_field_extract(t, src0, src1, src2, is_signed))
+
+def V_BFI_B32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 1u32))
+        src2: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 2u32))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_bitwise_or(t, ir_bitwise_and(t, src0, src1), ir_bitwise_and(t, ir_bitwise_not(t, src0), src2)))
+
+def V_FMA_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_fma_f32(t, valu_get_src_f32(t, gcn_inst_src(inst, 0u32)), valu_get_src_f32(t, gcn_inst_src(inst, 1u32)), valu_get_src_f32(t, gcn_inst_src(inst, 2u32))))
+
+def V_FMA_F64(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst64(t, gcn_inst_dst(inst, 0u32), ir_fp_fma_f64(t, valu_get_src_f64(t, gcn_inst_src(inst, 0u32)), valu_get_src_f64(t, gcn_inst_src(inst, 1u32)), valu_get_src_f64(t, gcn_inst_src(inst, 2u32))))
+
+def V_MIN3_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_min_tri(t, valu_get_src_f32(t, gcn_inst_src(inst, 0u32)), valu_get_src_f32(t, gcn_inst_src(inst, 1u32)), valu_get_src_f32(t, gcn_inst_src(inst, 2u32))))
+
+def V_MIN3_U32(t: void&?, is_signed: bool, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_imin_tri(t, valu_get_src_u32(t, gcn_inst_src(inst, 0u32)), valu_get_src_u32(t, gcn_inst_src(inst, 1u32)), valu_get_src_u32(t, gcn_inst_src(inst, 2u32)), is_signed))
+
+def V_MAX3_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_max_tri(t, valu_get_src_f32(t, gcn_inst_src(inst, 0u32)), valu_get_src_f32(t, gcn_inst_src(inst, 1u32)), valu_get_src_f32(t, gcn_inst_src(inst, 2u32))))
+
+def V_MAX3_U32(t: void&?, is_signed: bool, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_imax_tri(t, valu_get_src_u32(t, gcn_inst_src(inst, 0u32)), valu_get_src_u32(t, gcn_inst_src(inst, 1u32)), valu_get_src_u32(t, gcn_inst_src(inst, 2u32)), is_signed))
+
+def V_MED3_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_med_tri(t, valu_get_src_f32(t, gcn_inst_src(inst, 0u32)), valu_get_src_f32(t, gcn_inst_src(inst, 1u32)), valu_get_src_f32(t, gcn_inst_src(inst, 2u32))))
+
+def V_MED3_U32(t: void&?, is_signed: bool, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_imed_tri(t, valu_get_src_u32(t, gcn_inst_src(inst, 0u32)), valu_get_src_u32(t, gcn_inst_src(inst, 1u32)), valu_get_src_u32(t, gcn_inst_src(inst, 2u32)), is_signed))
+
+def V_SAD_U32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 1u32))
+        src2: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 2u32))
+        max: void&? = ir_imax(t, src0, src1, false)
+        min: void&? = ir_imin(t, src0, src1, false)
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_iadd(t, ir_isub(t, max, min), src2))
+
+def V_CVT_PK_U16_U32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        vec: void&? = ir_composite_construct2(t, ir_bit_cast_u32_to_f32(t, valu_get_src_u32(t, gcn_inst_src(inst, 0u32))), ir_bit_cast_u32_to_f32(t, valu_get_src_u32(t, gcn_inst_src(inst, 1u32))))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_pack2x16(t, NumFmt_Uint, vec))
+
+def V_CVT_PK_I16_I32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        vec: void&? = ir_composite_construct2(t, ir_bit_cast_u32_to_f32(t, valu_get_src_u32(t, gcn_inst_src(inst, 0u32))), ir_bit_cast_u32_to_f32(t, valu_get_src_u32(t, gcn_inst_src(inst, 1u32))))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_pack2x16(t, NumFmt_Sint, vec))
+
+def V_CVT_PK_U8_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_f32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 1u32))
+        src2: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 2u32))
+        value_uint: void&? = ir_convert_f_to_u(t, 32u32, src0)
+        offset: void&? = ir_shift_left_logical(t, src1, ir_imm32_u(t, 3u32))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_bit_field_insert(t, src2, value_uint, offset, ir_imm32_u(t, 8u32)))
+
+def V_LSHL_B64(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_u64(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_u64(t, gcn_inst_src(inst, 1u32))
+        valu_set_dst64(t, gcn_inst_dst(inst, 0u32), ir_shift_left_logical(t, src0, ir_bitwise_and(t, src1, ir_imm64_u(t, 0x3Fu64))))
+
+def V_LSHR_B64(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_u64(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_u64(t, gcn_inst_src(inst, 1u32))
+        valu_set_dst64(t, gcn_inst_dst(inst, 0u32), ir_shift_right_logical(t, src0, ir_bitwise_and(t, src1, ir_imm64_u(t, 0x3Fu64))))
+
+def V_ALIGNBIT_B32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 1u32))
+        src2: void&? = ir_bitwise_and(t, valu_get_src_u32(t, gcn_inst_src(inst, 2u32)), ir_imm32_u(t, 0x1Fu32))
+        lo: void&? = ir_shift_right_logical(t, src1, src2)
+        hi: void&? = ir_shift_left_logical(t, src0, ir_isub(t, ir_imm32_u(t, 32u32), src2))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_bitwise_or(t, lo, hi))
+
+def V_ALIGNBYTE_B32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 1u32))
+        src2: void&? = ir_bitwise_and(t, valu_get_src_u32(t, gcn_inst_src(inst, 2u32)), ir_imm32_u(t, 0x3u32))
+        shift: void&? = ir_shift_left_logical(t, src2, ir_imm32_u(t, 3u32))
+        lo: void&? = ir_shift_right_logical(t, src1, shift)
+        hi: void&? = ir_shift_left_logical(t, src0, ir_isub(t, ir_imm32_u(t, 32u32), shift))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_bitwise_or(t, lo, hi))
+
+def V_MUL_F64(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst64(t, gcn_inst_dst(inst, 0u32), ir_fp_mul_f64(t, valu_get_src_f64(t, gcn_inst_src(inst, 0u32)), valu_get_src_f64(t, gcn_inst_src(inst, 1u32))))
+
+def V_MAX_F64(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst64(t, gcn_inst_dst(inst, 0u32), ir_fp_max_f64(t, valu_get_src_f64(t, gcn_inst_src(inst, 0u32)), valu_get_src_f64(t, gcn_inst_src(inst, 1u32))))
+
+def V_MUL_LO_U32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_imul(t, valu_get_src_u32(t, gcn_inst_src(inst, 0u32)), valu_get_src_u32(t, gcn_inst_src(inst, 1u32))))
+
+def V_MUL_HI_U32(t: void&?, is_signed: bool, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_imul_hi(t, valu_get_src_u32(t, gcn_inst_src(inst, 0u32)), valu_get_src_u32(t, gcn_inst_src(inst, 1u32)), is_signed))
+
+def V_MAD_U64_U32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 1u32))
+        src2: void&? = valu_get_src_u64(t, gcn_inst_src(inst, 2u32))
+        mul_lo: void&? = ir_imul(t, src0, src1)
+        mul64: void&? = ir_pack_uint2x32(t, ir_composite_construct2(t, mul_lo, ir_imm32_u(t, 0u32)))
+        sum: void&? = ir_iadd(t, mul64, src2)
+        valu_set_dst64(t, gcn_inst_dst(inst, 0u32), sum)
+        less0: void&? = ir_iless_than(t, sum, mul64, false)
+        less1: void&? = ir_iless_than(t, sum, src2, false)
+        ir_set_vcc(t, ir_logical_or(t, less0, less1))
+
+def V_LSHLREV_B16(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        shift: void&? = valu_get_src16_u32(t, gcn_inst_src(inst, 0u32))
+        src: void&? = valu_get_src16_u32(t, gcn_inst_src(inst, 1u32))
+        valu_set_dst16_u32(t, gcn_inst_dst(inst, 0u32), ir_shift_left_logical(t, src, ir_bitwise_and(t, shift, ir_imm32_u(t, 0xFu32))))
+
+def V_LSHRREV_B16(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        shift: void&? = valu_get_src16_u32(t, gcn_inst_src(inst, 0u32))
+        src: void&? = valu_get_src16_u32(t, gcn_inst_src(inst, 1u32))
+        valu_set_dst16_u32(t, gcn_inst_dst(inst, 0u32), ir_shift_right_logical(t, src, ir_bitwise_and(t, shift, ir_imm32_u(t, 0xFu32))))
+
+def V_ASHRREV_I16(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        shift: void&? = valu_get_src16_u32_signed(t, gcn_inst_src(inst, 0u32))
+        src: void&? = valu_get_src16_u32_signed(t, gcn_inst_src(inst, 1u32))
+        valu_set_dst16_u32_signed(t, gcn_inst_dst(inst, 0u32), ir_shift_right_arithmetic(t, src, ir_bitwise_and(t, shift, ir_imm32_u(t, 0xFu32))))
+
+def V_ADD_LSHL_U32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 1u32))
+        src2: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 2u32))
+        shift: void&? = ir_bitwise_and(t, src2, ir_imm32_u(t, 0x1Fu32))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_shift_left_logical(t, ir_iadd(t, src0, src1), shift))
+
+def V_LSHL_ADD_U32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 1u32))
+        src2: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 2u32))
+        shift: void&? = ir_bitwise_and(t, src1, ir_imm32_u(t, 0x1Fu32))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_iadd(t, ir_shift_left_logical(t, src0, shift), src2))
+
+def V_MIN3_F16(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst16_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_min_tri(t, valu_get_src16_f32(t, gcn_inst_src(inst, 0u32)), valu_get_src16_f32(t, gcn_inst_src(inst, 1u32)), valu_get_src16_f32(t, gcn_inst_src(inst, 2u32))))
+
+def V_MAX3_F16(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst16_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_max_tri(t, valu_get_src16_f32(t, gcn_inst_src(inst, 0u32)), valu_get_src16_f32(t, gcn_inst_src(inst, 1u32)), valu_get_src16_f32(t, gcn_inst_src(inst, 2u32))))
+
+def V_MED3_F16(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst16_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_med_tri(t, valu_get_src16_f32(t, gcn_inst_src(inst, 0u32)), valu_get_src16_f32(t, gcn_inst_src(inst, 1u32)), valu_get_src16_f32(t, gcn_inst_src(inst, 2u32))))
+
+def V_ADD3_U32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 1u32))
+        src2: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 2u32))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_iadd(t, src0, ir_iadd(t, src1, src2)))
+
+def V_LSHL_OR_B32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 1u32))
+        src2: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 2u32))
+        shift: void&? = ir_bitwise_and(t, src1, ir_imm32_u(t, 0x1Fu32))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_bitwise_or(t, ir_shift_left_logical(t, src0, shift), src2))
+
+def V_AND_OR_B32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 1u32))
+        src2: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 2u32))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_bitwise_or(t, ir_bitwise_and(t, src0, src1), src2))
+
+def V_OR3_B32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 1u32))
+        src2: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 2u32))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_bitwise_or(t, ir_bitwise_or(t, src0, src1), src2))
+
+# ---------------------------------------------------------------------------
+# VOP3P packed F16 / U16 / I16
+# ---------------------------------------------------------------------------
+
+def V_PK_MUL_LO_U16(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_pk_u32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_pk_u32(t, gcn_inst_src(inst, 1u32))
+        valu_set_dst_pk_u32(t, gcn_inst_dst(inst, 0u32), ir_imul(t, valu_pk_first(src0), valu_pk_first(src1)), ir_imul(t, valu_pk_second(src0), valu_pk_second(src1)))
+
+def V_PK_ADD_I16(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_pk_u32_signed(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_pk_u32_signed(t, gcn_inst_src(inst, 1u32))
+        valu_set_dst_pk_u32_signed(t, gcn_inst_dst(inst, 0u32), ir_iadd(t, valu_pk_first(src0), valu_pk_first(src1)), ir_iadd(t, valu_pk_second(src0), valu_pk_second(src1)))
+
+def V_PK_SUB_I16(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_pk_u32_signed(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_pk_u32_signed(t, gcn_inst_src(inst, 1u32))
+        valu_set_dst_pk_u32_signed(t, gcn_inst_dst(inst, 0u32), ir_isub(t, valu_pk_first(src0), valu_pk_first(src1)), ir_isub(t, valu_pk_second(src0), valu_pk_second(src1)))
+
+def V_PK_LSHLREV_B16(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        shift: void&? = valu_get_src_pk_u32(t, gcn_inst_src(inst, 0u32))
+        src: void&? = valu_get_src_pk_u32(t, gcn_inst_src(inst, 1u32))
+        valu_set_dst_pk_u32(t, gcn_inst_dst(inst, 0u32), ir_shift_left_logical(t, valu_pk_first(src), valu_pk_first(shift)), ir_shift_left_logical(t, valu_pk_second(src), valu_pk_second(shift)))
+
+def V_PK_LSHRREV_B16(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        shift: void&? = valu_get_src_pk_u32(t, gcn_inst_src(inst, 0u32))
+        src: void&? = valu_get_src_pk_u32(t, gcn_inst_src(inst, 1u32))
+        valu_set_dst_pk_u32(t, gcn_inst_dst(inst, 0u32), ir_shift_right_logical(t, valu_pk_first(src), valu_pk_first(shift)), ir_shift_right_logical(t, valu_pk_second(src), valu_pk_second(shift)))
+
+def V_PK_MAD_U16(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_pk_u32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_pk_u32(t, gcn_inst_src(inst, 1u32))
+        src2: void&? = valu_get_src_pk_u32(t, gcn_inst_src(inst, 2u32))
+        valu_set_dst_pk_u32(t, gcn_inst_dst(inst, 0u32), ir_iadd(t, ir_imul(t, valu_pk_first(src0), valu_pk_first(src1)), valu_pk_first(src2)), ir_iadd(t, ir_imul(t, valu_pk_second(src0), valu_pk_second(src1)), valu_pk_second(src2)))
+
+def V_PK_ADD_U16(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_pk_u32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_pk_u32(t, gcn_inst_src(inst, 1u32))
+        valu_set_dst_pk_u32(t, gcn_inst_dst(inst, 0u32), ir_iadd(t, valu_pk_first(src0), valu_pk_first(src1)), ir_iadd(t, valu_pk_second(src0), valu_pk_second(src1)))
+
+def V_PK_SUB_U16(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_pk_u32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_pk_u32(t, gcn_inst_src(inst, 1u32))
+        valu_set_dst_pk_u32(t, gcn_inst_dst(inst, 0u32), ir_isub(t, valu_pk_first(src0), valu_pk_first(src1)), ir_isub(t, valu_pk_second(src0), valu_pk_second(src1)))
+
+def V_PK_MAX_U16(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_pk_u32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_pk_u32(t, gcn_inst_src(inst, 1u32))
+        valu_set_dst_pk_u32(t, gcn_inst_dst(inst, 0u32), ir_umax(t, valu_pk_first(src0), valu_pk_first(src1)), ir_umax(t, valu_pk_second(src0), valu_pk_second(src1)))
+
+def V_PK_MIN_U16(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_pk_u32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_pk_u32(t, gcn_inst_src(inst, 1u32))
+        valu_set_dst_pk_u32(t, gcn_inst_dst(inst, 0u32), ir_umin(t, valu_pk_first(src0), valu_pk_first(src1)), ir_umin(t, valu_pk_second(src0), valu_pk_second(src1)))
+
+def V_PK_FMA_F16(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_pk_f32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_pk_f32(t, gcn_inst_src(inst, 1u32))
+        src2: void&? = valu_get_src_pk_f32(t, gcn_inst_src(inst, 2u32))
+        valu_set_dst_pk_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_fma_f32(t, valu_pk_first(src0), valu_pk_first(src1), valu_pk_first(src2)), ir_fp_fma_f32(t, valu_pk_second(src0), valu_pk_second(src1), valu_pk_second(src2)))
+
+def V_PK_ADD_F16(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_pk_f32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_pk_f32(t, gcn_inst_src(inst, 1u32))
+        valu_set_dst_pk_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_add_f32(t, valu_pk_first(src0), valu_pk_first(src1)), ir_fp_add_f32(t, valu_pk_second(src0), valu_pk_second(src1)))
+
+def V_PK_MUL_F16(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_pk_f32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_pk_f32(t, gcn_inst_src(inst, 1u32))
+        valu_set_dst_pk_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_mul_f32(t, valu_pk_first(src0), valu_pk_first(src1)), ir_fp_mul_f32(t, valu_pk_second(src0), valu_pk_second(src1)))
+
+def V_PK_MIN_F16(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_pk_f32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_pk_f32(t, gcn_inst_src(inst, 1u32))
+        valu_set_dst_pk_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_min_f32(t, valu_pk_first(src0), valu_pk_first(src1)), ir_fp_min_f32(t, valu_pk_second(src0), valu_pk_second(src1)))
+
+def V_PK_MAX_F16(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_pk_f32(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_pk_f32(t, gcn_inst_src(inst, 1u32))
+        valu_set_dst_pk_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_max_f32(t, valu_pk_first(src0), valu_pk_first(src1)), ir_fp_max_f32(t, valu_pk_second(src0), valu_pk_second(src1)))
+
+def V_MAD_MIX_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_mix(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_mix(t, gcn_inst_src(inst, 1u32))
+        src2: void&? = valu_get_src_mix(t, gcn_inst_src(inst, 2u32))
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), ir_fp_fma_f32(t, src0, src1, src2))
+
+def V_MAD_MIXLO_F16(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_mix(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_mix(t, gcn_inst_src(inst, 1u32))
+        src2: void&? = valu_get_src_mix(t, gcn_inst_src(inst, 2u32))
+        result: void&? = ir_fp_fma_f32(t, src0, src1, src2)
+        f16: void&? = ir_fp_convert(t, 16u32, result)
+        u16: void&? = ir_bit_cast_f16_to_u16(t, f16)
+        dst_op: void&? = gcn_inst_dst(inst, 0u32)
+        old_val: void&? = valu_get_src_u32(t, dst_op)
+        new_val: void&? = ir_bit_field_insert(t, old_val, ir_u_convert(t, 32u32, u16), ir_imm32_u(t, 0u32), ir_imm32_u(t, 16u32))
+        valu_set_dst_u32(t, dst_op, new_val)
+
+def V_MAD_MIXHI_F16(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src0: void&? = valu_get_src_mix(t, gcn_inst_src(inst, 0u32))
+        src1: void&? = valu_get_src_mix(t, gcn_inst_src(inst, 1u32))
+        src2: void&? = valu_get_src_mix(t, gcn_inst_src(inst, 2u32))
+        result: void&? = ir_fp_fma_f32(t, src0, src1, src2)
+        f16: void&? = ir_fp_convert(t, 16u32, result)
+        u16: void&? = ir_bit_cast_f16_to_u16(t, f16)
+        dst_op: void&? = gcn_inst_dst(inst, 0u32)
+        old_val: void&? = valu_get_src_u32(t, dst_op)
+        new_val: void&? = ir_bit_field_insert(t, old_val, ir_u_convert(t, 32u32, u16), ir_imm32_u(t, 16u32), ir_imm32_u(t, 16u32))
+        valu_set_dst_u32(t, dst_op, new_val)
+
+# ---------------------------------------------------------------------------
+# Carry helpers
+# ---------------------------------------------------------------------------
+
+def V_get_carry_in(t: void&?, inst: void&?) -> void&?:
+    can Translate.Emit:
+        src_count: u32 = gcn_inst_src_count(inst)
+        if src_count == 3u32:
+            return ir_select(t, scalar_get_src1(t, gcn_inst_src(inst, 2u32)), ir_imm32_u(t, 1u32), ir_imm32_u(t, 0u32))
+        return ir_select(t, ir_get_vcc(t), ir_imm32_u(t, 1u32), ir_imm32_u(t, 0u32))
+
+def V_set_carry_out(t: void&?, dst1_op: void&?, inst: void&?, carry: void&?) -> void:
+    can Translate.Emit:
+        dst_count: u32 = gcn_inst_dst_count(inst)
+        if dst_count == 2u32:
+            valu_set_dst1(t, dst1_op, carry)
+        else:
+            ir_set_vcc(t, carry)
+
+# ---------------------------------------------------------------------------
+# Cube map helpers
+# ---------------------------------------------------------------------------
+
+extern valu_select_cube_result(t: void&?, x: void&?, y: void&?, z: void&?, xr: void&?, yr: void&?, zr: void&?) -> void&? effects[Translate.Emit, Unsafe.RawExtern]
+
+def V_CUBEID_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        x: void&? = valu_get_src_f32(t, gcn_inst_src(inst, 0u32))
+        y: void&? = valu_get_src_f32(t, gcn_inst_src(inst, 1u32))
+        z: void&? = valu_get_src_f32(t, gcn_inst_src(inst, 2u32))
+        result: mutable void&? = null
+        if profile_supports_native_cube_calc(t):
+            result <- ir_cube_face_index(t, ir_composite_construct3(t, x, y, z))
+        else:
+            xn: void&? = ir_fp_less_than_f32(t, x, ir_imm32_f(t, 0.0f32))
+            yn: void&? = ir_fp_less_than_f32(t, y, ir_imm32_f(t, 0.0f32))
+            zn: void&? = ir_fp_less_than_f32(t, z, ir_imm32_f(t, 0.0f32))
+            xf: void&? = ir_select(t, xn, ir_imm32_f(t, 1.0f32), ir_imm32_f(t, 0.0f32))
+            yf: void&? = ir_select(t, yn, ir_imm32_f(t, 3.0f32), ir_imm32_f(t, 2.0f32))
+            zf: void&? = ir_select(t, zn, ir_imm32_f(t, 5.0f32), ir_imm32_f(t, 4.0f32))
+            result <- valu_select_cube_result(t, x, y, z, xf, yf, zf)
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), result)
+
+def V_CUBESC_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        x: void&? = valu_get_src_f32(t, gcn_inst_src(inst, 0u32))
+        y: void&? = valu_get_src_f32(t, gcn_inst_src(inst, 1u32))
+        z: void&? = valu_get_src_f32(t, gcn_inst_src(inst, 2u32))
+        xn: void&? = ir_fp_less_than_f32(t, x, ir_imm32_f(t, 0.0f32))
+        zn: void&? = ir_fp_less_than_f32(t, z, ir_imm32_f(t, 0.0f32))
+        xsc: void&? = ir_select(t, xn, z, ir_fp_neg_f32(t, z))
+        ysc: void&? = x
+        zsc: void&? = ir_select(t, zn, ir_fp_neg_f32(t, x), x)
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), valu_select_cube_result(t, x, y, z, xsc, ysc, zsc))
+
+def V_CUBETC_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        x: void&? = valu_get_src_f32(t, gcn_inst_src(inst, 0u32))
+        y: void&? = valu_get_src_f32(t, gcn_inst_src(inst, 1u32))
+        z: void&? = valu_get_src_f32(t, gcn_inst_src(inst, 2u32))
+        yn: void&? = ir_fp_less_than_f32(t, y, ir_imm32_f(t, 0.0f32))
+        xztc: void&? = ir_fp_neg_f32(t, y)
+        ytc: void&? = ir_select(t, yn, ir_fp_neg_f32(t, z), z)
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), valu_select_cube_result(t, x, y, z, xztc, ytc, xztc))
+
+def V_CUBEMA_F32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        x: void&? = valu_get_src_f32(t, gcn_inst_src(inst, 0u32))
+        y: void&? = valu_get_src_f32(t, gcn_inst_src(inst, 1u32))
+        z: void&? = valu_get_src_f32(t, gcn_inst_src(inst, 2u32))
+        two: void&? = ir_imm32_f(t, 2.0f32)
+        valu_set_dst_f32(t, gcn_inst_dst(inst, 0u32), valu_select_cube_result(t, x, y, z, ir_fp_mul_f32(t, x, two), ir_fp_mul_f32(t, y, two), ir_fp_mul_f32(t, z, two)))
+
+# Lane ops forwarded to data_share
+def V_READFIRSTLANE_B32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_read_first_lane(t, valu_get_src_u32(t, gcn_inst_src(inst, 0u32))))
+
+def V_READLANE_B32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 0u32))
+        lane: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 1u32))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_read_lane(t, src, lane))
+
+def V_WRITELANE_B32(t: void&?, inst: void&?) -> void:
+    can Translate.Emit:
+        src: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 0u32))
+        lane: void&? = valu_get_src_u32(t, gcn_inst_src(inst, 1u32))
+        prev: void&? = valu_get_src_u32(t, gcn_inst_dst(inst, 0u32))
+        valu_set_dst_u32(t, gcn_inst_dst(inst, 0u32), ir_write_lane(t, src, lane, prev))

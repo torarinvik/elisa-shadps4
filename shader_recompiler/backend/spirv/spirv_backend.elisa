@@ -1,0 +1,159 @@
+# SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../bindings.elisa"
+
+const SPIRV_MAGIC: u32 = 0x07230203u32
+const SPIRV_VERSION_1_6: u32 = 0x00010600u32
+const SPIRV_GENERATOR_SHADPS4_ELISA: u32 = 0u32
+const SPIRV_SCHEMA_RESERVED: u32 = 0u32
+
+const SPIRV_EXECUTION_MODE_INPUT_POINTS: u32 = 19u32
+const SPIRV_EXECUTION_MODE_INPUT_LINES: u32 = 20u32
+const SPIRV_EXECUTION_MODE_INPUT_LINES_ADJACENCY: u32 = 21u32
+const SPIRV_EXECUTION_MODE_TRIANGLES: u32 = 22u32
+const SPIRV_EXECUTION_MODE_INPUT_TRIANGLES_ADJACENCY: u32 = 23u32
+const SPIRV_EXECUTION_MODE_OUTPUT_VERTICES: u32 = 26u32
+const SPIRV_EXECUTION_MODE_OUTPUT_LINE_STRIP: u32 = 28u32
+const SPIRV_EXECUTION_MODE_OUTPUT_TRIANGLE_STRIP: u32 = 29u32
+
+const AMDGPU_PRIMITIVE_NONE: u32 = 0u32
+const AMDGPU_PRIMITIVE_POINT_LIST: u32 = 1u32
+const AMDGPU_PRIMITIVE_LINE_LIST: u32 = 2u32
+const AMDGPU_PRIMITIVE_LINE_STRIP: u32 = 3u32
+const AMDGPU_PRIMITIVE_TRIANGLE_LIST: u32 = 4u32
+const AMDGPU_PRIMITIVE_TRIANGLE_FAN: u32 = 5u32
+const AMDGPU_PRIMITIVE_TRIANGLE_STRIP: u32 = 6u32
+const AMDGPU_PRIMITIVE_PATCH_PRIMITIVE: u32 = 9u32
+const AMDGPU_PRIMITIVE_ADJ_LINE_LIST: u32 = 10u32
+const AMDGPU_PRIMITIVE_ADJ_LINE_STRIP: u32 = 11u32
+const AMDGPU_PRIMITIVE_ADJ_TRIANGLE_LIST: u32 = 12u32
+const AMDGPU_PRIMITIVE_ADJ_TRIANGLE_STRIP: u32 = 13u32
+const AMDGPU_PRIMITIVE_RECT_LIST: u32 = 17u32
+const AMDGPU_PRIMITIVE_LINE_LOOP: u32 = 18u32
+const AMDGPU_PRIMITIVE_QUAD_LIST: u32 = 19u32
+const AMDGPU_PRIMITIVE_QUAD_STRIP: u32 = 20u32
+const AMDGPU_PRIMITIVE_POLYGON: u32 = 21u32
+
+const AMDGPU_GS_OUTPUT_POINT_LIST: u32 = 0u32
+const AMDGPU_GS_OUTPUT_LINE_STRIP: u32 = 1u32
+const AMDGPU_GS_OUTPUT_TRIANGLE_STRIP: u32 = 2u32
+
+const SHADER_IR_TYPE_VOID: u32 = 0u32
+const SHADER_IR_TYPE_U1: u32 = 1u32 << 5
+const SHADER_IR_TYPE_U32: u32 = 1u32 << 8
+
+const SPIRV_INVALID_ID: u32 = 0u32
+
+struct SpirvVectorIds:
+    ids: mutable u32[4]
+
+struct SpirvEmitContext:
+    next_id: mutable u32
+    void_id: mutable u32
+    u1_id: mutable u32
+    u32_id: mutable u32
+    last_label: mutable u32
+    interfaces: mutable darray[u32]
+    words: mutable darray[u32]
+
+struct SpirvEmitResult:
+    words: mutable darray[u32]
+    bound: mutable u32
+    ok: mutable bool
+
+def SpirvVectorIds_Default() -> SpirvVectorIds:
+    return SpirvVectorIds([0u32, 0u32, 0u32, 0u32])
+
+def SpirvVectorIds_Get(vector: SpirvVectorIds, index: u32) -> u32:
+    if index < 1u32 or index > 4u32:
+        return SPIRV_INVALID_ID
+    return vector.ids[(index - 1u32).usize()]
+
+def SpirvVectorIds_Set(vector: mutable SpirvVectorIds&, index: u32, value: u32) -> bool:
+    if index < 1u32 or index > 4u32:
+        return false
+    vector.ids[(index - 1u32).usize()] <- value
+    return true
+
+def SpirvGetInputPrimitiveExecutionMode(primitive_type: u32) -> u32:
+    if primitive_type == AMDGPU_PRIMITIVE_POINT_LIST:
+        return SPIRV_EXECUTION_MODE_INPUT_POINTS
+    if primitive_type == AMDGPU_PRIMITIVE_LINE_LIST or primitive_type == AMDGPU_PRIMITIVE_LINE_STRIP:
+        return SPIRV_EXECUTION_MODE_INPUT_LINES
+    if primitive_type == AMDGPU_PRIMITIVE_TRIANGLE_LIST or primitive_type == AMDGPU_PRIMITIVE_TRIANGLE_STRIP or primitive_type == AMDGPU_PRIMITIVE_RECT_LIST:
+        return SPIRV_EXECUTION_MODE_TRIANGLES
+    if primitive_type == AMDGPU_PRIMITIVE_ADJ_TRIANGLE_LIST:
+        return SPIRV_EXECUTION_MODE_INPUT_TRIANGLES_ADJACENCY
+    if primitive_type == AMDGPU_PRIMITIVE_ADJ_LINE_LIST:
+        return SPIRV_EXECUTION_MODE_INPUT_LINES_ADJACENCY
+    return 0u32
+
+def SpirvGetOutputPrimitiveExecutionMode(output_type: u32) -> u32:
+    if output_type == AMDGPU_GS_OUTPUT_POINT_LIST:
+        return SPIRV_EXECUTION_MODE_OUTPUT_VERTICES
+    if output_type == AMDGPU_GS_OUTPUT_LINE_STRIP:
+        return SPIRV_EXECUTION_MODE_OUTPUT_LINE_STRIP
+    if output_type == AMDGPU_GS_OUTPUT_TRIANGLE_STRIP:
+        return SPIRV_EXECUTION_MODE_OUTPUT_TRIANGLE_STRIP
+    return 0u32
+
+def SpirvEmitContext_Default() -> SpirvEmitContext:
+    return SpirvEmitContext(1u32, 0u32, 0u32, 0u32, 0u32, [], [])
+
+def SpirvEmitContext_AllocateId(ctx: mutable SpirvEmitContext&) -> u32:
+    id: u32 = ctx.next_id
+    ctx.next_id <- ctx.next_id + 1u32
+    return id
+
+def SpirvEmitContext_DefineCoreTypes(ctx: mutable SpirvEmitContext&) -> void:
+    if ctx.void_id == 0u32:
+        ctx.void_id <- SpirvEmitContext_AllocateId(ctx)
+    if ctx.u1_id == 0u32:
+        ctx.u1_id <- SpirvEmitContext_AllocateId(ctx)
+    if ctx.u32_id == 0u32:
+        ctx.u32_id <- SpirvEmitContext_AllocateId(ctx)
+
+def SpirvTypeId(ctx: SpirvEmitContext, ir_type: u32) -> u32:
+    if ir_type == SHADER_IR_TYPE_U1:
+        return ctx.u1_id
+    if ir_type == SHADER_IR_TYPE_U32:
+        return ctx.u32_id
+    return SPIRV_INVALID_ID
+
+def SpirvEmitContext_AddLabel(ctx: mutable SpirvEmitContext&) -> u32:
+    label: u32 = SpirvEmitContext_AllocateId(ctx)
+    ctx.last_label <- label
+    return label
+
+def SpirvEmitContext_AddInterface(ctx: mutable SpirvEmitContext&, id: u32) -> void:
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            ctx.interfaces.push(id)
+
+def SpirvWord(opcode: u16, word_count: u16) -> u32:
+    return (word_count.u32() << 16) | opcode.u32()
+
+def SpirvEmitContext_AppendWord(ctx: mutable SpirvEmitContext&, word: u32) -> void:
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            ctx.words.push(word)
+
+def SpirvEmitHeader(ctx: mutable SpirvEmitContext&) -> void:
+    can Memory.Allocate, Abort.Panic:
+        SpirvEmitContext_AppendWord(ctx, SPIRV_MAGIC)
+        SpirvEmitContext_AppendWord(ctx, SPIRV_VERSION_1_6)
+        SpirvEmitContext_AppendWord(ctx, SPIRV_GENERATOR_SHADPS4_ELISA)
+        SpirvEmitContext_AppendWord(ctx, ctx.next_id)
+        SpirvEmitContext_AppendWord(ctx, SPIRV_SCHEMA_RESERVED)
+
+def SpirvEmitMinimalModule(binding: mutable ShaderBackendBindings&) -> SpirvEmitResult:
+    ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
+    SpirvEmitContext_DefineCoreTypes(ctx)
+    _unified: u32 = ShaderBackendBindings_AllocateUnified(binding)
+    _buffer: u32 = ShaderBackendBindings_AllocateBuffer(binding)
+    can Memory.Allocate, Abort.Panic:
+        SpirvEmitHeader(ctx)
+    return SpirvEmitResult(ctx.words, ctx.next_id, true)

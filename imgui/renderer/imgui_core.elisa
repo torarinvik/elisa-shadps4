@@ -1,0 +1,343 @@
+# SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./font_stack.elisa"
+include "./imgui_impl_sdl3.elisa"
+include "./imgui_impl_vulkan.elisa"
+include "./texture_manager.elisa"
+
+permission Renderer:
+    Init
+    Draw
+    Shutdown
+
+# ---------------------------------------------------------------------------
+# External ImGui core API
+# ---------------------------------------------------------------------------
+
+extern imgui_core_create_context() -> void&? effects[Renderer.Init, Unsafe.RawExtern]
+extern imgui_core_destroy_context() -> void effects[Renderer.Shutdown, Unsafe.RawExtern]
+extern imgui_core_get_io() -> void&? effects[Unsafe.RawExtern]
+extern imgui_core_get_platform_io() -> void&? effects[Unsafe.RawExtern]
+extern imgui_core_get_main_viewport() -> void&? effects[Unsafe.RawExtern]
+extern imgui_core_style_colors_dark() -> void effects[Renderer.Init, Unsafe.RawExtern]
+extern imgui_core_push_style_var_float(var_id: int, val: f32) -> void effects[Renderer.Init, Unsafe.RawExtern]
+extern imgui_core_new_frame() -> void effects[Renderer.Draw, Unsafe.RawExtern]
+extern imgui_core_render() -> void effects[Renderer.Draw, Unsafe.RawExtern]
+extern imgui_core_get_draw_data() -> void&? effects[Renderer.Draw, Unsafe.RawExtern]
+extern imgui_core_dock_space_over_viewport(id: u32, viewport: void&?, flags: u32) -> u32 effects[Renderer.Draw, Unsafe.RawExtern]
+extern imgui_core_format_string(out: mutable u8&, size: usize, fmt: static u8&?, arg: u32) -> void effects[Unsafe.RawExtern]
+extern imgui_core_hash_str(str: u8&) -> u32 effects[Unsafe.RawExtern]
+extern imgui_core_save_ini_settings(filename: static u8&?) -> void effects[Unsafe.RawExtern]
+extern imgui_core_get_frame_count() -> int effects[Unsafe.RawExtern]
+extern imgui_core_get_draw_data_cmd_lists_count(draw_data: void&?) -> i32 effects[Renderer.Draw, Unsafe.RawExtern]
+
+extern imgui_core_io_get_ini_filename(io: void&?) -> static u8&? effects[Unsafe.RawExtern]
+extern imgui_core_io_set_config_flags_or(io: void&?, flags: u32) -> void effects[Renderer.Init, Unsafe.RawExtern]
+extern imgui_core_io_set_display_size(io: void&?, w: f32, h: f32) -> void effects[Renderer.Init, Unsafe.RawExtern]
+extern imgui_core_io_set_font_global_scale(io: void&?, scale: f32) -> void effects[Renderer.Init, Unsafe.RawExtern]
+extern imgui_core_io_get_font_global_scale(io: void&?) -> f32 effects[Unsafe.RawExtern]
+extern imgui_core_io_get_fonts(io: void&?) -> void&? effects[Renderer.Init, Unsafe.RawExtern]
+extern imgui_core_io_set_fonts_flags_or(io: void&?, flags: u32) -> void effects[Renderer.Init, Unsafe.RawExtern]
+extern imgui_core_io_set_default_font(io: void&?, font: void&?) -> void effects[Renderer.Init, Unsafe.RawExtern]
+extern imgui_core_io_build_fonts(io: void&?) -> void effects[Renderer.Init, Unsafe.RawExtern]
+extern imgui_core_fonts_add_from_memory_compressed(fonts: void&?, data: u8&, data_size: u32, size_px: f32) -> void&? effects[Font.Load, Unsafe.RawExtern]
+
+extern imgui_core_ctx_nav_window_id(io: void&?) -> u32 effects[Unsafe.RawExtern]
+extern imgui_core_ctx_nav_window_flags(io: void&?) -> u32 effects[Unsafe.RawExtern]
+extern imgui_core_io_want_capture_mouse(io: void&?) -> bool effects[Unsafe.RawExtern]
+extern imgui_core_io_want_capture_keyboard(io: void&?) -> bool effects[Unsafe.RawExtern]
+extern imgui_core_io_nav_active(io: void&?) -> bool effects[Unsafe.RawExtern]
+
+extern imgui_core_alloc_path_buf(path: void&?) -> void&? effects[Unsafe.RawExtern]
+extern imgui_core_free_path_buf(buf: void&?) -> void effects[Unsafe.RawExtern]
+extern imgui_core_path_buf_as_cstr(buf: void&?) -> static u8&? effects[Unsafe.RawExtern]
+
+extern imgui_core_get_user_dir_imgui_ini() -> void&? effects[Unsafe.RawExtern]
+extern imgui_core_get_log_dir_imgui_log() -> void&? effects[Unsafe.RawExtern]
+
+extern devtools_layer_setup_settings() -> void effects[Renderer.Init, Unsafe.RawExtern]
+extern debug_state_is_showing_debug_menu_bar() -> bool effects[Unsafe.RawExtern]
+
+extern imgui_core_vk_cmd_begin_rendering(cmd_buf: void&?, image_view: u64, extent_w: u32, extent_h: u32) -> void effects[Renderer.Draw, Unsafe.RawExtern]
+extern imgui_core_vk_cmd_end_rendering(cmd_buf: void&?) -> void effects[Renderer.Draw, Unsafe.RawExtern]
+extern imgui_core_vk_cmd_begin_debug_label(cmd_buf: void&?, label: static u8&?) -> void effects[Renderer.Draw, Unsafe.RawExtern]
+extern imgui_core_vk_cmd_end_debug_label(cmd_buf: void&?) -> void effects[Renderer.Draw, Unsafe.RawExtern]
+
+extern emulator_settings_is_vk_host_markers_enabled() -> bool effects[Unsafe.RawExtern]
+extern emulator_settings_get_console_language() -> int effects[Unsafe.RawExtern]
+extern imgui_core_register_at_quick_exit_save_ini() -> void effects[Renderer.Init, Unsafe.RawExtern]
+
+# ImGuiStyleVar_WindowRounding = 11
+const ImGuiStyleVar_WindowRounding: int = 11
+# ImGuiConfigFlags
+const ImGuiConfigFlags_NavEnableKeyboard: u32 = 0x1u32
+const ImGuiConfigFlags_NavEnableGamepad: u32 = 0x2u32
+const ImGuiConfigFlags_DockingEnable: u32 = 0x40u32
+# ImGuiFontAtlasFlags
+const ImFontAtlasFlags_NoPowerOfTwoHeight: u32 = 0x1u32
+# ImGuiDockNodeFlags
+const ImGuiDockNodeFlags_PassthruCentralNode: u32 = 0x80u32
+const ImGuiDockNodeFlags_AutoHideTabBar: u32 = 0x400u32
+const ImGuiDockNodeFlags_NoTabBar: u32 = 0x200u32
+# ImGuiWindowFlags
+const ImGuiWindowFlags_NoNav_val: u32 = 0x40000u32
+
+# ---------------------------------------------------------------------------
+# Layer list
+# ---------------------------------------------------------------------------
+
+const IMGUI_CORE_MAX_LAYERS: int = 64
+
+struct ImGuiCoreLayerEntry:
+    layer_ptr: mutable void&?
+    active: mutable bool
+
+struct ImGuiCoreLayerChange:
+    to_add: mutable bool
+    layer_ptr: mutable void&?
+
+global mutable g_imgui_layers: ImGuiCoreLayerEntry[64] = zeroed
+global mutable g_imgui_layer_count: int = 0
+global mutable g_imgui_changes: ImGuiCoreLayerChange[128] = zeroed
+global mutable g_imgui_change_count: int = 0
+global mutable g_imgui_dock_id: u32 = 0u32
+
+global mutable g_imgui_gamepad_capture_count: u32 = 0u32
+
+# ---------------------------------------------------------------------------
+# Gamepad capture
+# ---------------------------------------------------------------------------
+
+def ImGuiCore_AcquireGamepadInputCapture() -> void:
+    g_imgui_gamepad_capture_count <- g_imgui_gamepad_capture_count + 1u32
+
+def ImGuiCore_ReleaseGamepadInputCapture() -> void:
+    if g_imgui_gamepad_capture_count > 0u32:
+        g_imgui_gamepad_capture_count <- g_imgui_gamepad_capture_count - 1u32
+
+def ImGuiCore_IsGamepadInputCaptured() -> bool:
+    return g_imgui_gamepad_capture_count > 0u32
+
+# ---------------------------------------------------------------------------
+# Layer management
+# ---------------------------------------------------------------------------
+
+def ImGuiCore_AddLayer(layer: void&?) -> void:
+    if g_imgui_change_count < 128:
+        g_imgui_changes[g_imgui_change_count.usize()].to_add <- true
+        g_imgui_changes[g_imgui_change_count.usize()].layer_ptr <- layer
+        g_imgui_change_count <- g_imgui_change_count + 1
+
+def ImGuiCore_RemoveLayer(layer: void&?) -> void:
+    if g_imgui_change_count < 128:
+        g_imgui_changes[g_imgui_change_count.usize()].to_add <- false
+        g_imgui_changes[g_imgui_change_count.usize()].layer_ptr <- layer
+        g_imgui_change_count <- g_imgui_change_count + 1
+
+def imgui_core_apply_layer_changes() -> void:
+    i: mutable int = 0
+    while i < g_imgui_change_count:
+        change: ImGuiCoreLayerChange = g_imgui_changes[i.usize()]
+        if change.to_add:
+            if g_imgui_layer_count < IMGUI_CORE_MAX_LAYERS:
+                g_imgui_layers[g_imgui_layer_count.usize()].layer_ptr <- change.layer_ptr
+                g_imgui_layers[g_imgui_layer_count.usize()].active <- true
+                g_imgui_layer_count <- g_imgui_layer_count + 1
+        else:
+            j: mutable int = 0
+            while j < g_imgui_layer_count:
+                if g_imgui_layers[j.usize()].layer_ptr == change.layer_ptr:
+                    g_imgui_layers[j.usize()] <- g_imgui_layers[(g_imgui_layer_count - 1).usize()]
+                    g_imgui_layer_count <- g_imgui_layer_count - 1
+                    j <- j - 1
+                j <- j + 1
+        i <- i + 1
+    g_imgui_change_count <- 0
+
+# Layer virtual dispatch (layers implement a C-callable Draw function via vtable)
+extern imgui_core_layer_call_draw(layer: void&?) -> void effects[Renderer.Draw, Unsafe.RawExtern]
+
+# ---------------------------------------------------------------------------
+# Initialize
+# ---------------------------------------------------------------------------
+
+def ImGuiCore_Initialize(instance: void&?, physical_device: void&?, device: void&?, queue_family: u32, queue: void&?, image_count: u32, surface_format: i32, allocator: void&?, window: void&?, window_width: f32, window_height: f32) -> void:
+    can Renderer.Init, Font.Load, Window.Event, Window.Cursor:
+        _ = imgui_core_create_context()
+        io: void&? = imgui_core_get_io()
+
+        imgui_core_io_set_config_flags_or(io, ImGuiConfigFlags_NavEnableKeyboard)
+        imgui_core_io_set_config_flags_or(io, ImGuiConfigFlags_NavEnableGamepad)
+        imgui_core_io_set_config_flags_or(io, ImGuiConfigFlags_DockingEnable)
+        imgui_core_io_set_display_size(io, window_width, window_height)
+        imgui_core_push_style_var_float(ImGuiStyleVar_WindowRounding, 6.0)
+
+        config_path_buf: void&? = imgui_core_get_user_dir_imgui_ini()
+        log_path_buf: void&? = imgui_core_get_log_dir_imgui_log()
+        imgui_core_io_set_ini_filename(io, imgui_core_path_buf_as_cstr(config_path_buf))
+        imgui_core_io_set_log_filename(io, imgui_core_path_buf_as_cstr(log_path_buf))
+
+        fonts: void&? = imgui_core_io_get_fonts(io)
+        imgui_core_io_set_fonts_flags_or(io, ImFontAtlasFlags_NoPowerOfTwoHeight)
+        console_language: int = emulator_settings_get_console_language()
+
+        font_cfg: mutable void&? = null
+        _ = font_cfg  # FontConfig with OversampleH=2, OversampleV=1 created by C shim
+        extern imgui_core_make_font_config_2x1() -> void&? effects[Font.Load, Unsafe.RawExtern]
+        font_cfg <- imgui_core_make_font_config_2x1()
+
+        default_font: void&? = FontStack_AddPrimaryUiFont(fonts, 32.0, console_language, font_cfg, true)
+        imgui_core_io_set_default_font(io, default_font)
+
+        proggy_data: u8& = imgui_font_proggyvector_regular_compressed_data_ptr()
+        proggy_size: u32 = imgui_font_proggyvector_regular_compressed_size_val()
+        _ = imgui_core_fonts_add_from_memory_compressed(fonts, proggy_data, proggy_size, 32.0)
+
+        _ = FontStack_AddPrimaryUiFont(fonts, 128.0, console_language, font_cfg, false)
+        _ = FontStack_AddPrimaryUiFont(fonts, 64.0, console_language, font_cfg, true)
+
+        imgui_core_io_build_fonts(io)
+        imgui_core_io_set_font_global_scale(io, 0.5)
+
+        imgui_core_style_colors_dark()
+        devtools_layer_setup_settings()
+
+        _ = ImGui_Sdl_Init(window)
+
+        vk_info: ImGuiVkInitInfo = zeroed
+        vk_info.instance <- instance
+        vk_info.physical_device <- physical_device
+        vk_info.device <- device
+        vk_info.queue_family <- queue_family
+        vk_info.queue <- queue
+        vk_info.image_count <- image_count
+        vk_info.min_allocation_size <- 1048576u64  # 1024 * 1024
+        vk_info.color_attachment_format <- surface_format
+        vk_info.allocator <- allocator
+        _ = ImGui_Vulkan_Init(vk_info)
+
+        TextureManager_StartWorker()
+
+        label_buf: mutable u8[32] = zeroed
+        main_viewport: void&? = imgui_core_get_main_viewport()
+        imgui_core_format_string(label_buf[0].ref[mutable u8&], 32usize, "WindowOverViewport_%08X", imgui_core_get_viewport_id(main_viewport))
+        g_imgui_dock_id <- imgui_core_hash_str(label_buf[0].ref[u8&])
+
+        dpi: f32 = SDL_GetWindowDisplayScale(window)
+        if dpi > 0.0:
+            current_scale: f32 = imgui_core_io_get_font_global_scale(io)
+            imgui_core_io_set_font_global_scale(io, current_scale * dpi)
+
+        imgui_core_register_at_quick_exit_save_ini()
+
+extern imgui_core_get_viewport_id(viewport: void&?) -> u32 effects[Unsafe.RawExtern]
+extern imgui_core_io_set_ini_filename(io: void&?, path: static u8&?) -> void effects[Unsafe.RawExtern]
+extern imgui_core_io_set_log_filename(io: void&?, path: static u8&?) -> void effects[Unsafe.RawExtern]
+extern imgui_core_make_font_config_2x1() -> void&? effects[Font.Load, Unsafe.RawExtern]
+
+# ---------------------------------------------------------------------------
+# OnResize / OnSurfaceFormatChange
+# ---------------------------------------------------------------------------
+
+def ImGuiCore_OnResize() -> void:
+    can Window.Resize:
+        ImGui_Sdl_OnResize()
+
+def ImGuiCore_OnSurfaceFormatChange(surface_format: i32) -> void:
+    can Vulkan.Init:
+        ImGui_Vulkan_OnSurfaceFormatChange(surface_format)
+
+# ---------------------------------------------------------------------------
+# Shutdown
+# ---------------------------------------------------------------------------
+
+def ImGuiCore_Shutdown(device: void&?) -> void:
+    can Renderer.Shutdown, Vulkan.Init, Window.Cursor, Input.Gamepad:
+        _ = vk_device_wait_idle(device)
+        TextureManager_StopWorker()
+        ImGui_Vulkan_Shutdown()
+        ImGui_Sdl_Shutdown()
+        imgui_core_destroy_context()
+
+# ---------------------------------------------------------------------------
+# ProcessEvent
+# ---------------------------------------------------------------------------
+
+def ImGuiCore_ProcessEvent(event: void&?) -> bool:
+    can Window.Event, Input.Mouse, Input.Keyboard, Input.Gamepad:
+        _ = ImGui_Sdl_ProcessEvent(event)
+        io: void&? = imgui_core_get_io()
+        event_type: u32 = sdl_event_get_type(event)
+
+        if event_type == SDL_EVENT_MOUSE_MOTION or event_type == SDL_EVENT_MOUSE_WHEEL or event_type == SDL_EVENT_MOUSE_BUTTON_DOWN:
+            nav_win_id: u32 = imgui_core_ctx_nav_window_id(io)
+            return imgui_core_io_want_capture_mouse(io) and nav_win_id != 0u32 and (imgui_core_ctx_nav_window_flags(io) & ImGuiWindowFlags_NoNav_val) == 0u32
+
+        if event_type == SDL_EVENT_TEXT_INPUT or event_type == SDL_EVENT_KEY_DOWN:
+            if ImGuiCore_IsGamepadInputCaptured():
+                return false
+            nav_win_id: u32 = imgui_core_ctx_nav_window_id(io)
+            return imgui_core_io_want_capture_keyboard(io) and nav_win_id != 0u32 and nav_win_id != g_imgui_dock_id
+
+        if event_type == 0x651u32 or event_type == 0x652u32 or event_type == 0x653u32 or event_type == 0x654u32 or event_type == 0x655u32 or event_type == 0x656u32 or event_type == 0x657u32:
+            if ImGuiCore_IsGamepadInputCaptured():
+                return false
+            nav_win_id: u32 = imgui_core_ctx_nav_window_id(io)
+            return imgui_core_io_nav_active(io) and nav_win_id != 0u32 and nav_win_id != g_imgui_dock_id
+
+        return false
+
+# ---------------------------------------------------------------------------
+# NewFrame
+# ---------------------------------------------------------------------------
+
+def ImGuiCore_NewFrame(is_reusing_frame: bool) -> u32:
+    can Renderer.Draw, Window.Event, Input.Mouse, Input.Keyboard, Input.Gamepad:
+        imgui_core_apply_layer_changes()
+
+        ImGui_Sdl_NewFrame(is_reusing_frame)
+        imgui_core_new_frame()
+
+        flags: mutable u32 = ImGuiDockNodeFlags_PassthruCentralNode | ImGuiDockNodeFlags_AutoHideTabBar
+        if not debug_state_is_showing_debug_menu_bar():
+            flags <- flags | ImGuiDockNodeFlags_NoTabBar
+        main_viewport: void&? = imgui_core_get_main_viewport()
+        dock_id: u32 = imgui_core_dock_space_over_viewport(0u32, main_viewport, flags)
+
+        i: mutable int = 0
+        while i < g_imgui_layer_count:
+            layer: void&? = g_imgui_layers[i.usize()].layer_ptr
+            if layer != null:
+                imgui_core_layer_call_draw(layer)
+            i <- i + 1
+
+        return dock_id
+
+# ---------------------------------------------------------------------------
+# Render
+# ---------------------------------------------------------------------------
+
+def ImGuiCore_Render(cmd_buf: void&?, image_view: u64, extent_w: u32, extent_h: u32) -> void:
+    can Renderer.Draw, Vulkan.Draw:
+        imgui_core_render()
+        draw_data: void&? = imgui_core_get_draw_data()
+        if imgui_core_get_draw_data_cmd_lists_count(draw_data) == 0:
+            return
+
+        if emulator_settings_is_vk_host_markers_enabled():
+            imgui_core_vk_cmd_begin_debug_label(cmd_buf, "ImGui Render")
+
+        imgui_core_vk_cmd_begin_rendering(cmd_buf, image_view, extent_w, extent_h)
+        ImGui_Vulkan_RenderDrawData(draw_data, cmd_buf, VK_NULL_HANDLE_U64)
+        imgui_core_vk_cmd_end_rendering(cmd_buf)
+
+        if emulator_settings_is_vk_host_markers_enabled():
+            imgui_core_vk_cmd_end_debug_label(cmd_buf)
+
+# ---------------------------------------------------------------------------
+# MustKeepDrawing
+# ---------------------------------------------------------------------------
+
+def ImGuiCore_MustKeepDrawing() -> bool:
+    return g_imgui_layer_count > 1 or g_imgui_change_count > 1 or debug_state_is_showing_debug_menu_bar()
