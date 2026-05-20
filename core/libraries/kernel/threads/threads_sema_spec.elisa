@@ -1,10 +1,6 @@
 # SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 # SPDX-License-Identifier: GPL-2.0-or-later
 
-include "../../error_codes.elisa"
-include "../orbis_error.elisa"
-include "../posix_error.elisa"
-
 extern elisa_kernel_sem_create(value: int, max_value: int, out_error: mutable int&?) -> void&?
 extern elisa_kernel_sem_destroy(handle: void&?) -> int
 extern elisa_kernel_sem_wait(handle: void&?, need_count: int) -> int
@@ -53,7 +49,7 @@ def sceKernelCreateSema(sem: mutable int&, p_name: static u8&?, attr: u32, init_
         return ORBIS_KERNEL_ERROR_EINVAL
     i: mutable int = 0
     while i < 64:
-        if not g_orbis_sems[i].used:
+        if g_orbis_sems[i].used == false:
             create_res: mutable int = 0
             native: void&? = elisa_kernel_sem_create(init_count, max_count, create_res)
             if native == null:
@@ -69,7 +65,7 @@ def sceKernelCreateSema(sem: mutable int&, p_name: static u8&?, attr: u32, init_
     return ORBIS_KERNEL_ERROR_ENOMEM
 
 def sceKernelWaitSema(sem: int, need_count: int, p_timeout: mutable u32&?) -> int:
-    if sem < 0 or sem >= 64 or not g_orbis_sems[sem].used:
+    if sem < 0 or sem >= 64 or g_orbis_sems[sem].used == false:
         return ORBIS_KERNEL_ERROR_ESRCH
     if need_count < 0:
         return ORBIS_KERNEL_ERROR_EINVAL
@@ -96,7 +92,7 @@ def sceKernelWaitSema(sem: int, need_count: int, p_timeout: mutable u32&?) -> in
     return ORBIS_OK
 
 def sceKernelSignalSema(sem: int, signal_count: int) -> int:
-    if sem < 0 or sem >= 64 or not g_orbis_sems[sem].used:
+    if sem < 0 or sem >= 64 or g_orbis_sems[sem].used == false:
         return ORBIS_KERNEL_ERROR_ESRCH
     if g_orbis_sems[sem].token_count + signal_count > g_orbis_sems[sem].max_count:
         return ORBIS_KERNEL_ERROR_EINVAL
@@ -110,7 +106,7 @@ def sceKernelSignalSema(sem: int, signal_count: int) -> int:
     return ORBIS_OK
 
 def sceKernelPollSema(sem: int, need_count: int) -> int:
-    if sem < 0 or sem >= 64 or not g_orbis_sems[sem].used:
+    if sem < 0 or sem >= 64 or g_orbis_sems[sem].used == false:
         return ORBIS_KERNEL_ERROR_ESRCH
     if g_orbis_sems[sem].token_count < need_count:
         return ORBIS_KERNEL_ERROR_EBUSY
@@ -121,7 +117,7 @@ def sceKernelPollSema(sem: int, need_count: int) -> int:
     return ORBIS_OK
 
 def sceKernelCancelSema(sem: int, set_count: int, p_num_wait_threads: mutable int&?) -> int:
-    if sem < 0 or sem >= 64 or not g_orbis_sems[sem].used:
+    if sem < 0 or sem >= 64 or g_orbis_sems[sem].used == false:
         return ORBIS_KERNEL_ERROR_ESRCH
     if p_num_wait_threads != null:
         p_num_wait_threads <- g_orbis_sem_waiters[sem]
@@ -135,7 +131,7 @@ def sceKernelCancelSema(sem: int, set_count: int, p_num_wait_threads: mutable in
     return ORBIS_OK
 
 def sceKernelDeleteSema(sem: int) -> int:
-    if sem < 0 or sem >= 64 or not g_orbis_sems[sem].used:
+    if sem < 0 or sem >= 64 or g_orbis_sems[sem].used == false:
         return ORBIS_KERNEL_ERROR_ESRCH
     if g_orbis_sems[sem].native_handle != null:
         r_delete: int = elisa_kernel_sem_delete(g_orbis_sems[sem].native_handle, null)
@@ -151,7 +147,8 @@ def sceKernelDeleteSema(sem: int) -> int:
 
 def posix_sem_init(sem: mutable PthreadSem&?, pshared: int, value: u32) -> int:
     _ = pshared
-    if value > ORBIS_KERNEL_SEM_VALUE_MAX as u32:
+    max_value: u32 = ORBIS_KERNEL_SEM_VALUE_MAX.u32()
+    if value > max_value:
         return -1
     if sem == null:
         return 0
@@ -274,7 +271,7 @@ def scePthreadSemGetvalue(sem: PthreadSem&?, sval: mutable int&?) -> int:
 def posix_pthread_key_create(key: mutable int&, destructor: void&?) -> int:
     i: mutable int = 0
     while i < PTHREAD_KEYS_MAX:
-        if not g_tls_allocated[i]:
+        if g_tls_allocated[i] == false:
             g_tls_allocated[i] <- true
             g_tls_seqno[i] <- g_tls_seqno[i] + 1
             g_tls_destructors[i] <- destructor
@@ -288,7 +285,7 @@ def posix_pthread_key_create(key: mutable int&, destructor: void&?) -> int:
 def posix_pthread_key_delete(key: int) -> int:
     if key < 0 or key >= PTHREAD_KEYS_MAX:
         return POSIX_EINVAL
-    if not g_tls_allocated[key]:
+    if g_tls_allocated[key] == false:
         return POSIX_EINVAL
     g_tls_allocated[key] <- false
     return 0
@@ -296,7 +293,7 @@ def posix_pthread_key_delete(key: int) -> int:
 def posix_pthread_setspecific(key: int, value: void&?) -> int:
     if key < 0 or key >= PTHREAD_KEYS_MAX:
         return POSIX_EINVAL
-    if not g_tls_allocated[key]:
+    if g_tls_allocated[key] == false:
         return POSIX_EINVAL
     if g_tls_values[key] == null and value != null:
         g_tls_specific_count <- g_tls_specific_count + 1
@@ -310,7 +307,7 @@ def posix_pthread_setspecific(key: int, value: void&?) -> int:
 def posix_pthread_getspecific(key: int) -> void&?:
     if key < 0 or key >= PTHREAD_KEYS_MAX:
         return null
-    if not g_tls_allocated[key]:
+    if g_tls_allocated[key] == false:
         return null
     if g_tls_value_seqno[key] != g_tls_seqno[key]:
         return null
@@ -344,7 +341,7 @@ def threads_cleanup_specific() -> void:
                     destructor: mutable void&? = null
                     data: mutable void&? = null
                     if g_tls_values[key] != null:
-                        if g_tls_allocated[key] and g_tls_value_seqno[key] == g_tls_seqno[key]:
+                        if g_tls_allocated[key] == true and g_tls_value_seqno[key] == g_tls_seqno[key]:
                             data <- g_tls_values[key]
                             destructor <- g_tls_destructors[key]
                         g_tls_values[key] <- null

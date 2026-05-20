@@ -167,7 +167,7 @@ def posix_pthread_attr_setschedparam(attr: mutable PthreadAttr&?, param: SchedPa
         return POSIX_EINVAL
     if param == null:
         return POSIX_ENOTSUP
-    if not threads_sched_priority_valid(attr.sched_policy, param.sched_priority):
+    if threads_sched_priority_valid(attr.sched_policy, param.sched_priority) == false:
         return POSIX_ENOTSUP
     attr.prio <- param.sched_priority
     return 0
@@ -247,9 +247,9 @@ def posix_pthread_attr_get_np(pthread: void&?, dstattr: mutable PthreadAttr&?) -
     if pthread == null or dstattr == null:
         return POSIX_EINVAL
     id: mutable int = threads_handle_to_id(pthread)
-    if threads_is_current_self_handle(pthread):
+    if threads_is_current_self_handle(pthread) == true:
         id <- g_fake_thread_id
-    if not threads_is_valid_live_thread_id(id):
+    if threads_is_valid_live_thread_id(id) == false:
         return POSIX_ESRCH
     dstattr <- g_default_attr
     _ = g_fake_threads_detached[id]
@@ -269,7 +269,7 @@ def posix_pthread_attr_getaffinity_np(pattr: PthreadAttr&?, cpusetsize: u64, cpu
         mask: mutable u64&? = cpusetp as mutable u64&?
         if mask != null:
             if pattr.cpuset == null:
-                mask[0] <- 0xffffffffffffffffu64
+                mask[0] <- 0u64 - 1u64
             else:
                 source: u64&? = pattr.cpuset as u64&?
                 if source != null:
@@ -374,7 +374,7 @@ global mutable g_fake_sched_prio: int = ORBIS_KERNEL_PRIO_FIFO_DEFAULT
 global mutable g_fake_cancel_enable: bool = true
 global mutable g_fake_cancel_pending: bool = false
 global mutable g_fake_cancelling: bool = false
-global mutable g_fake_affinity_mask: u64 = 0xffffffffffffffffu64
+global mutable g_fake_affinity_mask: u64 = 0u64 - 1u64
 const FAKE_THREADS_MAX: int = 256
 global mutable g_fake_threads_bootstrapped: bool = false
 global mutable g_fake_threads_alive: bool[FAKE_THREADS_MAX]
@@ -399,7 +399,7 @@ def threads_handle_to_id(thread: void&?) -> int:
     i: mutable int = 1
     trusted Unsafe.AssumeProgress:
         while i < FAKE_THREADS_MAX:
-            if g_fake_threads_alive[i] and g_fake_threads_host_handle[i] == thread:
+            if g_fake_threads_alive[i] == true and g_fake_threads_host_handle[i] == thread:
                 return i
             i <- i + 1
     return thread as int
@@ -410,7 +410,7 @@ def threads_handle_for_id(id: int) -> void&?:
     return id as void&?
 
 def threads_native_handle_for_call(id: int, thread: void&?) -> void&?:
-    if id > 0 and id < FAKE_THREADS_MAX and g_fake_threads_host_backed[id]:
+    if id > 0 and id < FAKE_THREADS_MAX and g_fake_threads_host_backed[id] == true:
         return elisa_kernel_thread_native(g_fake_threads_host_handle[id])
     return thread
 
@@ -456,17 +456,17 @@ def posix_pthread_detach(pthread: void&?) -> int:
     if pthread == null:
         return POSIX_EINVAL
     id: mutable int = threads_handle_to_id(pthread)
-    if threads_is_current_self_handle(pthread):
+    if threads_is_current_self_handle(pthread) == true:
         id <- g_fake_thread_id
-    if not threads_is_valid_live_thread_id(id):
+    if threads_is_valid_live_thread_id(id) == false:
         return POSIX_ESRCH
-    if g_fake_threads_detached[id] or g_fake_threads_has_joiner[id]:
+    if g_fake_threads_detached[id] == true or g_fake_threads_has_joiner[id] == true:
         return POSIX_EINVAL
-    if g_fake_threads_exited[id]:
+    if g_fake_threads_exited[id] == true:
         g_fake_threads_alive[id] <- false
         g_fake_threads_running[id] <- false
     host_handle: void&? = threads_handle_for_id(id)
-    if g_fake_threads_host_backed[id]:
+    if g_fake_threads_host_backed[id] == true:
         host_res: int = elisa_kernel_thread_detach(host_handle)
         if host_res != 0:
             return host_res
@@ -499,20 +499,20 @@ def posix_pthread_join(pthread: void&?, thread_return: mutable void&?&) -> int:
     if pthread == null:
         return POSIX_EINVAL
     id: mutable int = threads_handle_to_id(pthread)
-    if threads_is_current_self_handle(pthread):
+    if threads_is_current_self_handle(pthread) == true:
         id <- g_fake_thread_id
     if id == g_fake_thread_id:
         return POSIX_EDEADLK
-    if not threads_is_valid_live_thread_id(id):
+    if threads_is_valid_live_thread_id(id) == false:
         return POSIX_ESRCH
-    if g_fake_threads_detached[id]:
+    if g_fake_threads_detached[id] == true:
         return POSIX_EINVAL
-    if g_fake_threads_has_joiner[id]:
+    if g_fake_threads_has_joiner[id] == true:
         return POSIX_ENOTSUP
-    if g_fake_threads_running[id] and not g_fake_threads_exited[id] and not g_fake_threads_host_backed[id]:
+    if g_fake_threads_running[id] == true and g_fake_threads_exited[id] == false and g_fake_threads_host_backed[id] == false:
         return POSIX_ETIMEDOUT
     host_ret: mutable void&? = null
-    if g_fake_threads_host_backed[id]:
+    if g_fake_threads_host_backed[id] == true:
         host_res: int = elisa_kernel_thread_join(threads_handle_for_id(id), host_ret)
         if host_res != 0:
             return host_res
@@ -533,7 +533,7 @@ def posix_pthread_join(pthread: void&?, thread_return: mutable void&?&) -> int:
 def posix_pthread_timedjoin_np(pthread: void&?, thread_return: mutable void&?&, abstime: void&?) -> int:
     if pthread == null:
         return POSIX_EINVAL
-    if threads_is_current_self_handle(pthread) or threads_handle_to_id(pthread) == g_fake_thread_id:
+    if threads_is_current_self_handle(pthread) == true or threads_handle_to_id(pthread) == g_fake_thread_id:
         return POSIX_EDEADLK
     if abstime == null:
         return POSIX_EINVAL
@@ -541,15 +541,15 @@ def posix_pthread_timedjoin_np(pthread: void&?, thread_return: mutable void&?&, 
     if ts == null or ts.tv_sec < 0 or ts.tv_nsec < 0 or ts.tv_nsec >= 1000000000:
         return POSIX_EINVAL
     id: mutable int = threads_handle_to_id(pthread)
-    if threads_is_current_self_handle(pthread):
+    if threads_is_current_self_handle(pthread) == true:
         id <- g_fake_thread_id
-    if not threads_is_valid_live_thread_id(id):
+    if threads_is_valid_live_thread_id(id) == false:
         return POSIX_ESRCH
-    if g_fake_threads_detached[id]:
+    if g_fake_threads_detached[id] == true:
         return POSIX_EINVAL
-    if g_fake_threads_has_joiner[id]:
+    if g_fake_threads_has_joiner[id] == true:
         return POSIX_ENOTSUP
-    if g_fake_threads_host_backed[id]:
+    if g_fake_threads_host_backed[id] == true:
         host_ret: mutable void&? = null
         # Match current C++ behavior: timed join shares join path and does not enforce timeout.
         host_res: int = elisa_kernel_thread_join(threads_handle_for_id(id), host_ret)
@@ -567,7 +567,7 @@ def posix_pthread_timedjoin_np(pthread: void&?, thread_return: mutable void&?&, 
         g_fake_threads_host_handle[id] <- null
         g_fake_threads_host_backed[id] <- false
         return 0
-    if not g_fake_threads_exited[id]:
+    if g_fake_threads_exited[id] == false:
         return POSIX_ETIMEDOUT
     return posix_pthread_join(pthread, thread_return)
 
@@ -600,7 +600,7 @@ def posix_pthread_create(thread: mutable void&?&, attr: void&?, start_routine: v
         g_fake_threads_host_handle[id] <- host_thread
         g_fake_threads_host_backed[id] <- true
         thread[0] <- host_thread
-        if g_fake_threads_detached[id]:
+        if g_fake_threads_detached[id] == true:
             _ = elisa_kernel_thread_detach(host_thread)
         return 0
     if g_fake_threads_autocomplete == true:
@@ -630,7 +630,7 @@ def posix_pthread_setcancelstate(state: int, oldstate: mutable int&?) -> int:
         else:
             oldstate <- 1
     g_fake_cancel_enable <- state == 0
-    if g_fake_cancel_enable and g_fake_cancel_pending:
+    if g_fake_cancel_enable == true and g_fake_cancel_pending == true:
         posix_pthread_exit(POSIX_PTHREAD_CANCELED_VALUE as void&?)
     return 0
 
@@ -639,16 +639,16 @@ def posix_pthread_cancel(thread: void&?) -> int:
     if thread == null:
         return POSIX_EINVAL
     id: mutable int = threads_handle_to_id(thread)
-    if threads_is_current_self_handle(thread):
+    if threads_is_current_self_handle(thread) == true:
         id <- g_fake_thread_id
-    if not threads_is_valid_live_thread_id(id):
+    if threads_is_valid_live_thread_id(id) == false:
         return POSIX_ESRCH
     if id == g_fake_thread_id:
         g_fake_cancel_pending <- true
         if g_fake_cancel_enable == true:
             posix_pthread_exit(POSIX_PTHREAD_CANCELED_VALUE as void&?)
         return 0
-    if g_fake_threads_host_backed[id]:
+    if g_fake_threads_host_backed[id] == true:
         host_res: int = elisa_kernel_thread_cancel(threads_handle_for_id(id))
         if host_res != 0:
             return host_res
@@ -659,7 +659,7 @@ def posix_pthread_cancel(thread: void&?) -> int:
 
 def posix_pthread_testcancel() -> void:
     threads_bootstrap_runtime()
-    if g_fake_cancel_enable and g_fake_cancel_pending:
+    if g_fake_cancel_enable == true and g_fake_cancel_pending == true:
         posix_pthread_exit(POSIX_PTHREAD_CANCELED_VALUE as void&?)
     return
 
@@ -668,9 +668,9 @@ def posix_pthread_setprio(thread: void&?, prio: int) -> int:
     if thread == null:
         return POSIX_EINVAL
     id: mutable int = threads_handle_to_id(thread)
-    if threads_is_current_self_handle(thread):
+    if threads_is_current_self_handle(thread) == true:
         id <- g_fake_thread_id
-    if not threads_is_valid_live_thread_id(id):
+    if threads_is_valid_live_thread_id(id) == false:
         return POSIX_ESRCH
     g_fake_sched_prio <- prio
     return 0
@@ -680,9 +680,9 @@ def posix_pthread_rename_np(thread: void&?, name: static u8&?) -> int:
     if thread == null:
         return POSIX_EINVAL
     id: mutable int = threads_handle_to_id(thread)
-    if threads_is_current_self_handle(thread):
+    if threads_is_current_self_handle(thread) == true:
         id <- g_fake_thread_id
-    if not threads_is_valid_live_thread_id(id):
+    if threads_is_valid_live_thread_id(id) == false:
         return POSIX_ESRCH
     self_thread: void&? = posix_pthread_self()
     if name != null and posix_pthread_equal(thread, self_thread) == 1:
@@ -696,9 +696,9 @@ def posix_pthread_getschedparam(thread: void&?, policy: mutable int&, param: mut
     if thread == null:
         return POSIX_EINVAL
     id: mutable int = threads_handle_to_id(thread)
-    if threads_is_current_self_handle(thread):
+    if threads_is_current_self_handle(thread) == true:
         id <- g_fake_thread_id
-    if not threads_is_valid_live_thread_id(id):
+    if threads_is_valid_live_thread_id(id) == false:
         return POSIX_ESRCH
     host_r: int = pthread_getschedparam(threads_native_handle_for_call(id, thread), policy, param)
     if host_r != 0 and posix_pthread_equal(thread, posix_pthread_self()) == 1:
@@ -712,9 +712,9 @@ def posix_pthread_setschedparam(thread: void&?, policy: int, param: SchedParam&?
     if thread == null or param == null:
         return POSIX_EINVAL
     id: mutable int = threads_handle_to_id(thread)
-    if threads_is_current_self_handle(thread):
+    if threads_is_current_self_handle(thread) == true:
         id <- g_fake_thread_id
-    if not threads_is_valid_live_thread_id(id):
+    if threads_is_valid_live_thread_id(id) == false:
         return POSIX_ESRCH
     host_r: int = pthread_setschedparam(threads_native_handle_for_call(id, thread), policy, param as SchedParam&)
     if host_r != 0 and posix_pthread_equal(thread, posix_pthread_self()) == 1:
@@ -730,9 +730,9 @@ def posix_pthread_getaffinity_np(thread: void&?, cpusetsize: u64, cpusetp: mutab
     if thread == null:
         return POSIX_EINVAL
     id: mutable int = threads_handle_to_id(thread)
-    if threads_is_current_self_handle(thread):
+    if threads_is_current_self_handle(thread) == true:
         id <- g_fake_thread_id
-    if not threads_is_valid_live_thread_id(id):
+    if threads_is_valid_live_thread_id(id) == false:
         return POSIX_ESRCH
     host_r: int = pthread_getaffinity_np(threads_native_handle_for_call(id, thread), cpusetsize, cpusetp)
     if host_r != 0 and posix_pthread_equal(thread, posix_pthread_self()) == 1:
@@ -746,9 +746,9 @@ def posix_pthread_setaffinity_np(thread: void&?, cpusetsize: u64, cpusetp: void&
     if thread == null:
         return POSIX_EINVAL
     id: mutable int = threads_handle_to_id(thread)
-    if threads_is_current_self_handle(thread):
+    if threads_is_current_self_handle(thread) == true:
         id <- g_fake_thread_id
-    if not threads_is_valid_live_thread_id(id):
+    if threads_is_valid_live_thread_id(id) == false:
         return POSIX_ESRCH
     host_r: int = pthread_setaffinity_np(threads_native_handle_for_call(id, thread), cpusetsize, cpusetp)
     if host_r != 0 and posix_pthread_equal(thread, posix_pthread_self()) == 1:
@@ -769,9 +769,9 @@ def posix_pthread_getname_np(thread: void&?, name: mutable u8&?) -> int:
     if thread == null:
         return POSIX_EINVAL
     id: mutable int = threads_handle_to_id(thread)
-    if threads_is_current_self_handle(thread):
+    if threads_is_current_self_handle(thread) == true:
         id <- g_fake_thread_id
-    if not threads_is_valid_live_thread_id(id):
+    if threads_is_valid_live_thread_id(id) == false:
         return POSIX_ESRCH
     self_thread: void&? = posix_pthread_self()
     if posix_pthread_equal(thread, self_thread) == 1:
