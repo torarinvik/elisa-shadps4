@@ -1,0 +1,635 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../../../file_format/psf.elisa"
+include "../../../../common/path_util.elisa"
+include "../../../../common/io_file.elisa"
+
+const ORBIS_SAVEDATA_DIALOG_SDK_FW_45: u32 = 0x04500000
+const ORBIS_SAVE_DATA_BLOCK_SIZE: u64 = 32768
+
+const ORBIS_SAVE_DATA_DIALOG_MODE_INVALID: u32 = 0
+const ORBIS_SAVE_DATA_DIALOG_MODE_LIST: u32 = 1
+const ORBIS_SAVE_DATA_DIALOG_MODE_USER_MSG: u32 = 2
+const ORBIS_SAVE_DATA_DIALOG_MODE_SYSTEM_MSG: u32 = 3
+const ORBIS_SAVE_DATA_DIALOG_MODE_ERROR_CODE: u32 = 4
+const ORBIS_SAVE_DATA_DIALOG_MODE_PROGRESS_BAR: u32 = 5
+
+const ORBIS_SAVE_DATA_DIALOG_TYPE_SAVE: u32 = 1
+const ORBIS_SAVE_DATA_DIALOG_TYPE_LOAD: u32 = 2
+const ORBIS_SAVE_DATA_DIALOG_TYPE_DELETE: u32 = 3
+
+const ORBIS_SAVE_DATA_DIALOG_BUTTON_ID_INVALID: u32 = 0
+const ORBIS_SAVE_DATA_DIALOG_BUTTON_ID_OK: u32 = 1
+const ORBIS_SAVE_DATA_DIALOG_BUTTON_ID_YES: u32 = 1
+const ORBIS_SAVE_DATA_DIALOG_BUTTON_ID_NO: u32 = 2
+
+const ORBIS_SAVE_DATA_DIALOG_BUTTON_TYPE_OK: u32 = 0
+const ORBIS_SAVE_DATA_DIALOG_BUTTON_TYPE_YESNO: u32 = 1
+const ORBIS_SAVE_DATA_DIALOG_BUTTON_TYPE_NONE: u32 = 2
+const ORBIS_SAVE_DATA_DIALOG_BUTTON_TYPE_OK_CANCEL: u32 = 3
+
+const ORBIS_SAVE_DATA_DIALOG_USER_MSG_TYPE_NORMAL: u32 = 0
+const ORBIS_SAVE_DATA_DIALOG_USER_MSG_TYPE_ERROR: u32 = 1
+
+const ORBIS_SAVE_DATA_DIALOG_FOCUS_POS_LIST_HEAD: u32 = 0
+const ORBIS_SAVE_DATA_DIALOG_FOCUS_POS_LIST_TAIL: u32 = 1
+const ORBIS_SAVE_DATA_DIALOG_FOCUS_POS_DATA_HEAD: u32 = 2
+const ORBIS_SAVE_DATA_DIALOG_FOCUS_POS_DATA_TAIL: u32 = 3
+const ORBIS_SAVE_DATA_DIALOG_FOCUS_POS_DATA_LATEST: u32 = 4
+const ORBIS_SAVE_DATA_DIALOG_FOCUS_POS_DATA_OLDEST: u32 = 5
+const ORBIS_SAVE_DATA_DIALOG_FOCUS_POS_DIR_NAME: u32 = 6
+
+const ORBIS_SAVE_DATA_DIALOG_ITEM_STYLE_TITLE_DATASIZE_SUBTITLE: u32 = 0
+const ORBIS_SAVE_DATA_DIALOG_ITEM_STYLE_TITLE_SUBTITLE_DATESIZE: u32 = 1
+const ORBIS_SAVE_DATA_DIALOG_ITEM_STYLE_TITLE_DATESIZE: u32 = 2
+
+const ORBIS_SAVE_DATA_DIALOG_SYSTEM_MSG_NODATA: u32 = 1
+const ORBIS_SAVE_DATA_DIALOG_SYSTEM_MSG_CONFIRM: u32 = 2
+const ORBIS_SAVE_DATA_DIALOG_SYSTEM_MSG_OVERWRITE: u32 = 3
+const ORBIS_SAVE_DATA_DIALOG_SYSTEM_MSG_NOSPACE: u32 = 4
+const ORBIS_SAVE_DATA_DIALOG_SYSTEM_MSG_PROGRESS: u32 = 5
+const ORBIS_SAVE_DATA_DIALOG_SYSTEM_MSG_FILE_CORRUPTED: u32 = 6
+const ORBIS_SAVE_DATA_DIALOG_SYSTEM_MSG_FINISHED: u32 = 7
+const ORBIS_SAVE_DATA_DIALOG_SYSTEM_MSG_NOSPACE_CONTINUABLE: u32 = 8
+const ORBIS_SAVE_DATA_DIALOG_SYSTEM_MSG_CORRUPTED_AND_DELETED: u32 = 10
+const ORBIS_SAVE_DATA_DIALOG_SYSTEM_MSG_CORRUPTED_AND_CREATED: u32 = 11
+const ORBIS_SAVE_DATA_DIALOG_SYSTEM_MSG_CORRUPTED_AND_RESTORE: u32 = 13
+const ORBIS_SAVE_DATA_DIALOG_SYSTEM_MSG_TOTAL_SIZE_EXCEEDED: u32 = 14
+
+const ORBIS_SAVE_DATA_DIALOG_PROGRESS_SYSMSG_INVALID: u32 = 0
+const ORBIS_SAVE_DATA_DIALOG_PROGRESS_SYSMSG_PROGRESS: u32 = 1
+const ORBIS_SAVE_DATA_DIALOG_PROGRESS_SYSMSG_RESTORE: u32 = 2
+
+const ORBIS_SAVE_DATA_DIALOG_OPTION_BACK_ENABLE: u32 = 0
+const ORBIS_SAVE_DATA_DIALOG_OPTION_BACK_DISABLE: u32 = 1
+
+const ORBIS_SAVE_DATA_DIALOG_PROGRESS_BAR_TARGET_DEFAULT: u32 = 0
+
+const ORBIS_SAVE_DATA_TITLE_MAXSIZE: usize = 128
+const ORBIS_SAVE_DATA_SUBTITLE_MAXSIZE: usize = 128
+const ORBIS_SAVE_DATA_DETAIL_MAXSIZE: usize = 1024
+const ORBIS_SAVE_DATA_TITLE_ID_MAXSIZE: usize = 10
+const ORBIS_SAVE_DATA_DIRNAME_MAXSIZE: usize = 32
+
+const ORBIS_SAVEDATA_ERR_NOT_FOUND: u32 = 0x809F0008
+const ORBIS_SAVEDATA_ERR_BROKEN: u32 = 0x809F000F
+
+@fixed_layout
+struct OrbisSaveDataTitleId:
+    data: mutable u8[10]
+    pad: mutable u8[6]
+
+@fixed_layout
+struct OrbisSaveDataDirName:
+    data: mutable u8[32]
+
+@fixed_layout
+struct OrbisSaveDataParam:
+    title: mutable u8[128]
+    subTitle: mutable u8[128]
+    detail: mutable u8[1024]
+    userParam: mutable u32
+    pad0: mutable s32
+    mtime: mutable i64
+    reserved: mutable u8[32]
+
+@fixed_layout
+struct SaveDataDialogAnimationParam:
+    userOK: mutable u32
+    userCancel: mutable u32
+    reserved: mutable u8[32]
+
+@fixed_layout
+struct SaveDataDialogNewItem:
+    title: mutable u8&?
+    iconBuf: mutable void&?
+    iconSize: mutable usize
+    reserved: mutable u8[32]
+
+@fixed_layout
+struct SaveDataDialogItems:
+    userId: mutable s32
+    pad0: mutable s32
+    titleId: mutable OrbisSaveDataTitleId&?
+    dirName: mutable OrbisSaveDataDirName&?
+    dirNameNum: mutable u32
+    pad1: mutable s32
+    newItem: mutable SaveDataDialogNewItem&?
+    focusPos: mutable u32
+    pad2: mutable s32
+    focusPosDirName: mutable OrbisSaveDataDirName&?
+    itemStyle: mutable u32
+    reserved: mutable u8[32]
+
+@fixed_layout
+struct SaveDataDialogUserMessageParam:
+    buttonType: mutable u32
+    msgType: mutable u32
+    msg: mutable u8&?
+    reserved: mutable u8[32]
+
+@fixed_layout
+struct SaveDataDialogSystemMessageParam:
+    msgType: mutable u32
+    pad0: mutable s32
+    value: mutable u64
+    reserved: mutable u8[32]
+
+@fixed_layout
+struct SaveDataDialogErrorCodeParam:
+    errorCode: mutable u32
+    reserved: mutable u8[32]
+
+@fixed_layout
+struct SaveDataDialogProgressBarParam:
+    barType: mutable u32
+    pad0: mutable s32
+    msg: mutable u8&?
+    sysMsgType: mutable u32
+    reserved: mutable u8[28]
+
+@fixed_layout
+struct SaveDataDialogOptionParam:
+    back: mutable u32
+    reserved: mutable u8[32]
+
+@fixed_layout
+struct OrbisSaveDataDialogParam:
+    baseParam: mutable BaseParam
+    size: mutable s32
+    mode: mutable u32
+    dispType: mutable u32
+    pad0: mutable s32
+    animParam: mutable SaveDataDialogAnimationParam&?
+    items: mutable SaveDataDialogItems&?
+    userMsgParam: mutable SaveDataDialogUserMessageParam&?
+    sysMsgParam: mutable SaveDataDialogSystemMessageParam&?
+    errorCodeParam: mutable SaveDataDialogErrorCodeParam&?
+    progressBarParam: mutable SaveDataDialogProgressBarParam&?
+    userData: mutable void&?
+    optionParam: mutable SaveDataDialogOptionParam&?
+    reserved: mutable u8[24]
+
+@fixed_layout
+struct OrbisSaveDataDialogResult:
+    mode: mutable u32
+    result: mutable u32
+    buttonId: mutable u32
+    pad0: mutable s32
+    dirName: mutable OrbisSaveDataDirName&?
+    param: mutable OrbisSaveDataParam&?
+    userData: mutable void&?
+    reserved: mutable u8[32]
+
+struct SaveDialogResult:
+    mode: mutable u32
+    result: mutable u32
+    button_id: mutable u32
+    dir_name: mutable static u8&
+    param: mutable PsfFile
+    user_data: mutable void&?
+
+struct SaveDialogUserState:
+    button_type: mutable u32
+    msg_type: mutable u32
+    msg: mutable static u8&
+
+struct SaveDialogSystemState:
+    msg: mutable static u8&
+    hide_ok: mutable bool
+    show_no: mutable bool
+    show_cancel: mutable bool
+    return_cancel: mutable bool
+
+struct SaveDialogErrorCodeState:
+    error_msg: mutable static u8&
+
+struct SaveDialogProgressBarState:
+    msg: mutable static u8&
+    progress: mutable u32
+
+struct SaveDialogItem:
+    dir_name: mutable static u8&
+    title: mutable static u8&
+    subtitle: mutable static u8&
+    details: mutable static u8&
+    date: mutable static u8&
+    size: mutable static u8&
+    last_write: mutable i64
+    pfo: mutable PsfFile
+    is_corrupted: mutable bool
+
+struct SaveDialogState:
+    mode: mutable u32
+    dialog_type: mutable u32
+    user_data: mutable void&?
+    has_enable_back: mutable bool
+    enable_back: mutable bool
+    user_id: mutable s32
+    title_id: mutable static u8&
+    save_list: mutable darray[SaveDialogItem]
+    has_focus_pos: mutable bool
+    focus_pos: mutable u32
+    focus_pos_dir_name: mutable static u8&
+    style: mutable u32
+    has_new_item: mutable bool
+    new_item: mutable SaveDialogItem
+    state_kind: mutable u32
+    user_state: mutable SaveDialogUserState
+    system_state: mutable SaveDialogSystemState
+    error_state: mutable SaveDialogErrorCodeState
+    progress_state: mutable SaveDialogProgressBarState
+
+struct SaveDialogUi:
+    state: mutable SaveDialogState&?
+    status: mutable u32&?
+    result: mutable SaveDialogResult&?
+
+global mutable g_savedata_dialog_runtime_game_serial: static u8& = ""
+global mutable g_savedata_dialog_runtime_install_dir_savedata: static u8& = ""
+global mutable g_savedata_dialog_firmware_version: u32 = ORBIS_SAVEDATA_DIALOG_SDK_FW_45
+
+def SaveDataDialog_DebugSetGameSerial(serial: static u8&) -> void:
+    g_savedata_dialog_runtime_game_serial <- serial
+
+def SaveDataDialog_DebugSetInstallDirSavedata(title_id: static u8&) -> void:
+    g_savedata_dialog_runtime_install_dir_savedata <- title_id
+
+def SaveDataDialog_DebugSetFirmwareVersion(version: u32) -> void:
+    g_savedata_dialog_firmware_version <- version
+
+def SaveDataDialog_ClearBuffer(buf: mutable u8&, count: usize) -> void:
+    i: mutable usize = 0
+    while i < count:
+        buf[i] <- 0
+        i <- i + 1
+
+def SaveDataDialog_CopyStringToFixed(buf: mutable u8&, cap: usize, value: static u8&) -> void:
+    SaveDataDialog_ClearBuffer(buf, cap)
+    if cap == 0:
+        return
+    len: usize = runtime_strlen(value)
+    limit: usize = cap - 1
+    count: usize = len if len < limit else limit
+    i: mutable usize = 0
+    while i < count:
+        buf[i] <- value[i]
+        i <- i + 1
+    buf[count] <- 0
+
+def SaveDataDialog_CopyFixedToString(buf: u8&, cap: usize) -> static u8&:
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            out: mutable darray[u8] = []
+            i: mutable usize = 0
+            while i < cap and buf[i] != 0:
+                out.push(buf[i])
+                i <- i + 1
+            out.push(0)
+            return out[0].ref[static u8&]
+    return ""
+
+def SaveDataDialog_DefaultTitleId() -> static u8&:
+    if runtime_strlen(g_savedata_dialog_runtime_install_dir_savedata) > 0:
+        return g_savedata_dialog_runtime_install_dir_savedata
+    if runtime_strlen(g_savedata_dialog_runtime_game_serial) > 0:
+        return g_savedata_dialog_runtime_game_serial
+    return "CUSA00000"
+
+def SaveDataDialog_MakeDirSavePath(user_id: s32, title_id: static u8&, dir_name: static u8&) -> static u8&:
+    home_dir: static u8& = GetUserPath(PathType.HomeDir)
+    user_dir: static u8& = fs_join(home_dir, int_to_string(user_id.i64()).cast[static u8&])
+    save_root: static u8& = fs_join(user_dir, "savedata")
+    title_root: static u8& = fs_join(save_root, title_id)
+    return fs_join(title_root, dir_name)
+
+def SaveDataDialog_TwoDigits(value: u64) -> static u8&:
+    if value < 10:
+        return concat2("0", int_to_string(value.i64()).cast[static u8&])
+    return int_to_string(value.i64()).cast[static u8&]
+
+def SaveDataDialog_SpaceSizeToString(size: u64) -> static u8&:
+    gib: u64 = 1024u64 * 1024u64 * 1024u64
+    mib: u64 = 1024u64 * 1024u64
+    kib: u64 = 1024u64
+    if size > gib:
+        whole: u64 = size / gib
+        frac: u64 = ((size % gib) * 100u64) / gib
+        return concat2(concat2(concat2(int_to_string(whole.i64()), "."), SaveDataDialog_TwoDigits(frac)), " GB")
+    if size > mib:
+        whole: u64 = size / mib
+        frac: u64 = ((size % mib) * 100u64) / mib
+        return concat2(concat2(concat2(int_to_string(whole.i64()), "."), SaveDataDialog_TwoDigits(frac)), " MB")
+    if size > kib:
+        whole: u64 = size / kib
+        frac: u64 = ((size % kib) * 100u64) / kib
+        return concat2(concat2(concat2(int_to_string(whole.i64()), "."), SaveDataDialog_TwoDigits(frac)), " KB")
+    return concat2(int_to_string(size.i64()), " B")
+
+def SaveDataDialog_HexU32Upper(value: u32) -> static u8&:
+    digits: static u8& = "0123456789ABCDEF"
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            out: mutable darray[u8] = []
+            started: mutable bool = false
+            shift: mutable i32 = 28
+            while shift >= 0:
+                nibble: u8 = ((value >> shift.u32()) & 0xFu32).u8()
+                if nibble != 0 or started or shift == 0:
+                    started <- true
+                    out.push(digits[nibble.usize()])
+                shift <- shift - 4
+            out.push(0)
+            return out[0].ref[static u8&]
+    return "0"
+
+def SaveDataDialog_ParamFromPsf(out_param: mutable OrbisSaveDataParam&, sfo: PsfFile&) -> void:
+    SaveDataDialog_ClearBuffer(out_param.title[0].ref[mutable u8&], ORBIS_SAVE_DATA_TITLE_MAXSIZE)
+    SaveDataDialog_ClearBuffer(out_param.subTitle[0].ref[mutable u8&], ORBIS_SAVE_DATA_SUBTITLE_MAXSIZE)
+    SaveDataDialog_ClearBuffer(out_param.detail[0].ref[mutable u8&], ORBIS_SAVE_DATA_DETAIL_MAXSIZE)
+    title: static u8& = Psf_GetString(sfo, "MAINTITLE")
+    sub_title: static u8& = Psf_GetString(sfo, "SUBTITLE")
+    detail: static u8& = Psf_GetString(sfo, "DETAIL")
+    title_final: static u8& = "Unknown" if runtime_strlen(title) == 0 else title
+    SaveDataDialog_CopyStringToFixed(out_param.title[0].ref[mutable u8&], ORBIS_SAVE_DATA_TITLE_MAXSIZE, title_final)
+    SaveDataDialog_CopyStringToFixed(out_param.subTitle[0].ref[mutable u8&], ORBIS_SAVE_DATA_SUBTITLE_MAXSIZE, sub_title)
+    SaveDataDialog_CopyStringToFixed(out_param.detail[0].ref[mutable u8&], ORBIS_SAVE_DATA_DETAIL_MAXSIZE, detail)
+    out_param.userParam <- Psf_GetInteger(sfo, "SAVEDATA_LIST_PARAM").u32()
+    out_param.pad0 <- 0
+    out_param.mtime <- 0
+    SaveDataDialog_ClearBuffer(out_param.reserved[0].ref[mutable u8&], 32)
+
+def SaveDialogResult_new() -> SaveDialogResult:
+    return SaveDialogResult(
+        ORBIS_SAVE_DATA_DIALOG_MODE_INVALID,
+        ORBIS_COMMON_DIALOG_RESULT_OK,
+        ORBIS_SAVE_DATA_DIALOG_BUTTON_ID_INVALID,
+        "",
+        PsfFile_empty(),
+        null
+    )
+
+def SaveDialogUserState_new() -> SaveDialogUserState:
+    return SaveDialogUserState(ORBIS_SAVE_DATA_DIALOG_BUTTON_TYPE_NONE, ORBIS_SAVE_DATA_DIALOG_USER_MSG_TYPE_NORMAL, "")
+
+def SaveDialogSystemState_new() -> SaveDialogSystemState:
+    return SaveDialogSystemState("", false, false, false, false)
+
+def SaveDialogErrorCodeState_new() -> SaveDialogErrorCodeState:
+    return SaveDialogErrorCodeState("")
+
+def SaveDialogProgressBarState_new() -> SaveDialogProgressBarState:
+    return SaveDialogProgressBarState("", 0)
+
+def SaveDialogItem_new() -> SaveDialogItem:
+    return SaveDialogItem("", "", "", "", "", "", 0, PsfFile_empty(), false)
+
+def SaveDialogState_new() -> SaveDialogState:
+    return SaveDialogState(
+        ORBIS_SAVE_DATA_DIALOG_MODE_INVALID,
+        ORBIS_SAVE_DATA_DIALOG_TYPE_SAVE,
+        null,
+        false,
+        true,
+        0,
+        "",
+        [],
+        false,
+        ORBIS_SAVE_DATA_DIALOG_FOCUS_POS_LIST_HEAD,
+        "",
+        ORBIS_SAVE_DATA_DIALOG_ITEM_STYLE_TITLE_DATASIZE_SUBTITLE,
+        false,
+        SaveDialogItem_new(),
+        ORBIS_SAVE_DATA_DIALOG_MODE_INVALID,
+        SaveDialogUserState_new(),
+        SaveDialogSystemState_new(),
+        SaveDialogErrorCodeState_new(),
+        SaveDialogProgressBarState_new()
+    )
+
+def SaveDialogResult_CopyTo(self: SaveDialogResult&, out_result: mutable OrbisSaveDataDialogResult&) -> void:
+    out_result.mode <- self.mode
+    out_result.result <- self.result
+    out_result.buttonId <- self.button_id
+    if out_result.dirName != null:
+        SaveDataDialog_CopyStringToFixed(out_result.dirName.data[0].ref[mutable u8&], ORBIS_SAVE_DATA_DIRNAME_MAXSIZE, self.dir_name)
+    if out_result.param != null and runtime_strlen(Psf_GetString(self.param.ref[PsfFile&], "MAINTITLE")) > 0:
+        SaveDataDialog_ParamFromPsf(out_result.param, self.param.ref[PsfFile&])
+    out_result.userData <- self.user_data
+
+def SaveDialogState_SetSystemMessageByType(dialog_type: u32, save_msg: static u8&, load_msg: static u8&, delete_msg: static u8&) -> static u8&:
+    if dialog_type == ORBIS_SAVE_DATA_DIALOG_TYPE_SAVE:
+        return save_msg
+    if dialog_type == ORBIS_SAVE_DATA_DIALOG_TYPE_LOAD:
+        return load_msg
+    return delete_msg
+
+def SaveDialogState_BuildUserState(param: OrbisSaveDataDialogParam&) -> SaveDialogUserState:
+    if param.userMsgParam == null:
+        return SaveDialogUserState_new()
+    user: mutable SaveDataDialogUserMessageParam& = param.userMsgParam
+    msg: static u8& = user.msg.cast[static u8&] if user.msg != null else ""
+    return SaveDialogUserState(user.buttonType, user.msgType, msg)
+
+def SaveDialogState_BuildSystemState(state: SaveDialogState&, param: OrbisSaveDataDialogParam&) -> SaveDialogSystemState:
+    if param.sysMsgParam == null:
+        return SaveDialogSystemState_new()
+    sys: mutable SaveDataDialogSystemMessageParam& = param.sysMsgParam
+    out: mutable SaveDialogSystemState = SaveDialogSystemState_new()
+    if sys.msgType == ORBIS_SAVE_DATA_DIALOG_SYSTEM_MSG_NODATA:
+        out.return_cancel <- true
+        out.msg <- "There is no saved data"
+        return out
+    if sys.msgType == ORBIS_SAVE_DATA_DIALOG_SYSTEM_MSG_CONFIRM:
+        out.show_no <- true
+        out.msg <- SaveDialogState_SetSystemMessageByType(state.dialog_type, "Do you want to save?", "Do you want to load this saved data?", "Do you want to delete this saved data?")
+        return out
+    if sys.msgType == ORBIS_SAVE_DATA_DIALOG_SYSTEM_MSG_OVERWRITE:
+        out.show_no <- true
+        out.msg <- SaveDialogState_SetSystemMessageByType(state.dialog_type, "Do you want to overwrite the existing saved data?", "##UNKNOWN##", "##UNKNOWN##")
+        return out
+    if sys.msgType == ORBIS_SAVE_DATA_DIALOG_SYSTEM_MSG_NOSPACE:
+        out.return_cancel <- true
+        amount: static u8& = SaveDataDialog_SpaceSizeToString(sys.value * ORBIS_SAVE_DATA_BLOCK_SIZE)
+        out.msg <- SaveDialogState_SetSystemMessageByType(
+            state.dialog_type,
+            concat2("There is not enough space to save the data. To continue ", concat2(amount, " free space is required.")),
+            "##UNKNOWN##",
+            "##UNKNOWN##"
+        )
+        return out
+    if sys.msgType == ORBIS_SAVE_DATA_DIALOG_SYSTEM_MSG_PROGRESS:
+        out.hide_ok <- true
+        out.show_cancel <- state.enable_back if state.has_enable_back else false
+        out.msg <- SaveDialogState_SetSystemMessageByType(state.dialog_type, "Saving...", "Loading...", "Deleting...")
+        return out
+    if sys.msgType == ORBIS_SAVE_DATA_DIALOG_SYSTEM_MSG_FILE_CORRUPTED:
+        out.return_cancel <- true
+        out.msg <- "The saved data is corrupted."
+        return out
+    if sys.msgType == ORBIS_SAVE_DATA_DIALOG_SYSTEM_MSG_FINISHED:
+        out.return_cancel <- true
+        out.msg <- SaveDialogState_SetSystemMessageByType(state.dialog_type, "Saved successfully.", "Loading complete.", "Deletion complete.")
+        return out
+    if sys.msgType == ORBIS_SAVE_DATA_DIALOG_SYSTEM_MSG_NOSPACE_CONTINUABLE:
+        out.return_cancel <- true
+        amount: static u8& = SaveDataDialog_SpaceSizeToString(sys.value * ORBIS_SAVE_DATA_BLOCK_SIZE)
+        out.msg <- SaveDialogState_SetSystemMessageByType(
+            state.dialog_type,
+            concat2("There is not enough space to save the data. ", concat2(amount, " free space is required.")),
+            "##UNKNOWN##",
+            "##UNKNOWN##"
+        )
+        return out
+    if sys.msgType == ORBIS_SAVE_DATA_DIALOG_SYSTEM_MSG_CORRUPTED_AND_DELETED:
+        out.show_cancel <- state.enable_back if state.has_enable_back else true
+        out.msg <- SaveDialogState_SetSystemMessageByType(state.dialog_type, "The saved data is corrupted and will be deleted.", "The saved data is corrupted and will be deleted.", "##UNKNOWN##")
+        return out
+    if sys.msgType == ORBIS_SAVE_DATA_DIALOG_SYSTEM_MSG_CORRUPTED_AND_CREATED:
+        out.show_cancel <- state.enable_back if state.has_enable_back else true
+        out.msg <- SaveDialogState_SetSystemMessageByType(
+            state.dialog_type,
+            "The saved data is corrupted. This saved data will be deleted and a new one will be created.",
+            "The saved data is corrupted. This saved data will be deleted and a new one will be created.",
+            "##UNKNOWN##"
+        )
+        return out
+    if sys.msgType == ORBIS_SAVE_DATA_DIALOG_SYSTEM_MSG_CORRUPTED_AND_RESTORE:
+        out.show_cancel <- state.enable_back if state.has_enable_back else true
+        out.msg <- SaveDialogState_SetSystemMessageByType(
+            state.dialog_type,
+            "The saved data is corrupted. The data that was backed up by the system will be restored.",
+            "The saved data is corrupted. The data that was backed up by the system will be restored.",
+            "##UNKNOWN##"
+        )
+        return out
+    if sys.msgType == ORBIS_SAVE_DATA_DIALOG_SYSTEM_MSG_TOTAL_SIZE_EXCEEDED:
+        out.msg <- SaveDialogState_SetSystemMessageByType(state.dialog_type, "Cannot create more saved data", "##UNKNOWN##", "##UNKNOWN##")
+        return out
+    out.msg <- "Unknown message type"
+    return out
+
+def SaveDialogState_BuildErrorCodeState(param: OrbisSaveDataDialogParam&) -> SaveDialogErrorCodeState:
+    if param.errorCodeParam == null:
+        return SaveDialogErrorCodeState_new()
+    err: mutable SaveDataDialogErrorCodeParam& = param.errorCodeParam
+    if err.errorCode == ORBIS_SAVEDATA_ERR_NOT_FOUND:
+        return SaveDialogErrorCodeState("There is not saved data.")
+    if err.errorCode == ORBIS_SAVEDATA_ERR_BROKEN:
+        return SaveDialogErrorCodeState("The data is corrupted.")
+    return SaveDialogErrorCodeState(concat2("An error has occurred. (", concat2(SaveDataDialog_HexU32Upper(err.errorCode), ")")))
+
+def SaveDialogState_BuildProgressBarState(state: SaveDialogState&, param: OrbisSaveDataDialogParam&) -> SaveDialogProgressBarState:
+    if param.progressBarParam == null:
+        return SaveDialogProgressBarState_new()
+    bar: mutable SaveDataDialogProgressBarParam& = param.progressBarParam
+    out: mutable SaveDialogProgressBarState = SaveDialogProgressBarState_new()
+    out.progress <- 0
+    if bar.msg != null:
+        out.msg <- bar.msg.cast[static u8&]
+        return out
+    if bar.sysMsgType == ORBIS_SAVE_DATA_DIALOG_PROGRESS_SYSMSG_INVALID:
+        out.msg <- ""
+        return out
+    if bar.sysMsgType == ORBIS_SAVE_DATA_DIALOG_PROGRESS_SYSMSG_PROGRESS:
+        if state.dialog_type == ORBIS_SAVE_DATA_DIALOG_TYPE_SAVE:
+            out.msg <- "Saving..."
+        elif state.dialog_type == ORBIS_SAVE_DATA_DIALOG_TYPE_LOAD:
+            out.msg <- "Loading..."
+        else:
+            out.msg <- "Deleting..."
+        return out
+    if bar.sysMsgType == ORBIS_SAVE_DATA_DIALOG_PROGRESS_SYSMSG_RESTORE:
+        out.msg <- "Restoring saved data..."
+        return out
+    out.msg <- ""
+    return out
+
+def SaveDialogState_LoadItems(state: mutable SaveDialogState&, item: SaveDataDialogItems&) -> void:
+    state.user_id <- item.userId
+    if item.titleId == null:
+        state.title_id <- SaveDataDialog_DefaultTitleId()
+    else:
+        state.title_id <- SaveDataDialog_CopyFixedToString(item.titleId.data[0].ref[u8&], ORBIS_SAVE_DATA_TITLE_ID_MAXSIZE)
+    if item.dirName != null:
+        i: mutable u32 = 0
+        while i < item.dirNameNum:
+            current: OrbisSaveDataDirName = item.dirName[i.usize()]
+            dir_name: static u8& = SaveDataDialog_CopyFixedToString(current.data[0].ref[u8&], ORBIS_SAVE_DATA_DIRNAME_MAXSIZE)
+            if runtime_strlen(dir_name) != 0:
+                dir_path: static u8& = SaveDataDialog_MakeDirSavePath(state.user_id, state.title_id, dir_name)
+                param_sfo_path: static u8& = fs_join(fs_join(dir_path, "sce_sys"), "param.sfo")
+                if fs_exists(param_sfo_path):
+                    pfo: PsfFile = Psf_Open(param_sfo_path)
+                    title: static u8& = Psf_GetString(pfo.ref[PsfFile&], "MAINTITLE")
+                    subtitle: static u8& = Psf_GetString(pfo.ref[PsfFile&], "SUBTITLE")
+                    detail: static u8& = Psf_GetString(pfo.ref[PsfFile&], "DETAIL")
+                    title_final: static u8& = "Unknown" if runtime_strlen(title) == 0 else title
+                    size_text: static u8& = SaveDataDialog_SpaceSizeToString(GetDirectorySize(dir_path))
+                    is_corrupted: bool = fs_exists(fs_join(fs_join(dir_path, "sce_sys"), "corrupted"))
+                    can Memory.Allocate, Abort.Panic:
+                        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+                        in owner:
+                            state.save_list.push(SaveDialogItem(dir_name, title_final, subtitle, detail, "", size_text, 0, pfo, is_corrupted))
+            i <- i + 1
+    if state.dialog_type == ORBIS_SAVE_DATA_DIALOG_TYPE_SAVE and item.newItem != null:
+        title: mutable static u8& = "New Save"
+        if item.newItem.title != null:
+            title <- item.newItem.title.cast[static u8&]
+        state.new_item <- SaveDialogItem("", title, "", "", "", "", 0, PsfFile_empty(), false)
+        state.has_new_item <- true
+    if item.focusPos != ORBIS_SAVE_DATA_DIALOG_FOCUS_POS_DIR_NAME:
+        state.has_focus_pos <- true
+        state.focus_pos <- item.focusPos
+    elif item.focusPosDirName != null:
+        state.has_focus_pos <- true
+        state.focus_pos <- ORBIS_SAVE_DATA_DIALOG_FOCUS_POS_DIR_NAME
+        state.focus_pos_dir_name <- SaveDataDialog_CopyFixedToString(item.focusPosDirName.data[0].ref[u8&], ORBIS_SAVE_DATA_DIRNAME_MAXSIZE)
+    state.style <- item.itemStyle
+
+def SaveDialogState_FromParam(param: OrbisSaveDataDialogParam&) -> SaveDialogState:
+    out: mutable SaveDialogState = SaveDialogState_new()
+    out.mode <- param.mode
+    out.dialog_type <- param.dispType
+    out.user_data <- param.userData
+    if param.optionParam != null:
+        out.has_enable_back <- true
+        out.enable_back <- param.optionParam.back == ORBIS_SAVE_DATA_DIALOG_OPTION_BACK_ENABLE
+    if param.items != null:
+        SaveDialogState_LoadItems(out.ref[mutable SaveDialogState&], param.items)
+    if out.mode == ORBIS_SAVE_DATA_DIALOG_MODE_USER_MSG:
+        out.state_kind <- ORBIS_SAVE_DATA_DIALOG_MODE_USER_MSG
+        out.user_state <- SaveDialogState_BuildUserState(param)
+    elif out.mode == ORBIS_SAVE_DATA_DIALOG_MODE_SYSTEM_MSG:
+        out.state_kind <- ORBIS_SAVE_DATA_DIALOG_MODE_SYSTEM_MSG
+        out.system_state <- SaveDialogState_BuildSystemState(out, param)
+    elif out.mode == ORBIS_SAVE_DATA_DIALOG_MODE_ERROR_CODE:
+        out.state_kind <- ORBIS_SAVE_DATA_DIALOG_MODE_ERROR_CODE
+        out.error_state <- SaveDialogState_BuildErrorCodeState(param)
+    elif out.mode == ORBIS_SAVE_DATA_DIALOG_MODE_PROGRESS_BAR:
+        out.state_kind <- ORBIS_SAVE_DATA_DIALOG_MODE_PROGRESS_BAR
+        out.progress_state <- SaveDialogState_BuildProgressBarState(out, param)
+    return out
+
+def SaveDialogUi_new(state: mutable SaveDialogState&? = null, status: mutable u32&? = null, result: mutable SaveDialogResult&? = null) -> SaveDialogUi:
+    return SaveDialogUi(state, status, result)
+
+def SaveDialogUi_finish(self: mutable SaveDialogUi&, button_id: u32, result_code: u32 = ORBIS_COMMON_DIALOG_RESULT_OK) -> void:
+    if self.result != null:
+        if self.state != null:
+            self.result.mode <- self.state.mode
+            self.result.user_data <- self.state.user_data
+            if self.state.mode != ORBIS_SAVE_DATA_DIALOG_MODE_LIST and self.state.save_list.count > 0:
+                self.result.dir_name <- self.state.save_list[0].dir_name
+        self.result.result <- result_code
+        self.result.button_id <- button_id
+    if self.status != null:
+        self.status[0] <- ORBIS_COMMON_DIALOG_STATUS_FINISHED
+
+def SaveDialogUi_reset(self: mutable SaveDialogUi&) -> void:
+    self.state <- null
+    self.status <- null
+    self.result <- null

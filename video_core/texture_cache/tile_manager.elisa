@@ -1,0 +1,126 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./types.elisa"
+include "./image_info.elisa"
+include "./image.elisa"
+include "./tile.elisa"
+include "../buffer_cache/buffer.elisa"
+
+struct TilingPipelineKey:
+    tile_mode: mutable u32
+    array_mode: mutable u32
+    num_bits: mutable u32
+    num_samples: mutable u32
+    is_tiler: mutable bool
+
+def TilingPipelineKey_eq(left: TilingPipelineKey, right: TilingPipelineKey) -> bool:
+    if left.tile_mode != right.tile_mode:
+        return false
+    if left.array_mode != right.array_mode:
+        return false
+    if left.num_bits != right.num_bits:
+        return false
+    if left.num_samples != right.num_samples:
+        return false
+    if left.is_tiler != right.is_tiler:
+        return false
+    return true
+
+struct TileManagerPipelineEntry:
+    key: mutable TilingPipelineKey
+    handle: mutable u64
+
+struct TileManagerScratchBuffer:
+    handle: mutable u64
+    allocation: mutable u64
+    size: mutable u32
+
+struct TileManagerResult:
+    buffer: mutable u64
+    offset: mutable u32
+    ok: mutable bool
+
+struct TileManager:
+    instance_handle: mutable u64
+    scheduler_handle: mutable u64
+    stream_buffer_handle: mutable u64
+    next_pipeline_handle: mutable u64
+    next_scratch_handle: mutable u64
+    tiling_pipelines: mutable darray[TileManagerPipelineEntry]
+    tile_dispatch_count: mutable u64
+    detile_dispatch_count: mutable u64
+    last_copy_size: mutable u32
+
+def TileManager_New(instance_handle: u64, scheduler_handle: u64, stream_buffer: mutable StreamBuffer&) -> TileManager:
+    return TileManager(
+        instance_handle,
+        scheduler_handle,
+        stream_buffer.base.buffer.handle,
+        1u64,
+        1u64 << 20u64,
+        [],
+        0u64,
+        0u64,
+        0u32
+    )
+
+def TilingDispatchGroups(byte_size: u32, num_bits: u32) -> u32:
+    if byte_size == 0u32:
+        return 0u32
+    bytes_per_el: u32 = Tile_BytesPerElement(num_bits)
+    if bytes_per_el == 0u32:
+        bytes_per_el <- 1u32
+    invocations: u64 = byte_size.u64() / bytes_per_el.u64()
+    if byte_size.u64() % bytes_per_el.u64() != 0u64:
+        invocations <- invocations + 1u64
+    groups: u64 = (invocations + 63u64) / 64u64
+    if groups == 0u64:
+        groups <- 1u64
+    if groups > 0xffffffffu64:
+        return 0xffffffffu32
+    return groups.u32()
+
+def TileManager_GetScratchBuffer(self: mutable TileManager&, size: u32) -> TileManagerScratchBuffer:
+    handle: u64 = self.next_scratch_handle
+    self.next_scratch_handle <- self.next_scratch_handle + size.u64() + 4096u64
+    return TileManagerScratchBuffer(handle, handle ^ 0xa5a5a5a5u64, size)
+
+def TileManager_GetTilingPipeline(self: mutable TileManager&, info: ImageInfo, is_tiler: bool) -> u64:
+    can Memory.Allocate, Abort.Panic:
+        key: TilingPipelineKey = TilingPipelineKey(info.tile_mode, info.array_mode, info.num_bits, info.num_samples, is_tiler)
+        i: mutable usize = 0usize
+        while i < self.tiling_pipelines.count:
+            if TilingPipelineKey_eq(self.tiling_pipelines[i].key, key):
+                return self.tiling_pipelines[i].handle
+            i <- i + 1usize
+        handle: u64 = self.next_pipeline_handle
+        self.next_pipeline_handle <- self.next_pipeline_handle + 1u64
+        self.tiling_pipelines.push(TileManagerPipelineEntry(key, handle))
+        return handle
+
+def TileManager_DetileImage(self: mutable TileManager&, in_buffer: u64, in_offset: u32, info: ImageInfo) -> TileManagerResult:
+    can Memory.Allocate, Abort.Panic:
+        _ = in_buffer
+        _ = in_offset
+        if info.guest_size == 0u32:
+            return TileManagerResult(0u64, 0u32, false)
+        _ = TileManager_GetTilingPipeline(self, info, false)
+        _ = TilingDispatchGroups(info.guest_size, info.num_bits)
+        scratch: TileManagerScratchBuffer = TileManager_GetScratchBuffer(self, info.guest_size)
+        self.detile_dispatch_count <- self.detile_dispatch_count + 1u64
+        self.last_copy_size <- info.guest_size
+        return TileManagerResult(scratch.handle, 0u32, true)
+
+def TileManager_TileImage(self: mutable TileManager&, in_image: Image, buffer_copies: darray[BufferImageCopy], out_buffer: Buffer, out_offset: u32, copy_size: u32) -> void:
+    can Memory.Allocate, Abort.Panic:
+        _ = buffer_copies
+        _ = out_buffer
+        _ = out_offset
+        if copy_size == 0u32:
+            return
+        _ = TileManager_GetTilingPipeline(self, in_image.info, true)
+        _ = TilingDispatchGroups(copy_size, in_image.info.num_bits)
+        _ = TileManager_GetScratchBuffer(self, copy_size)
+        self.tile_dispatch_count <- self.tile_dispatch_count + 1u64
+        self.last_copy_size <- copy_size

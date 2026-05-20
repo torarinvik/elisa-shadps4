@@ -1,0 +1,82 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./types.elisa"
+include "../amdgpu/tiling.elisa"
+
+def Tile_BytesPerElement(num_bits: u32) -> u32:
+    if num_bits == 0u32:
+        return 1u32
+    return (num_bits + 7u32) / 8u32
+
+def Tile_IsLinearMode(tile_mode: u32) -> bool:
+    return tile_mode == TileMode_DisplayLinearAligned or tile_mode == TileMode_DisplayLinearGeneral
+
+def Tile_IsMacroTiled(array_mode: u32) -> bool:
+    if array_mode == ArrayMode_Array2DTiledThin1:
+        return true
+    if array_mode == ArrayMode_ArrayPrt2DTiledThin1:
+        return true
+    if array_mode == ArrayMode_Array2DTiledThick:
+        return true
+    if array_mode == ArrayMode_Array2DTiledXThick:
+        return true
+    if array_mode == ArrayMode_Array3DTiledThin1:
+        return true
+    if array_mode == ArrayMode_Array3DTiledThick:
+        return true
+    if array_mode == ArrayMode_Array3DTiledXThick:
+        return true
+    return false
+
+def GetMacroTileExtents(array_mode: u32, num_bits: u32, num_samples: u32) -> Extent2D:
+    sample_scale: mutable u32 = 1u32
+    if num_samples >= 2u32:
+        sample_scale <- 2u32
+    width: mutable u32 = 128u32 / Tile_BytesPerElement(num_bits)
+    if width == 0u32:
+        width <- 1u32
+    height: mutable u32 = 8u32
+    if Tile_IsMacroTiled(array_mode):
+        height <- 16u32
+    return Extent2D_new(width / sample_scale, height * sample_scale)
+
+def ImageSizeLinearAligned(width: u32, height: u32, depth: u32, pitch: u32, num_bits: u32, num_samples: u32) -> u64:
+    row_pitch: mutable u64 = pitch.u64()
+    if row_pitch == 0u64:
+        row_pitch <- width.u64()
+    bytes_per_element: u64 = Tile_BytesPerElement(num_bits).u64()
+    sample_count: mutable u64 = num_samples.u64()
+    if sample_count == 0u64:
+        sample_count <- 1u64
+    return row_pitch * height.u64() * depth.u64() * bytes_per_element * sample_count
+
+def ImageSizeMicroTiled(width: u32, height: u32, depth: u32, num_bits: u32, num_samples: u32) -> u64:
+    block_w: u64 = 8u64
+    block_h: u64 = 8u64
+    tiles_x: u64 = (width.u64() + block_w - 1u64) / block_w
+    tiles_y: u64 = (height.u64() + block_h - 1u64) / block_h
+    bytes_per_element: u64 = Tile_BytesPerElement(num_bits).u64()
+    sample_count: mutable u64 = num_samples.u64()
+    if sample_count == 0u64:
+        sample_count <- 1u64
+    return tiles_x * tiles_y * depth.u64() * block_w * block_h * bytes_per_element * sample_count
+
+def ImageSizeMacroTiled(width: u32, height: u32, depth: u32, pitch: u32, num_bits: u32, num_samples: u32, array_mode: u32) -> u64:
+    ext: Extent2D = GetMacroTileExtents(array_mode, num_bits, num_samples)
+    tile_w: mutable u64 = ext.width.u64()
+    if tile_w == 0u64:
+        tile_w <- 1u64
+    tile_h: mutable u64 = ext.height.u64()
+    if tile_h == 0u64:
+        tile_h <- 1u64
+    logical_w: mutable u64 = pitch.u64()
+    if logical_w == 0u64:
+        logical_w <- width.u64()
+    tiles_x: u64 = (logical_w + tile_w - 1u64) / tile_w
+    tiles_y: u64 = (height.u64() + tile_h - 1u64) / tile_h
+    bytes_per_element: u64 = Tile_BytesPerElement(num_bits).u64()
+    sample_count: mutable u64 = num_samples.u64()
+    if sample_count == 0u64:
+        sample_count <- 1u64
+    return tiles_x * tiles_y * depth.u64() * tile_w * tile_h * bytes_per_element * sample_count

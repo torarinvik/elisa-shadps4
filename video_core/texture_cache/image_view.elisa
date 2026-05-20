@@ -1,0 +1,144 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./types.elisa"
+include "./image_info.elisa"
+include "./host_compatibility.elisa"
+include "./constants.elisa"
+
+const TEXTURE_COMP_MAPPING_IDENTITY: u32 = 0x07060504u32
+
+const VK_IMAGE_VIEW_TYPE_1D: u32 = 0u32
+const VK_IMAGE_VIEW_TYPE_2D: u32 = 1u32
+const VK_IMAGE_VIEW_TYPE_3D: u32 = 2u32
+const VK_IMAGE_VIEW_TYPE_CUBE: u32 = 3u32
+const VK_IMAGE_VIEW_TYPE_1D_ARRAY: u32 = 4u32
+const VK_IMAGE_VIEW_TYPE_2D_ARRAY: u32 = 5u32
+
+def ConvertImageViewType(type: u32) -> u32:
+    if type == ImageType_Color1D:
+        return VK_IMAGE_VIEW_TYPE_1D
+    if type == ImageType_Color1DArray:
+        return VK_IMAGE_VIEW_TYPE_1D_ARRAY
+    if type == ImageType_Color2D:
+        return VK_IMAGE_VIEW_TYPE_2D
+    if type == ImageType_Color2DArray or type == ImageType_Color2DMsaa or type == ImageType_Color2DMsaaArray:
+        return VK_IMAGE_VIEW_TYPE_2D_ARRAY
+    if type == ImageType_Color3D:
+        return VK_IMAGE_VIEW_TYPE_3D
+    if type == ImageType_Cube:
+        return VK_IMAGE_VIEW_TYPE_CUBE
+    return VK_IMAGE_VIEW_TYPE_2D
+
+def IsViewTypeCompatible(view_type: u32, image_type: u32) -> bool:
+    if view_type == image_type:
+        return true
+    if view_type == ImageType_Color1DArray and image_type == ImageType_Color1D:
+        return true
+    if view_type == ImageType_Color2DArray or view_type == ImageType_Color2DMsaaArray:
+        if image_type == ImageType_Color2D or image_type == ImageType_Color2DMsaa or image_type == ImageType_Color3D:
+            return true
+    if view_type == ImageType_Color2D and image_type == ImageType_Color2DMsaa:
+        return true
+    return false
+
+struct ImageViewInfo:
+    type: mutable u32
+    format: mutable u32
+    range: mutable SubresourceRange
+    mapping: mutable u32
+    is_storage: mutable bool
+
+def ImageViewInfo_Default() -> ImageViewInfo:
+    return ImageViewInfo(
+        ImageType_Color2D,
+        VK_FORMAT_R8G8B8A8_UNORM,
+        SubresourceRange_default(),
+        TEXTURE_COMP_MAPPING_IDENTITY,
+        false
+    )
+
+def ImageViewInfo_FromImage(type: u32, format: u32, base_level: u32, num_levels: u32, base_layer: u32, num_layers: u32, mapping: u32, is_storage: bool) -> ImageViewInfo:
+    out: mutable ImageViewInfo = ImageViewInfo_Default()
+    out.type <- type
+    out.format <- format
+    out.range <- SubresourceRange_new(SubresourceBase_new(base_level, base_layer), SubresourceExtent_new(num_levels, num_layers))
+    out.mapping <- mapping
+    out.is_storage <- is_storage
+    return out
+
+def ImageViewInfo_FromColorBuffer(format: u32, layers: u32) -> ImageViewInfo:
+    layer_count: mutable u32 = layers
+    if layer_count == 0u32:
+        layer_count <- 1u32
+    return ImageViewInfo_FromImage(
+        ImageType_Color2D,
+        format,
+        0u32,
+        1u32,
+        0u32,
+        layer_count,
+        TEXTURE_COMP_MAPPING_IDENTITY,
+        true
+    )
+
+def ImageViewInfo_FromDepthBuffer(format: u32, base_level: u32, base_layer: u32, levels: u32, layers: u32, writable: bool) -> ImageViewInfo:
+    level_count: mutable u32 = levels
+    if level_count == 0u32:
+        level_count <- 1u32
+    layer_count: mutable u32 = layers
+    if layer_count == 0u32:
+        layer_count <- 1u32
+    return ImageViewInfo_FromImage(
+        ImageType_Color2DArray,
+        format,
+        base_level,
+        level_count,
+        base_layer,
+        layer_count,
+        TEXTURE_COMP_MAPPING_IDENTITY,
+        writable
+    )
+
+struct ImageView:
+    info: mutable ImageViewInfo
+    handle: mutable u64
+    image_handle: mutable u64
+    valid: mutable bool
+
+def ImageView_Default() -> ImageView:
+    return ImageView(ImageViewInfo_Default(), 0u64, 0u64, false)
+
+def ImageView_New(info: ImageViewInfo, image_info: ImageInfo, image_handle: u64, next_handle: u64) -> ImageView:
+    if not IsViewTypeCompatible(info.type, image_info.type):
+        return ImageView(info, 0u64, image_handle, false)
+    if info.range.extent.levels == 0u32 or info.range.extent.layers == 0u32:
+        return ImageView(info, 0u64, image_handle, false)
+    if info.range.base.level >= image_info.resources.levels:
+        return ImageView(info, 0u64, image_handle, false)
+    if info.range.base.layer >= image_info.resources.layers:
+        return ImageView(info, 0u64, image_handle, false)
+    if info.range.base.level + info.range.extent.levels > image_info.resources.levels:
+        return ImageView(info, 0u64, image_handle, false)
+    if info.range.base.layer + info.range.extent.layers > image_info.resources.layers:
+        return ImageView(info, 0u64, image_handle, false)
+    if not IsVulkanFormatCompatible(image_info.pixel_format, info.format):
+        # Allow depth/stencil compatibility by class.
+        image_class: VkFormatCompatibilityClass = VkFormatCompatibility_ClassOf(image_info.pixel_format)
+        view_class: VkFormatCompatibilityClass = VkFormatCompatibility_ClassOf(info.format)
+        image_depth_like: mutable bool = false
+        if image_class == VkFormatCompatibilityClass.Depth or image_class == VkFormatCompatibilityClass.DepthStencil:
+            image_depth_like <- true
+        view_depth_like: mutable bool = false
+        if view_class == VkFormatCompatibilityClass.Depth or view_class == VkFormatCompatibilityClass.DepthStencil:
+            view_depth_like <- true
+        if not image_depth_like or not view_depth_like:
+            return ImageView(info, 0u64, image_handle, false)
+    return ImageView(info, next_handle, image_handle, true)
+
+def ImageView_Destroy(self: mutable ImageView&) -> void:
+    self.valid <- false
+    self.handle <- 0u64
+
+def ImageView_Type(self: ImageView) -> u32:
+    return ConvertImageViewType(self.info.type)

@@ -1,0 +1,264 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./types.elisa"
+include "./image_info.elisa"
+include "./image_view.elisa"
+include "./blit_helper.elisa"
+include "./host_compatibility.elisa"
+
+const IMAGE_FLAG_EMPTY: u32 = 0u32
+const IMAGE_FLAG_MAYBE_CPU_DIRTY: u32 = 1u32 << 0u32
+const IMAGE_FLAG_CPU_DIRTY: u32 = 1u32 << 1u32
+const IMAGE_FLAG_GPU_DIRTY: u32 = 1u32 << 2u32
+const IMAGE_FLAG_GPU_MODIFIED: u32 = 1u32 << 3u32
+const IMAGE_FLAG_REGISTERED: u32 = 1u32 << 6u32
+const IMAGE_FLAG_PICKED: u32 = 1u32 << 7u32
+const IMAGE_FLAG_DIRTY: u32 = IMAGE_FLAG_MAYBE_CPU_DIRTY | IMAGE_FLAG_CPU_DIRTY | IMAGE_FLAG_GPU_DIRTY
+
+struct UniqueImage:
+    handle: mutable u64
+    allocation: mutable u64
+    width: mutable u32
+    height: mutable u32
+    depth: mutable u32
+    created: mutable bool
+
+def UniqueImage_Default() -> UniqueImage:
+    return UniqueImage(0u64, 0u64, 0u32, 0u32, 0u32, false)
+
+def UniqueImage_Create(self: mutable UniqueImage&, handle: u64, width: u32, height: u32, depth: u32) -> void:
+    self.handle <- handle
+    self.allocation <- handle ^ 0x5a5a5a5au64
+    self.width <- width
+    self.height <- height
+    self.depth <- depth
+    self.created <- true
+
+def UniqueImage_Destroy(self: mutable UniqueImage&) -> void:
+    self.handle <- 0u64
+    self.allocation <- 0u64
+    self.created <- false
+
+struct ImageState:
+    pl_stage: mutable u32
+    access_mask: mutable u32
+    layout: mutable u32
+
+def ImageState_Default() -> ImageState:
+    return ImageState(0u32, 0u32, 0u32)
+
+struct BackingImage:
+    image: mutable UniqueImage
+    state: mutable ImageState
+    num_samples: mutable u32
+
+def BackingImage_Default() -> BackingImage:
+    return BackingImage(UniqueImage_Default(), ImageState_Default(), 1u32)
+
+struct ImageBarrier:
+    image_handle: mutable u64
+    old_layout: mutable u32
+    new_layout: mutable u32
+    dst_access: mutable u32
+    dst_stage: mutable u32
+    valid: mutable bool
+
+def ImageBarrier_Invalid() -> ImageBarrier:
+    return ImageBarrier(0u64, 0u32, 0u32, 0u32, 0u32, false)
+
+struct Image:
+    info: mutable ImageInfo
+    aspect_mask: mutable u32
+    supported_samples: mutable u32
+    flags: mutable u32
+    track_addr: mutable u64
+    track_addr_end: mutable u64
+    depth_id: mutable ImageId
+    usage_texture: mutable bool
+    usage_storage: mutable bool
+    usage_render_target: mutable bool
+    usage_depth_target: mutable bool
+    usage_vo_surface: mutable bool
+    bind_is_bound: mutable bool
+    bind_is_target: mutable bool
+    bind_needs_rebind: mutable bool
+    bind_force_general: mutable bool
+    backing_images: mutable darray[BackingImage]
+    backing_index: mutable usize
+    views: mutable darray[ImageView]
+    next_view_handle: mutable u64
+    mip_hashes: mutable u64[16]
+    lru_id: mutable u64
+    tick_accessed_last: mutable u64
+    hash: mutable u64
+
+def Image_New(info: ImageInfo, next_image_handle: u64) -> Image:
+    can Memory.Allocate, Abort.Panic:
+        base: mutable BackingImage = BackingImage_Default()
+        UniqueImage_Create(base.image.ref[mutable UniqueImage&], next_image_handle, info.size.width, info.size.height, info.size.depth)
+        base.num_samples <- info.num_samples
+        out: mutable Image = Image(
+            info,
+            1u32,
+            info.num_samples,
+            IMAGE_FLAG_DIRTY,
+            0u64,
+            0u64,
+            NULL_IMAGE_ID,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            [],
+            0usize,
+            [],
+            1u64,
+            [0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64],
+            0u64,
+            0u64,
+            0u64
+        )
+        out.backing_images.push(base)
+        return out
+
+def Image_GetImage(self: Image) -> u64:
+    if self.backing_index >= self.backing_images.count:
+        return 0u64
+    return self.backing_images[self.backing_index].image.handle
+
+def Image_Overlaps(self: Image, overlap_cpu_addr: u64, overlap_size: usize) -> bool:
+    overlap_end: u64 = overlap_cpu_addr + overlap_size.u64()
+    image_addr: u64 = self.info.guest_address
+    image_end: u64 = self.info.guest_address + self.info.guest_size.u64()
+    return image_addr < overlap_end and overlap_cpu_addr < image_end
+
+def Image_IsTracked(self: Image) -> bool:
+    return self.track_addr != 0u64 and self.track_addr_end != 0u64
+
+def Image_SafeToDownload(self: Image) -> bool:
+    return (self.flags & IMAGE_FLAG_GPU_MODIFIED) != 0u32 and (self.flags & IMAGE_FLAG_DIRTY) == 0u32
+
+def Image_AssociateDepth(self: mutable Image&, image_id: ImageId) -> void:
+    self.depth_id <- image_id
+
+def Image_FindView(self: mutable Image&, requested_view_info: ImageViewInfo, ensure_guest_samples: bool) -> ImageView:
+    can Memory.Allocate, Abort.Panic:
+        if ensure_guest_samples:
+            Image_SetBackingSamples(self, self.info.num_samples, false)
+        i: mutable usize = 0usize
+        while i < self.views.count:
+            if SubresourceRange_eq(self.views[i].info.range, requested_view_info.range):
+                if self.views[i].info.format == requested_view_info.format:
+                    if self.views[i].info.type == requested_view_info.type:
+                        if self.views[i].info.is_storage == requested_view_info.is_storage:
+                            return self.views[i]
+            i <- i + 1usize
+        view_handle: u64 = self.next_view_handle
+        self.next_view_handle <- self.next_view_handle + 1u64
+        view: ImageView = ImageView_New(requested_view_info, self.info, Image_GetImage(self), view_handle)
+        self.views.push(view)
+        return view
+
+def Image_GetBarriers(self: mutable Image&, dst_layout: u32, dst_mask: u32, dst_stage: u32, subres_range: SubresourceRange?) -> darray[ImageBarrier]:
+    can Memory.Allocate, Abort.Panic:
+        _ = subres_range
+        barriers: mutable darray[ImageBarrier] = []
+        if self.backing_index >= self.backing_images.count:
+            return barriers
+        state: mutable ImageState& = self.backing_images[self.backing_index].state.ref[mutable ImageState&]
+        if state.layout == dst_layout and state.access_mask == dst_mask and state.pl_stage == dst_stage:
+            return barriers
+        barriers.push(ImageBarrier(
+            self.backing_images[self.backing_index].image.handle,
+            state.layout,
+            dst_layout,
+            dst_mask,
+            dst_stage,
+            true
+        ))
+        state.layout <- dst_layout
+        state.access_mask <- dst_mask
+        state.pl_stage <- dst_stage
+        return barriers
+
+def Image_Transit(self: mutable Image&, dst_layout: u32, dst_mask: u32, dst_pl_stage: u32, range: SubresourceRange?) -> usize:
+    can Memory.Allocate, Abort.Panic:
+        barriers: darray[ImageBarrier] = Image_GetBarriers(self, dst_layout, dst_mask, dst_pl_stage, range)
+        return barriers.count
+
+def Image_Upload(self: mutable Image&, upload_copies: darray[BufferImageCopy], buffer: u64, offset: u64) -> void:
+    _ = upload_copies
+    _ = buffer
+    _ = offset
+    self.flags <- (self.flags | IMAGE_FLAG_GPU_MODIFIED) & ~IMAGE_FLAG_CPU_DIRTY
+    _ = Image_Transit(self, 1u32, 1u32, 1u32, null)
+
+def Image_Download(self: mutable Image&, download_copies: darray[BufferImageCopy], buffer: u64, offset: u64, download_size: u64) -> void:
+    _ = download_copies
+    _ = buffer
+    _ = offset
+    _ = download_size
+    self.flags <- self.flags & ~IMAGE_FLAG_GPU_DIRTY
+    _ = Image_Transit(self, 2u32, 2u32, 2u32, null)
+
+def Image_CopyImage(self: mutable Image&, src_image: mutable Image&) -> void:
+    self.hash <- src_image.hash
+    self.flags <- self.flags | IMAGE_FLAG_GPU_MODIFIED
+    self.flags <- self.flags & ~IMAGE_FLAG_CPU_DIRTY
+    i: mutable usize = 0usize
+    while i < 16usize:
+        self.mip_hashes[i] <- src_image.mip_hashes[i]
+        i <- i + 1usize
+
+def Image_CopyImageWithBuffer(self: mutable Image&, src_image: mutable Image&, buffer: u64, offset: u64) -> void:
+    _ = buffer
+    _ = offset
+    Image_CopyImage(self, src_image)
+
+def Image_CopyMip(self: mutable Image&, src_image: mutable Image&, mip: u32, slice: u32) -> void:
+    _ = slice
+    if mip < 16u32:
+        self.mip_hashes[mip.usize()] <- src_image.mip_hashes[mip.usize()]
+    self.flags <- self.flags | IMAGE_FLAG_GPU_MODIFIED
+
+def Image_Resolve(self: mutable Image&, src_image: mutable Image&, mrt0_range: SubresourceRange, mrt1_range: SubresourceRange) -> void:
+    _ = mrt0_range
+    _ = mrt1_range
+    Image_CopyImage(self, src_image)
+    Image_SetBackingSamples(self, 1u32, false)
+
+def Image_Clear(self: mutable Image&, clear_color_rgba: u32[4], range: SubresourceRange) -> void:
+    _ = clear_color_rgba
+    _ = range
+    self.flags <- self.flags | IMAGE_FLAG_GPU_MODIFIED
+    self.flags <- self.flags & ~IMAGE_FLAG_DIRTY
+    self.hash <- self.hash ^ 0xabcdu64
+
+def Image_SetBackingSamples(self: mutable Image&, num_samples: u32, copy_backing: bool) -> void:
+    can Memory.Allocate, Abort.Panic:
+        if num_samples == 0u32:
+            return
+        if self.backing_index < self.backing_images.count and self.backing_images[self.backing_index].num_samples == num_samples:
+            return
+        i: mutable usize = 0usize
+        while i < self.backing_images.count:
+            if self.backing_images[i].num_samples == num_samples:
+                self.backing_index <- i
+                self.supported_samples <- num_samples
+                return
+            i <- i + 1usize
+        handle_seed: u64 = Image_GetImage(self) + num_samples.u64() + self.backing_images.count.u64() + 1u64
+        backing: mutable BackingImage = BackingImage_Default()
+        UniqueImage_Create(backing.image.ref[mutable UniqueImage&], handle_seed, self.info.size.width, self.info.size.height, self.info.size.depth)
+        backing.num_samples <- num_samples
+        if copy_backing and self.backing_index < self.backing_images.count:
+            backing.state <- self.backing_images[self.backing_index].state
+        self.backing_images.push(backing)
+        self.backing_index <- self.backing_images.count - 1usize
+        self.supported_samples <- num_samples

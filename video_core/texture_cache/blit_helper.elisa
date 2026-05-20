@@ -1,0 +1,94 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+const BLIT_HELPER_MAX_MS_PIPELINES: usize = 6usize
+
+def ToSampleCount(num_samples: u32) -> u32:
+    if num_samples == 1u32:
+        return 1u32
+    if num_samples == 2u32:
+        return 2u32
+    if num_samples == 4u32:
+        return 4u32
+    if num_samples == 8u32:
+        return 8u32
+    return 1u32
+
+struct BlitHelperPipeline:
+    num_samples: mutable u32
+    attachment_format: mutable u32
+    src_msaa: mutable bool
+    handle: mutable u64
+
+struct BlitHelper:
+    instance_handle: mutable u64
+    scheduler_handle: mutable u64
+    shader_created: mutable bool
+    pipeline_layout_created: mutable bool
+    next_pipeline_handle: mutable u64
+    color_to_ms_depth_pl: mutable darray[BlitHelperPipeline]
+    ms_image_copy_pl: mutable darray[BlitHelperPipeline]
+    reinterpret_count: mutable u64
+    copy_count: mutable u64
+
+def BlitHelper_New(instance_handle: u64, scheduler_handle: u64) -> BlitHelper:
+    return BlitHelper(instance_handle, scheduler_handle, false, false, 1u64, [], [], 0u64, 0u64)
+
+def BlitHelper_Destroy(self: mutable BlitHelper&) -> void:
+    self.shader_created <- false
+    self.pipeline_layout_created <- false
+    self.color_to_ms_depth_pl.count <- 0
+    self.ms_image_copy_pl.count <- 0
+
+def BlitHelper_CreateShaders(self: mutable BlitHelper&) -> void:
+    self.shader_created <- true
+
+def BlitHelper_CreatePipelineLayouts(self: mutable BlitHelper&) -> void:
+    self.pipeline_layout_created <- true
+
+def BlitHelper_CreateColorToMSDepthPipeline(self: mutable BlitHelper&, num_samples: u32, attachment_format: u32, src_msaa: bool) -> u64:
+    can Memory.Allocate, Abort.Panic:
+        if self.color_to_ms_depth_pl.count >= BLIT_HELPER_MAX_MS_PIPELINES:
+            return 0u64
+        handle: u64 = self.next_pipeline_handle
+        self.next_pipeline_handle <- self.next_pipeline_handle + 1u64
+        self.color_to_ms_depth_pl.push(BlitHelperPipeline(num_samples, attachment_format, src_msaa, handle))
+        return handle
+
+def BlitHelper_CreateMsCopyPipeline(self: mutable BlitHelper&, num_samples: u32, attachment_format: u32, src_msaa: bool) -> u64:
+    can Memory.Allocate, Abort.Panic:
+        if self.ms_image_copy_pl.count >= BLIT_HELPER_MAX_MS_PIPELINES:
+            return 0u64
+        handle: u64 = self.next_pipeline_handle
+        self.next_pipeline_handle <- self.next_pipeline_handle + 1u64
+        self.ms_image_copy_pl.push(BlitHelperPipeline(num_samples, attachment_format, src_msaa, handle))
+        return handle
+
+def BlitHelper_ReinterpretColorAsMsDepth(self: mutable BlitHelper&, width: u32, height: u32, num_samples: u32, src_pixel_format: u32, dst_pixel_format: u32, source: u64, dest: u64) -> void:
+    _ = width
+    _ = height
+    _ = source
+    _ = dest
+    can Memory.Allocate, Abort.Panic:
+        if not self.shader_created:
+            BlitHelper_CreateShaders(self)
+        if not self.pipeline_layout_created:
+            BlitHelper_CreatePipelineLayouts(self)
+        _ = ToSampleCount(num_samples)
+        _ = BlitHelper_CreateColorToMSDepthPipeline(self, num_samples, src_pixel_format, true)
+        _ = BlitHelper_CreateColorToMSDepthPipeline(self, num_samples, dst_pixel_format, false)
+        self.reinterpret_count <- self.reinterpret_count + 1u64
+
+def BlitHelper_CopyBetweenMsImages(self: mutable BlitHelper&, width: u32, height: u32, num_samples: u32, pixel_format: u32, src_msaa: bool, source: u64, dest: u64) -> void:
+    _ = width
+    _ = height
+    _ = source
+    _ = dest
+    can Memory.Allocate, Abort.Panic:
+        if not self.shader_created:
+            BlitHelper_CreateShaders(self)
+        if not self.pipeline_layout_created:
+            BlitHelper_CreatePipelineLayouts(self)
+        _ = ToSampleCount(num_samples)
+        _ = BlitHelper_CreateMsCopyPipeline(self, num_samples, pixel_format, src_msaa)
+        self.copy_count <- self.copy_count + 1u64
