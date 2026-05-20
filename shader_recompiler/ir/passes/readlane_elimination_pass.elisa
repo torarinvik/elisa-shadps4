@@ -1,0 +1,74 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./pass_model.elisa"
+
+def SearchChain(program: ShaderIrProgram&, inst_id: u32, lane: u32) -> u32:
+    current: mutable u32 = inst_id
+    while current != 0u32 and current != IR_PASS_INVALID_ID:
+        b: mutable u32 = 0u32
+        i: mutable u32 = 0u32
+        if not ShaderIrProgram_FindInst(program, current, b.ref[mutable u32&], i.ref[mutable u32&]):
+            return current
+        inst: ShaderIrPassInst = program.blocks[b.usize()].insts[i.usize()]
+        if inst.opcode != OPCODE_WRITELANE:
+            return current
+        if ShaderIrPass_ArgIsImm(inst, 2u32) and inst.args[2] == lane:
+            return current
+        if ShaderIrPass_ArgIsInst(inst, 0u32):
+            current <- inst.args[0]
+        else:
+            return current
+    return current
+
+
+def IsPossibleToEliminate(program: ShaderIrProgram&, inst_id: u32, lane: u32) -> bool:
+    _ = lane
+    b: mutable u32 = 0u32
+    i: mutable u32 = 0u32
+    if not ShaderIrProgram_FindInst(program, inst_id, b.ref[mutable u32&], i.ref[mutable u32&]):
+        return false
+    inst: ShaderIrPassInst = program.blocks[b.usize()].insts[i.usize()]
+    if inst.opcode == OPCODE_PHI:
+        return true
+    if inst.opcode == OPCODE_READLANE or inst.opcode == OPCODE_WRITELANE:
+        return true
+    return false
+
+
+def GetRealValue(program: ShaderIrProgram&, inst_id: u32, lane: u32) -> u32:
+    root: u32 = SearchChain(program, inst_id, lane)
+    b: mutable u32 = 0u32
+    i: mutable u32 = 0u32
+    if not ShaderIrProgram_FindInst(program, root, b.ref[mutable u32&], i.ref[mutable u32&]):
+        return 0u32
+    inst: ShaderIrPassInst = program.blocks[b.usize()].insts[i.usize()]
+    if inst.opcode == OPCODE_WRITELANE:
+        return inst.args[1]
+    if inst.opcode == OPCODE_PHI and inst.arg_count > 0u32:
+        return inst.args[0]
+    return 0u32
+
+
+def ReadLaneEliminationPass(program: mutable ShaderIrProgram&) -> void:
+    b: mutable u32 = 0u32
+    while b < program.block_count:
+        block: mutable ShaderIrPassBlock& = program.blocks[b.usize()].ref[mutable ShaderIrPassBlock&]
+        i: mutable u32 = 0u32
+        while i < block.inst_count:
+            inst: mutable ShaderIrPassInst& = block.insts[i.usize()].ref[mutable ShaderIrPassInst&]
+            if inst.opcode == OPCODE_READLANE and ShaderIrPass_ArgIsImm(inst, 1u32) and ShaderIrPass_ArgIsInst(inst, 0u32):
+                lane: u32 = inst.args[1]
+                prod_id: u32 = SearchChain(program, inst.args[0], lane)
+                pb: mutable u32 = 0u32
+                pi: mutable u32 = 0u32
+                if ShaderIrProgram_FindInst(program, prod_id, pb.ref[mutable u32&], pi.ref[mutable u32&]):
+                    prod: ShaderIrPassInst = program.blocks[pb.usize()].insts[pi.usize()]
+                    if prod.opcode == OPCODE_WRITELANE and ShaderIrPass_ArgIsImm(prod, 2u32) and prod.args[2] == lane:
+                        ShaderIrPass_ReplaceWithImm(inst, prod.args[1])
+                        program.stats.readlane_eliminated <- program.stats.readlane_eliminated + 1u32
+                    if prod.opcode == OPCODE_PHI and IsPossibleToEliminate(program, prod_id, lane):
+                        ShaderIrPass_ReplaceWithImm(inst, GetRealValue(program, prod_id, lane))
+                        program.stats.readlane_eliminated <- program.stats.readlane_eliminated + 1u32
+            i <- i + 1u32
+        b <- b + 1u32

@@ -1,0 +1,188 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./pass_model.elisa"
+include "./constant_propagation_pass.elisa"
+
+const ATTR_REGION_INPUT_CP: u32 = 0u32
+const ATTR_REGION_OUTPUT_CP: u32 = 1u32
+const ATTR_REGION_PATCH_CONST: u32 = 2u32
+
+
+def InitTessConstants(sharp_ptr_base: u32, sharp_dword_offset: int, info: mutable ShaderIrInfo&, runtime_info: mutable ShaderRuntimeInfo&) -> void:
+    info.tess_consts_ptr_base <- sharp_ptr_base
+    info.tess_consts_dword_offset <- sharp_dword_offset
+    if runtime_info.hs_ls_stride == 0u32:
+        runtime_info.hs_ls_stride <- 16u32
+    if runtime_info.hs_output_cp_stride == 0u32:
+        runtime_info.hs_output_cp_stride <- 16u32
+
+
+def FindTessConstantSharp(inst: ShaderIrPassInst&) -> u32:
+    if inst.opcode != OPCODE_READCONSTBUFFER:
+        return IR_PASS_INVALID_ID
+    if inst.arg_count == 0u32:
+        return IR_PASS_INVALID_ID
+    if inst.arg_kinds[0] == IR_PASS_ARG_IMM:
+        return inst.args[0]
+    return IR_PASS_INVALID_ID
+
+
+def WalkUsersOfTessConstantHelper(program: mutable ShaderIrProgram&, readconst_id: u32, inc: u32) -> void:
+    b: mutable u32 = 0u32
+    while b < program.block_count:
+        block: mutable ShaderIrPassBlock& = program.blocks[b.usize()].ref[mutable ShaderIrPassBlock&]
+        i: mutable u32 = 0u32
+        while i < block.inst_count:
+            inst: mutable ShaderIrPassInst& = block.insts[i.usize()].ref[mutable ShaderIrPassInst&]
+            if inst.arg_count > 0u32 and inst.arg_kinds[0] == IR_PASS_ARG_INST and inst.args[0] == readconst_id:
+                if inst.opcode == OPCODE_LOADSHAREDU32 or inst.opcode == OPCODE_LOADSHAREDU64 or inst.opcode == OPCODE_WRITESHAREDU32 or inst.opcode == OPCODE_WRITESHAREDU64:
+                    inst.flags_u32 <- inst.flags_u32 + inc
+            i <- i + 1u32
+        b <- b + 1u32
+
+
+def WalkUsersOfTessConstant(program: mutable ShaderIrProgram&, readconst_id: u32, attr: u32) -> void:
+    inc: u32 = 1u32
+    if attr == TESS_CONST_PATCH_CONST_BASE:
+        inc <- 2u32
+    WalkUsersOfTessConstantHelper(program, readconst_id, inc)
+
+
+def GetAttributeRegionKind(inst: ShaderIrPassInst&, runtime_info: ShaderRuntimeInfo&) -> u32:
+    count: u32 = inst.flags_u32
+    if count == 0u32:
+        return ATTR_REGION_INPUT_CP
+    if runtime_info.hs_is_passthrough:
+        return ATTR_REGION_PATCH_CONST
+    if count == 1u32:
+        return ATTR_REGION_OUTPUT_CP
+    return ATTR_REGION_PATCH_CONST
+
+
+def IsDivisibleByStride(term: u32, stride: u32) -> bool:
+    if stride == 0u32:
+        return false
+    return term % stride == 0u32
+
+
+def TryOptimizeAddendInModulo(addend: u32, stride: u32) -> bool:
+    return IsDivisibleByStride(addend, stride)
+
+
+def TryOptimizeAddressModulo(addr: u32, stride: u32) -> u32:
+    if stride == 0u32:
+        return addr
+    if TryOptimizeAddendInModulo(addr, stride):
+        return 0u32
+    return addr % stride
+
+
+def ReadTessControlPointAttribute(addr: u32, stride: u32, off_dw: u32) -> u32:
+    if stride == 0u32:
+        return addr + off_dw
+    return TryOptimizeAddressModulo(addr + off_dw, stride)
+
+
+def HullShaderTransform(program: mutable ShaderIrProgram&, runtime_info: ShaderRuntimeInfo&) -> void:
+    b: mutable u32 = 0u32
+    while b < program.block_count:
+        block: mutable ShaderIrPassBlock& = program.blocks[b.usize()].ref[mutable ShaderIrPassBlock&]
+        i: mutable u32 = 0u32
+        while i < block.inst_count:
+            inst: mutable ShaderIrPassInst& = block.insts[i.usize()].ref[mutable ShaderIrPassInst&]
+
+            if inst.opcode == OPCODE_STOREBUFFERU32 and inst.flags_u32 == ATTR_TESS_FACTORS_BUFFER_BASE:
+                ShaderIrPass_MarkInvalid(inst)
+                program.stats.hull_rewrites <- program.stats.hull_rewrites + 1u32
+
+            if inst.opcode == OPCODE_WRITESHAREDU32 or inst.opcode == OPCODE_WRITESHAREDU64:
+                ShaderIrPass_MarkInvalid(inst)
+                program.stats.hull_rewrites <- program.stats.hull_rewrites + 1u32
+
+            if inst.opcode == OPCODE_LOADSHAREDU32 or inst.opcode == OPCODE_LOADSHAREDU64:
+                stride: u32 = runtime_info.hs_ls_stride
+                if GetAttributeRegionKind(inst, runtime_info) == ATTR_REGION_OUTPUT_CP:
+                    stride <- runtime_info.hs_output_cp_stride
+                ShaderIrPass_ReplaceWithImm(inst, ReadTessControlPointAttribute(inst.args[0], stride, 0u32))
+                program.stats.hull_rewrites <- program.stats.hull_rewrites + 1u32
+
+            i <- i + 1u32
+        b <- b + 1u32
+
+    if runtime_info.hs_is_passthrough and program.block_count > 0u32:
+        _ = ShaderIrProgram_AddInst(program, 0u32, OPCODE_TESS_PASSTHROUGH_COPY)
+
+
+def DomainShaderTransform(program: mutable ShaderIrProgram&, runtime_info: ShaderRuntimeInfo&) -> void:
+    b: mutable u32 = 0u32
+    while b < program.block_count:
+        block: mutable ShaderIrPassBlock& = program.blocks[b.usize()].ref[mutable ShaderIrPassBlock&]
+        i: mutable u32 = 0u32
+        while i < block.inst_count:
+            inst: mutable ShaderIrPassInst& = block.insts[i.usize()].ref[mutable ShaderIrPassInst&]
+            if inst.opcode == OPCODE_LOADSHAREDU32 or inst.opcode == OPCODE_LOADSHAREDU64:
+                if GetAttributeRegionKind(inst, runtime_info) == ATTR_REGION_PATCH_CONST:
+                    ShaderIrPass_ReplaceWithImm(inst, inst.args[0] >> 2u32)
+                else:
+                    ShaderIrPass_ReplaceWithImm(inst, ReadTessControlPointAttribute(inst.args[0], runtime_info.hs_output_cp_stride, 0u32))
+                program.stats.domain_rewrites <- program.stats.domain_rewrites + 1u32
+            i <- i + 1u32
+        b <- b + 1u32
+
+
+def TessellationPreprocess(program: mutable ShaderIrProgram&, runtime_info: mutable ShaderRuntimeInfo&) -> void:
+    b: mutable u32 = 0u32
+    found_consts: mutable bool = false
+
+    while b < program.block_count:
+        block: mutable ShaderIrPassBlock& = program.blocks[b.usize()].ref[mutable ShaderIrPassBlock&]
+        i: mutable u32 = 0u32
+        while i < block.inst_count:
+            inst: mutable ShaderIrPassInst& = block.insts[i.usize()].ref[mutable ShaderIrPassInst&]
+            if inst.opcode == OPCODE_READCONSTBUFFER:
+                sharp: u32 = FindTessConstantSharp(inst)
+                if sharp != IR_PASS_INVALID_ID and program.info.tess_consts_dword_offset < 0:
+                    InitTessConstants(sharp, 0, program.info.ref[mutable ShaderIrInfo&], runtime_info.ref[mutable ShaderRuntimeInfo&])
+                    found_consts <- true
+            i <- i + 1u32
+        b <- b + 1u32
+
+    if found_consts and program.info.tess_consts_dword_offset < 0:
+        program.info.tess_consts_dword_offset <- 0
+
+    b <- 0u32
+    while b < program.block_count:
+        block: mutable ShaderIrPassBlock& = program.blocks[b.usize()].ref[mutable ShaderIrPassBlock&]
+        i: mutable u32 = 0u32
+        while i < block.inst_count:
+            inst: mutable ShaderIrPassInst& = block.insts[i.usize()].ref[mutable ShaderIrPassInst&]
+
+            if inst.opcode == OPCODE_READCONSTBUFFER and ShaderIrPass_ArgIsImm(inst, 1u32):
+                off_dw: u32 = inst.args[1]
+                if off_dw == TESS_CONST_LS_STRIDE:
+                    ShaderIrPass_ReplaceWithImm(inst, runtime_info.hs_ls_stride)
+                    program.stats.tess_constants_replaced <- program.stats.tess_constants_replaced + 1u32
+                if off_dw == TESS_CONST_HS_CP_STRIDE:
+                    ShaderIrPass_ReplaceWithImm(inst, runtime_info.hs_output_cp_stride)
+                    program.stats.tess_constants_replaced <- program.stats.tess_constants_replaced + 1u32
+                if off_dw == TESS_CONST_HS_NUM_PATCH or off_dw == TESS_CONST_HS_OUTPUT_BASE or off_dw == TESS_CONST_PATCH_CONST_BASE:
+                    WalkUsersOfTessConstant(program, inst.id, off_dw)
+                    ShaderIrPass_ReplaceWithImm(inst, 0u32)
+                    program.stats.tess_constants_replaced <- program.stats.tess_constants_replaced + 1u32
+
+            if inst.opcode == OPCODE_BITFIELDUEXTRACT and inst.flags_u32 == ATTR_PACKED_HULL_INVOCATION_INFO and ShaderIrPass_ArgIsImm(inst, 1u32) and ShaderIrPass_ArgIsImm(inst, 2u32):
+                if inst.args[1] == 0u32 and inst.args[2] == 8u32:
+                    ShaderIrPass_ReplaceWithImm(inst, 0u32)
+                    program.stats.tess_constants_replaced <- program.stats.tess_constants_replaced + 1u32
+                if inst.args[1] == 8u32 and inst.args[2] == 5u32:
+                    if runtime_info.hs_is_passthrough:
+                        ShaderIrPass_ReplaceWithImm(inst, 0u32)
+                    else:
+                        ShaderIrPass_ReplaceWithImm(inst, 1u32)
+                    program.stats.tess_constants_replaced <- program.stats.tess_constants_replaced + 1u32
+
+            i <- i + 1u32
+        b <- b + 1u32
+
+    ConstantPropagationPass(program)

@@ -1,0 +1,114 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./pass_model.elisa"
+
+def IsSharedAccess(inst: ShaderIrPassInst&) -> bool:
+    return ShaderIrPass_IsSharedAccess(inst.opcode)
+
+
+def CalculateSharedMemoryTypes(program: ShaderIrProgram&) -> u32:
+    used_types: mutable u32 = IR_TYPE_VOID
+    b: mutable u32 = 0u32
+    while b < program.block_count:
+        i: mutable u32 = 0u32
+        while i < program.blocks[b.usize()].inst_count:
+            inst: ShaderIrPassInst = program.blocks[b.usize()].insts[i.usize()]
+            if IsSharedAccess(inst):
+                if inst.opcode == OPCODE_LOADSHAREDU16 or inst.opcode == OPCODE_WRITESHAREDU16:
+                    used_types <- used_types | IR_TYPE_U16
+                if inst.opcode == OPCODE_LOADSHAREDU64 or inst.opcode == OPCODE_WRITESHAREDU64 or (inst.opcode >= OPCODE_SHAREDATOMICIADD64 and inst.opcode <= OPCODE_SHAREDATOMICXOR64):
+                    used_types <- used_types | IR_TYPE_U64
+                if inst.opcode == OPCODE_LOADSHAREDU32 or inst.opcode == OPCODE_WRITESHAREDU32 or (inst.opcode >= OPCODE_SHAREDATOMICIADD32 and inst.opcode <= OPCODE_SHAREDATOMICXOR32):
+                    used_types <- used_types | IR_TYPE_U32
+            i <- i + 1u32
+        b <- b + 1u32
+    return used_types
+
+
+def SharedMemoryToStoragePass(program: mutable ShaderIrProgram&, runtime_info: ShaderRuntimeInfo&, profile: ShaderPassProfile&) -> void:
+    if program.info.stage != STAGE_COMPUTE:
+        return
+
+    shared_memory_size: u32 = runtime_info.cs_shared_memory_size
+    used_types: u32 = CalculateSharedMemoryTypes(program)
+    if used_types == IR_TYPE_VOID:
+        return
+
+    can_keep_shared: bool = false
+    if shared_memory_size <= profile.max_shared_memory_size:
+        if profile.supports_workgroup_explicit_memory_layout:
+            can_keep_shared <- true
+        if ShaderIrPopcount(used_types) == 1u32:
+            can_keep_shared <- true
+
+    if can_keep_shared:
+        return
+
+    binding: u32 = program.info.buffers_count
+    program.info.buffers_count <- program.info.buffers_count + 1u32
+    _ = binding
+
+    b: mutable u32 = 0u32
+    while b < program.block_count:
+        block: mutable ShaderIrPassBlock& = program.blocks[b.usize()].ref[mutable ShaderIrPassBlock&]
+        i: mutable u32 = 0u32
+        while i < block.inst_count:
+            inst: mutable ShaderIrPassInst& = block.insts[i.usize()].ref[mutable ShaderIrPassInst&]
+            if not IsSharedAccess(inst):
+                i <- i + 1u32
+                continue
+
+            changed: mutable bool = false
+
+            if inst.opcode == OPCODE_SHAREDATOMICIADD32 or inst.opcode == OPCODE_SHAREDATOMICIADD64:
+                ShaderIrPass_ReplaceOpcode(inst, OPCODE_BUFFERATOMICIADD32)
+                changed <- true
+            if inst.opcode == OPCODE_SHAREDATOMICISUB32 or inst.opcode == OPCODE_SHAREDATOMICISUB64:
+                ShaderIrPass_ReplaceOpcode(inst, OPCODE_BUFFERATOMICISUB32)
+                changed <- true
+            if inst.opcode == OPCODE_SHAREDATOMICSMIN32 or inst.opcode == OPCODE_SHAREDATOMICUMIN32 or inst.opcode == OPCODE_SHAREDATOMICSMIN64 or inst.opcode == OPCODE_SHAREDATOMICUMIN64:
+                ShaderIrPass_ReplaceOpcode(inst, OPCODE_BUFFERATOMICSMIN32)
+                changed <- true
+            if inst.opcode == OPCODE_SHAREDATOMICSMAX32 or inst.opcode == OPCODE_SHAREDATOMICUMAX32 or inst.opcode == OPCODE_SHAREDATOMICSMAX64 or inst.opcode == OPCODE_SHAREDATOMICUMAX64:
+                ShaderIrPass_ReplaceOpcode(inst, OPCODE_BUFFERATOMICSMAX32)
+                changed <- true
+            if inst.opcode == OPCODE_SHAREDATOMICINC32:
+                ShaderIrPass_ReplaceOpcode(inst, OPCODE_BUFFERATOMICINC32)
+                changed <- true
+            if inst.opcode == OPCODE_SHAREDATOMICDEC32:
+                ShaderIrPass_ReplaceOpcode(inst, OPCODE_BUFFERATOMICDEC32)
+                changed <- true
+            if inst.opcode == OPCODE_SHAREDATOMICAND32 or inst.opcode == OPCODE_SHAREDATOMICAND64:
+                ShaderIrPass_ReplaceOpcode(inst, OPCODE_BUFFERATOMICAND32)
+                changed <- true
+            if inst.opcode == OPCODE_SHAREDATOMICOR32 or inst.opcode == OPCODE_SHAREDATOMICOR64:
+                ShaderIrPass_ReplaceOpcode(inst, OPCODE_BUFFERATOMICOR32)
+                changed <- true
+            if inst.opcode == OPCODE_SHAREDATOMICXOR32 or inst.opcode == OPCODE_SHAREDATOMICXOR64:
+                ShaderIrPass_ReplaceOpcode(inst, OPCODE_BUFFERATOMICXOR32)
+                changed <- true
+            if inst.opcode == OPCODE_LOADSHAREDU16:
+                ShaderIrPass_ReplaceOpcode(inst, OPCODE_LOADBUFFERU16)
+                changed <- true
+            if inst.opcode == OPCODE_LOADSHAREDU32:
+                ShaderIrPass_ReplaceOpcode(inst, OPCODE_LOADBUFFERU32)
+                changed <- true
+            if inst.opcode == OPCODE_LOADSHAREDU64:
+                ShaderIrPass_ReplaceOpcode(inst, OPCODE_LOADBUFFERU64)
+                changed <- true
+            if inst.opcode == OPCODE_WRITESHAREDU16:
+                ShaderIrPass_ReplaceOpcode(inst, OPCODE_STOREBUFFERU16)
+                changed <- true
+            if inst.opcode == OPCODE_WRITESHAREDU32:
+                ShaderIrPass_ReplaceOpcode(inst, OPCODE_STOREBUFFERU32)
+                changed <- true
+            if inst.opcode == OPCODE_WRITESHAREDU64:
+                ShaderIrPass_ReplaceOpcode(inst, OPCODE_STOREBUFFERU64)
+                changed <- true
+
+            if changed:
+                program.stats.shared_to_storage_rewrites <- program.stats.shared_to_storage_rewrites + 1u32
+
+            i <- i + 1u32
+        b <- b + 1u32

@@ -1,0 +1,294 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./pass_model.elisa"
+
+const DESCRIPTOR_BUFFER: u32 = 1u32
+const DESCRIPTOR_IMAGE: u32 = 2u32
+const DESCRIPTOR_SAMPLER: u32 = 3u32
+const DESCRIPTOR_FMASK: u32 = 4u32
+
+const SHARP_NOT_FOUND: u32 = IR_PASS_INVALID_ID
+
+def IsBufferAtomic(inst: ShaderIrPassInst&) -> bool:
+    return ShaderIrPass_IsBufferAtomic(inst.opcode)
+
+
+def IsBufferStore(inst: ShaderIrPassInst&) -> bool:
+    return ShaderIrPass_IsBufferStore(inst.opcode)
+
+
+def IsBufferInstruction(inst: ShaderIrPassInst&) -> bool:
+    return ShaderIrPass_IsBufferInstruction(inst.opcode)
+
+
+def IsDataRingInstruction(inst: ShaderIrPassInst&) -> bool:
+    return ShaderIrPass_IsDataRingInstruction(inst)
+
+
+def BufferAddressShift(inst: ShaderIrPassInst&) -> u32:
+    if inst.opcode == OPCODE_LOADBUFFERU8 or inst.opcode == OPCODE_STOREBUFFERU8:
+        return 0u32
+    if inst.opcode == OPCODE_LOADBUFFERU16 or inst.opcode == OPCODE_STOREBUFFERU16:
+        return 1u32
+    if inst.opcode == OPCODE_LOADBUFFERU64 or inst.opcode == OPCODE_STOREBUFFERU64 or inst.opcode == OPCODE_BUFFERATOMICIADD64:
+        return 3u32
+    return 2u32
+
+
+def IsImageAtomicInstruction(inst: ShaderIrPassInst&) -> bool:
+    return inst.opcode == OPCODE_IMAGEATOMICFMIN32 or inst.opcode == OPCODE_IMAGEATOMICFMAX32
+
+
+def IsImageInstruction(inst: ShaderIrPassInst&) -> bool:
+    return ShaderIrPass_IsImageInstruction(inst.opcode)
+
+
+def Add(descriptor_kind: u32, info: mutable ShaderIrInfo&) -> u32:
+    if descriptor_kind == DESCRIPTOR_BUFFER:
+        index: u32 = info.buffers_count
+        info.buffers_count <- info.buffers_count + 1u32
+        return index
+    if descriptor_kind == DESCRIPTOR_IMAGE:
+        index: u32 = info.images_count
+        info.images_count <- info.images_count + 1u32
+        return index
+    if descriptor_kind == DESCRIPTOR_SAMPLER:
+        index: u32 = info.samplers_count
+        info.samplers_count <- info.samplers_count + 1u32
+        return index
+    index: u32 = info.fmasks_count
+    info.fmasks_count <- info.fmasks_count + 1u32
+    return index
+
+
+def TryDisableAnisoLod0(inst_id: u32) -> bool:
+    return inst_id != 0u32 and inst_id != IR_PASS_INVALID_ID
+
+
+def IsSharpSource(inst: ShaderIrPassInst&) -> bool:
+    return inst.opcode == OPCODE_GETUSERDATA or inst.opcode == OPCODE_READCONST
+
+
+def FindSharpSources(program: ShaderIrProgram&, inst_id: u32) -> u32:
+    b: mutable u32 = 0u32
+    i: mutable u32 = 0u32
+    if not ShaderIrProgram_FindInst(program, inst_id, b.ref[mutable u32&], i.ref[mutable u32&]):
+        return 0u32
+    inst: ShaderIrPassInst = program.blocks[b.usize()].insts[i.usize()]
+    if IsSharpSource(inst):
+        return 1u32
+    if inst.opcode == OPCODE_PHI:
+        return inst.arg_count
+    return 0u32
+
+
+def IsCfgBlockDominatedBy(maybe_dominator: u32, block: u32, dest_block: u32) -> bool:
+    if block == maybe_dominator:
+        return true
+    if block == dest_block:
+        return false
+    return maybe_dominator <= block
+
+
+def SharpLocationFromSource(program: ShaderIrProgram&, inst_id: u32) -> u32:
+    b: mutable u32 = 0u32
+    i: mutable u32 = 0u32
+    if not ShaderIrProgram_FindInst(program, inst_id, b.ref[mutable u32&], i.ref[mutable u32&]):
+        return SHARP_NOT_FOUND
+    inst: ShaderIrPassInst = program.blocks[b.usize()].insts[i.usize()]
+    if inst.arg_count == 0u32:
+        return SHARP_NOT_FOUND
+    return inst.args[0]
+
+
+def TrackSharp(program: ShaderIrProgram&, inst_id: u32) -> u32:
+    if inst_id == 0u32 or inst_id == IR_PASS_INVALID_ID:
+        return SHARP_NOT_FOUND
+    source_count: u32 = FindSharpSources(program, inst_id)
+    if source_count == 0u32:
+        return SHARP_NOT_FOUND
+    return SharpLocationFromSource(program, inst_id)
+
+
+def DropUnsupportedImageInstruction(inst: mutable ShaderIrPassInst&) -> void:
+    if inst.opcode == OPCODE_IMAGEREAD or inst.opcode == OPCODE_IMAGESAMPLERAW:
+        ShaderIrPass_ReplaceWithImm(inst, 0u32)
+        return
+    if inst.opcode == OPCODE_IMAGEQUERYDIMENSIONS or inst.opcode == OPCODE_IMAGEQUERYLOD:
+        ShaderIrPass_ReplaceWithImm(inst, 0u32)
+        return
+    if IsImageAtomicInstruction(inst):
+        ShaderIrPass_ReplaceWithImm(inst, 0u32)
+    ShaderIrPass_MarkInvalid(inst)
+
+
+def PatchBufferSharp(program: mutable ShaderIrProgram&, block_index: u32, inst_index: u32, profile: ShaderPassProfile&) -> void:
+    _ = profile
+    block: mutable ShaderIrPassBlock& = program.blocks[block_index.usize()].ref[mutable ShaderIrPassBlock&]
+    inst: mutable ShaderIrPassInst& = block.insts[inst_index.usize()].ref[mutable ShaderIrPassInst&]
+
+    if inst.arg_count == 0u32:
+        if IsBufferStore(inst):
+            ShaderIrPass_MarkInvalid(inst)
+        else:
+            ShaderIrPass_ReplaceWithImm(inst, 0u32)
+        return
+
+    if inst.arg_kinds[0] == IR_PASS_ARG_IMM:
+        inst.args[0] <- Add(DESCRIPTOR_BUFFER, program.info.ref[mutable ShaderIrInfo&])
+        program.stats.resource_sharp_patched <- program.stats.resource_sharp_patched + 1u32
+        return
+
+    if inst.arg_kinds[0] == IR_PASS_ARG_INST:
+        sharp_index: u32 = TrackSharp(program, inst.args[0])
+        if sharp_index == SHARP_NOT_FOUND:
+            if IsBufferStore(inst):
+                ShaderIrPass_MarkInvalid(inst)
+            else:
+                ShaderIrPass_ReplaceWithImm(inst, 0u32)
+            return
+        inst.arg_kinds[0] <- IR_PASS_ARG_IMM
+        inst.args[0] <- Add(DESCRIPTOR_BUFFER, program.info.ref[mutable ShaderIrInfo&])
+        program.stats.resource_sharp_patched <- program.stats.resource_sharp_patched + 1u32
+
+
+def PatchImageSharp(program: mutable ShaderIrProgram&, block_index: u32, inst_index: u32, profile: ShaderPassProfile&) -> void:
+    _ = profile
+    block: mutable ShaderIrPassBlock& = program.blocks[block_index.usize()].ref[mutable ShaderIrPassBlock&]
+    inst: mutable ShaderIrPassInst& = block.insts[inst_index.usize()].ref[mutable ShaderIrPassInst&]
+
+    if inst.arg_count == 0u32:
+        DropUnsupportedImageInstruction(inst.ref[mutable ShaderIrPassInst&])
+        return
+
+    sharp_index: u32 = inst.args[0]
+    if inst.arg_kinds[0] == IR_PASS_ARG_INST:
+        sharp_index <- TrackSharp(program, inst.args[0])
+
+    if sharp_index == SHARP_NOT_FOUND:
+        DropUnsupportedImageInstruction(inst.ref[mutable ShaderIrPassInst&])
+        return
+
+    image_binding: u32 = Add(DESCRIPTOR_IMAGE, program.info.ref[mutable ShaderIrInfo&])
+    inst.arg_kinds[0] <- IR_PASS_ARG_IMM
+    inst.args[0] <- image_binding
+
+    if inst.opcode == OPCODE_IMAGESAMPLERAW:
+        sampler_binding: u32 = Add(DESCRIPTOR_SAMPLER, program.info.ref[mutable ShaderIrInfo&])
+        inst.flags_u32 <- (sampler_binding << 16u32) | image_binding
+
+    program.stats.resource_sharp_patched <- program.stats.resource_sharp_patched + 1u32
+
+
+def PatchGlobalDataShareAccess(program: mutable ShaderIrProgram&, block_index: u32, inst_index: u32, profile: ShaderPassProfile&) -> void:
+    _ = profile
+    block: mutable ShaderIrPassBlock& = program.blocks[block_index.usize()].ref[mutable ShaderIrPassBlock&]
+    inst: mutable ShaderIrPassInst& = block.insts[inst_index.usize()].ref[mutable ShaderIrPassInst&]
+
+    _ = Add(DESCRIPTOR_BUFFER, program.info.ref[mutable ShaderIrInfo&])
+
+    if inst.opcode == OPCODE_DATALAPPEND:
+        ShaderIrPass_ReplaceOpcode(inst, OPCODE_BUFFERATOMICINC32)
+        program.stats.resource_args_patched <- program.stats.resource_args_patched + 1u32
+        return
+    if inst.opcode == OPCODE_DATACONSUME:
+        ShaderIrPass_ReplaceOpcode(inst, OPCODE_BUFFERATOMICDEC32)
+        program.stats.resource_args_patched <- program.stats.resource_args_patched + 1u32
+        return
+
+    if inst.opcode == OPCODE_LOADSHAREDU16:
+        ShaderIrPass_ReplaceOpcode(inst, OPCODE_LOADBUFFERU16)
+    if inst.opcode == OPCODE_LOADSHAREDU32:
+        ShaderIrPass_ReplaceOpcode(inst, OPCODE_LOADBUFFERU32)
+    if inst.opcode == OPCODE_LOADSHAREDU64:
+        ShaderIrPass_ReplaceOpcode(inst, OPCODE_LOADBUFFERU64)
+    if inst.opcode == OPCODE_WRITESHAREDU16:
+        ShaderIrPass_ReplaceOpcode(inst, OPCODE_STOREBUFFERU16)
+        ShaderIrPass_MarkInvalid(inst)
+    if inst.opcode == OPCODE_WRITESHAREDU32:
+        ShaderIrPass_ReplaceOpcode(inst, OPCODE_STOREBUFFERU32)
+        ShaderIrPass_MarkInvalid(inst)
+    if inst.opcode == OPCODE_WRITESHAREDU64:
+        ShaderIrPass_ReplaceOpcode(inst, OPCODE_STOREBUFFERU64)
+        ShaderIrPass_MarkInvalid(inst)
+    if inst.opcode == OPCODE_SHAREDATOMICIADD32 or inst.opcode == OPCODE_SHAREDATOMICIADD64:
+        ShaderIrPass_ReplaceOpcode(inst, OPCODE_BUFFERATOMICIADD32)
+
+    program.stats.resource_args_patched <- program.stats.resource_args_patched + 1u32
+
+
+def CalculateBufferAddress(inst: ShaderIrPassInst&, stride: u32) -> u32:
+    base: u32 = 0u32
+    if inst.arg_count > 1u32:
+        base <- inst.args[1]
+    shift: u32 = BufferAddressShift(inst)
+    return (base + inst.flags_u32 * stride) >> shift
+
+
+def PatchBufferArgs(program: mutable ShaderIrProgram&, block_index: u32, inst_index: u32) -> void:
+    block: mutable ShaderIrPassBlock& = program.blocks[block_index.usize()].ref[mutable ShaderIrPassBlock&]
+    inst: mutable ShaderIrPassInst& = block.insts[inst_index.usize()].ref[mutable ShaderIrPassInst&]
+
+    if inst.opcode == OPCODE_READCONSTBUFFER:
+        return
+
+    if inst.arg_count > 1u32:
+        inst.arg_kinds[1] <- IR_PASS_ARG_IMM
+        inst.args[1] <- CalculateBufferAddress(inst, 4u32)
+    program.stats.resource_args_patched <- program.stats.resource_args_patched + 1u32
+
+
+def FixCubeCoords(x: u32, y: u32, face: u32) -> u32:
+    return x ^ y ^ face
+
+
+def PatchImageSampleArgs(inst: mutable ShaderIrPassInst&) -> void:
+    inst.flags_u32 <- inst.flags_u32 | 1u32
+
+
+def PatchImageArgs(program: mutable ShaderIrProgram&, block_index: u32, inst_index: u32) -> void:
+    block: mutable ShaderIrPassBlock& = program.blocks[block_index.usize()].ref[mutable ShaderIrPassBlock&]
+    inst: mutable ShaderIrPassInst& = block.insts[inst_index.usize()].ref[mutable ShaderIrPassInst&]
+
+    if inst.opcode == OPCODE_IMAGEQUERYDIMENSIONS:
+        return
+
+    if inst.opcode == OPCODE_IMAGESAMPLERAW:
+        PatchImageSampleArgs(inst.ref[mutable ShaderIrPassInst&])
+        program.stats.resource_args_patched <- program.stats.resource_args_patched + 1u32
+        return
+
+    if inst.opcode == OPCODE_IMAGEREAD:
+        ShaderIrPass_ReplaceWithImm(inst, FixCubeCoords(1u32, 2u32, 3u32))
+    program.stats.resource_args_patched <- program.stats.resource_args_patched + 1u32
+
+
+def ResourceTrackingPass(program: mutable ShaderIrProgram&, profile: ShaderPassProfile&) -> void:
+    b: mutable u32 = 0u32
+    while b < program.block_count:
+        block: ShaderIrPassBlock = program.blocks[b.usize()]
+        i: mutable u32 = 0u32
+        while i < block.inst_count:
+            inst: ShaderIrPassInst = block.insts[i.usize()]
+            if IsBufferInstruction(inst):
+                PatchBufferSharp(program, b, i, profile)
+            if IsImageInstruction(inst):
+                PatchImageSharp(program, b, i, profile)
+            i <- i + 1u32
+        b <- b + 1u32
+
+    b <- 0u32
+    while b < program.block_count:
+        block: ShaderIrPassBlock = program.blocks[b.usize()]
+        i: mutable u32 = 0u32
+        while i < block.inst_count:
+            inst: ShaderIrPassInst = block.insts[i.usize()]
+            if IsBufferInstruction(inst):
+                PatchBufferArgs(program, b, i)
+            if IsImageInstruction(inst):
+                PatchImageArgs(program, b, i)
+            if IsDataRingInstruction(inst):
+                PatchGlobalDataShareAccess(program, b, i, profile)
+            i <- i + 1u32
+        b <- b + 1u32

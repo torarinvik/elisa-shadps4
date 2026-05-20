@@ -1,0 +1,132 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./pass_model.elisa"
+
+const READCONST_TYPE_NONE: u32 = 0u32
+const READCONST_TYPE_IMMEDIATE: u32 = 1u32
+const READCONST_TYPE_DYNAMIC: u32 = 2u32
+
+def Visit(info: mutable ShaderIrInfo&, inst: ShaderIrPassInst&) -> void:
+    op: u32 = inst.opcode
+
+    if op == OPCODE_GETATTRIBUTE or op == OPCODE_GETATTRIBUTEU32:
+        if inst.arg_count > 0u32:
+            info.loads_mask <- info.loads_mask | (1u32 << (inst.args[0] & 31u32))
+        return
+
+    if op == OPCODE_SETATTRIBUTE:
+        if inst.arg_count > 0u32:
+            info.stores_mask <- info.stores_mask | (1u32 << (inst.args[0] & 31u32))
+        return
+
+    if op == OPCODE_GETUSERDATA:
+        if inst.arg_count > 0u32:
+            info.ud_mask <- info.ud_mask | (1u32 << (inst.args[0] & 31u32))
+        return
+
+    if op == OPCODE_SETPATCH:
+        patch: u32 = 0u32
+        if inst.arg_count > 0u32:
+            patch <- inst.args[0]
+        if patch <= 3u32:
+            info.stores_tess_level_outer <- true
+        if patch > 3u32 and patch <= 5u32:
+            info.stores_tess_level_inner <- true
+        if patch > 5u32:
+            info.uses_patches_mask <- info.uses_patches_mask | (1u32 << (patch & 31u32))
+        return
+
+    if op == OPCODE_GETPATCH:
+        patch: u32 = 0u32
+        if inst.arg_count > 0u32:
+            patch <- inst.args[0]
+        info.uses_patches_mask <- info.uses_patches_mask | (1u32 << (patch & 31u32))
+        return
+
+    if op == OPCODE_LOADSHAREDU16 or op == OPCODE_WRITESHAREDU16:
+        info.shared_types <- info.shared_types | IR_TYPE_U16
+        return
+
+    if op == OPCODE_LOADSHAREDU32 or op == OPCODE_WRITESHAREDU32 or (op >= OPCODE_SHAREDATOMICIADD32 and op <= OPCODE_SHAREDATOMICXOR32):
+        info.shared_types <- info.shared_types | IR_TYPE_U32
+        return
+
+    if op == OPCODE_LOADSHAREDU64 or op == OPCODE_WRITESHAREDU64 or (op >= OPCODE_SHAREDATOMICIADD64 and op <= OPCODE_SHAREDATOMICXOR64):
+        info.shared_types <- info.shared_types | IR_TYPE_U64
+        info.uses_shared_int64_atomics <- true
+        return
+
+    if op == OPCODE_PACKDOUBLE2X32 or op == OPCODE_UNPACKDOUBLE2X32:
+        info.uses_fp64 <- true
+        return
+
+    if op == OPCODE_IMAGEWRITE:
+        info.has_storage_images <- true
+        return
+
+    if op == OPCODE_READLANE or op == OPCODE_READFIRSTLANE or op == OPCODE_WRITELANE:
+        info.uses_group_ballot <- true
+        return
+
+    if op == OPCODE_DISCARD or op == OPCODE_DISCARDCOND:
+        info.has_discard <- true
+        return
+
+    if op == OPCODE_BITWISEXOR32:
+        info.has_bitwise_xor <- true
+        return
+
+    if op == OPCODE_IMAGEGATHER or op == OPCODE_IMAGEGATHERDREF:
+        info.has_image_gather <- true
+        return
+
+    if op == OPCODE_IMAGEQUERYDIMENSIONS or op == OPCODE_IMAGEQUERYLOD:
+        info.has_image_query <- true
+        return
+
+    if op == OPCODE_IMAGEATOMICFMIN32 or op == OPCODE_IMAGEATOMICFMAX32:
+        info.uses_image_atomic_float_min_max <- true
+        return
+
+    if op == OPCODE_BUFFERATOMICFMIN32 or op == OPCODE_BUFFERATOMICFMAX32:
+        info.uses_buffer_atomic_float_min_max <- true
+        return
+
+    if op == OPCODE_BUFFERATOMICIADD64:
+        info.uses_buffer_int64_atomics <- true
+        return
+
+    if op == OPCODE_LANEID:
+        info.uses_lane_id <- true
+        return
+
+    if op == OPCODE_READCONST:
+        if not info.uses_dma:
+            info.buffers_count <- info.buffers_count + 1u32
+        if inst.flags_u32 != 0u32:
+            info.readconst_types <- info.readconst_types | READCONST_TYPE_IMMEDIATE
+        else:
+            info.readconst_types <- info.readconst_types | READCONST_TYPE_DYNAMIC
+        info.uses_dma <- true
+        return
+
+
+def CollectShaderInfoPass(program: mutable ShaderIrProgram&, profile: ShaderPassProfile&) -> void:
+    _ = profile
+    pi: mutable u32 = 0u32
+    while pi < program.post_order_count:
+        block_index: u32 = program.post_order[pi.usize()]
+        if block_index >= program.block_count:
+            pi <- pi + 1u32
+            continue
+        i: mutable u32 = 0u32
+        while i < program.blocks[block_index.usize()].inst_count:
+            inst: ShaderIrPassInst = program.blocks[block_index.usize()].insts[i.usize()]
+            Visit(program.info.ref[mutable ShaderIrInfo&], inst)
+            i <- i + 1u32
+        pi <- pi + 1u32
+
+    if program.info.uses_dma:
+        # Bda pagetable + fault buffer.
+        program.info.buffers_count <- program.info.buffers_count + 2u32

@@ -1,0 +1,86 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./pass_model.elisa"
+
+const GCN_SUBGROUP_SIZE: u32 = 64u32
+
+const BARRIER_ACTION_NONE: u32 = 0u32
+const BARRIER_ACTION_ON_WRITE: u32 = 1u32
+const BARRIER_ACTION_ON_READ: u32 = 2u32
+
+def IsLoadShared(inst: ShaderIrPassInst&) -> bool:
+    return ShaderIrPass_IsLoadShared(inst.opcode)
+
+
+def IsWriteShared(inst: ShaderIrPassInst&) -> bool:
+    return ShaderIrPass_IsWriteShared(inst.opcode)
+
+
+def EmitBarrierInBlock(program: mutable ShaderIrProgram&, block_index: u32) -> void:
+    if block_index >= program.block_count:
+        return
+    block: ShaderIrPassBlock = program.blocks[block_index.usize()]
+    action: mutable u32 = BARRIER_ACTION_NONE
+    i: mutable u32 = 0u32
+    while i < block.inst_count:
+        inst: ShaderIrPassInst = block.insts[i.usize()]
+        if IsLoadShared(inst):
+            if action == BARRIER_ACTION_ON_READ:
+                _ = ShaderIrProgram_AddInst(program, block_index, OPCODE_BARRIER)
+                program.stats.shared_barriers_inserted <- program.stats.shared_barriers_inserted + 1u32
+            action <- BARRIER_ACTION_ON_WRITE
+        if IsWriteShared(inst):
+            if action == BARRIER_ACTION_ON_WRITE:
+                _ = ShaderIrProgram_AddInst(program, block_index, OPCODE_BARRIER)
+                program.stats.shared_barriers_inserted <- program.stats.shared_barriers_inserted + 1u32
+            action <- BARRIER_ACTION_ON_READ
+        i <- i + 1u32
+
+    if action != BARRIER_ACTION_NONE:
+        _ = ShaderIrProgram_AddInst(program, block_index, OPCODE_BARRIER)
+        program.stats.shared_barriers_inserted <- program.stats.shared_barriers_inserted + 1u32
+
+
+def EmitBarrierInMergeBlock(program: mutable ShaderIrProgram&, cond_inst_id: u32, merge_block_index: u32, divergence_depth: mutable u32&) -> void:
+    cond_block: mutable u32 = 0u32
+    cond_inst: mutable u32 = 0u32
+    if not ShaderIrProgram_FindInst(program, cond_inst_id, cond_block.ref[mutable u32&], cond_inst.ref[mutable u32&]):
+        return
+    cond: ShaderIrPassInst = program.blocks[cond_block.usize()].insts[cond_inst.usize()]
+    # Elisa model: flags_bool marks conditions derived from LocalInvocationId.
+    if not cond.flags_bool:
+        return
+
+    if divergence_depth == 0u32 and merge_block_index < program.block_count:
+        _ = ShaderIrProgram_AddInst(program, merge_block_index, OPCODE_BARRIER)
+        program.stats.shared_barriers_inserted <- program.stats.shared_barriers_inserted + 1u32
+
+    divergence_depth <- divergence_depth + 1u32
+
+
+def SharedMemoryBarrierPass(program: mutable ShaderIrProgram&, runtime_info: ShaderRuntimeInfo&, profile: ShaderPassProfile&) -> void:
+    if program.info.stage != STAGE_COMPUTE:
+        return
+
+    shared_memory_size: u32 = runtime_info.cs_shared_memory_size
+    threadgroup_size: u32 = runtime_info.cs_workgroup_size_x * runtime_info.cs_workgroup_size_y * runtime_info.cs_workgroup_size_z
+    if shared_memory_size == 0u32 or threadgroup_size != GCN_SUBGROUP_SIZE or not profile.needs_lds_barriers:
+        return
+
+    divergence_depth: mutable u32 = 0u32
+    si: mutable u32 = 0u32
+    while si < program.syntax_count:
+        node: ShaderIrSyntaxNode = program.syntax_nodes[si.usize()]
+        if node.node_type == IR_SYNTAX_END_IF:
+            if divergence_depth > 0u32:
+                divergence_depth <- divergence_depth - 1u32
+            si <- si + 1u32
+            continue
+        if node.node_type == IR_SYNTAX_IF:
+            EmitBarrierInMergeBlock(program, node.cond_inst_id, node.merge_block_index, divergence_depth.ref[mutable u32&])
+            si <- si + 1u32
+            continue
+        if node.node_type == IR_SYNTAX_BLOCK and divergence_depth == 0u32:
+            EmitBarrierInBlock(program, node.block_index)
+        si <- si + 1u32

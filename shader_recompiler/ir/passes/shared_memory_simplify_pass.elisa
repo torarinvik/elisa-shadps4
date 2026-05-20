@@ -1,0 +1,65 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./pass_model.elisa"
+
+def Requires16BitSharedAtomic(inst: ShaderIrPassInst&) -> bool:
+    _ = inst
+    return false
+
+
+def Requires64BitSharedAtomic(inst: ShaderIrPassInst&) -> bool:
+    return inst.opcode == OPCODE_SHAREDATOMICIADD64 or inst.opcode == OPCODE_SHAREDATOMICISUB64 or inst.opcode == OPCODE_SHAREDATOMICSMIN64 or inst.opcode == OPCODE_SHAREDATOMICUMIN64 or inst.opcode == OPCODE_SHAREDATOMICSMAX64 or inst.opcode == OPCODE_SHAREDATOMICUMAX64 or inst.opcode == OPCODE_SHAREDATOMICINC64 or inst.opcode == OPCODE_SHAREDATOMICDEC64 or inst.opcode == OPCODE_SHAREDATOMICAND64 or inst.opcode == OPCODE_SHAREDATOMICOR64 or inst.opcode == OPCODE_SHAREDATOMICXOR64
+
+
+def IsNon32BitSharedLoadStore(inst: ShaderIrPassInst&) -> bool:
+    return inst.opcode == OPCODE_LOADSHAREDU16 or inst.opcode == OPCODE_LOADSHAREDU64 or inst.opcode == OPCODE_WRITESHAREDU16 or inst.opcode == OPCODE_WRITESHAREDU64
+
+
+def CalculateSpecialSharedAtomicTypes(program: ShaderIrProgram&) -> u32:
+    extra_types: mutable u32 = IR_TYPE_VOID
+    b: mutable u32 = 0u32
+    while b < program.block_count:
+        i: mutable u32 = 0u32
+        while i < program.blocks[b.usize()].inst_count:
+            inst: ShaderIrPassInst = program.blocks[b.usize()].insts[i.usize()]
+            if Requires16BitSharedAtomic(inst):
+                extra_types <- extra_types | IR_TYPE_U16
+            if Requires64BitSharedAtomic(inst):
+                extra_types <- extra_types | IR_TYPE_U64
+            i <- i + 1u32
+        b <- b + 1u32
+    return extra_types
+
+
+def SharedMemorySimplifyPass(program: mutable ShaderIrProgram&, profile: ShaderPassProfile&) -> void:
+    if program.info.stage != STAGE_COMPUTE or profile.supports_workgroup_explicit_memory_layout:
+        return
+
+    atomic_types: u32 = CalculateSpecialSharedAtomicTypes(program)
+    if (atomic_types & IR_TYPE_U16) != 0u32 and (atomic_types & IR_TYPE_U64) != 0u32:
+        return
+
+    b: mutable u32 = 0u32
+    while b < program.block_count:
+        block: mutable ShaderIrPassBlock& = program.blocks[b.usize()].ref[mutable ShaderIrPassBlock&]
+        i: mutable u32 = 0u32
+        while i < block.inst_count:
+            inst: mutable ShaderIrPassInst& = block.insts[i.usize()].ref[mutable ShaderIrPassInst&]
+            if IsNon32BitSharedLoadStore(inst):
+                if (atomic_types & IR_TYPE_U16) == 0u32:
+                    if inst.opcode == OPCODE_LOADSHAREDU16:
+                        ShaderIrPass_ReplaceOpcode(inst, OPCODE_LOADSHAREDU32)
+                        program.stats.shared_simplified_rewrites <- program.stats.shared_simplified_rewrites + 1u32
+                    if inst.opcode == OPCODE_WRITESHAREDU16:
+                        ShaderIrPass_ReplaceOpcode(inst, OPCODE_WRITESHAREDU32)
+                        program.stats.shared_simplified_rewrites <- program.stats.shared_simplified_rewrites + 1u32
+                if (atomic_types & IR_TYPE_U64) == 0u32:
+                    if inst.opcode == OPCODE_LOADSHAREDU64:
+                        ShaderIrPass_ReplaceOpcode(inst, OPCODE_LOADSHAREDU32)
+                        program.stats.shared_simplified_rewrites <- program.stats.shared_simplified_rewrites + 1u32
+                    if inst.opcode == OPCODE_WRITESHAREDU64:
+                        ShaderIrPass_ReplaceOpcode(inst, OPCODE_WRITESHAREDU32)
+                        program.stats.shared_simplified_rewrites <- program.stats.shared_simplified_rewrites + 1u32
+            i <- i + 1u32
+        b <- b + 1u32
