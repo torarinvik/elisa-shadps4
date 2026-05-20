@@ -10,6 +10,7 @@ const INFINITY_FIGURE_SLOTS: usize = 9
 struct InfinityFigure:
     present: mutable bool
     order_added: mutable u8
+    file_path: mutable static u8&
     data: mutable u8[INFINITY_FIGURE_SIZE]
 
 struct InfinityQueue:
@@ -204,6 +205,16 @@ def Infinity_WriteBlock(order: u8, block: u8, payload: u8&, sequence: u8, out: m
             while i < 16:
                 fig.data[base + i] <- payload[i]
                 i <- i + 1
+            saved: mutable darray[u8] = []
+            j: mutable usize = 0
+            while j < INFINITY_FIGURE_SIZE:
+                can Memory.Allocate, Abort.Panic:
+                    owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+                    in owner:
+                        saved.push(fig.data[j])
+                j <- j + 1
+            if runtime_strlen(fig.file_path) != 0:
+                _ = ff_file_write_all(fig.file_path, saved)
     out[4] <- Infinity_Checksum(out, 4)
 
 def Infinity_GetFigureIdentifier(order: u8, sequence: u8, out: mutable u8&) -> void:
@@ -340,6 +351,7 @@ def UsbdInfinityEmu_LoadFigure(path: static u8&, slot: u8) -> void:
     if slot >= INFINITY_FIGURE_SLOTS.u8():
         return
     idx: usize = slot.usize()
+    g_inf_figures[idx].file_path <- path
     file_data: darray[u8] = ff_file_read_all(path)
     if file_data.count >= INFINITY_FIGURE_SIZE:
         i: mutable usize = 0
@@ -364,5 +376,15 @@ def UsbdInfinityEmu_RemoveFigure(slot: u8) -> void:
     idx: usize = slot.usize()
     if not g_inf_figures[idx].present:
         return
+    saved: mutable darray[u8] = []
+    j: mutable usize = 0
+    while j < INFINITY_FIGURE_SIZE:
+        can Memory.Allocate, Abort.Panic:
+            owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+            in owner:
+                saved.push(g_inf_figures[idx].data[j])
+        j <- j + 1
+    if runtime_strlen(g_inf_figures[idx].file_path) != 0:
+        _ = ff_file_write_all(g_inf_figures[idx].file_path, saved)
     g_inf_figures[idx].present <- false
     Infinity_QueueFigureEvent(slot, g_inf_figures[idx].order_added, false)

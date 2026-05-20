@@ -474,10 +474,6 @@ def posix_pthread_detach(pthread: void&?) -> int:
     else:
         _ = pthread_detach(host_handle)
     g_fake_threads_detached[id] <- true
-    if g_fake_threads_host_backed[id]:
-        g_fake_threads_alive[id] <- false
-        g_fake_threads_running[id] <- false
-        g_fake_threads_exited[id] <- false
     return 0
 
 def posix_pthread_exit(status: void&?) -> void:
@@ -555,7 +551,8 @@ def posix_pthread_timedjoin_np(pthread: void&?, thread_return: mutable void&?&, 
         return POSIX_ENOTSUP
     if g_fake_threads_host_backed[id]:
         host_ret: mutable void&? = null
-        host_res: int = elisa_kernel_thread_timedjoin(threads_handle_for_id(id), host_ret, ts.tv_sec, ts.tv_nsec)
+        # Match current C++ behavior: timed join shares join path and does not enforce timeout.
+        host_res: int = elisa_kernel_thread_join(threads_handle_for_id(id), host_ret)
         if host_res != 0:
             return host_res
         g_fake_threads_retval[id] <- host_ret
@@ -608,8 +605,6 @@ def posix_pthread_create(thread: mutable void&?&, attr: void&?, start_routine: v
         thread <- host_thread
         if g_fake_threads_detached[id]:
             _ = elisa_kernel_thread_detach(host_thread)
-            g_fake_threads_alive[id] <- false
-            g_fake_threads_running[id] <- false
         return 0
     if g_fake_threads_autocomplete:
         g_fake_threads_retval[id] <- arg
@@ -697,8 +692,6 @@ def posix_pthread_rename_np(thread: void&?, name: static u8&?) -> int:
         host_r: int = pthread_setname_np(name)
         if host_r != 0:
             return POSIX_EINVAL
-    if name == null and posix_pthread_equal(thread, self_thread) == 1:
-        return POSIX_EINVAL
     return 0
 
 def posix_pthread_getschedparam(thread: void&?, policy: mutable int&, param: mutable SchedParam&) -> int:
@@ -785,7 +778,7 @@ def posix_pthread_getname_np(thread: void&?, name: mutable u8&?) -> int:
         return POSIX_ESRCH
     self_thread: void&? = posix_pthread_self()
     if posix_pthread_equal(thread, self_thread) == 1:
-        host_r: int = pthread_getname_np(self_thread, name, 64u64)
+        host_r: int = pthread_getname_np(self_thread, name, 32u64)
         if host_r != 0:
             return POSIX_EINVAL
     return 0

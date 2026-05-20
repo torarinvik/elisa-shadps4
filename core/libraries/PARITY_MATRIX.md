@@ -76,6 +76,7 @@ Status values:
 - `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_ajm_instance_tests.elisa`
 - `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_ajm_batch_tests.elisa`
 - `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_ajm_aac_tests.elisa`
+- `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_usbd_parity_tests.elisa`
 - `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_move_pure_tests.elisa`
 - `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_ngs2_pure_tests.elisa`
 - `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_random_pure_tests.elisa`

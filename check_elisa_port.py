@@ -115,6 +115,18 @@ def main() -> int:
             ROOT,
             args.verbose,
         ) and ok
+        ok = run_step(
+            "system parity matrix generation",
+            [sys.executable, "system_parity_matrix.py"],
+            ROOT,
+            args.verbose,
+        ) and ok
+        ok = run_step(
+            "system parity matrix gate",
+            [sys.executable, "system_parity_matrix_check.py", "--summary"],
+            ROOT,
+            args.verbose,
+        ) and ok
 
     if not args.skip_lowering:
         if not (compiler_dir / "go.mod").exists():

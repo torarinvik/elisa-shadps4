@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 include "../../error_codes.elisa"
+include "../../../file_format/binary.elisa"
 
 struct DimensionsQueue:
     packets: mutable u8[64 * 32]
@@ -11,7 +12,9 @@ struct DimensionsQueue:
 struct DimensionsFigure:
     present: mutable bool
     index: mutable u8
+    pad: mutable u8
     id: mutable u32
+    file_path: mutable static u8&
     data: mutable u8[0x2d * 0x04]
 
 global mutable g_dim_queue: DimensionsQueue = zeroed
@@ -31,6 +34,7 @@ def Dimensions_InitIfNeeded() -> void:
     while i < 7:
         g_dim_figures[i].present <- false
         g_dim_figures[i].index <- 255u8
+        g_dim_figures[i].pad <- 255u8
         g_dim_figures[i].id <- 0u32
         i <- i + 1
     g_dim_init <- true
@@ -222,6 +226,16 @@ def Dimensions_WriteBlock(index: u8, page: u8, payload: u8&, sequence: u8, out: 
             while i < 4:
                 g_dim_figures[fig_i].data[base + i] <- payload[i]
                 i <- i + 1
+            saved: mutable darray[u8] = []
+            j: mutable usize = 0
+            while j < (0x2dusize * 4usize):
+                can Memory.Allocate, Abort.Panic:
+                    owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+                    in owner:
+                        saved.push(g_dim_figures[fig_i].data[j])
+                j <- j + 1
+            if runtime_strlen(g_dim_figures[fig_i].file_path) != 0:
+                _ = ff_file_write_all(g_dim_figures[fig_i].file_path, saved)
     out[4] <- Dimensions_Checksum(out, 4)
 
 def Dimensions_GetModel(payload: u8&, sequence: u8, out: mutable u8&) -> void:
@@ -262,7 +276,7 @@ def Dimensions_QueueFigureEvent(slot_index: u8, added: bool) -> void:
     event: mutable u8[32] = zeroed
     event[0] <- 0x56u8
     event[1] <- 0x0bu8
-    event[2] <- 0u8
+    event[2] <- fig.pad
     event[3] <- 0u8
     event[4] <- fig.index
     event[5] <- 0x00u8 if added else 0x01u8
@@ -311,8 +325,12 @@ def UsbdDimensionsEmu_CommandOut(buffer: u8&) -> int:
         Dimensions_WriteBlock(buffer[4], buffer[5], buffer[6].ref[u8&], sequence, q_result[0].ref[mutable u8&])
     elif command == 0xd4u8:
         Dimensions_GetModel(buffer[4].ref[u8&], sequence, q_result[0].ref[mutable u8&])
+    elif command == 0xd0u8 or command == 0xe1u8 or command == 0xe5u8 or command == 0xffu8:
+        # C++ parity: command acknowledged by queued zeroed response (stub/unimplemented path).
+        pass
     else:
-        Dimensions_Blank(0x01u8, sequence, q_result[0].ref[mutable u8&])
+        # C++ parity: unknown command leaves q_result zeroed, still queued.
+        pass
     Dimensions_QueuePush(q_result[0].ref[u8&])
     return 32
 
@@ -330,24 +348,33 @@ def UsbdDimensionsEmu_Init() -> int:
     Dimensions_InitIfNeeded()
     return ORBIS_OK
 
-def UsbdDimensionsEmu_LoadFigure(slot: u8) -> void:
+def UsbdDimensionsEmu_LoadFigure(path: static u8&, pad: u8, slot: u8) -> void:
     Dimensions_InitIfNeeded()
     if slot >= 7u8:
         return
     idx: usize = slot.usize()
+    g_dim_figures[idx].file_path <- path
     g_dim_figures[idx].present <- true
     g_dim_figures[idx].index <- (slot + 1u8).u8()
+    g_dim_figures[idx].pad <- pad
+    file_data: darray[u8] = ff_file_read_all(path)
     i: mutable usize = 0
     while i < (0x2dusize * 4usize):
-        g_dim_figures[idx].data[i] <- 0u8
+        if i < file_data.count:
+            g_dim_figures[idx].data[i] <- file_data[i]
+        else:
+            g_dim_figures[idx].data[i] <- 0u8
         i <- i + 1
-    g_dim_figures[idx].data[0] <- 0x04u8
-    g_dim_figures[idx].data[1] <- (0x10u8 + slot).u8()
-    g_dim_figures[idx].data[2] <- 0x20u8
-    g_dim_figures[idx].data[4] <- 0x30u8
-    g_dim_figures[idx].data[5] <- 0x40u8
-    g_dim_figures[idx].data[6] <- 0x50u8
-    g_dim_figures[idx].data[7] <- 0x60u8
+    if file_data.count == 0:
+        g_dim_figures[idx].data[0] <- 0x04u8
+        g_dim_figures[idx].data[1] <- (0x10u8 + slot).u8()
+        g_dim_figures[idx].data[2] <- 0x20u8
+        g_dim_figures[idx].data[4] <- 0x30u8
+        g_dim_figures[idx].data[5] <- 0x40u8
+        g_dim_figures[idx].data[6] <- 0x50u8
+        g_dim_figures[idx].data[7] <- 0x60u8
+    page36: usize = 36usize * 4usize
+    g_dim_figures[idx].id <- g_dim_figures[idx].data[page36].u32() | (g_dim_figures[idx].data[page36 + 1usize].u32() << 8u32) | (g_dim_figures[idx].data[page36 + 2usize].u32() << 16u32) | (g_dim_figures[idx].data[page36 + 3usize].u32() << 24u32)
     Dimensions_QueueFigureEvent(slot, true)
 
 def UsbdDimensionsEmu_RemoveFigure(slot: u8) -> void:
@@ -357,6 +384,61 @@ def UsbdDimensionsEmu_RemoveFigure(slot: u8) -> void:
     idx: usize = slot.usize()
     if g_dim_figures[idx].index == 255u8:
         return
+    saved: mutable darray[u8] = []
+    j: mutable usize = 0
+    while j < (0x2dusize * 4usize):
+        can Memory.Allocate, Abort.Panic:
+            owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+            in owner:
+                saved.push(g_dim_figures[idx].data[j])
+        j <- j + 1
+    if runtime_strlen(g_dim_figures[idx].file_path) != 0:
+        _ = ff_file_write_all(g_dim_figures[idx].file_path, saved)
     Dimensions_QueueFigureEvent(slot, false)
     g_dim_figures[idx].present <- false
     g_dim_figures[idx].index <- 255u8
+    g_dim_figures[idx].pad <- 255u8
+
+def UsbdDimensionsEmu_TempRemoveFigure(slot: u8) -> void:
+    Dimensions_InitIfNeeded()
+    if slot >= 7u8:
+        return
+    idx: usize = slot.usize()
+    if g_dim_figures[idx].index == 255u8:
+        return
+    Dimensions_QueueFigureEvent(slot, false)
+
+def UsbdDimensionsEmu_CancelRemoveFigure(slot: u8) -> void:
+    Dimensions_InitIfNeeded()
+    if slot >= 7u8:
+        return
+    idx: usize = slot.usize()
+    if g_dim_figures[idx].index == 255u8:
+        return
+    Dimensions_QueueFigureEvent(slot, true)
+
+def UsbdDimensionsEmu_MoveFigure(from_pad: u8, from_slot: u8, to_pad: u8, to_slot: u8) -> void:
+    Dimensions_InitIfNeeded()
+    if from_slot >= 7u8 or to_slot >= 7u8:
+        return
+    if from_slot == to_slot:
+        UsbdDimensionsEmu_CancelRemoveFigure(to_slot)
+        return
+    # Remove any existing destination figure with full remove semantics (event + persist).
+    UsbdDimensionsEmu_RemoveFigure(to_slot)
+    from_idx: usize = from_slot.usize()
+    if g_dim_figures[from_idx].index == 255u8:
+        return
+    # Capture source, then remove source silently (no remove event), matching C++ MoveFigure flow.
+    tmp: mutable DimensionsFigure = g_dim_figures[from_idx]
+    g_dim_figures[from_idx].present <- false
+    g_dim_figures[from_idx].index <- 255u8
+    g_dim_figures[from_idx].pad <- 255u8
+    g_dim_figures[from_idx].id <- 0u32
+    g_dim_figures[from_idx].file_path <- ""
+    to_idx: usize = to_slot.usize()
+    g_dim_figures[to_idx] <- tmp
+    g_dim_figures[to_idx].index <- (to_slot + 1u8).u8()
+    g_dim_figures[to_idx].pad <- to_pad
+    _ = from_pad
+    Dimensions_QueueFigureEvent(to_slot, true)
