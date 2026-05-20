@@ -6,6 +6,7 @@ const ORBIS_KERNEL_ERROR_EACCES: int = 0x8002000D
 const ORBIS_KERNEL_ERROR_ECANCELED: int = 0x80020055
 const ORBIS_KERNEL_ERROR_ETIMEDOUT: int = 0x8002003C
 const POSIX_EPERM: int = 1
+const POSIX_EINVAL: int = 22
 const POSIX_EACCES: int = 13
 const POSIX_EBUSY: int = 16
 const POSIX_ECANCELED: int = 85
@@ -59,6 +60,11 @@ extern elisa_kernel_test_monotonic_usec() -> u64
 extern elisa_kernel_test_sleep_usec(usec: u64) -> void
 extern elisa_kernel_test_yield() -> void
 
+@fixed_layout
+struct OrbisKernelTimespec:
+    tv_sec: i64
+    tv_nsec: i64
+
 const RUNTIME_WAIT_SHORT_US: u64 = 50000u64
 const RUNTIME_WAIT_LONG_US: u64 = 250000u64
 
@@ -89,6 +95,11 @@ def posix_pthread_join(thread: void&?, retval: mutable void&?&) -> int:
 
 def posix_pthread_detach(thread: void&?) -> int:
     return elisa_kernel_thread_detach(thread)
+
+def posix_pthread_timedjoin_np(thread: void&?, retval: mutable void&?&, abstime: OrbisKernelTimespec&?) -> int:
+    if abstime == null:
+        return POSIX_EINVAL
+    return elisa_kernel_thread_timedjoin(thread, retval, abstime.tv_sec, abstime.tv_nsec)
 
 def posix_pthread_mutex_init(mutex: mutable void&?&, attr: void&?) -> int:
     _ = attr
@@ -383,6 +394,12 @@ def rt_thread_lifecycle_entry(arg: void&?) -> void&?:
     elisa_kernel_test_slot_set(0, 1)
     return arg
 
+def rt_thread_sleep_entry(arg: void&?) -> void&?:
+    _ = arg
+    elisa_kernel_test_slot_set(0, 1)
+    elisa_kernel_test_sleep_usec(50000u64)
+    return 0x77 as void&?
+
 def rt_mutex_owner_entry(arg: void&?) -> void&?:
     _ = arg
     if posix_pthread_mutex_lock(rt_mutex) == 0:
@@ -492,6 +509,31 @@ def runtime_thread_lifecycle_join_result() -> void:
         rt_wait_slot(0, 1)
         ret: void&? = rt_join(thread)
         assert ret == expected
+
+@test
+def runtime_thread_detach_then_join_invalid() -> void:
+    can Abort.Panic:
+        elisa_kernel_test_slots_reset()
+        thread: mutable void&? = null
+        rt_assert_zero(posix_pthread_create(thread, null, rt_thread_sleep_entry.cast[void&], null))
+        rt_wait_slot(0, 1)
+        rt_assert_zero(posix_pthread_detach(thread))
+        ret: mutable void&? = null
+        rt_assert_eq_int(posix_pthread_join(thread, ret), POSIX_EINVAL)
+        elisa_kernel_test_sleep_usec(70000u64)
+
+@test
+def runtime_thread_detach_then_timedjoin_invalid() -> void:
+    can Abort.Panic:
+        elisa_kernel_test_slots_reset()
+        thread: mutable void&? = null
+        rt_assert_zero(posix_pthread_create(thread, null, rt_thread_sleep_entry.cast[void&], null))
+        rt_wait_slot(0, 1)
+        rt_assert_zero(posix_pthread_detach(thread))
+        ts: mutable OrbisKernelTimespec = OrbisKernelTimespec(0, 1000000)
+        ret: mutable void&? = null
+        rt_assert_eq_int(posix_pthread_timedjoin_np(thread, ret, ts.ref[OrbisKernelTimespec&]), POSIX_EINVAL)
+        elisa_kernel_test_sleep_usec(70000u64)
 
 @test
 def runtime_mutex_owner_and_trylock_contention() -> void:

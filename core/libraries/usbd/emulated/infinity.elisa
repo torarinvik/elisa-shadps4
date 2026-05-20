@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 include "../../error_codes.elisa"
+include "../../../file_format/binary.elisa"
 
 const INFINITY_FIGURE_SIZE: usize = 320
 const INFINITY_FIGURE_SLOTS: usize = 9
@@ -218,6 +219,20 @@ def Infinity_GetFigureIdentifier(order: u8, sequence: u8, out: mutable u8&) -> v
             i <- i + 1
     out[11] <- Infinity_Checksum(out, 11)
 
+def Infinity_QueueFigureEvent(slot_index: u8, order: u8, added: bool) -> void:
+    event: mutable u8[32] = zeroed
+    pos: u8 = Infinity_DerivePosition(slot_index)
+    if pos == 0u8:
+        return
+    event[0] <- 0xabu8
+    event[1] <- 0x04u8
+    event[2] <- pos
+    event[3] <- 0x09u8
+    event[4] <- order
+    event[5] <- 0x00u8 if added else 0x01u8
+    event[6] <- Infinity_Checksum(event[0].ref[u8&], 6)
+    Infinity_QueuePush(event[0].ref[u8&])
+
 def Infinity_DescrambleAndSeed(buffer: u8&, sequence: u8, out: mutable u8&) -> void:
     value: u64 = (buffer[4].u64() << 56u64) | (buffer[5].u64() << 48u64) | (buffer[6].u64() << 40u64) | (buffer[7].u64() << 32u64) | (buffer[8].u64() << 24u64) | (buffer[9].u64() << 16u64) | (buffer[10].u64() << 8u64) | buffer[11].u64()
     seed: u32 = Infinity_Descramble(value)
@@ -319,3 +334,35 @@ def UsbdInfinityEmu_InterruptIn(out: mutable u8&) -> int:
 def UsbdInfinityEmu_Init() -> int:
     Infinity_InitIfNeeded()
     return ORBIS_OK
+
+def UsbdInfinityEmu_LoadFigure(path: static u8&, slot: u8) -> void:
+    Infinity_InitIfNeeded()
+    if slot >= INFINITY_FIGURE_SLOTS.u8():
+        return
+    idx: usize = slot.usize()
+    file_data: darray[u8] = ff_file_read_all(path)
+    if file_data.count >= INFINITY_FIGURE_SIZE:
+        i: mutable usize = 0
+        while i < INFINITY_FIGURE_SIZE:
+            g_inf_figures[idx].data[i] <- file_data[i]
+            i <- i + 1
+    else:
+        i: mutable usize = 0
+        while i < INFINITY_FIGURE_SIZE:
+            g_inf_figures[idx].data[i] <- 0u8
+            i <- i + 1
+    g_inf_figures[idx].present <- true
+    if g_inf_figures[idx].order_added == 255u8:
+        g_inf_figures[idx].order_added <- g_inf_order
+        g_inf_order <- (g_inf_order + 1u8).u8()
+    Infinity_QueueFigureEvent(slot, g_inf_figures[idx].order_added, true)
+
+def UsbdInfinityEmu_RemoveFigure(slot: u8) -> void:
+    Infinity_InitIfNeeded()
+    if slot >= INFINITY_FIGURE_SLOTS.u8():
+        return
+    idx: usize = slot.usize()
+    if not g_inf_figures[idx].present:
+        return
+    g_inf_figures[idx].present <- false
+    Infinity_QueueFigureEvent(slot, g_inf_figures[idx].order_added, false)

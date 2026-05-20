@@ -253,6 +253,29 @@ def Dimensions_GetModel(payload: u8&, sequence: u8, out: mutable u8&) -> void:
         i <- i + 1
     out[12] <- Dimensions_Checksum(out, 12)
 
+def Dimensions_QueueFigureEvent(slot_index: u8, added: bool) -> void:
+    if slot_index >= 7u8:
+        return
+    fig: mutable DimensionsFigure& = g_dim_figures[slot_index.usize()].ref[mutable DimensionsFigure&]
+    if fig.index == 255u8:
+        return
+    event: mutable u8[32] = zeroed
+    event[0] <- 0x56u8
+    event[1] <- 0x0bu8
+    event[2] <- 0u8
+    event[3] <- 0u8
+    event[4] <- fig.index
+    event[5] <- 0x00u8 if added else 0x01u8
+    event[6] <- fig.data[0]
+    event[7] <- fig.data[1]
+    event[8] <- fig.data[2]
+    event[9] <- fig.data[4]
+    event[10] <- fig.data[5]
+    event[11] <- fig.data[6]
+    event[12] <- fig.data[7]
+    event[13] <- Dimensions_Checksum(event[0].ref[u8&], 13)
+    Dimensions_QueuePush(event[0].ref[u8&])
+
 def UsbdDimensionsEmu_CommandOut(buffer: u8&) -> int:
     Dimensions_InitIfNeeded()
     command: u8 = buffer[2]
@@ -306,3 +329,34 @@ def UsbdDimensionsEmu_InterruptIn(out: mutable u8&) -> int:
 def UsbdDimensionsEmu_Init() -> int:
     Dimensions_InitIfNeeded()
     return ORBIS_OK
+
+def UsbdDimensionsEmu_LoadFigure(slot: u8) -> void:
+    Dimensions_InitIfNeeded()
+    if slot >= 7u8:
+        return
+    idx: usize = slot.usize()
+    g_dim_figures[idx].present <- true
+    g_dim_figures[idx].index <- (slot + 1u8).u8()
+    i: mutable usize = 0
+    while i < (0x2dusize * 4usize):
+        g_dim_figures[idx].data[i] <- 0u8
+        i <- i + 1
+    g_dim_figures[idx].data[0] <- 0x04u8
+    g_dim_figures[idx].data[1] <- (0x10u8 + slot).u8()
+    g_dim_figures[idx].data[2] <- 0x20u8
+    g_dim_figures[idx].data[4] <- 0x30u8
+    g_dim_figures[idx].data[5] <- 0x40u8
+    g_dim_figures[idx].data[6] <- 0x50u8
+    g_dim_figures[idx].data[7] <- 0x60u8
+    Dimensions_QueueFigureEvent(slot, true)
+
+def UsbdDimensionsEmu_RemoveFigure(slot: u8) -> void:
+    Dimensions_InitIfNeeded()
+    if slot >= 7u8:
+        return
+    idx: usize = slot.usize()
+    if g_dim_figures[idx].index == 255u8:
+        return
+    Dimensions_QueueFigureEvent(slot, false)
+    g_dim_figures[idx].present <- false
+    g_dim_figures[idx].index <- 255u8
