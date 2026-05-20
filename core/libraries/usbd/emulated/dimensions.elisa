@@ -3,5 +3,124 @@
 
 include "../../error_codes.elisa"
 
+struct DimensionsQueue:
+    packets: mutable u8[64 * 32]
+    read_index: mutable usize
+    write_index: mutable usize
+
+global mutable g_dim_queue: DimensionsQueue = zeroed
+global mutable g_dim_init: bool = false
+
+def Dimensions_InitIfNeeded() -> void:
+    if g_dim_init:
+        return
+    g_dim_queue.read_index <- 0
+    g_dim_queue.write_index <- 0
+    g_dim_init <- true
+
+def Dimensions_QueuePush(packet: u8&) -> void:
+    slot: usize = g_dim_queue.write_index % 64
+    base: usize = slot * 32
+    i: mutable usize = 0
+    while i < 32:
+        g_dim_queue.packets[base + i] <- packet[i]
+        i <- i + 1
+    g_dim_queue.write_index <- g_dim_queue.write_index + 1
+    if g_dim_queue.write_index - g_dim_queue.read_index > 64:
+        g_dim_queue.read_index <- g_dim_queue.write_index - 64
+
+def Dimensions_QueuePop(out: mutable u8&) -> bool:
+    if g_dim_queue.read_index >= g_dim_queue.write_index:
+        return false
+    slot: usize = g_dim_queue.read_index % 64
+    base: usize = slot * 32
+    i: mutable usize = 0
+    while i < 32:
+        out[i] <- g_dim_queue.packets[base + i]
+        i <- i + 1
+    g_dim_queue.read_index <- g_dim_queue.read_index + 1
+    return true
+
+def Dimensions_Checksum(data: u8&, count: int) -> u8:
+    sum: mutable int = 0
+    i: mutable int = 0
+    while i < count:
+        sum <- sum + data[i].int()
+        i <- i + 1
+    return (sum & 0xff).u8()
+
+def Dimensions_Blank(type_: u8, sequence: u8, out: mutable u8&) -> void:
+    out[0] <- 0x55u8
+    out[1] <- type_
+    out[2] <- sequence
+    out[3] <- Dimensions_Checksum(out, 3)
+
+def UsbdDimensionsEmu_CommandOut(buffer: u8&) -> int:
+    Dimensions_InitIfNeeded()
+    command: u8 = buffer[2]
+    sequence: u8 = buffer[3]
+    q_result: mutable u8[32] = zeroed
+    if command == 0xb0u8:
+        q_result[0] <- 0x55u8
+        q_result[1] <- 0x0eu8
+        q_result[2] <- 0x01u8
+        q_result[3] <- 0x28u8
+        q_result[4] <- 0x63u8
+        q_result[5] <- 0x29u8
+        q_result[6] <- 0x20u8
+        q_result[7] <- 0x4cu8
+        q_result[8] <- 0x45u8
+        q_result[9] <- 0x47u8
+        q_result[10] <- 0x4fu8
+        q_result[11] <- 0x20u8
+        q_result[12] <- 0x32u8
+        q_result[13] <- 0x30u8
+        q_result[14] <- 0x31u8
+        q_result[15] <- 0x34u8
+        q_result[16] <- 0x46u8
+    elif command == 0xb1u8:
+        Dimensions_Blank(0x01u8, sequence, q_result[0].ref[mutable u8&])
+    elif command == 0xb3u8:
+        Dimensions_Blank(0x09u8, sequence, q_result[0].ref[mutable u8&])
+    elif command == 0xc0u8 or command == 0xc1u8 or command == 0xc2u8 or command == 0xc3u8 or command == 0xc4u8 or command == 0xc6u8 or command == 0xc7u8 or command == 0xc8u8:
+        Dimensions_Blank(0x01u8, sequence, q_result[0].ref[mutable u8&])
+    elif command == 0xd2u8:
+        q_result[0] <- 0x55u8
+        q_result[1] <- 0x12u8
+        q_result[2] <- sequence
+        q_result[3] <- 0u8
+        q_result[20] <- Dimensions_Checksum(q_result[0].ref[u8&], 20)
+    elif command == 0xd3u8:
+        q_result[0] <- 0x55u8
+        q_result[1] <- 0x02u8
+        q_result[2] <- sequence
+        q_result[3] <- 0u8
+        q_result[4] <- Dimensions_Checksum(q_result[0].ref[u8&], 4)
+    elif command == 0xd4u8:
+        q_result[0] <- 0x55u8
+        q_result[1] <- 0x06u8
+        q_result[2] <- sequence
+        q_result[3] <- 0u8
+        q_result[4] <- 0u8
+        q_result[5] <- 0u8
+        q_result[6] <- 0u8
+        q_result[7] <- 0u8
+        q_result[8] <- Dimensions_Checksum(q_result[0].ref[u8&], 8)
+    else:
+        Dimensions_Blank(0x01u8, sequence, q_result[0].ref[mutable u8&])
+    Dimensions_QueuePush(q_result[0].ref[u8&])
+    return 32
+
+def UsbdDimensionsEmu_InterruptIn(out: mutable u8&) -> int:
+    Dimensions_InitIfNeeded()
+    if Dimensions_QueuePop(out):
+        return 32
+    i: mutable usize = 0
+    while i < 32:
+        out[i] <- 0u8
+        i <- i + 1
+    return 32
+
 def UsbdDimensionsEmu_Init() -> int:
+    Dimensions_InitIfNeeded()
     return ORBIS_OK

@@ -6,6 +6,10 @@ include "./avplayer_impl.elisa"
 include "./avplayer_state.elisa"
 include "./avplayer_source.elisa"
 
+extern pthread_create(thread: mutable void&?&, attr: void&?, start_routine: void&?, arg: void&?) -> int
+extern pthread_join(thread: void&?, thread_return: mutable void&?&) -> int
+extern usleep(usec: u32) -> int
+
 const AVPLAYER_MAX_HANDLES: int = 64
 
 type AvPlayerHandle = i32
@@ -212,6 +216,9 @@ global mutable g_avplayer_mem_allocate_texture: AvPlayerAllocateTexture = avplay
 global mutable g_avplayer_mem_deallocate_texture: AvPlayerDeallocateTexture = avplayer_null_deallocate
 global mutable g_avplayer_log_callback: void&? = null
 global mutable g_avplayer_log_user_data: void&? = null
+global mutable g_avplayer_controller_thread: void&? = null
+global mutable g_avplayer_controller_stop: bool = false
+global mutable g_avplayer_controller_running: bool = false
 
 def avplayer_store_allocator(slot: int, allocator: AvPlayerMemAllocator&):
     g_handle_mem_object[slot] <- allocator.object_ptr
@@ -440,6 +447,47 @@ def avplayer_dispatch_state_events(slot: int):
         event_cb(event_obj, AVPLAYER_EVENTS_WARNING_ID, 0, warning_ptr)
         g_state_warning_last[slot] <- 0
 
+def avplayer_any_handle_active() -> bool:
+    i: mutable int = 0
+    while i < AVPLAYER_MAX_HANDLES:
+        if g_handle_active[i]:
+            return true
+        i <- i + 1
+    return false
+
+def avplayer_controller_thread_entry(arg: void&?) -> void&?:
+    _ = arg
+    g_avplayer_controller_running <- true
+    while not g_avplayer_controller_stop:
+        i: mutable int = 0
+        while i < AVPLAYER_MAX_HANDLES:
+            if g_handle_active[i]:
+                if avsrc_has_source[i] and avsrc_started[i] and not avsrc_is_paused[i]:
+                    _ = avsrc_fill_outputs(i, avsrc_video_enabled[i], avsrc_audio_enabled[i])
+                avplayer_controller_tick(i)
+            i <- i + 1
+        _ = usleep(2000)
+    g_avplayer_controller_running <- false
+    return null
+
+def avplayer_controller_thread_start():
+    if g_avplayer_controller_thread != null:
+        return
+    g_avplayer_controller_stop <- false
+    created: mutable void&? = null
+    if pthread_create(created, null, avplayer_controller_thread_entry.cast[void&], null) == 0:
+        g_avplayer_controller_thread <- created
+
+def avplayer_controller_thread_stop():
+    thread: void&? = g_avplayer_controller_thread
+    if thread == null:
+        return
+    g_avplayer_controller_stop <- true
+    thread_ret: mutable void&? = null
+    _ = pthread_join(thread, thread_ret)
+    g_avplayer_controller_thread <- null
+    g_avplayer_controller_running <- false
+
 def avplayer_controller_tick(slot: int):
     avs_process_events(slot, avsrc_get_stream_count(slot) > 0)
     avplayer_dispatch_state_events(slot)
@@ -573,6 +621,8 @@ def sceAvPlayerClose(handle: AvPlayerHandle) -> i32:
     g_handle_event_callback[handle - 1] <- avplayer_null_event_callback
     avplayer_release_payloads(handle - 1)
     g_handle_mem_object[handle - 1] <- null
+    if not avplayer_any_handle_active():
+        avplayer_controller_thread_stop()
     return ORBIS_OK
 
 def sceAvPlayerCurrentTime(handle: AvPlayerHandle) -> u64:
@@ -837,6 +887,7 @@ def sceAvPlayerInit(data: mutable AvPlayerInitData&?) -> AvPlayerHandle:
         if requested_pool_count > AVPLAYER_VIDEO_PAYLOAD_POOL_MAX:
             requested_pool_count <- AVPLAYER_VIDEO_PAYLOAD_POOL_MAX
         g_handle_video_payload_count[handle - 1] <- requested_pool_count
+        avplayer_controller_thread_start()
     return handle
 
 def sceAvPlayerInitEx(p_data: AvPlayerInitData&?, p_player: mutable AvPlayerHandle&?) -> i32:
@@ -860,6 +911,7 @@ def sceAvPlayerInitEx(p_data: AvPlayerInitData&?, p_player: mutable AvPlayerHand
     if requested_pool_count > AVPLAYER_VIDEO_PAYLOAD_POOL_MAX:
         requested_pool_count <- AVPLAYER_VIDEO_PAYLOAD_POOL_MAX
     g_handle_video_payload_count[p_player - 1] <- requested_pool_count
+    avplayer_controller_thread_start()
     return ORBIS_OK
 
 def sceAvPlayerIsActive(handle: AvPlayerHandle) -> bool:

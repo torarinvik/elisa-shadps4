@@ -34,6 +34,7 @@ struct OrbisSem:
     native_handle: mutable void&?
 
 global mutable g_orbis_sems: OrbisSem[64]
+global mutable g_orbis_sem_waiters: int[64]
 global mutable g_tls_allocated: bool[PTHREAD_KEYS_MAX]
 global mutable g_tls_seqno: int[PTHREAD_KEYS_MAX]
 global mutable g_tls_destructors: void&?[PTHREAD_KEYS_MAX]
@@ -72,12 +73,16 @@ def sceKernelWaitSema(sem: int, need_count: int, p_timeout: mutable u32&?) -> in
         return ORBIS_KERNEL_ERROR_EINVAL
     if g_orbis_sems[sem].token_count < need_count:
         if p_timeout == null:
+            g_orbis_sem_waiters[sem] <- g_orbis_sem_waiters[sem] + 1
             r_wait: int = elisa_kernel_sem_wait(g_orbis_sems[sem].native_handle, need_count)
+            g_orbis_sem_waiters[sem] <- g_orbis_sem_waiters[sem] - 1
             if r_wait != 0:
                 return threads_posix_to_orbis_errno(r_wait)
             g_orbis_sems[sem].token_count <- g_orbis_sems[sem].token_count - need_count
             return ORBIS_OK
+        g_orbis_sem_waiters[sem] <- g_orbis_sem_waiters[sem] + 1
         r_timeout: int = elisa_kernel_sem_timedwait(g_orbis_sems[sem].native_handle, need_count, p_timeout[0] as u64)
+        g_orbis_sem_waiters[sem] <- g_orbis_sem_waiters[sem] - 1
         if r_timeout != 0:
             p_timeout <- 0u32
             return threads_posix_to_orbis_errno(r_timeout)
@@ -117,7 +122,7 @@ def sceKernelCancelSema(sem: int, set_count: int, p_num_wait_threads: mutable in
     if sem < 0 or sem >= 64 or not g_orbis_sems[sem].used:
         return ORBIS_KERNEL_ERROR_ESRCH
     if p_num_wait_threads != null:
-        p_num_wait_threads <- 0
+        p_num_wait_threads <- g_orbis_sem_waiters[sem]
     if set_count < 0:
         g_orbis_sems[sem].token_count <- g_orbis_sems[sem].init_count
     else:
@@ -135,6 +140,7 @@ def sceKernelDeleteSema(sem: int) -> int:
     g_orbis_sems[sem].max_count <- 0
     g_orbis_sems[sem].init_count <- 0
     g_orbis_sems[sem].native_handle <- null
+    g_orbis_sem_waiters[sem] <- 0
     return ORBIS_OK
 
 def posix_sem_init(sem: mutable PthreadSem&?&, pshared: int, value: u32) -> int:

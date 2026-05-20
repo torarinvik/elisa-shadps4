@@ -69,6 +69,11 @@ extern libusb_handle_events_locked(ctx: void&?, tv: void&?) -> int
 
 global mutable g_libusb_context: void&? = null
 global mutable g_has_removed_driver: bool = false
+const USBD_BACKEND_REAL: int = 0
+const USBD_BACKEND_SKYLANDER: int = 1
+const USBD_BACKEND_INFINITY: int = 2
+const USBD_BACKEND_DIMENSIONS: int = 3
+global mutable g_usbd_backend_mode: int = USBD_BACKEND_REAL
 
 def usbd_libusb_to_orbis_error(retVal: int) -> s32:
     if retVal == -99:
@@ -78,6 +83,9 @@ def usbd_libusb_to_orbis_error(retVal: int) -> s32:
     return retVal.s32()
 
 def sceUsbdInit() -> s32:
+    _ = UsbdSkylanderEmu_Init()
+    _ = UsbdInfinityEmu_Init()
+    _ = UsbdDimensionsEmu_Init()
     return usbd_libusb_to_orbis_error(libusb_init(g_libusb_context as mutable void&?&))
 
 def sceUsbdExit() -> void:
@@ -112,7 +120,16 @@ def sceUsbdClaimInterface(dev_handle: void&?, interface_number: s32) -> s32:
         _ = sceUsbdDetachKernelDriver(dev_handle, interface_number.int())
     return usbd_libusb_to_orbis_error(libusb_claim_interface(dev_handle, interface_number.int()))
 def sceUsbdReleaseInterface(dev_handle: void&?, interface_number: s32) -> s32: return usbd_libusb_to_orbis_error(libusb_release_interface(dev_handle, interface_number.int()))
-def sceUsbdOpenDeviceWithVidPid(vendor_id: u16, product_id: u16) -> void&?: return libusb_open_device_with_vid_pid(g_libusb_context, vendor_id, product_id)
+def sceUsbdOpenDeviceWithVidPid(vendor_id: u16, product_id: u16) -> void&?:
+    if vendor_id == 0x1430u16 and product_id == 0x0150u16:
+        g_usbd_backend_mode <- USBD_BACKEND_SKYLANDER
+    elif vendor_id == 0x0e6fu16 and product_id == 0x0129u16:
+        g_usbd_backend_mode <- USBD_BACKEND_INFINITY
+    elif vendor_id == 0x0e6fu16 and product_id == 0x0241u16:
+        g_usbd_backend_mode <- USBD_BACKEND_DIMENSIONS
+    else:
+        g_usbd_backend_mode <- USBD_BACKEND_REAL
+    return libusb_open_device_with_vid_pid(g_libusb_context, vendor_id, product_id)
 def sceUsbdSetInterfaceAltSetting(dev_handle: void&?, interface_number: int, alternate_setting: int) -> s32: return usbd_libusb_to_orbis_error(libusb_set_interface_alt_setting(dev_handle, interface_number, alternate_setting))
 def sceUsbdClearHalt(dev_handle: void&?, endpoint: u8) -> s32: return usbd_libusb_to_orbis_error(libusb_clear_halt(dev_handle, endpoint))
 def sceUsbdResetDevice(dev_handle: void&?) -> s32: return usbd_libusb_to_orbis_error(libusb_reset_device(dev_handle))
@@ -151,9 +168,46 @@ def sceUsbdFillInterruptTransfer(transfer: void&?, dev_handle: void&?, endpoint:
 def sceUsbdFillIsoTransfer(transfer: void&?, dev_handle: void&?, endpoint: u8, buffer: mutable u8&?, length: s32, num_iso_packets: s32, callback: void&?, user_data: void&?, timeout: u32) -> void: libusb_fill_iso_transfer(transfer, dev_handle, endpoint, buffer, length, num_iso_packets, callback, user_data, timeout)
 def sceUsbdSetIsoPacketLengths(transfer: void&?, length: u32) -> void: libusb_set_iso_packet_lengths(transfer, length)
 def sceUsbdGetIsoPacketBuffer(transfer: void&?, packet: u32) -> void&?: return libusb_get_iso_packet_buffer(transfer, packet)
-def sceUsbdControlTransfer(dev_handle: void&?, request_type: u8, bRequest: u8, wValue: u16, wIndex: u16, data: mutable u8&?, wLength: s32, timeout: u32) -> s32: return usbd_libusb_to_orbis_error(libusb_control_transfer(dev_handle, request_type, bRequest, wValue, wIndex, data, wLength.u16(), timeout))
+def sceUsbdControlTransfer(dev_handle: void&?, request_type: u8, bRequest: u8, wValue: u16, wIndex: u16, data: mutable u8&?, wLength: s32, timeout: u32) -> s32:
+    if g_usbd_backend_mode == USBD_BACKEND_SKYLANDER and data != null:
+        if request_type == 0x21u8 and bRequest == 0x09u8:
+            return UsbdSkylanderEmu_ControlTransfer(data.cast[u8&], wLength.u16()).s32()
+    _ = timeout
+    return usbd_libusb_to_orbis_error(libusb_control_transfer(dev_handle, request_type, bRequest, wValue, wIndex, data, wLength.u16(), timeout))
 def sceUsbdBulkTransfer(dev_handle: void&?, endpoint: u8, data: mutable u8&?, length: s32, actual_length: mutable s32&?, timeout: u32) -> s32: return usbd_libusb_to_orbis_error(libusb_bulk_transfer(dev_handle, endpoint, data, length, actual_length, timeout))
-def sceUsbdInterruptTransfer(dev_handle: void&?, endpoint: u8, data: mutable u8&?, length: s32, actual_length: mutable s32&?, timeout: u32) -> s32: return usbd_libusb_to_orbis_error(libusb_interrupt_transfer(dev_handle, endpoint, data, length, actual_length, timeout))
+def sceUsbdInterruptTransfer(dev_handle: void&?, endpoint: u8, data: mutable u8&?, length: s32, actual_length: mutable s32&?, timeout: u32) -> s32:
+    if data != null:
+        if g_usbd_backend_mode == USBD_BACKEND_INFINITY:
+            if endpoint == 0x01u8:
+                _ = UsbdInfinityEmu_CommandOut(data.cast[u8&])
+                if actual_length != null:
+                    actual_length <- length
+                return ORBIS_OK
+            if endpoint == 0x81u8:
+                produced: int = UsbdInfinityEmu_InterruptIn(data.cast[mutable u8&])
+                if actual_length != null:
+                    actual_length <- produced
+                return ORBIS_OK
+        elif g_usbd_backend_mode == USBD_BACKEND_SKYLANDER:
+            if endpoint == 0x81u8:
+                produced: int = UsbdSkylanderEmu_InterruptIn(data.cast[mutable u8&])
+                if actual_length != null:
+                    actual_length <- produced
+                return ORBIS_OK
+        elif g_usbd_backend_mode == USBD_BACKEND_DIMENSIONS:
+            if endpoint == 0x01u8:
+                _ = UsbdDimensionsEmu_CommandOut(data.cast[u8&])
+                if actual_length != null:
+                    actual_length <- length
+                return ORBIS_OK
+            if endpoint == 0x81u8:
+                produced: int = UsbdDimensionsEmu_InterruptIn(data.cast[mutable u8&])
+                if actual_length != null:
+                    actual_length <- produced
+                return ORBIS_OK
+    _ = dev_handle
+    _ = timeout
+    return usbd_libusb_to_orbis_error(libusb_interrupt_transfer(dev_handle, endpoint, data, length, actual_length, timeout))
 def sceUsbdGetDescriptor(dev_handle: void&?, descType: u8, descIndex: u8, data: mutable u8&?, length: s32) -> s32: return usbd_libusb_to_orbis_error(libusb_get_descriptor(dev_handle, descType, descIndex, data, length))
 def sceUsbdGetStringDescriptor(dev_handle: void&?, desc_index: u8, langid: u16, data: mutable u8&?, length: s32) -> s32: return usbd_libusb_to_orbis_error(libusb_get_string_descriptor(dev_handle, desc_index, langid, data, length))
 def sceUsbdGetStringDescriptorAscii(dev_handle: void&?, desc_index: u8, data: mutable u8&?, length: s32) -> s32: return usbd_libusb_to_orbis_error(libusb_get_string_descriptor_ascii(dev_handle, desc_index, data, length))

@@ -1,9 +1,12 @@
 include "../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
 
 const ORBIS_OK: int = 0
+const ORBIS_KERNEL_ERROR_EPERM: int = 0x80020001
+const ORBIS_KERNEL_ERROR_ECANCELED: int = 0x80020055
 const ORBIS_KERNEL_ERROR_ETIMEDOUT: int = 0x8002003C
 const POSIX_EPERM: int = 1
 const POSIX_EBUSY: int = 16
+const POSIX_ECANCELED: int = 85
 const POSIX_ETIMEDOUT: int = 60
 
 extern elisa_kernel_thread_create(entry: void&?, arg: void&?, out_error: mutable int&?) -> void&?
@@ -63,6 +66,9 @@ global mutable rt_kernel_sem: void&? = null
 global mutable rt_event_flag: void&? = null
 global mutable rt_kernel_sem_id: int = -1
 global mutable rt_event_flag_id: int = -1
+global mutable rt_kernel_sem_waiters: int = 0
+global mutable rt_event_waiters: int = 0
+global mutable rt_event_attr: u32 = 0u32
 
 def posix_pthread_create(thread: mutable void&?&, attr: void&?, start_routine: void&?, arg: void&?) -> int:
     _ = attr
@@ -214,6 +220,7 @@ def sceKernelCreateSema(out_id: mutable int&, name: static u8&?, attr: u32, init
     if rt_kernel_sem == null:
         return err
     rt_kernel_sem_id <- 1
+    rt_kernel_sem_waiters <- 0
     out_id <- 1
     return ORBIS_OK
 
@@ -223,14 +230,20 @@ def sceKernelDeleteSema(id: int) -> int:
     r: int = elisa_kernel_sem_destroy(rt_kernel_sem)
     rt_kernel_sem <- null
     rt_kernel_sem_id <- -1
+    rt_kernel_sem_waiters <- 0
     return r
 
 def sceKernelWaitSema(id: int, need_count: int, timeout: mutable u32&?) -> int:
     if id != rt_kernel_sem_id:
         return 22
     if timeout == null:
-        return elisa_kernel_sem_wait(rt_kernel_sem, need_count)
+        rt_kernel_sem_waiters <- rt_kernel_sem_waiters + 1
+        r_wait: int = elisa_kernel_sem_wait(rt_kernel_sem, need_count)
+        rt_kernel_sem_waiters <- rt_kernel_sem_waiters - 1
+        return r_wait
+    rt_kernel_sem_waiters <- rt_kernel_sem_waiters + 1
     r: int = elisa_kernel_sem_timedwait(rt_kernel_sem, need_count, (timeout[0] as u64) * 1000u64)
+    rt_kernel_sem_waiters <- rt_kernel_sem_waiters - 1
     if r == POSIX_ETIMEDOUT:
         timeout <- 0u32
         return ORBIS_KERNEL_ERROR_ETIMEDOUT
@@ -241,15 +254,23 @@ def sceKernelSignalSema(id: int, signal_count: int) -> int:
         return 22
     return elisa_kernel_sem_post(rt_kernel_sem, signal_count)
 
+def sceKernelCancelSema(id: int, set_count: int, out_waiters: mutable int&) -> int:
+    _ = set_count
+    if id != rt_kernel_sem_id:
+        return 22
+    out_waiters <- rt_kernel_sem_waiters
+    return ORBIS_OK
+
 def sceKernelCreateEventFlag(out_id: mutable int&, name: static u8&?, attr: u32, init_pattern: u64, option: void&?) -> int:
     _ = name
-    _ = attr
     _ = option
     err: mutable int = 0
     rt_event_flag <- elisa_kernel_event_create(init_pattern, err.ref[mutable int&])
     if rt_event_flag == null:
         return err
     rt_event_flag_id <- 1
+    rt_event_waiters <- 0
+    rt_event_attr <- attr
     out_id <- 1
     return ORBIS_OK
 
@@ -259,6 +280,8 @@ def sceKernelDeleteEventFlag(id: int) -> int:
     r: int = elisa_kernel_event_destroy(rt_event_flag)
     rt_event_flag <- null
     rt_event_flag_id <- -1
+    rt_event_waiters <- 0
+    rt_event_attr <- 0u32
     return r
 
 def sceKernelSetEventFlag(id: int, pattern: u64) -> int:
@@ -277,10 +300,18 @@ def sceKernelPollEventFlag(id: int, pattern: u64, wait_mode: u32, out_bits: muta
 def sceKernelWaitEventFlag(id: int, pattern: u64, wait_mode: u32, out_bits: mutable u64&?, timeout: mutable u32&?) -> int:
     if id != rt_event_flag_id:
         return 22
+    attr_mode: u32 = rt_event_attr & 0x30u32
+    single_wait_mode: bool = attr_mode == 0x10u32
+    if single_wait_mode and rt_event_waiters > 0:
+        return ORBIS_KERNEL_ERROR_EPERM
     wait_usec: mutable u64 = 0xffffffffffffffffu64
     if timeout != null:
         wait_usec <- (timeout[0] as u64) * 1000u64
+    rt_event_waiters <- rt_event_waiters + 1
     r: int = elisa_kernel_event_wait(rt_event_flag, pattern, wait_mode, out_bits, wait_usec)
+    rt_event_waiters <- rt_event_waiters - 1
+    if r == POSIX_ECANCELED:
+        return ORBIS_KERNEL_ERROR_ECANCELED
     if r == POSIX_ETIMEDOUT:
         if timeout != null:
             timeout <- 0u32
@@ -291,8 +322,8 @@ def sceKernelCancelEventFlag(id: int, set_pattern: u64, out_waiters: mutable int
     if id != rt_event_flag_id:
         return 22
     r: int = elisa_kernel_event_cancel(rt_event_flag, set_pattern, out_waiters)
-    if r == 0:
-        out_waiters <- 0
+    if r == 0 and out_waiters < rt_event_waiters:
+        out_waiters <- rt_event_waiters
     return r
 
 def rt_assert_zero(value: int):
@@ -401,6 +432,8 @@ def rt_event_wait_entry(arg: void&?) -> void&?:
     r: int = sceKernelWaitEventFlag(rt_event_flag_id, 0x3u64, wait_mode, result, null)
     if r == ORBIS_OK:
         elisa_kernel_test_slot_set(1, result as i64)
+    if r == ORBIS_KERNEL_ERROR_ECANCELED:
+        elisa_kernel_test_slot_set(2, 1)
     return r as void&?
 
 def rt_mixed_wait_entry(arg: void&?) -> void&?:
@@ -556,6 +589,24 @@ def runtime_kernel_sema_wait_signal_timeout() -> void:
         rt_assert_zero(sceKernelDeleteSema(rt_kernel_sem_id))
 
 @test
+def runtime_kernel_sema_cancel_reports_waiters() -> void:
+    can Abort.Panic:
+        elisa_kernel_test_slots_reset()
+        rt_kernel_sem_id <- -1
+        rt_assert_zero(sceKernelCreateSema(rt_kernel_sem_id, "runtime-sema-cancel", 0u32, 0, 1, null))
+        thread: mutable void&? = null
+        rt_assert_zero(posix_pthread_create(thread, null, rt_kernel_sema_wait_entry.cast[void&], null))
+        rt_wait_slot(0, 1)
+        waiters: mutable int = -1
+        rt_assert_zero(sceKernelCancelSema(rt_kernel_sem_id, 0, waiters.ref[mutable int&]))
+        if waiters < 1:
+            panic("cancel sema should report at least one waiter")
+        rt_assert_zero(sceKernelSignalSema(rt_kernel_sem_id, 1))
+        rt_wait_slot(1, 1)
+        assert rt_join(thread) == null
+        rt_assert_zero(sceKernelDeleteSema(rt_kernel_sem_id))
+
+@test
 def runtime_posix_sem_wait_post_try_timed_getvalue() -> void:
     can Abort.Panic:
         elisa_kernel_test_slots_reset()
@@ -615,6 +666,40 @@ def runtime_event_flag_wait_set_clear_cancel() -> void:
         rt_assert_zero(sceKernelCancelEventFlag(rt_event_flag_id, 0u64, waiters.ref[mutable int&]))
         if waiters != 0:
             panic("event cancel should report zero waiters")
+        rt_assert_zero(sceKernelDeleteEventFlag(rt_event_flag_id))
+
+@test
+def runtime_event_flag_single_mode_rejects_second_waiter() -> void:
+    can Abort.Panic:
+        elisa_kernel_test_slots_reset()
+        rt_event_flag_id <- -1
+        rt_assert_zero(sceKernelCreateEventFlag(rt_event_flag_id, "runtime-event-single", 0x10u32, 0u64, null))
+        thread: mutable void&? = null
+        rt_assert_zero(posix_pthread_create(thread, null, rt_event_wait_entry.cast[void&], 0x01u32 as void&?))
+        rt_wait_slot(0, 1)
+        result_bits: mutable u64 = 0u64
+        timeout: mutable u32 = 1000u32
+        rt_assert_eq_int(sceKernelWaitEventFlag(rt_event_flag_id, 0x3u64, 0x01u32, result_bits, timeout), ORBIS_KERNEL_ERROR_EPERM)
+        rt_assert_zero(sceKernelSetEventFlag(rt_event_flag_id, 0x3u64))
+        rt_wait_slot(1, 3)
+        assert rt_join(thread) == null
+        rt_assert_zero(sceKernelDeleteEventFlag(rt_event_flag_id))
+
+@test
+def runtime_event_flag_cancel_wakes_waiter() -> void:
+    can Abort.Panic:
+        elisa_kernel_test_slots_reset()
+        rt_event_flag_id <- -1
+        rt_assert_zero(sceKernelCreateEventFlag(rt_event_flag_id, "runtime-event-cancel", 0x20u32, 0u64, null))
+        thread: mutable void&? = null
+        rt_assert_zero(posix_pthread_create(thread, null, rt_event_wait_entry.cast[void&], 0x01u32 as void&?))
+        rt_wait_slot(0, 1)
+        waiters: mutable int = -1
+        rt_assert_zero(sceKernelCancelEventFlag(rt_event_flag_id, 0u64, waiters.ref[mutable int&]))
+        if waiters < 1:
+            panic("event cancel should report at least one waiter")
+        rt_wait_slot(2, 1)
+        _ = rt_join(thread)
         rt_assert_zero(sceKernelDeleteEventFlag(rt_event_flag_id))
 
 @test
