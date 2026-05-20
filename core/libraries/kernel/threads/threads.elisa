@@ -3,6 +3,8 @@
 
 include "../../error_codes.elisa"
 include "../posix_error.elisa"
+include "../orbis_error.elisa"
+include "../lib_function_stub.elisa"
 include "./threads_sync.elisa"
 include "./threads_sema_spec.elisa"
 include "./threads_event_exception_clean.elisa"
@@ -25,7 +27,7 @@ extern getpid() -> int
 extern elisa_kernel_thread_create(entry: void&?, arg: void&?, out_error: mutable int&?) -> void&?
 extern elisa_kernel_thread_native(handle: void&?) -> void&?
 extern elisa_kernel_thread_join(handle: void&?, retval: mutable void&?&) -> int
-extern elisa_kernel_thread_timedjoin(handle: void&?, retval: mutable void&?&, tv_sec: s64, tv_nsec: s64) -> int
+extern elisa_kernel_thread_timedjoin(handle: void&?, retval: mutable void&?&, tv_sec: i64, tv_nsec: i64) -> int
 extern elisa_kernel_thread_detach(handle: void&?) -> int
 extern elisa_kernel_thread_cancel(handle: void&?) -> int
 
@@ -45,6 +47,8 @@ const PTHREAD_SCOPE_PROCESS: int = 0
 const PTHREAD_SCOPE_SYSTEM: int = 2
 const PTHREAD_DETACHED: int = 1
 const POSIX_PTHREAD_CANCELED_VALUE: int = 1
+
+type ThreadDtorsFunc = func() -> void
 
 @fixed_layout
 struct SchedParam:
@@ -96,19 +100,19 @@ def posix_pthread_attr_init(attr: mutable PthreadAttr&?&) -> int:
     if attr == null:
         return POSIX_EINVAL
     local: mutable PthreadAttr = g_default_attr
-    attr <- local
+    attr[0] <- local
     return 0
 
 def posix_pthread_attr_destroy(attr: mutable PthreadAttr&?&) -> int:
-    if attr == null or attr == null:
+    if attr == null or attr[0] == null:
         return POSIX_EINVAL
-    attr <- null
+    attr[0] <- null
     return 0
 
 def posix_pthread_attr_getdetachstate(attr: PthreadAttr&?, detachstate: mutable int&) -> int:
     if attr == null:
         return POSIX_EINVAL
-    if (attr.flags and PTHREAD_DETACHED) != 0:
+    if (attr.flags & PTHREAD_DETACHED) != 0:
         detachstate <- 1
     else:
         detachstate <- 0
@@ -118,9 +122,9 @@ def posix_pthread_attr_setdetachstate(attr: mutable PthreadAttr&?, detachstate: 
     if attr == null or (detachstate != 0 and detachstate != 1):
         return POSIX_EINVAL
     if detachstate == 1:
-        attr.flags <- attr.flags or PTHREAD_DETACHED
+        attr.flags <- attr.flags | PTHREAD_DETACHED
     else:
-        attr.flags <- attr.flags and (not PTHREAD_DETACHED)
+        attr.flags <- attr.flags & ~PTHREAD_DETACHED
     return 0
 
 def posix_pthread_attr_getguardsize(attr: PthreadAttr&?, guardsize: mutable u64&) -> int:
@@ -186,7 +190,7 @@ def posix_pthread_attr_setschedpolicy(attr: mutable PthreadAttr&?, policy: int) 
 def posix_pthread_attr_getscope(attr: PthreadAttr&?, contentionscope: mutable int&) -> int:
     if attr == null:
         return POSIX_EINVAL
-    if (attr.flags and PTHREAD_SCOPE_SYSTEM) != 0:
+    if (attr.flags & PTHREAD_SCOPE_SYSTEM) != 0:
         contentionscope <- PTHREAD_SCOPE_SYSTEM
     else:
         contentionscope <- PTHREAD_SCOPE_PROCESS
@@ -199,15 +203,15 @@ def posix_pthread_attr_setscope(attr: mutable PthreadAttr&?, contentionscope: in
     if contentionscope != PTHREAD_SCOPE_PROCESS or contentionscope != PTHREAD_SCOPE_SYSTEM:
         return POSIX_EINVAL
     if contentionscope == PTHREAD_SCOPE_SYSTEM:
-        attr.flags <- attr.flags or PTHREAD_SCOPE_SYSTEM
+        attr.flags <- attr.flags | PTHREAD_SCOPE_SYSTEM
     else:
-        attr.flags <- attr.flags and (not PTHREAD_SCOPE_SYSTEM)
+        attr.flags <- attr.flags & ~PTHREAD_SCOPE_SYSTEM
     return 0
 
 def posix_pthread_attr_getstack(attr: PthreadAttr&?, stackaddr: mutable void&?&, stacksize: mutable u64&) -> int:
     if attr == null:
         return POSIX_EINVAL
-    stackaddr <- attr.stackaddr_attr
+    stackaddr[0] <- attr.stackaddr_attr
     stacksize <- attr.stacksize_attr
     return 0
 
@@ -221,7 +225,7 @@ def posix_pthread_attr_setstack(attr: mutable PthreadAttr&?, stackaddr: void&?, 
 def posix_pthread_attr_getstackaddr(attr: PthreadAttr&?, stackaddr: mutable void&?&) -> int:
     if attr == null:
         return POSIX_EINVAL
-    stackaddr <- attr.stackaddr_attr
+    stackaddr[0] <- attr.stackaddr_attr
     return 0
 
 def posix_pthread_attr_setstackaddr(attr: mutable PthreadAttr&?, stackaddr: void&?) -> int:
@@ -253,7 +257,7 @@ def posix_pthread_attr_get_np(pthread: void&?, dstattr: mutable PthreadAttr&?) -
         return POSIX_ESRCH
     dstattr <- g_default_attr
     if g_fake_threads_detached[id]:
-        dstattr.flags <- dstattr.flags or PTHREAD_DETACHED
+        dstattr.flags <- dstattr.flags | PTHREAD_DETACHED
     return 0
 
 def posix_pthread_attr_setcreatesuspend_np(attr: mutable PthreadAttr&?) -> int:
@@ -270,11 +274,11 @@ def posix_pthread_attr_getaffinity_np(pattr: PthreadAttr&?, cpusetsize: u64, cpu
         mask: mutable u64&? = cpusetp as mutable u64&?
         if mask != null:
             if pattr.cpuset == null:
-                mask <- 0xffffffffffffffffu64
+                mask[0] <- 0xffffffffffffffffu64
             else:
                 source: u64&? = pattr.cpuset as u64&?
                 if source != null:
-                    mask <- source
+                    mask[0] <- source[0]
     return 0
 
 def posix_pthread_attr_setaffinity_np(pattr: mutable PthreadAttr&?, cpusetsize: u64, cpusetp: void&?) -> int:
@@ -487,7 +491,8 @@ def posix_pthread_exit(status: void&?) -> void:
     g_fake_threads_exited[g_fake_thread_id] <- true
     threads_run_cleanup_handlers()
     if g_fake_thread_dtors != null:
-        CALL_VOID_FN_0(g_fake_thread_dtors)
+        dtors_fn: ThreadDtorsFunc = g_fake_thread_dtors.cast[ThreadDtorsFunc]
+        dtors_fn()
     threads_cleanup_specific()
     g_fake_threads_alive[g_fake_thread_id] <- false
     g_fake_cancelling <- false
@@ -519,7 +524,7 @@ def posix_pthread_join(pthread: void&?, thread_return: mutable void&?&) -> int:
         g_fake_threads_retval[id] <- host_ret
     g_fake_threads_has_joiner[id] <- true
     if thread_return != null:
-        thread_return <- g_fake_threads_retval[id]
+        thread_return[0] <- g_fake_threads_retval[id]
     g_fake_threads_alive[id] <- false
     g_fake_threads_running[id] <- false
     g_fake_threads_detached[id] <- true
@@ -557,7 +562,7 @@ def posix_pthread_timedjoin_np(pthread: void&?, thread_return: mutable void&?&, 
             return host_res
         g_fake_threads_retval[id] <- host_ret
         if thread_return != null:
-            thread_return <- g_fake_threads_retval[id]
+            thread_return[0] <- g_fake_threads_retval[id]
         g_fake_threads_alive[id] <- false
         g_fake_threads_running[id] <- false
         g_fake_threads_detached[id] <- true
@@ -588,8 +593,8 @@ def posix_pthread_create(thread: mutable void&?&, attr: void&?, start_routine: v
     g_fake_threads_host_backed[id] <- false
     g_fake_threads_exited[id] <- false
     if attr != null:
-        a: PthreadAttr&? = attr as PthreadAttr&?
-        if a != null and (a.flags and PTHREAD_DETACHED) != 0:
+        a: PthreadAttr& = attr.cast[PthreadAttr&]
+        if (a.flags & PTHREAD_DETACHED) != 0:
             g_fake_threads_detached[id] <- true
     if start_routine != null:
         create_res: mutable int = 0
@@ -602,7 +607,7 @@ def posix_pthread_create(thread: mutable void&?&, attr: void&?, start_routine: v
             return create_res
         g_fake_threads_host_handle[id] <- host_thread
         g_fake_threads_host_backed[id] <- true
-        thread <- host_thread
+        thread[0] <- host_thread
         if g_fake_threads_detached[id]:
             _ = elisa_kernel_thread_detach(host_thread)
         return 0
@@ -610,15 +615,15 @@ def posix_pthread_create(thread: mutable void&?&, attr: void&?, start_routine: v
         g_fake_threads_retval[id] <- arg
         g_fake_threads_running[id] <- false
         g_fake_threads_exited[id] <- true
-    thread <- id as void&?
+    thread[0] <- id as void&?
     return 0
 
 def posix_pthread_create_name_np(thread: mutable void&?&, attr: void&?, start_routine: void&?, arg: void&?, name: static u8&?) -> int:
     r: int = posix_pthread_create(thread, attr, start_routine, arg)
     if r != 0:
         return r
-    if name != null and thread != null:
-        _ = posix_pthread_rename_np(thread, name)
+    if name != null and thread != null and thread[0] != null:
+        _ = posix_pthread_rename_np(thread[0], name)
     return 0
 
 def posix_pthread_setcancelstate(state: int, oldstate: mutable int&?) -> int:

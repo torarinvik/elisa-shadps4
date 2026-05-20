@@ -13,7 +13,7 @@ extern elisa_kernel_mutex_isowned(handle: void&?) -> int
 extern elisa_kernel_cond_create(out_error: mutable int&?) -> void&?
 extern elisa_kernel_cond_destroy(handle: void&?) -> int
 extern elisa_kernel_cond_wait(cond_handle: void&?, mutex_handle: void&?) -> int
-extern elisa_kernel_cond_timedwait(cond_handle: void&?, mutex_handle: void&?, tv_sec: s64, tv_nsec: s64) -> int
+extern elisa_kernel_cond_timedwait(cond_handle: void&?, mutex_handle: void&?, tv_sec: i64, tv_nsec: i64) -> int
 extern elisa_kernel_cond_reltimedwait(cond_handle: void&?, mutex_handle: void&?, usec: u64) -> int
 extern elisa_kernel_cond_signal(handle: void&?) -> int
 extern elisa_kernel_cond_broadcast(handle: void&?) -> int
@@ -27,8 +27,8 @@ extern elisa_kernel_rwlock_unlock(handle: void&?) -> int
 
 @fixed_layout
 struct OrbisKernelTimespec:
-    tv_sec: mutable s64
-    tv_nsec: mutable s64
+    tv_sec: mutable i64
+    tv_nsec: mutable i64
 
 @fixed_layout
 struct PthreadMutexAttr:
@@ -77,7 +77,7 @@ def threads_sync_orbis_from_posix(ret: int) -> int:
         return 0
     return ORBIS_KERNEL_ERROR_UNKNOWN + ret
 
-def posix_pthread_mutex_init(mutex: mutable PthreadMutex&?&, mutex_attr: PthreadMutexAttr&?) -> int:
+def posix_pthread_mutex_init(mutex: mutable PthreadMutex&?, mutex_attr: PthreadMutexAttr&?) -> int:
     if mutex == null:
         return POSIX_EINVAL
     attr: mutable PthreadMutexAttr = g_default_mutex_attr
@@ -86,7 +86,7 @@ def posix_pthread_mutex_init(mutex: mutable PthreadMutex&?&, mutex_attr: Pthread
             return POSIX_EINVAL
         if mutex_attr.m_protocol > 2:
             return POSIX_EINVAL
-        attr <- mutex_attr
+        attr <- mutex_attr[0]
     create_res: mutable int = 0
     native: void&? = elisa_kernel_mutex_create(attr.m_type, create_res)
     if native == null:
@@ -96,18 +96,18 @@ def posix_pthread_mutex_init(mutex: mutable PthreadMutex&?&, mutex_attr: Pthread
         mutex.spinloops <- 2000
     return 0
 
-def scePthreadMutexInit(mutex: mutable PthreadMutex&?&, mutex_attr: PthreadMutexAttr&?, name: static u8&?) -> int:
+def scePthreadMutexInit(mutex: mutable PthreadMutex&?, mutex_attr: PthreadMutexAttr&?, name: static u8&?) -> int:
     _ = name
     return threads_sync_orbis_from_posix(posix_pthread_mutex_init(mutex, mutex_attr))
 
-def scePthreadMutexInitPosix(mutex: mutable PthreadMutex&?&, mutex_attr: PthreadMutexAttr&?, name: static u8&?) -> int:
+def scePthreadMutexInitPosix(mutex: mutable PthreadMutex&?, mutex_attr: PthreadMutexAttr&?, name: static u8&?) -> int:
     _ = name
     return posix_pthread_mutex_init(mutex, mutex_attr)
 
-def posix_pthread_mutex_destroy(mutex: mutable PthreadMutex&?&) -> int:
+def posix_pthread_mutex_destroy(mutex: mutable PthreadMutex&?) -> int:
     if mutex == null:
         return POSIX_EINVAL
-    if mutex == null:
+    if not mutex.initialized:
         return 0
     if mutex.locked:
         return POSIX_EBUSY
@@ -115,11 +115,11 @@ def posix_pthread_mutex_destroy(mutex: mutable PthreadMutex&?&) -> int:
         r: int = elisa_kernel_mutex_destroy(mutex.native_handle)
         if r != 0:
             return r
-    mutex <- null
+    mutex <- PthreadMutex(false, false, 0, 0, 1, 0, null)
     return 0
 
-def posix_pthread_mutex_trylock(mutex: mutable PthreadMutex&?&) -> int:
-    if mutex == null or mutex == null:
+def posix_pthread_mutex_trylock(mutex: mutable PthreadMutex&?) -> int:
+    if mutex == null:
         return POSIX_EINVAL
     r: int = elisa_kernel_mutex_trylock(mutex.native_handle)
     if r != 0:
@@ -127,8 +127,8 @@ def posix_pthread_mutex_trylock(mutex: mutable PthreadMutex&?&) -> int:
     mutex.locked <- true
     return 0
 
-def posix_pthread_mutex_lock(mutex: mutable PthreadMutex&?&) -> int:
-    if mutex == null or mutex == null:
+def posix_pthread_mutex_lock(mutex: mutable PthreadMutex&?) -> int:
+    if mutex == null:
         return POSIX_EINVAL
     r: int = elisa_kernel_mutex_lock(mutex.native_handle)
     if r != 0:
@@ -136,19 +136,19 @@ def posix_pthread_mutex_lock(mutex: mutable PthreadMutex&?&) -> int:
     mutex.locked <- true
     return 0
 
-def posix_pthread_mutex_timedlock(mutex: mutable PthreadMutex&?&, abstime: void&?) -> int:
+def posix_pthread_mutex_timedlock(mutex: mutable PthreadMutex&?, abstime: void&?) -> int:
     if abstime != null:
         ts: OrbisKernelTimespec&? = abstime as OrbisKernelTimespec&?
         if ts == null or ts.tv_nsec < 0 or ts.tv_nsec >= 1000000000:
             return POSIX_EINVAL
     return posix_pthread_mutex_trylock(mutex)
 
-def posix_pthread_mutex_reltimedlock_np(mutex: mutable PthreadMutex&?&, usec: u64) -> int:
+def posix_pthread_mutex_reltimedlock_np(mutex: mutable PthreadMutex&?, usec: u64) -> int:
     _ = usec
     return posix_pthread_mutex_trylock(mutex)
 
-def posix_pthread_mutex_unlock(mutex: mutable PthreadMutex&?&) -> int:
-    if mutex == null or mutex == null:
+def posix_pthread_mutex_unlock(mutex: mutable PthreadMutex&?) -> int:
+    if mutex == null:
         return POSIX_EINVAL
     if not mutex.locked:
         return POSIX_EPERM
@@ -189,7 +189,7 @@ def posix_pthread_mutex_isowned_np(mutex: PthreadMutex&?) -> int:
         return 1
     return 0
 
-def posix_pthread_mutexattr_init(attr: mutable PthreadMutexAttr&?&) -> int:
+def posix_pthread_mutexattr_init(attr: mutable PthreadMutexAttr&?) -> int:
     if attr == null:
         return POSIX_EINVAL
     attr <- g_default_mutex_attr
@@ -264,13 +264,13 @@ def posix_pthread_mutexattr_gettype(attr: PthreadMutexAttr&?, type_: mutable int
     type_ <- attr.m_type
     return 0
 
-def posix_pthread_mutexattr_destroy(attr: mutable PthreadMutexAttr&?&) -> int:
-    if attr == null or attr == null:
+def posix_pthread_mutexattr_destroy(attr: mutable PthreadMutexAttr&?) -> int:
+    if attr == null:
         return POSIX_EINVAL
-    attr <- null
+    attr <- g_default_mutex_attr
     return 0
 
-def posix_pthread_cond_init(cond: mutable PthreadCond&?&, cond_attr: PthreadCondAttr&?) -> int:
+def posix_pthread_cond_init(cond: mutable PthreadCond&?, cond_attr: PthreadCondAttr&?) -> int:
     _ = cond_attr
     if cond == null:
         return POSIX_EINVAL
@@ -281,43 +281,51 @@ def posix_pthread_cond_init(cond: mutable PthreadCond&?&, cond_attr: PthreadCond
     cond <- PthreadCond(true, native)
     return 0
 
-def scePthreadCondInit(cond: mutable PthreadCond&?&, cond_attr: PthreadCondAttr&?, name: static u8&?) -> int:
+def scePthreadCondInit(cond: mutable PthreadCond&?, cond_attr: PthreadCondAttr&?, name: static u8&?) -> int:
     _ = name
     return threads_sync_orbis_from_posix(posix_pthread_cond_init(cond, cond_attr))
 
-def posix_pthread_cond_destroy(cond: mutable PthreadCond&?&) -> int:
+def posix_pthread_cond_destroy(cond: mutable PthreadCond&?) -> int:
     if cond == null:
         return POSIX_EINVAL
-    if cond == null:
+    if not cond.initialized:
         return 0
     if cond.native_handle != null:
         r: int = elisa_kernel_cond_destroy(cond.native_handle)
         if r != 0:
             return r
-    cond <- null
+    cond <- PthreadCond(false, null)
     return 0
 
-def posix_pthread_cond_wait(cond: PthreadCond&?, mutex: mutable PthreadMutex&?&) -> int:
-    if cond == null or mutex == null or mutex == null:
+def posix_pthread_cond_wait(cond: PthreadCond&?, mutex: mutable PthreadMutex&?) -> int:
+    if cond == null or mutex == null:
         return POSIX_EINVAL
-    if not mutex.locked:
+    cond_v: PthreadCond& = cond.cast[PthreadCond&]
+    mutex_v: mutable PthreadMutex& = mutex.cast[mutable PthreadMutex&]
+    if not mutex_v.locked:
         return POSIX_EPERM
-    return elisa_kernel_cond_wait(cond.native_handle, mutex.native_handle)
+    return elisa_kernel_cond_wait(cond_v.native_handle, mutex_v.native_handle)
 
-def posix_pthread_cond_timedwait(cond: PthreadCond&?, mutex: mutable PthreadMutex&?&, abstime: void&?) -> int:
+def posix_pthread_cond_timedwait(cond: PthreadCond&?, mutex: mutable PthreadMutex&?, abstime: void&?) -> int:
+    if cond == null or mutex == null:
+        return POSIX_EINVAL
     if abstime == null:
         return POSIX_EINVAL
     ts: OrbisKernelTimespec&? = abstime as OrbisKernelTimespec&?
     if ts == null or ts.tv_sec < 0 or ts.tv_nsec < 0 or ts.tv_nsec >= 1000000000:
         return POSIX_EINVAL
-    return elisa_kernel_cond_timedwait(cond.native_handle, mutex.native_handle, ts.tv_sec, ts.tv_nsec)
+    cond_v: PthreadCond& = cond.cast[PthreadCond&]
+    mutex_v: mutable PthreadMutex& = mutex.cast[mutable PthreadMutex&]
+    return elisa_kernel_cond_timedwait(cond_v.native_handle, mutex_v.native_handle, ts.tv_sec, ts.tv_nsec)
 
-def posix_pthread_cond_reltimedwait_np(cond: PthreadCond&?, mutex: mutable PthreadMutex&?&, usec: u64) -> int:
-    if cond == null or mutex == null or mutex == null:
+def posix_pthread_cond_reltimedwait_np(cond: PthreadCond&?, mutex: mutable PthreadMutex&?, usec: u64) -> int:
+    if cond == null or mutex == null:
         return POSIX_EINVAL
-    if not mutex.locked:
+    cond_v: PthreadCond& = cond.cast[PthreadCond&]
+    mutex_v: mutable PthreadMutex& = mutex.cast[mutable PthreadMutex&]
+    if not mutex_v.locked:
         return POSIX_EPERM
-    return elisa_kernel_cond_reltimedwait(cond.native_handle, mutex.native_handle, usec)
+    return elisa_kernel_cond_reltimedwait(cond_v.native_handle, mutex_v.native_handle, usec)
 
 def posix_pthread_cond_signal(cond: PthreadCond&?) -> int:
     if cond == null:
@@ -333,16 +341,16 @@ def posix_pthread_cond_broadcast(cond: PthreadCond&?) -> int:
         return POSIX_EINVAL
     return elisa_kernel_cond_broadcast(cond.native_handle)
 
-def posix_pthread_condattr_init(attr: mutable PthreadCondAttr&?&) -> int:
+def posix_pthread_condattr_init(attr: mutable PthreadCondAttr&?) -> int:
     if attr == null:
         return POSIX_EINVAL
     attr <- g_default_cond_attr
     return 0
 
-def posix_pthread_condattr_destroy(attr: mutable PthreadCondAttr&?&) -> int:
-    if attr == null or attr == null:
+def posix_pthread_condattr_destroy(attr: mutable PthreadCondAttr&?) -> int:
+    if attr == null:
         return POSIX_EINVAL
-    attr <- null
+    attr <- g_default_cond_attr
     return 0
 
 def posix_pthread_condattr_getclock(attr: PthreadCondAttr&?, clock_id: mutable int&) -> int:
@@ -370,20 +378,20 @@ def posix_pthread_condattr_setpshared(attr: PthreadCondAttr&?, pshared: int) -> 
         return POSIX_EINVAL
     return 0
 
-def posix_pthread_rwlock_destroy(rwlock: mutable PthreadRwlock&?&) -> int:
+def posix_pthread_rwlock_destroy(rwlock: mutable PthreadRwlock&?) -> int:
     if rwlock == null:
         return POSIX_EINVAL
     # Match C++ static-initializer destroy behavior: null rwlock value is a no-op success.
-    if rwlock == null:
+    if not rwlock.initialized:
         return 0
     if rwlock.native_handle != null:
         r: int = elisa_kernel_rwlock_destroy(rwlock.native_handle)
         if r != 0:
             return r
-    rwlock <- null
+    rwlock <- PthreadRwlock(false, 0, false, null)
     return 0
 
-def posix_pthread_rwlock_init(rwlock: mutable PthreadRwlock&?&, attr: PthreadRwlockAttr&?) -> int:
+def posix_pthread_rwlock_init(rwlock: mutable PthreadRwlock&?, attr: PthreadRwlockAttr&?) -> int:
     if rwlock == null:
         return POSIX_EINVAL
     if attr != null and attr.type_ > 2:
@@ -395,8 +403,8 @@ def posix_pthread_rwlock_init(rwlock: mutable PthreadRwlock&?&, attr: PthreadRwl
     rwlock <- PthreadRwlock(true, 0, false, native)
     return 0
 
-def posix_pthread_rwlock_rdlock(rwlock: mutable PthreadRwlock&?&) -> int:
-    if rwlock == null or rwlock == null:
+def posix_pthread_rwlock_rdlock(rwlock: mutable PthreadRwlock&?) -> int:
+    if rwlock == null:
         return POSIX_EINVAL
     r: int = elisa_kernel_rwlock_rdlock(rwlock.native_handle)
     if r != 0:
@@ -404,15 +412,15 @@ def posix_pthread_rwlock_rdlock(rwlock: mutable PthreadRwlock&?&) -> int:
     rwlock.read_count <- rwlock.read_count + 1
     return 0
 
-def posix_pthread_rwlock_timedrdlock(rwlock: mutable PthreadRwlock&?&, abstime: void&?) -> int:
-    if rwlock != null and rwlock != null and rwlock.write_locked and abstime != null:
+def posix_pthread_rwlock_timedrdlock(rwlock: mutable PthreadRwlock&?, abstime: void&?) -> int:
+    if rwlock != null and rwlock.write_locked and abstime != null:
         ts: OrbisKernelTimespec&? = abstime as OrbisKernelTimespec&?
         if ts == null or ts.tv_nsec < 0 or ts.tv_nsec >= 1000000000:
             return POSIX_EINVAL
     return posix_pthread_rwlock_rdlock(rwlock)
 
-def posix_pthread_rwlock_tryrdlock(rwlock: mutable PthreadRwlock&?&) -> int:
-    if rwlock == null or rwlock == null:
+def posix_pthread_rwlock_tryrdlock(rwlock: mutable PthreadRwlock&?) -> int:
+    if rwlock == null:
         return POSIX_EINVAL
     r: int = elisa_kernel_rwlock_tryrdlock(rwlock.native_handle)
     if r != 0:
@@ -420,8 +428,8 @@ def posix_pthread_rwlock_tryrdlock(rwlock: mutable PthreadRwlock&?&) -> int:
     rwlock.read_count <- rwlock.read_count + 1
     return 0
 
-def posix_pthread_rwlock_trywrlock(rwlock: mutable PthreadRwlock&?&) -> int:
-    if rwlock == null or rwlock == null:
+def posix_pthread_rwlock_trywrlock(rwlock: mutable PthreadRwlock&?) -> int:
+    if rwlock == null:
         return POSIX_EINVAL
     r: int = elisa_kernel_rwlock_trywrlock(rwlock.native_handle)
     if r != 0:
@@ -429,8 +437,8 @@ def posix_pthread_rwlock_trywrlock(rwlock: mutable PthreadRwlock&?&) -> int:
     rwlock.write_locked <- true
     return 0
 
-def posix_pthread_rwlock_wrlock(rwlock: mutable PthreadRwlock&?&) -> int:
-    if rwlock == null or rwlock == null:
+def posix_pthread_rwlock_wrlock(rwlock: mutable PthreadRwlock&?) -> int:
+    if rwlock == null:
         return POSIX_EINVAL
     r: int = elisa_kernel_rwlock_wrlock(rwlock.native_handle)
     if r != 0:
@@ -438,15 +446,15 @@ def posix_pthread_rwlock_wrlock(rwlock: mutable PthreadRwlock&?&) -> int:
     rwlock.write_locked <- true
     return 0
 
-def posix_pthread_rwlock_timedwrlock(rwlock: mutable PthreadRwlock&?&, abstime: void&?) -> int:
-    if rwlock != null and rwlock != null and (rwlock.write_locked or rwlock.read_count > 0) and abstime != null:
+def posix_pthread_rwlock_timedwrlock(rwlock: mutable PthreadRwlock&?, abstime: void&?) -> int:
+    if rwlock != null and (rwlock.write_locked or rwlock.read_count > 0) and abstime != null:
         ts: OrbisKernelTimespec&? = abstime as OrbisKernelTimespec&?
         if ts == null or ts.tv_nsec < 0 or ts.tv_nsec >= 1000000000:
             return POSIX_EINVAL
     return posix_pthread_rwlock_trywrlock(rwlock)
 
-def posix_pthread_rwlock_unlock(rwlock: mutable PthreadRwlock&?&) -> int:
-    if rwlock == null or rwlock == null:
+def posix_pthread_rwlock_unlock(rwlock: mutable PthreadRwlock&?) -> int:
+    if rwlock == null:
         return POSIX_EINVAL
     if rwlock.write_locked:
         r: int = elisa_kernel_rwlock_unlock(rwlock.native_handle)
@@ -462,10 +470,10 @@ def posix_pthread_rwlock_unlock(rwlock: mutable PthreadRwlock&?&) -> int:
         return 0
     return POSIX_EPERM
 
-def posix_pthread_rwlockattr_destroy(rwlockattr: mutable PthreadRwlockAttr&?&) -> int:
-    if rwlockattr == null or rwlockattr == null:
+def posix_pthread_rwlockattr_destroy(rwlockattr: mutable PthreadRwlockAttr&?) -> int:
+    if rwlockattr == null:
         return POSIX_EINVAL
-    rwlockattr <- null
+    rwlockattr <- g_default_rwlock_attr
     return 0
 
 def posix_pthread_rwlockattr_getpshared(rwlockattr: PthreadRwlockAttr&?, pshared: mutable int&) -> int:
@@ -480,7 +488,7 @@ def posix_pthread_rwlockattr_gettype_np(rwlockattr: PthreadRwlockAttr&?, type_: 
     type_ <- rwlockattr.type_
     return 0
 
-def posix_pthread_rwlockattr_init(rwlockattr: mutable PthreadRwlockAttr&?&) -> int:
+def posix_pthread_rwlockattr_init(rwlockattr: mutable PthreadRwlockAttr&?) -> int:
     if rwlockattr == null:
         return POSIX_EINVAL
     rwlockattr <- g_default_rwlock_attr
@@ -503,15 +511,15 @@ def posix_pthread_rwlockattr_setpshared(rwlockattr: mutable PthreadRwlockAttr&?,
 
 def scePthreadMutexIsowned(mutex: PthreadMutex&?) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_mutex_isowned_np(mutex))
-def scePthreadMutexInitOrbis(mutex: mutable PthreadMutex&?&, mutex_attr: PthreadMutexAttr&?) -> int:
+def scePthreadMutexInitOrbis(mutex: mutable PthreadMutex&?, mutex_attr: PthreadMutexAttr&?) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_mutex_init(mutex, mutex_attr))
-def scePthreadMutexLock(mutex: mutable PthreadMutex&?&) -> int:
+def scePthreadMutexLock(mutex: mutable PthreadMutex&?) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_mutex_lock(mutex))
-def scePthreadMutexRelTimedlock(mutex: mutable PthreadMutex&?&, usec: u64) -> int:
+def scePthreadMutexRelTimedlock(mutex: mutable PthreadMutex&?, usec: u64) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_mutex_reltimedlock_np(mutex, usec))
-def scePthreadMutexTrylock(mutex: mutable PthreadMutex&?&) -> int:
+def scePthreadMutexTrylock(mutex: mutable PthreadMutex&?) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_mutex_trylock(mutex))
-def scePthreadMutexUnlock(mutex: mutable PthreadMutex&?&) -> int:
+def scePthreadMutexUnlock(mutex: mutable PthreadMutex&?) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_mutex_unlock(mutex))
 def scePthreadMutexGetspinloops(mutex: PthreadMutex&?, count: mutable int&) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_mutex_getspinloops_np(mutex, count))
@@ -521,9 +529,9 @@ def scePthreadMutexSetspinloops(mutex: mutable PthreadMutex&?, count: int) -> in
     return threads_sync_orbis_from_posix(posix_pthread_mutex_setspinloops_np(mutex, count))
 def scePthreadMutexSetyieldloops(mutex: mutable PthreadMutex&?, count: int) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_mutex_setyieldloops_np(mutex, count))
-def scePthreadMutexDestroy(mutex: mutable PthreadMutex&?&) -> int:
+def scePthreadMutexDestroy(mutex: mutable PthreadMutex&?) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_mutex_destroy(mutex))
-def scePthreadMutexattrInit(attr: mutable PthreadMutexAttr&?&) -> int:
+def scePthreadMutexattrInit(attr: mutable PthreadMutexAttr&?) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_mutexattr_init(attr))
 def scePthreadMutexattrGetkind(attr: PthreadMutexAttr&?) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_mutexattr_getkind_np(attr))
@@ -545,10 +553,10 @@ def scePthreadMutexattrSetpshared(attr: PthreadMutexAttr&?, pshared: int) -> int
     return threads_sync_orbis_from_posix(posix_pthread_mutexattr_setpshared(attr, pshared))
 def scePthreadMutexattrSettype(attr: mutable PthreadMutexAttr&?, type_: int) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_mutexattr_settype(attr, type_))
-def scePthreadMutexattrDestroy(attr: mutable PthreadMutexAttr&?&) -> int:
+def scePthreadMutexattrDestroy(attr: mutable PthreadMutexAttr&?) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_mutexattr_destroy(attr))
 
-def scePthreadCondattrInit(attr: mutable PthreadCondAttr&?&) -> int:
+def scePthreadCondattrInit(attr: mutable PthreadCondAttr&?) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_condattr_init(attr))
 def scePthreadCondattrSetpshared(attr: PthreadCondAttr&?, pshared: int) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_condattr_setpshared(attr, pshared))
@@ -558,11 +566,11 @@ def scePthreadCondattrGetpshared(attr: PthreadCondAttr&?, pshared: mutable int&)
     return threads_sync_orbis_from_posix(posix_pthread_condattr_getpshared(attr, pshared))
 def scePthreadCondattrGetclock(attr: PthreadCondAttr&?, clock_id: mutable int&) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_condattr_getclock(attr, clock_id))
-def scePthreadCondattrDestroy(attr: mutable PthreadCondAttr&?&) -> int:
+def scePthreadCondattrDestroy(attr: mutable PthreadCondAttr&?) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_condattr_destroy(attr))
-def scePthreadCondRelTimedwait(cond: PthreadCond&?, mutex: mutable PthreadMutex&?&, usec: u64) -> int:
+def scePthreadCondRelTimedwait(cond: PthreadCond&?, mutex: mutable PthreadMutex&?, usec: u64) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_cond_reltimedwait_np(cond, mutex, usec))
-def scePthreadCondWait(cond: PthreadCond&?, mutex: mutable PthreadMutex&?&) -> int:
+def scePthreadCondWait(cond: PthreadCond&?, mutex: mutable PthreadMutex&?) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_cond_wait(cond, mutex))
 def scePthreadCondSignal(cond: PthreadCond&?) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_cond_signal(cond))
@@ -570,38 +578,38 @@ def scePthreadCondSignalto(cond: PthreadCond&?, thread: void&?) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_cond_signalto_np(cond, thread))
 def scePthreadCondBroadcast(cond: PthreadCond&?) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_cond_broadcast(cond))
-def scePthreadCondDestroy(cond: mutable PthreadCond&?&) -> int:
+def scePthreadCondDestroy(cond: mutable PthreadCond&?) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_cond_destroy(cond))
 
-def scePthreadRwlockattrDestroy(attr: mutable PthreadRwlockAttr&?&) -> int:
+def scePthreadRwlockattrDestroy(attr: mutable PthreadRwlockAttr&?) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_rwlockattr_destroy(attr))
 def scePthreadRwlockattrGetpshared(attr: PthreadRwlockAttr&?, pshared: mutable int&) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_rwlockattr_getpshared(attr, pshared))
 def scePthreadRwlockattrGettype(attr: PthreadRwlockAttr&?, type_: mutable int&) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_rwlockattr_gettype_np(attr, type_))
-def scePthreadRwlockattrInit(attr: mutable PthreadRwlockAttr&?&) -> int:
+def scePthreadRwlockattrInit(attr: mutable PthreadRwlockAttr&?) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_rwlockattr_init(attr))
 def scePthreadRwlockattrSetpshared(attr: mutable PthreadRwlockAttr&?, pshared: int) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_rwlockattr_setpshared(attr, pshared))
 def scePthreadRwlockattrSettype(attr: mutable PthreadRwlockAttr&?, type_: int) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_rwlockattr_settype_np(attr, type_))
-def scePthreadRwlockDestroy(rwlock: mutable PthreadRwlock&?&) -> int:
+def scePthreadRwlockDestroy(rwlock: mutable PthreadRwlock&?) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_rwlock_destroy(rwlock))
-def scePthreadRwlockInit(rwlock: mutable PthreadRwlock&?&, attr: PthreadRwlockAttr&?) -> int:
+def scePthreadRwlockInit(rwlock: mutable PthreadRwlock&?, attr: PthreadRwlockAttr&?) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_rwlock_init(rwlock, attr))
-def scePthreadRwlockRdlock(rwlock: mutable PthreadRwlock&?&) -> int:
+def scePthreadRwlockRdlock(rwlock: mutable PthreadRwlock&?) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_rwlock_rdlock(rwlock))
-def scePthreadRwlockTimedrdlock(rwlock: mutable PthreadRwlock&?&, abstime: void&?) -> int:
+def scePthreadRwlockTimedrdlock(rwlock: mutable PthreadRwlock&?, abstime: void&?) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_rwlock_timedrdlock(rwlock, abstime))
-def scePthreadRwlockTimedwrlock(rwlock: mutable PthreadRwlock&?&, abstime: void&?) -> int:
+def scePthreadRwlockTimedwrlock(rwlock: mutable PthreadRwlock&?, abstime: void&?) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_rwlock_timedwrlock(rwlock, abstime))
-def scePthreadRwlockTryrdlock(rwlock: mutable PthreadRwlock&?&) -> int:
+def scePthreadRwlockTryrdlock(rwlock: mutable PthreadRwlock&?) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_rwlock_tryrdlock(rwlock))
-def scePthreadRwlockTrywrlock(rwlock: mutable PthreadRwlock&?&) -> int:
+def scePthreadRwlockTrywrlock(rwlock: mutable PthreadRwlock&?) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_rwlock_trywrlock(rwlock))
-def scePthreadRwlockUnlock(rwlock: mutable PthreadRwlock&?&) -> int:
+def scePthreadRwlockUnlock(rwlock: mutable PthreadRwlock&?) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_rwlock_unlock(rwlock))
-def scePthreadRwlockWrlock(rwlock: mutable PthreadRwlock&?&) -> int:
+def scePthreadRwlockWrlock(rwlock: mutable PthreadRwlock&?) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_rwlock_wrlock(rwlock))
 
 def RegisterMutex(sym: void&?) -> void:

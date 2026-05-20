@@ -76,7 +76,7 @@ def __pthread_cleanup_push_imp(routine: void&?, arg: void&?, newbuf: mutable Pth
     newbuf.routine_arg <- arg
     newbuf.onheap <- 0
     if g_pthread_cleanup_depth < PTHREAD_CLEANUP_STACK_MAX:
-        g_pthread_cleanup_stack[g_pthread_cleanup_depth] <- newbuf
+        g_pthread_cleanup_stack[g_pthread_cleanup_depth] <- newbuf[0]
         g_pthread_cleanup_depth <- g_pthread_cleanup_depth + 1
 
 def posix_pthread_cleanup_push(routine: void&?, arg: void&?) -> void:
@@ -148,7 +148,7 @@ def sceKernelClearEventFlag(ef: int, bit_pattern: u64) -> int:
     if ef < 0 or ef >= 64 or not g_event_flags[ef].used:
         return ORBIS_KERNEL_ERROR_ESRCH
     _ = elisa_kernel_event_clear(g_event_flags[ef].native_handle, bit_pattern)
-    g_event_flags[ef].bits <- g_event_flags[ef].bits and bit_pattern
+    g_event_flags[ef].bits <- g_event_flags[ef].bits & bit_pattern
     return ORBIS_OK
 
 def sceKernelCancelEventFlag(ef: int, set_pattern: u64, p_num_wait_threads: mutable int&?) -> int:
@@ -162,7 +162,7 @@ def sceKernelSetEventFlag(ef: int, bit_pattern: u64) -> int:
     if ef < 0 or ef >= 64 or not g_event_flags[ef].used:
         return ORBIS_KERNEL_ERROR_ESRCH
     _ = elisa_kernel_event_set(g_event_flags[ef].native_handle, bit_pattern)
-    g_event_flags[ef].bits <- g_event_flags[ef].bits or bit_pattern
+    g_event_flags[ef].bits <- g_event_flags[ef].bits | bit_pattern
     return ORBIS_OK
 
 def sceKernelPollEventFlag(ef: int, bit_pattern: u64, wait_mode: u32, p_result_pat: mutable u64&?) -> int:
@@ -171,20 +171,20 @@ def sceKernelPollEventFlag(ef: int, bit_pattern: u64, wait_mode: u32, p_result_p
     if bit_pattern == 0u64:
         return ORBIS_KERNEL_ERROR_EINVAL
     bits: u64 = g_event_flags[ef].bits
-    wait_mode_low: u32 = wait_mode and 0x0fu32
+    wait_mode_low: u32 = wait_mode & 0x0fu32
     if wait_mode_low != 0x01u32 and wait_mode_low != 0x02u32:
         return ORBIS_KERNEL_ERROR_EINVAL
-    clear_mode_bits: u32 = wait_mode and 0xf0u32
+    clear_mode_bits: u32 = wait_mode & 0xf0u32
     if clear_mode_bits != 0x00u32 and clear_mode_bits != 0x10u32 and clear_mode_bits != 0x20u32:
         return ORBIS_KERNEL_ERROR_EINVAL
 
     and_mode: bool = wait_mode_low == 0x01u32
-    ok: bool = false
+    ok: mutable bool = false
     if and_mode:
-        ok <- (bits and bit_pattern) == bit_pattern
+        ok <- (bits & bit_pattern) == bit_pattern
     else:
-        ok <- (bits and bit_pattern) != 0u64
-    native_r: int = elisa_kernel_event_poll(g_event_flags[ef].native_handle, bit_pattern, wait_mode, p_result_pat)
+        ok <- (bits & bit_pattern) != 0u64
+    native_r: mutable int = elisa_kernel_event_poll(g_event_flags[ef].native_handle, bit_pattern, wait_mode, p_result_pat)
     if native_r == POSIX_EAGAIN:
         native_r <- POSIX_EBUSY
     if native_r != 0 and native_r != POSIX_EBUSY:
@@ -196,16 +196,16 @@ def sceKernelPollEventFlag(ef: int, bit_pattern: u64, wait_mode: u32, p_result_p
     if clear_mode_bits == 0x10u32:
         g_event_flags[ef].bits <- 0u64
     if clear_mode_bits == 0x20u32:
-        g_event_flags[ef].bits <- g_event_flags[ef].bits and (not bit_pattern)
+        g_event_flags[ef].bits <- g_event_flags[ef].bits & ~bit_pattern
     return ORBIS_OK
 
 def sceKernelWaitEventFlag(ef: int, bit_pattern: u64, wait_mode: u32, p_result_pat: mutable u64&?, p_timeout: mutable u32&?) -> int:
     r: int = sceKernelPollEventFlag(ef, bit_pattern, wait_mode, p_result_pat)
     if r == ORBIS_KERNEL_ERROR_EBUSY:
         # Match C++ single-thread event flag behavior: only one waiter allowed.
-        if (g_event_flags[ef].attr and 0x30u32) == 0x10u32 and g_event_waiters[ef] > 0:
+        if (g_event_flags[ef].attr & 0x30u32) == 0x10u32 and g_event_waiters[ef] > 0:
             return ORBIS_KERNEL_ERROR_EPERM
-        wait_usec: u64 = 0xffffffffffffffffu64
+        wait_usec: mutable u64 = 0xffffffffffffffffu64
         if p_timeout != null:
             wait_usec <- p_timeout[0] as u64
         g_event_waiters[ef] <- g_event_waiters[ef] + 1

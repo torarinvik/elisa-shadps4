@@ -125,7 +125,7 @@ def sceKernelCancelSema(sem: int, set_count: int, p_num_wait_threads: mutable in
         return ORBIS_KERNEL_ERROR_ESRCH
     if p_num_wait_threads != null:
         p_num_wait_threads <- g_orbis_sem_waiters[sem]
-    set_value: int = set_count
+    set_value: mutable int = set_count
     if set_count < 0:
         set_value <- g_orbis_sems[sem].init_count
     g_orbis_sems[sem].token_count <- set_value
@@ -153,24 +153,25 @@ def posix_sem_init(sem: mutable PthreadSem&?&, pshared: int, value: u32) -> int:
     _ = pshared
     if value > ORBIS_KERNEL_SEM_VALUE_MAX as u32:
         return -1
-    if sem != null:
-        create_res: mutable int = 0
-        native: void&? = elisa_kernel_sem_create(value as int, ORBIS_KERNEL_SEM_VALUE_MAX, create_res)
-        if native == null:
-            return -1
-        sem <- PthreadSem(value as int, native)
+    if sem == null:
+        return 0
+    create_res: mutable int = 0
+    native: void&? = elisa_kernel_sem_create(value as int, ORBIS_KERNEL_SEM_VALUE_MAX, create_res)
+    if native == null:
+        return -1
+    sem <- PthreadSem(value as int, native)
     return 0
 
 def posix_sem_destroy(sem: mutable PthreadSem&?&) -> int:
-    if sem == null or sem == null:
+    if sem == null:
         return -1
     if sem.native_handle != null:
         _ = elisa_kernel_sem_destroy(sem.native_handle)
-    sem <- null
+    sem <- PthreadSem(0, null)
     return 0
 
 def posix_sem_wait(sem: mutable PthreadSem&?&) -> int:
-    if sem == null or sem == null:
+    if sem == null:
         return -1
     r: int = elisa_kernel_sem_wait(sem.native_handle, 1)
     if r != 0:
@@ -179,7 +180,7 @@ def posix_sem_wait(sem: mutable PthreadSem&?&) -> int:
     return 0
 
 def posix_sem_trywait(sem: mutable PthreadSem&?&) -> int:
-    if sem == null or sem == null:
+    if sem == null:
         return -1
     r: int = elisa_kernel_sem_trywait(sem.native_handle, 1)
     if r != 0:
@@ -189,7 +190,7 @@ def posix_sem_trywait(sem: mutable PthreadSem&?&) -> int:
 
 def posix_sem_timedwait(sem: mutable PthreadSem&?&, t: void&?) -> int:
     _ = t
-    if sem == null or sem == null:
+    if sem == null:
         return -1
     r: int = elisa_kernel_sem_timedwait(sem.native_handle, 1, 0u64)
     if r != 0:
@@ -198,7 +199,7 @@ def posix_sem_timedwait(sem: mutable PthreadSem&?&, t: void&?) -> int:
     return 0
 
 def posix_sem_post(sem: mutable PthreadSem&?&) -> int:
-    if sem == null or sem == null:
+    if sem == null:
         return -1
     r: int = elisa_kernel_sem_post(sem.native_handle, 1)
     if r != 0:
@@ -211,8 +212,6 @@ def posix_sem_getvalue(sem: PthreadSem&?, sval: mutable int&?) -> int:
         return -1
     if sem.native_handle != null:
         _ = elisa_kernel_sem_getvalue(sem.native_handle, sval)
-        if sval != null:
-            sem.value <- sval
         return 0
     if sval != null:
         sval <- sem.value
@@ -234,7 +233,7 @@ def scePthreadSemDestroy(sem: mutable PthreadSem&?&) -> int:
 def scePthreadSemWait(sem: mutable PthreadSem&?&) -> int:
     r: int = posix_sem_wait(sem)
     if r != 0:
-        if sem == null or sem == null:
+        if sem == null:
             return ORBIS_KERNEL_ERROR_EINVAL
         return threads_posix_to_orbis_errno(POSIX_EAGAIN)
     return ORBIS_OK
@@ -242,7 +241,7 @@ def scePthreadSemWait(sem: mutable PthreadSem&?&) -> int:
 def scePthreadSemTrywait(sem: mutable PthreadSem&?&) -> int:
     r: int = posix_sem_trywait(sem)
     if r != 0:
-        if sem == null or sem == null:
+        if sem == null:
             return ORBIS_KERNEL_ERROR_EINVAL
         return threads_posix_to_orbis_errno(POSIX_EAGAIN)
     return ORBIS_OK
@@ -251,7 +250,7 @@ def scePthreadSemTimedwait(sem: mutable PthreadSem&?&, usec: u32) -> int:
     _ = usec
     r: int = posix_sem_timedwait(sem, null)
     if r != 0:
-        if sem == null or sem == null:
+        if sem == null:
             return ORBIS_KERNEL_ERROR_EINVAL
         return threads_posix_to_orbis_errno(POSIX_ETIMEDOUT)
     return ORBIS_OK
@@ -259,7 +258,7 @@ def scePthreadSemTimedwait(sem: mutable PthreadSem&?&, usec: u32) -> int:
 def scePthreadSemPost(sem: mutable PthreadSem&?&) -> int:
     r: int = posix_sem_post(sem)
     if r != 0:
-        if sem == null or sem == null:
+        if sem == null:
             return ORBIS_KERNEL_ERROR_EINVAL
         return threads_posix_to_orbis_errno(POSIX_EOVERFLOW)
     return ORBIS_OK
@@ -340,8 +339,8 @@ def threads_cleanup_specific() -> void:
             key: mutable int = 0
             trusted Unsafe.AssumeProgress:
                 while key < PTHREAD_KEYS_MAX and g_tls_specific_count > 0:
-                    destructor: void&? = null
-                    data: void&? = null
+                    destructor: mutable void&? = null
+                    data: mutable void&? = null
                     if g_tls_values[key] != null:
                         if g_tls_allocated[key] and g_tls_value_seqno[key] == g_tls_seqno[key]:
                             data <- g_tls_values[key]
