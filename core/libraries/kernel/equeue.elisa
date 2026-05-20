@@ -6,95 +6,482 @@ include "./orbis_error.elisa"
 include "./posix_error.elisa"
 include "./lib_function_stub.elisa"
 
-def posix_kqueue() -> int:
+extern high_resolution_now_ns() -> i64
+extern sceKernelUsleep(microseconds: u32) -> int
+extern SetPosixErrno(e: int) -> void
+
+const EQUEUE_MAX_QUEUES: int = 64
+const EQUEUE_MAX_EVENTS: int = 2048
+const EQUEUE_MAX_NAME: int = 32
+
+const EQUEUE_FILTER_TIMER: int = -7
+const EQUEUE_FILTER_USER: int = -11
+const EQUEUE_FILTER_VIDEOOUT: int = -13
+const EQUEUE_FILTER_GRAPHICS: int = -14
+const EQUEUE_FILTER_HRTIMER: int = -15
+
+const EQUEUE_FLAG_ADD: u16 = 0x0001u16
+const EQUEUE_FLAG_DELETE: u16 = 0x0002u16
+const EQUEUE_FLAG_ONESHOT: u16 = 0x0010u16
+const EQUEUE_FLAG_CLEAR: u16 = 0x0020u16
+
+const EQUEUE_USER_TRIGGER_FFLAG: u32 = 0x01000000u32
+
+@fixed_layout
+struct OrbisKernelTimespec:
+    tv_sec: mutable i64
+    tv_nsec: mutable i64
+
+@fixed_layout
+struct OrbisKernelEvent:
+    ident: mutable u64
+    filter: mutable i16
+    flags: mutable u16
+    fflags: mutable u32
+    data: mutable u64
+    udata: mutable void&?
+
+@fixed_layout
+struct EqueueState:
+    used: mutable bool
+    handle: mutable int
+    name: mutable u8[EQUEUE_MAX_NAME]
+
+@fixed_layout
+struct EqueueEventState:
+    used: mutable bool
+    queue_handle: mutable int
+    event: mutable OrbisKernelEvent
+    triggered: mutable bool
+    timer_period_us: mutable u64
+    timer_deadline_us: mutable u64
+
+global mutable g_equeues: EqueueState[EQUEUE_MAX_QUEUES] = zeroed
+global mutable g_equeue_events: EqueueEventState[EQUEUE_MAX_EVENTS] = zeroed
+global mutable g_equeue_next_handle: int = 100
+
+def equeue_now_usec() -> u64:
+    ns: i64 = high_resolution_now_ns()
+    if ns <= 0:
+        return 0
+    return (ns / 1000).u64()
+
+def equeue_supported_filter(filter: int) -> bool:
+    return filter == EQUEUE_FILTER_GRAPHICS or filter == EQUEUE_FILTER_HRTIMER or filter == EQUEUE_FILTER_TIMER or filter == EQUEUE_FILTER_USER or filter == EQUEUE_FILTER_VIDEOOUT
+
+def equeue_find_queue_slot(handle: int) -> int:
+    i: mutable int = 0
+    while i < EQUEUE_MAX_QUEUES:
+        if g_equeues[i].used and g_equeues[i].handle == handle:
+            return i
+        i <- i + 1
     return -1
+
+def equeue_find_free_queue_slot() -> int:
+    i: mutable int = 0
+    while i < EQUEUE_MAX_QUEUES:
+        if not g_equeues[i].used:
+            return i
+        i <- i + 1
+    return -1
+
+def equeue_clear_queue_events(handle: int) -> void:
+    i: mutable int = 0
+    while i < EQUEUE_MAX_EVENTS:
+        if g_equeue_events[i].used and g_equeue_events[i].queue_handle == handle:
+            g_equeue_events[i] <- zeroed
+        i <- i + 1
+
+def equeue_find_event_slot(handle: int, ident: u64, filter: int) -> int:
+    i: mutable int = 0
+    while i < EQUEUE_MAX_EVENTS:
+        if g_equeue_events[i].used and g_equeue_events[i].queue_handle == handle and g_equeue_events[i].event.ident == ident and g_equeue_events[i].event.filter.int() == filter:
+            return i
+        i <- i + 1
+    return -1
+
+def equeue_find_free_event_slot() -> int:
+    i: mutable int = 0
+    while i < EQUEUE_MAX_EVENTS:
+        if not g_equeue_events[i].used:
+            return i
+        i <- i + 1
+    return -1
+
+def equeue_add_or_update_event(handle: int, incoming: OrbisKernelEvent) -> bool:
+    idx: int = equeue_find_event_slot(handle, incoming.ident, incoming.filter.int())
+    if idx >= 0:
+        # Parity with C++: duplicate add updates user data and timer interval.
+        g_equeue_events[idx].event.udata <- incoming.udata
+        if incoming.filter.int() == EQUEUE_FILTER_TIMER:
+            g_equeue_events[idx].timer_period_us <- incoming.data * 1000
+            g_equeue_events[idx].timer_deadline_us <- equeue_now_usec() + g_equeue_events[idx].timer_period_us
+        elif incoming.filter.int() == EQUEUE_FILTER_HRTIMER:
+            g_equeue_events[idx].timer_period_us <- incoming.data
+            g_equeue_events[idx].timer_deadline_us <- equeue_now_usec() + incoming.data
+        return true
+
+    free_idx: int = equeue_find_free_event_slot()
+    if free_idx < 0:
+        return false
+
+    stored: mutable OrbisKernelEvent = incoming
+    # Parity with C++: event.data is cleared on add.
+    stored.data <- 0
+    # Parity with C++: Add flag is consumed internally.
+    if (stored.flags & EQUEUE_FLAG_ADD) != 0:
+        stored.flags <- stored.flags - EQUEUE_FLAG_ADD
+    # Non-user events are clear-on-consume.
+    if stored.filter.int() != EQUEUE_FILTER_USER:
+        stored.flags <- stored.flags | EQUEUE_FLAG_CLEAR
+
+    period_us: mutable u64 = 0
+    deadline_us: mutable u64 = 0
+    if incoming.filter.int() == EQUEUE_FILTER_TIMER:
+        period_us <- incoming.data * 1000
+        deadline_us <- equeue_now_usec() + period_us
+    elif incoming.filter.int() == EQUEUE_FILTER_HRTIMER:
+        period_us <- incoming.data
+        deadline_us <- equeue_now_usec() + period_us
+
+    g_equeue_events[free_idx].used <- true
+    g_equeue_events[free_idx].queue_handle <- handle
+    g_equeue_events[free_idx].event <- stored
+    g_equeue_events[free_idx].triggered <- false
+    g_equeue_events[free_idx].timer_period_us <- period_us
+    g_equeue_events[free_idx].timer_deadline_us <- deadline_us
+    return true
+
+def equeue_remove_event(handle: int, ident: u64, filter: int) -> bool:
+    idx: int = equeue_find_event_slot(handle, ident, filter)
+    if idx < 0:
+        return false
+    g_equeue_events[idx] <- zeroed
+    return true
+
+def equeue_trigger_event(handle: int, ident: u64, filter: int, trigger_data: void&?) -> bool:
+    i: mutable int = 0
+    found: mutable bool = false
+    while i < EQUEUE_MAX_EVENTS:
+        if g_equeue_events[i].used and g_equeue_events[i].queue_handle == handle and g_equeue_events[i].event.ident == ident and g_equeue_events[i].event.filter.int() == filter:
+            g_equeue_events[i].triggered <- true
+            if filter == EQUEUE_FILTER_USER:
+                g_equeue_events[i].event.udata <- trigger_data
+            elif filter == EQUEUE_FILTER_TIMER or filter == EQUEUE_FILTER_HRTIMER:
+                g_equeue_events[i].event.data <- g_equeue_events[i].event.data + 1
+            else:
+                g_equeue_events[i].event.data <- trigger_data.cast[u64]
+            found <- true
+        i <- i + 1
+    return found
+
+def equeue_refresh_timers(handle: int) -> void:
+    now_us: u64 = equeue_now_usec()
+    i: mutable int = 0
+    while i < EQUEUE_MAX_EVENTS:
+        if g_equeue_events[i].used and g_equeue_events[i].queue_handle == handle and g_equeue_events[i].timer_period_us > 0 and now_us >= g_equeue_events[i].timer_deadline_us:
+            g_equeue_events[i].triggered <- true
+            g_equeue_events[i].event.data <- g_equeue_events[i].event.data + 1
+            if (g_equeue_events[i].event.flags & EQUEUE_FLAG_ONESHOT) != 0:
+                g_equeue_events[i].timer_deadline_us <- 0
+                g_equeue_events[i].timer_period_us <- 0
+            else:
+                # Catch up without accumulating drift.
+                while g_equeue_events[i].timer_deadline_us <= now_us and g_equeue_events[i].timer_period_us > 0:
+                    g_equeue_events[i].timer_deadline_us <- g_equeue_events[i].timer_deadline_us + g_equeue_events[i].timer_period_us
+        i <- i + 1
+
+def equeue_collect_triggered(handle: int, out_events: mutable OrbisKernelEvent&, max_count: int) -> int:
+    count: mutable int = 0
+    i: mutable int = 0
+    while i < EQUEUE_MAX_EVENTS and count < max_count:
+        if g_equeue_events[i].used and g_equeue_events[i].queue_handle == handle and g_equeue_events[i].triggered:
+            out_events[count.usize()] <- g_equeue_events[i].event
+            count <- count + 1
+
+            if (g_equeue_events[i].event.flags & EQUEUE_FLAG_CLEAR) != 0:
+                g_equeue_events[i].triggered <- false
+                g_equeue_events[i].event.fflags <- 0
+                g_equeue_events[i].event.data <- 0
+
+            if (g_equeue_events[i].event.flags & EQUEUE_FLAG_ONESHOT) != 0:
+                g_equeue_events[i] <- zeroed
+        i <- i + 1
+    return count
+
+def equeue_wait_for_events(handle: int, ev: mutable OrbisKernelEvent&, num: int, timo: mutable u32&?) -> int:
+    if num <= 0:
+        return 0
+
+    start_us: u64 = equeue_now_usec()
+    timeout_us: mutable u64 = 0
+    has_timeout: bool = timo != null
+    if has_timeout:
+        timeout_in: mutable u32&? = timo as mutable u32&?
+        if timeout_in == null:
+            timeout_us <- 0
+        else:
+            timeout_us <- timeout_in[0].u64()
+        if timeout_us == 0:
+            equeue_refresh_timers(handle)
+            return equeue_collect_triggered(handle, ev, num)
+
+    trusted Unsafe.AssumeProgress:
+        while true:
+            equeue_refresh_timers(handle)
+            count: int = equeue_collect_triggered(handle, ev, num)
+            if count > 0:
+                return count
+
+            if has_timeout:
+                now_us: u64 = equeue_now_usec()
+                if now_us - start_us >= timeout_us:
+                    return 0
+            _ = sceKernelUsleep(50)
+    return 0
+
+def posix_kqueue() -> int:
+    slot: int = equeue_find_free_queue_slot()
+    if slot < 0:
+        SetPosixErrno(POSIX_ENOMEM)
+        return -1
+
+    handle: int = g_equeue_next_handle
+    g_equeue_next_handle <- g_equeue_next_handle + 1
+
+    g_equeues[slot] <- zeroed
+    g_equeues[slot].used <- true
+    g_equeues[slot].handle <- handle
+    # "kqueueNNN" with guaranteed NUL termination.
+    g_equeues[slot].name[0] <- 'k'.u8()
+    g_equeues[slot].name[1] <- 'q'.u8()
+    g_equeues[slot].name[2] <- 'u'.u8()
+    g_equeues[slot].name[3] <- 'e'.u8()
+    g_equeues[slot].name[4] <- 'u'.u8()
+    g_equeues[slot].name[5] <- 'e'.u8()
+    g_equeues[slot].name[6] <- 0u8
+    return handle
 
 def posix_kevent(handle: int, changelist: void&?, nchanges: u64, eventlist: void&?, nevents: u64, timeout: void&?) -> int:
-    _ = handle
-    _ = changelist
-    _ = nchanges
-    _ = eventlist
-    _ = nevents
-    _ = timeout
-    return -1
+    if equeue_find_queue_slot(handle) < 0:
+        SetPosixErrno(POSIX_EBADF)
+        return -1
+
+    changes: OrbisKernelEvent&? = changelist as OrbisKernelEvent&?
+    out_events: mutable OrbisKernelEvent&? = eventlist as mutable OrbisKernelEvent&?
+
+    i: mutable u64 = 0u64
+    while i < nchanges:
+        if changes != null:
+            ch: OrbisKernelEvent = changes[i.usize()]
+            if equeue_supported_filter(ch.filter.int()):
+                if (ch.flags & EQUEUE_FLAG_ADD) != 0:
+                    if not equeue_add_or_update_event(handle, ch):
+                        SetPosixErrno(POSIX_ENOMEM)
+                        return -1
+
+                if (ch.flags & EQUEUE_FLAG_DELETE) != 0:
+                    if not equeue_remove_event(handle, ch.ident, ch.filter.int()):
+                        SetPosixErrno(POSIX_ENOENT)
+                        return -1
+
+                if ch.filter.int() == EQUEUE_FILTER_USER and ch.fflags == EQUEUE_USER_TRIGGER_FFLAG:
+                    if not equeue_trigger_event(handle, ch.ident, EQUEUE_FILTER_USER, ch.udata):
+                        SetPosixErrno(POSIX_ENOENT)
+                        return -1
+        i <- i + 1u64
+
+    if nevents == 0u64:
+        return 0
+    if out_events == null:
+        SetPosixErrno(POSIX_EFAULT)
+        return -1
+
+    timeout_us: mutable u32 = 0
+    timeout_ref: mutable u32&? = null
+    if timeout != null:
+        ts: OrbisKernelTimespec&? = timeout as OrbisKernelTimespec&?
+        if ts != null:
+            timeout_us <- (ts.tv_sec * 1000000 + (ts.tv_nsec / 1000)).u32()
+            timeout_ref <- timeout_us.ref[mutable u32&]
+    return equeue_wait_for_events(handle, out_events, nevents.int(), timeout_ref)
 
 def sceKernelCreateEqueue(eq: void&?, name: u8&?) -> int:
-    _ = eq
-    _ = name
+    out_eq: mutable int&? = eq as mutable int&?
+    if out_eq == null or name == null:
+        return ORBIS_KERNEL_ERROR_EINVAL
+
+    name_len: mutable int = 0
+    trusted Unsafe.AssumeProgress:
+        while name[name_len.usize()] != 0u8:
+            name_len <- name_len + 1
+            if name_len > EQUEUE_MAX_NAME:
+                return ORBIS_KERNEL_ERROR_ENAMETOOLONG
+
+    slot: int = equeue_find_free_queue_slot()
+    if slot < 0:
+        return ORBIS_KERNEL_ERROR_ENOMEM
+
+    handle: int = g_equeue_next_handle
+    g_equeue_next_handle <- g_equeue_next_handle + 1
+
+    g_equeues[slot] <- zeroed
+    g_equeues[slot].used <- true
+    g_equeues[slot].handle <- handle
+    i: mutable int = 0
+    while i < EQUEUE_MAX_NAME - 1 and name[i.usize()] != 0u8:
+        g_equeues[slot].name[i.usize()] <- name[i.usize()]
+        i <- i + 1
+    g_equeues[slot].name[i.usize()] <- 0u8
+
+    out_eq[0] <- handle
     return ORBIS_OK
 
 def sceKernelDeleteEqueue(eq: int) -> int:
-    _ = eq
+    slot: int = equeue_find_queue_slot(eq)
+    if slot < 0:
+        return ORBIS_KERNEL_ERROR_EBADF
+    g_equeues[slot] <- zeroed
+    equeue_clear_queue_events(eq)
     return ORBIS_OK
 
 def sceKernelWaitEqueue(eq: int, ev: void&?, num: int, out: void&?, timo: void&?) -> int:
-    _ = eq
-    _ = ev
-    _ = num
-    _ = out
-    _ = timo
+    slot: int = equeue_find_queue_slot(eq)
+    if slot < 0:
+        return ORBIS_KERNEL_ERROR_EBADF
+
+    out_events: mutable OrbisKernelEvent&? = ev as mutable OrbisKernelEvent&?
+    if out_events == null:
+        return ORBIS_KERNEL_ERROR_EFAULT
+
+    out_count: mutable int&? = out as mutable int&?
+    if num < 1:
+        if out_count != null:
+            out_count[0] <- 0
+        return ORBIS_KERNEL_ERROR_EINVAL
+
+    timeout_ref: mutable u32&? = timo as mutable u32&?
+    count: int = equeue_wait_for_events(eq, out_events, num, timeout_ref)
+    if out_count != null:
+        out_count[0] <- count
+
+    if count == 0:
+        return ORBIS_KERNEL_ERROR_ETIMEDOUT
     return ORBIS_OK
 
 def sceKernelGetEventUserData(ev: void&?) -> void&?:
-    _ = ev
-    return null
+    e: OrbisKernelEvent&? = ev as OrbisKernelEvent&?
+    if e == null:
+        return null
+    return e.udata
 
 def sceKernelAddUserEvent(eq: int, id: int) -> int:
-    _ = eq
-    _ = id
+    if equeue_find_queue_slot(eq) < 0:
+        return ORBIS_KERNEL_ERROR_EBADF
+    event: mutable OrbisKernelEvent = zeroed
+    event.ident <- id.u64()
+    event.filter <- EQUEUE_FILTER_USER.i16()
+    event.flags <- EQUEUE_FLAG_ADD
+    event.fflags <- 0
+    event.data <- 0
+    event.udata <- null
+    if not equeue_add_or_update_event(eq, event):
+        return ORBIS_KERNEL_ERROR_ENOMEM
     return ORBIS_OK
 
 def sceKernelAddUserEventEdge(eq: int, id: int) -> int:
-    _ = eq
-    _ = id
+    if equeue_find_queue_slot(eq) < 0:
+        return ORBIS_KERNEL_ERROR_EBADF
+    event: mutable OrbisKernelEvent = zeroed
+    event.ident <- id.u64()
+    event.filter <- EQUEUE_FILTER_USER.i16()
+    event.flags <- EQUEUE_FLAG_ADD | EQUEUE_FLAG_CLEAR
+    event.fflags <- 0
+    event.data <- 0
+    event.udata <- null
+    if not equeue_add_or_update_event(eq, event):
+        return ORBIS_KERNEL_ERROR_ENOMEM
     return ORBIS_OK
 
 def sceKernelAddHRTimerEvent(eq: int, id: int, ts: void&?, udata: void&?) -> int:
-    _ = eq
-    _ = id
-    _ = ts
-    _ = udata
+    if equeue_find_queue_slot(eq) < 0:
+        return ORBIS_KERNEL_ERROR_EBADF
+    t: OrbisKernelTimespec&? = ts as OrbisKernelTimespec&?
+    if t == null:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    duration_us: u64 = (t.tv_sec * 1000000 + (t.tv_nsec / 1000)).u64()
+    event: mutable OrbisKernelEvent = zeroed
+    event.ident <- id.u64()
+    event.filter <- EQUEUE_FILTER_HRTIMER.i16()
+    event.flags <- EQUEUE_FLAG_ADD | EQUEUE_FLAG_ONESHOT
+    event.fflags <- 0
+    # For internal timer scheduling, data stores microseconds.
+    event.data <- duration_us
+    event.udata <- udata
+    if not equeue_add_or_update_event(eq, event):
+        return ORBIS_KERNEL_ERROR_ENOMEM
     return ORBIS_OK
 
 def sceKernelDeleteHRTimerEvent(eq: int, id: int) -> int:
-    _ = eq
-    _ = id
+    if equeue_find_queue_slot(eq) < 0:
+        return ORBIS_KERNEL_ERROR_EBADF
+    if not equeue_remove_event(eq, id.u64(), EQUEUE_FILTER_HRTIMER):
+        return ORBIS_KERNEL_ERROR_ENOENT
     return ORBIS_OK
 
 def sceKernelAddTimerEvent(eq: int, id: int, usec: int, udata: void&?) -> int:
-    _ = eq
-    _ = id
-    _ = usec
-    _ = udata
+    if equeue_find_queue_slot(eq) < 0:
+        return ORBIS_KERNEL_ERROR_EBADF
+    event: mutable OrbisKernelEvent = zeroed
+    event.ident <- id.u64()
+    event.filter <- EQUEUE_FILTER_TIMER.i16()
+    event.flags <- EQUEUE_FLAG_ADD
+    event.fflags <- 0
+    # C++ stores timer period in ms in event.data.
+    event.data <- (usec / 1000).u64()
+    event.udata <- udata
+    if not equeue_add_or_update_event(eq, event):
+        return ORBIS_KERNEL_ERROR_ENOMEM
     return ORBIS_OK
 
 def sceKernelDeleteTimerEvent(eq: int, id: int) -> int:
-    _ = eq
-    _ = id
+    if equeue_find_queue_slot(eq) < 0:
+        return ORBIS_KERNEL_ERROR_EBADF
+    if not equeue_remove_event(eq, id.u64(), EQUEUE_FILTER_TIMER):
+        return ORBIS_KERNEL_ERROR_ENOENT
     return ORBIS_OK
 
 def sceKernelTriggerUserEvent(eq: int, id: int, udata: void&?) -> int:
-    _ = eq
-    _ = id
-    _ = udata
+    if equeue_find_queue_slot(eq) < 0:
+        return ORBIS_KERNEL_ERROR_EBADF
+    if not equeue_trigger_event(eq, id.u64(), EQUEUE_FILTER_USER, udata):
+        return ORBIS_KERNEL_ERROR_ENOENT
     return ORBIS_OK
 
 def sceKernelDeleteUserEvent(eq: int, id: int) -> int:
-    _ = eq
-    _ = id
+    if equeue_find_queue_slot(eq) < 0:
+        return ORBIS_KERNEL_ERROR_EBADF
+    if not equeue_remove_event(eq, id.u64(), EQUEUE_FILTER_USER):
+        return ORBIS_KERNEL_ERROR_ENOENT
     return ORBIS_OK
 
 def sceKernelGetEventId(ev: void&?) -> u64:
-    _ = ev
-    return 0u64
+    e: OrbisKernelEvent&? = ev as OrbisKernelEvent&?
+    if e == null:
+        return 0
+    return e.ident
 
 def sceKernelGetEventFilter(ev: void&?) -> int:
-    _ = ev
-    return ORBIS_OK
+    e: OrbisKernelEvent&? = ev as OrbisKernelEvent&?
+    if e == null:
+        return ORBIS_OK
+    return e.filter.int()
 
 def sceKernelGetEventData(ev: void&?) -> u64:
-    _ = ev
-    return 0u64
+    e: OrbisKernelEvent&? = ev as OrbisKernelEvent&?
+    if e == null:
+        return 0
+    return e.data
 
 def RegisterEventQueue(sym: void&?) -> void:
     _ = sym

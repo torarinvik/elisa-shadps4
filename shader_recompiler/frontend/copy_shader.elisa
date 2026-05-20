@@ -51,16 +51,15 @@ def _copy_shader_attr_map_set(data: mutable CopyShaderData&, offset: u32, semant
 
 
 def _copy_shader_second_smallest_offset(data: CopyShaderData&) -> u32:
-    smallest: u32 = 0xFFFFFFFFu32
-    second: u32 = 0xFFFFFFFFu32
+    smallest: mutable u32 = 0xFFFFFFFFu32
+    second: mutable u32 = 0xFFFFFFFFu32
     i: mutable u32 = 0u32
     while i < data.attr_map_count:
         ofs: u32 = data.attr_map_offsets[i.usize()]
         if ofs < smallest:
             second <- smallest
             smallest <- ofs
-        else:
-            if ofs < second and ofs != smallest:
+        if ofs < second and ofs != smallest:
             second <- ofs
         i <- i + 1u32
     return second
@@ -95,36 +94,31 @@ def ParseCopyShader(code_words: u32&, word_count: u32) -> CopyShaderData:
                 src1: int = (inst.src[1].code - OPERAND_FIELD_RANGE_SIGNED_CONST_POS_MIN + 1u32).int()
                 if inst.dst[0].code < 256u32:
                     sources[inst.dst[0].code.usize()] <- src0 << src1
-
-        else:
-            if inst.opcode == OPCODE_S_MOVK_I32:
+        if inst.opcode == OPCODE_S_MOVK_I32:
             if inst.dst[0].code < 256u32:
                 sources[inst.dst[0].code.usize()] <- inst.control_sopk_simm
 
-        else:
-            if inst.opcode == OPCODE_S_MOV_B32:
+        if inst.opcode == OPCODE_S_MOV_B32:
             if inst.dst[0].code < 256u32:
                 sources[inst.dst[0].code.usize()] <- inst.src[0].code.int()
 
-        else:
-            if inst.opcode == OPCODE_S_ADDK_I32:
+        if inst.opcode == OPCODE_S_ADDK_I32:
             if inst.dst[0].code < 256u32:
                 sources[inst.dst[0].code.usize()] <- sources[inst.dst[0].code.usize()] + inst.control_sopk_simm
 
-        else:
-            if inst.opcode == OPCODE_S_BFM_B32:
+        if inst.opcode == OPCODE_S_BFM_B32:
             if inst.src[0].field == OPERAND_FIELD_SIGNED_CONST_INT_POS and inst.src[1].field == OPERAND_FIELD_SIGNED_CONST_INT_POS:
                 src0: int = (inst.src[0].code - OPERAND_FIELD_RANGE_SIGNED_CONST_POS_MIN + 1u32).int()
                 src1: int = (inst.src[1].code - OPERAND_FIELD_RANGE_SIGNED_CONST_POS_MIN + 1u32).int()
                 if inst.dst[0].code < 256u32:
-                    sources[inst.dst[0].code.usize()] <- ((1i64 << src0.i64()) - 1i64 << src1.i64()).int()
+                    mask: i64 = (1i64 << src0.i64()) - 1i64
+                    sources[inst.dst[0].code.usize()] <- (mask << src1.i64()).int()
 
-        else:
-            if inst.opcode == OP_MAP_EXP:
+        if inst.opcode == OP_MAP_EXP:
             semantic: u32 = inst.control_exp_target
             i: mutable u32 = 0u32
             while i < inst.src_count and i < GCN_MAX_SRC_COUNT:
-                if (inst.control_exp_en & (1u32 << i)) != 0u32:
+                if _bit_extract_u32(inst.control_exp_en, i, i) == 1u32:
                     src_code: u32 = inst.src[i.usize()].code
                     if src_code < 64u32 and offsets[src_code.usize()] != -1:
                         _copy_shader_attr_map_set(data, offsets[src_code.usize()].u32(), semantic, i)
@@ -132,10 +126,9 @@ def ParseCopyShader(code_words: u32&, word_count: u32) -> CopyShaderData:
                             last_attr <- semantic
                 i <- i + 1u32
 
-        else:
-            if inst.opcode == OPCODE_BUFFER_LOAD_DWORD:
+        if inst.opcode == OPCODE_BUFFER_LOAD_DWORD:
             if inst.src[1].code < 64u32:
-                ofs: int = inst.control_mubuf_offset.int()
+                ofs: mutable int = inst.control_mubuf_offset.int()
                 if inst.src[3].field != OPERAND_FIELD_CONST_ZERO:
                     idx: u32 = inst.src[3].code
                     if idx < 256u32 and sources[idx.usize()] != -1:
@@ -146,7 +139,7 @@ def ParseCopyShader(code_words: u32&, word_count: u32) -> CopyShaderData:
     if not _copy_shader_is_position(last_attr):
         data.num_attrs <- (last_attr - IR_ATTRIBUTE_PARAM0) + 1u32
         if data.attr_map_count >= 2u32:
-            first: u32 = 0xFFFFFFFFu32
+            first: mutable u32 = 0xFFFFFFFFu32
             i2: mutable u32 = 0u32
             while i2 < data.attr_map_count:
                 if data.attr_map_offsets[i2.usize()] < first:

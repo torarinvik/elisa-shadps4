@@ -95,46 +95,47 @@ def ParseFetchShader(info: ShaderInfoLite&) -> FetchShaderDataOptional:
 
     loads: mutable _VsharpLoad[104] = zeroed
     semantic_index: mutable u32 = 0u32
+    done: mutable bool = false
 
-    while not GcnCodeSlice_atEnd(slice):
+    while not GcnCodeSlice_atEnd(slice) and not done:
         inst: GcnInst = GcnDecodeContext_decodeInstruction(decoder, slice.ref[mutable GcnCodeSlice&])
         out.value.size <- out.value.size + inst.length
 
         if inst.opcode == OPCODE_S_SETPC_B64:
-            break
+            done <- true
 
-        if inst.inst_class == INST_CLASS_SCALAR_MEM_RD:
+        is_smrd: bool = inst.inst_class == INST_CLASS_SCALAR_MEM_RD
+        if is_smrd:
             if inst.dst[0].code < FETCH_SHADER_MAX_LOADS:
                 loads[inst.dst[0].code.usize()].dword_offset <- inst.control_smrd_offset
                 loads[inst.dst[0].code.usize()].base_sgpr <- inst.src[0].code * 2u32
-            continue
 
-        if inst.opcode == OPCODE_V_ADD_I32:
-            vgpr: u32 = inst.dst[0].code
-            sgpr: int = inst.src[0].code.int()
-            if vgpr == 0u32:
-                out.value.vertex_offset_sgpr <- sgpr
-            else:
+        if not is_smrd:
+            if inst.opcode == OPCODE_V_ADD_I32:
+                vgpr: u32 = inst.dst[0].code
+                sgpr: int = inst.src[0].code.int()
+                if vgpr == 0u32:
+                    out.value.vertex_offset_sgpr <- sgpr
                 if vgpr == 3u32:
-                out.value.instance_offset_sgpr <- sgpr
+                    out.value.instance_offset_sgpr <- sgpr
 
-        if inst.inst_class == INST_CLASS_VECTOR_MEM_BUF_FMT:
-            if out.value.attribute_count < FETCH_SHADER_MAX_ATTRS:
-                idx: u32 = out.value.attribute_count
-                out.value.attribute_count <- out.value.attribute_count + 1u32
-                base_sgpr: u32 = inst.src[2].code * 4u32
+            if inst.inst_class == INST_CLASS_VECTOR_MEM_BUF_FMT:
+                if out.value.attribute_count < FETCH_SHADER_MAX_ATTRS:
+                    idx: u32 = out.value.attribute_count
+                    out.value.attribute_count <- out.value.attribute_count + 1u32
+                    base_sgpr: u32 = inst.src[2].code * 4u32
 
-                out.value.attributes[idx.usize()].semantic <- semantic_index.u8()
-                out.value.attributes[idx.usize()].dest_vgpr <- inst.src[1].code.u8()
-                out.value.attributes[idx.usize()].num_elements <- inst.control_mubuf_count.u8()
-                if base_sgpr < FETCH_SHADER_MAX_LOADS:
-                    out.value.attributes[idx.usize()].sgpr_base <- loads[base_sgpr.usize()].base_sgpr.u8()
-                    out.value.attributes[idx.usize()].dword_offset <- loads[base_sgpr.usize()].dword_offset.u8()
-                out.value.attributes[idx.usize()].inst_offset <- inst.control_mtbuf_offset.u8()
-                out.value.attributes[idx.usize()].instance_data <- inst.src[0].code.u8()
-                if _is_typed_buffer_load(inst):
-                    out.value.attributes[idx.usize()].data_format <- inst.control_mtbuf_dfmt.u8()
-                    out.value.attributes[idx.usize()].num_format <- inst.control_mtbuf_nfmt.u8()
-                semantic_index <- semantic_index + 1u32
+                    out.value.attributes[idx.usize()].semantic <- semantic_index.u8()
+                    out.value.attributes[idx.usize()].dest_vgpr <- inst.src[1].code.u8()
+                    out.value.attributes[idx.usize()].num_elements <- inst.control_mubuf_count.u8()
+                    if base_sgpr < FETCH_SHADER_MAX_LOADS:
+                        out.value.attributes[idx.usize()].sgpr_base <- loads[base_sgpr.usize()].base_sgpr.u8()
+                        out.value.attributes[idx.usize()].dword_offset <- loads[base_sgpr.usize()].dword_offset.u8()
+                    out.value.attributes[idx.usize()].inst_offset <- inst.control_mtbuf_offset.u8()
+                    out.value.attributes[idx.usize()].instance_data <- inst.src[0].code.u8()
+                    if _is_typed_buffer_load(inst):
+                        out.value.attributes[idx.usize()].data_format <- inst.control_mtbuf_dfmt.u8()
+                        out.value.attributes[idx.usize()].num_format <- inst.control_mtbuf_nfmt.u8()
+                    semantic_index <- semantic_index + 1u32
 
     return out
