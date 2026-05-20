@@ -3,5 +3,130 @@
 
 include "../../error_codes.elisa"
 
+const INFINITY_FIGURE_SIZE: usize = 320
+const INFINITY_FIGURE_SLOTS: usize = 9
+
+struct InfinityFigure:
+    present: mutable bool
+    order_added: mutable u8
+    data: mutable u8[INFINITY_FIGURE_SIZE]
+
+struct InfinityQueue:
+    packets: mutable u8[64 * 32]
+    read_index: mutable usize
+    write_index: mutable usize
+
+global mutable g_inf_figures: InfinityFigure[INFINITY_FIGURE_SLOTS] = zeroed
+global mutable g_inf_queue: InfinityQueue = zeroed
+global mutable g_inf_order: u8 = 0u8
+global mutable g_inf_random_a: u32 = 0u32
+global mutable g_inf_random_b: u32 = 0u32
+global mutable g_inf_random_c: u32 = 0u32
+global mutable g_inf_random_d: u32 = 0u32
+global mutable g_inf_init: bool = false
+
+def Infinity_InitIfNeeded() -> void:
+    if g_inf_init:
+        return
+    i: mutable usize = 0
+    while i < INFINITY_FIGURE_SLOTS:
+        g_inf_figures[i].present <- false
+        g_inf_figures[i].order_added <- 255u8
+        i <- i + 1
+    g_inf_queue.read_index <- 0
+    g_inf_queue.write_index <- 0
+    g_inf_order <- 0u8
+    g_inf_init <- true
+
+def Infinity_QueuePush(packet: u8&) -> void:
+    slot: usize = g_inf_queue.write_index % 64
+    base: usize = slot * 32
+    i: mutable usize = 0
+    while i < 32:
+        g_inf_queue.packets[base + i] <- packet[i]
+        i <- i + 1
+    g_inf_queue.write_index <- g_inf_queue.write_index + 1
+    if g_inf_queue.write_index - g_inf_queue.read_index > 64:
+        g_inf_queue.read_index <- g_inf_queue.write_index - 64
+
+def Infinity_QueuePop(out: mutable u8&) -> bool:
+    if g_inf_queue.read_index >= g_inf_queue.write_index:
+        return false
+    slot: usize = g_inf_queue.read_index % 64
+    base: usize = slot * 32
+    i: mutable usize = 0
+    while i < 32:
+        out[i] <- g_inf_queue.packets[base + i]
+        i <- i + 1
+    g_inf_queue.read_index <- g_inf_queue.read_index + 1
+    return true
+
+def Infinity_Checksum(data: u8&, count: int) -> u8:
+    sum: mutable int = 0
+    i: mutable int = 0
+    while i < count:
+        sum <- sum + data[i].int()
+        i <- i + 1
+    return (sum & 0xff).u8()
+
+def Infinity_Descramble(value: u64) -> u32:
+    mask: mutable u64 = 0x8e55aa1b3999e8aau64
+    inbits: mutable u64 = value
+    out: mutable u32 = 0u32
+    i: mutable int = 0
+    while i < 64:
+        if (mask & 0x8000000000000000u64) != 0u64:
+            out <- (out << 1u32) | (inbits & 1u64).u32()
+        inbits <- inbits >> 1u64
+        mask <- mask << 1u64
+        i <- i + 1
+    return out
+
+def Infinity_Scramble(value: u32, garbage: u32) -> u64:
+    mask: mutable u64 = 0x8e55aa1b3999e8aau64
+    v: mutable u32 = value
+    g: mutable u32 = garbage
+    out: mutable u64 = 0u64
+    i: mutable int = 0
+    while i < 64:
+        out <- out << 1u64
+        if (mask & 1u64) != 0u64:
+            out <- out | (v & 1u32).u64()
+            v <- v >> 1u32
+        else:
+            out <- out | (g & 1u32).u64()
+            g <- g >> 1u32
+        mask <- mask >> 1u64
+        i <- i + 1
+    return out
+
+def Infinity_GetNext() -> u32:
+    a: mutable u32 = g_inf_random_a
+    b: mutable u32 = g_inf_random_b
+    c: mutable u32 = g_inf_random_c
+    rot: mutable u32 = ((b << 27u32) | (b >> 5u32))
+    tmp: mutable u32 = a + ((~rot) + 1u32)
+    b <- b ^ ((c << 17u32) | (c >> 15u32))
+    a <- g_inf_random_d
+    c <- c + a
+    out: mutable u32 = b + tmp
+    a <- a + tmp
+    g_inf_random_c <- a
+    g_inf_random_a <- b
+    g_inf_random_b <- c
+    g_inf_random_d <- out
+    return out
+
+def Infinity_GenerateSeed(seed: u32) -> void:
+    g_inf_random_a <- 0xf1ea5eedu32
+    g_inf_random_b <- seed
+    g_inf_random_c <- seed
+    g_inf_random_d <- seed
+    i: mutable int = 0
+    while i < 23:
+        _ = Infinity_GetNext()
+        i <- i + 1
+
 def UsbdInfinityEmu_Init() -> int:
+    Infinity_InitIfNeeded()
     return ORBIS_OK

@@ -31,7 +31,11 @@ If you opt in, provide these C ABI symbols in your native runtime shim:
 
 1. Include the bridge file in the host-selected build surface.
 2. Route runtime-sensitive calls to `*_Ffi*` wrappers.
-3. Keep pure-Elisa fallback path as default when host bridge is absent.
+3. Bridge mode defaults to enabled. Calls fall back to pure Elisa behavior when
+   shim functions return `ELISA_FFI_BRIDGE_UNAVAILABLE`.
+4. Optional override:
+   - `UserService_SetUseFfiBridge(bool)`
+   - `SystemService_SetUseFfiBridge(bool)`
 
 This pattern lets us move toward runtime-level parity without destabilizing pure
 compiler/runtime tests.

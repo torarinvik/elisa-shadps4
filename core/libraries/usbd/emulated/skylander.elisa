@@ -142,6 +142,120 @@ def Skylander_GetStatusPacket(out: mutable u8&) -> void:
     out[6] <- active
     g_sky_state.interrupt_counter <- (g_sky_state.interrupt_counter + 1u8).u8()
 
+def Skylander_QueryBlock(sky_num: u8, block: u8, out: mutable u8&) -> void:
+    out[0] <- 'Q'.u8()
+    out[1] <- 1u8
+    out[2] <- block
+    if sky_num >= MAX_SKYLANDERS.u8() or block >= 64u8:
+        return
+    s: mutable Skylander& = g_sky_state.skylanders[sky_num.usize()].ref[mutable Skylander&]
+    if s.status & 1u8 == 0u8:
+        return
+    out[1] <- (0x10u8 | sky_num)
+    base: usize = block.usize() * 16
+    i: mutable usize = 0
+    while i < 16:
+        out[3 + i] <- s.data[base + i]
+        i <- i + 1
+
+def Skylander_WriteBlock(sky_num: u8, block: u8, in_data: u8&, out: mutable u8&) -> void:
+    out[0] <- 'W'.u8()
+    out[1] <- 1u8
+    out[2] <- block
+    if sky_num >= MAX_SKYLANDERS.u8() or block >= 64u8:
+        return
+    s: mutable Skylander& = g_sky_state.skylanders[sky_num.usize()].ref[mutable Skylander&]
+    if s.status & 1u8 == 0u8:
+        return
+    out[1] <- (0x10u8 | sky_num)
+    base: usize = block.usize() * 16
+    i: mutable usize = 0
+    while i < 16:
+        s.data[base + i] <- in_data[i]
+        i <- i + 1
+
+def UsbdSkylanderEmu_ControlTransfer(request: u8&, wLength: u16) -> int:
+    Skylander_InitIfNeeded()
+    if wLength == 0u16:
+        return 0
+    cmd: u8 = request[0]
+    control_response: mutable u8[32] = zeroed
+    interrupt_response: mutable u8[32] = zeroed
+    expected: mutable int = 0
+    if cmd == 'A'.u8():
+        if wLength == 2u16:
+            control_response[0] <- request[0]
+            control_response[1] <- request[1]
+            interrupt_response[0] <- 0x41u8
+            interrupt_response[1] <- request[1]
+            interrupt_response[2] <- 0xffu8
+            interrupt_response[3] <- 0x77u8
+            Skylander_QueuePush(interrupt_response[0].ref[u8&])
+            Skylander_Activate()
+            expected <- 10
+    elif cmd == 'C'.u8():
+        if wLength == 4u16:
+            Skylander_SetLEDs(1u8, request[1], request[2], request[3])
+            expected <- 12
+    elif cmd == 'J'.u8():
+        if wLength == 7u16:
+            side: mutable u8 = request[1]
+            Skylander_SetLEDs(side, request[2], request[3], request[4])
+            interrupt_response[0] <- request[0]
+            Skylander_QueuePush(interrupt_response[0].ref[u8&])
+            expected <- 15
+    elif cmd == 'L'.u8():
+        if wLength == 5u16:
+            side: mutable u8 = request[1]
+            if side == 2u8:
+                side <- 4u8
+            Skylander_SetLEDs(side, request[2], request[3], request[4])
+            expected <- 13
+    elif cmd == 'M'.u8():
+        if wLength == 2u16:
+            interrupt_response[0] <- request[0]
+            interrupt_response[1] <- request[1]
+            interrupt_response[2] <- 0u8
+            interrupt_response[3] <- 0x19u8
+            Skylander_QueuePush(interrupt_response[0].ref[u8&])
+            expected <- 10
+    elif cmd == 'Q'.u8():
+        if wLength == 3u16:
+            sky_num: u8 = request[1] & 0x0fu8
+            block: u8 = request[2]
+            Skylander_QueryBlock(sky_num, block, interrupt_response[0].ref[mutable u8&])
+            Skylander_QueuePush(interrupt_response[0].ref[u8&])
+            expected <- 11
+    elif cmd == 'R'.u8():
+        if wLength == 2u16:
+            interrupt_response[0] <- 0x52u8
+            interrupt_response[1] <- 0x02u8
+            interrupt_response[2] <- 0x1bu8
+            Skylander_QueuePush(interrupt_response[0].ref[u8&])
+            expected <- 10
+    elif cmd == 'S'.u8():
+        if wLength == 1u16:
+            expected <- 9
+    elif cmd == 'V'.u8():
+        if wLength == 4u16:
+            expected <- 12
+    elif cmd == 'W'.u8():
+        if wLength == 19u16:
+            sky_num: u8 = request[1] & 0x0fu8
+            block: u8 = request[2]
+            Skylander_WriteBlock(sky_num, block, request[3].ref[u8&], interrupt_response[0].ref[mutable u8&])
+            Skylander_QueuePush(interrupt_response[0].ref[u8&])
+            expected <- 27
+    _ = control_response
+    return expected
+
+def UsbdSkylanderEmu_InterruptIn(out: mutable u8&) -> int:
+    Skylander_InitIfNeeded()
+    if Skylander_QueuePop(out):
+        return 32
+    Skylander_GetStatusPacket(out)
+    return 32
+
 def UsbdSkylanderEmu_Init() -> int:
     Skylander_InitIfNeeded()
     return ORBIS_OK

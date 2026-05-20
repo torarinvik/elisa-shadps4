@@ -39,9 +39,11 @@ Current validated prefix structs:
 - `Implemented`: init/initEx/addSource/addSourceEx/start/stop/pause/resume/close
 - `Implemented`: stream count/info, get audio/video data, loop flag, current time
 - `Implemented`: `SetAvSyncMode` now stores sync mode in source state; `None` bypasses video delivery sync gating like C++ source behavior
-- `Implemented`: `SetLooping` now fails with operation failure when no source is attached, matching the C++ state/source guard
-- `Implemented`: `JumpToTime` matches the current C++ no-op behavior
-- `Implemented`: `DisableStream` matches the current C++ no-op behavior
+- `Implemented`: `SetLooping` now updates both source and controller loop state and fails when no source is attached
+- `Implemented`: `JumpToTime` now performs source seek/queue reset and emits jump-complete warning through controller
+- `Implemented`: `EnableStream`/`DisableStream` now drive source behavior and controller tick processing
+- `Implemented`: `SetTrickSpeed` now drives controller trick-mode/revert-state transitions instead of no-op behavior
+- `Implemented`: `SetLogCallback` now persists callback + user-data values
 - `Implemented`: subtitle/timed-text streams can participate in auto-start and startup validation
 - `Implemented`: handle validation and basic error returns
 - `Implemented`: timing uses a monotonic playback clock for `CurrentTime`
@@ -102,7 +104,7 @@ Current validated prefix structs:
 - `Implemented`: init/initEx now clamp requested output video framebuffer count to the C++ range `[2, 16]` and store it in source state
 - `Implemented`: `IsActive` and `CurrentTime` gating now follow the C++ source shape
 - `Partial`: no full demux/decode threads, packet queues, or converted frame pipeline
-- `Partial`: guest payload buffers now use the supplied allocator callbacks and are released on close, but this is still a single reusable payload per media type rather than the full C++ queued `GuestBuffer` pool
+- `Implemented`: guest payload buffers now use allocator-backed per-handle ring pools (video pool count tracks requested framebuffer count, audio uses rotating pool) and are released on close
 
 ### State/controller (`avplayer_state.elisa`)
 

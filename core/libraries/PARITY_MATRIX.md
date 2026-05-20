@@ -63,8 +63,8 @@ Status values:
 - Empty decoder queue decode/flush/reset state behavior: `Exact`
 - Pure Elisa H.264 frame decode payload generation: `Intentional Divergence`
   - `videodec.elisa` preserves observable validation and no-frame state contracts without embedding the FFmpeg-backed C++ decoder.
-- Native bridge path (`videodec_native.elisa` + `videodec_elisa_bridge.cc`): `Bridge-Parity`
-  - Full frame payload behavior can be delegated to the existing shadPS4 C++/FFmpeg decoder when the bridge is linked.
+- Default runtime native bridge path (`videodec_native.elisa` + `videodec_elisa_bridge.cc`): `Exact`
+  - `core_port.elisa` and `core_port_noipc.elisa` now include the native bridge, and `project.json` links the shadPS4 FFmpeg-backed decoder implementation.
 
 ## Deferred / outstanding
 - None currently identified in covered core/libraries parity suites and emit gates.
@@ -83,6 +83,8 @@ Status values:
 - `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_rtc_pure_tests.elisa`
 - `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_videodec_pure_tests.elisa`
 - `go run ./src test tests --project ../elisa-shad-ps4-from-scratch/core/libraries/videodec/native_bridge_project`
+- `go run ./src test videodec-native-link-smoke --project ../elisa-shad-ps4-from-scratch`
 - `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_share_play_pure_tests.elisa`
 - `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_signin_dialog_pure_tests.elisa`
 - `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_system_pure_tests.elisa`
+- `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_system_ffi_bridge_tests.elisa`

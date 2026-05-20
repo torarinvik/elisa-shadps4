@@ -26,6 +26,7 @@ global mutable avsrc_has_source: bool[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_started: bool[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_is_paused: bool[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_is_eof: bool[AVSRC_MAX_HANDLES] = zeroed
+global mutable avsrc_eof_signal_pending: bool[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_video_eof: bool[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_audio_eof: bool[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_is_looping: bool[AVSRC_MAX_HANDLES] = zeroed
@@ -196,6 +197,7 @@ def avsrc_init_handle(slot: int):
     avsrc_started[slot] <- false
     avsrc_is_paused[slot] <- false
     avsrc_is_eof[slot] <- false
+    avsrc_eof_signal_pending[slot] <- false
     avsrc_video_eof[slot] <- false
     avsrc_audio_eof[slot] <- false
     avsrc_is_looping[slot] <- false
@@ -485,10 +487,13 @@ def avsrc_set_av_sync_mode(slot: int, sync_mode: i32):
         avsrc_av_sync_mode[slot] <- AVPLAYER_AV_SYNC_MODE_DEFAULT
 
 def avsrc_refresh_eof(slot: int):
+    was_eof: bool = avsrc_is_eof[slot]
     video_done: bool = (not avsrc_video_enabled[slot]) or avsrc_video_eof[slot]
     audio_done: bool = (not avsrc_audio_enabled[slot]) or avsrc_audio_eof[slot]
     queues_empty: bool = avsrc_video_q_size[slot] == 0 and avsrc_audio_q_size[slot] == 0 and avsrc_video_pkt_q_size[slot] == 0 and avsrc_audio_pkt_q_size[slot] == 0
     avsrc_is_eof[slot] <- video_done and audio_done and queues_empty
+    if not was_eof and avsrc_is_eof[slot]:
+        avsrc_eof_signal_pending[slot] <- true
 
 def avsrc_try_loop_restart(slot: int) -> bool:
     avsrc_refresh_eof(slot)
@@ -506,6 +511,7 @@ def avsrc_try_loop_restart(slot: int) -> bool:
     avsrc_video_eof[slot] <- false
     avsrc_audio_eof[slot] <- false
     avsrc_is_eof[slot] <- false
+    avsrc_eof_signal_pending[slot] <- false
     avsrc_video_pkt_q_head[slot] <- 0
     avsrc_video_pkt_q_tail[slot] <- 0
     avsrc_video_pkt_q_size[slot] <- 0
@@ -721,6 +727,7 @@ def avsrc_start(slot: int) -> bool:
         return false
     avsrc_is_paused[slot] <- false
     avsrc_is_eof[slot] <- false
+    avsrc_eof_signal_pending[slot] <- false
     avsrc_video_eof[slot] <- false
     avsrc_audio_eof[slot] <- false
     avsrc_last_audio_ts[slot] <- 0
@@ -820,6 +827,7 @@ def avsrc_stop(slot: int) -> bool:
         return false
     avsrc_is_paused[slot] <- false
     avsrc_is_eof[slot] <- false
+    avsrc_eof_signal_pending[slot] <- false
     avsrc_video_eof[slot] <- false
     avsrc_audio_eof[slot] <- false
     avsrc_started[slot] <- false
@@ -872,6 +880,7 @@ def avsrc_jump_to_time(slot: int, target_time: u64) -> bool:
     if not avsrc_has_source[slot]:
         return false
     avsrc_is_eof[slot] <- false
+    avsrc_eof_signal_pending[slot] <- false
     avsrc_video_eof[slot] <- false
     avsrc_audio_eof[slot] <- false
     avsrc_last_audio_ts[slot] <- target_time
@@ -1042,7 +1051,12 @@ def avsrc_should_signal_eof(slot: int) -> bool:
     if not avsrc_has_source[slot]:
         return false
     avsrc_refresh_eof(slot)
-    return avsrc_is_eof[slot] and not avsrc_is_looping[slot]
+    if not avsrc_is_eof[slot] or avsrc_is_looping[slot]:
+        return false
+    if not avsrc_eof_signal_pending[slot]:
+        return false
+    avsrc_eof_signal_pending[slot] <- false
+    return true
 
 def avsrc_consume_warning(slot: int, out_warning: mutable i32&) -> bool:
     warning_id: i32 = avsrc_pending_warning[slot]
