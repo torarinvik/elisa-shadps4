@@ -73,6 +73,35 @@ static int elisa_kernel_make_deadline_from_usec(uint64_t usec, struct timespec *
     return 0;
 }
 
+static int elisa_kernel_monotonic_abs_to_realtime_deadline(int64_t tv_sec, int64_t tv_nsec, struct timespec *out) {
+    if (out == NULL || tv_sec < 0 || tv_nsec < 0 || tv_nsec >= 1000000000LL) {
+        return EINVAL;
+    }
+    struct timespec mono_now;
+    struct timespec real_now;
+    if (clock_gettime(CLOCK_MONOTONIC, &mono_now) != 0) {
+        return errno;
+    }
+    if (clock_gettime(CLOCK_REALTIME, &real_now) != 0) {
+        return errno;
+    }
+    int64_t target_ns = tv_sec * 1000000000LL + tv_nsec;
+    int64_t mono_now_ns = (int64_t)mono_now.tv_sec * 1000000000LL + (int64_t)mono_now.tv_nsec;
+    int64_t remaining_ns = target_ns - mono_now_ns;
+    if (remaining_ns <= 0) {
+        return ETIMEDOUT;
+    }
+    int64_t real_now_ns = (int64_t)real_now.tv_sec * 1000000000LL + (int64_t)real_now.tv_nsec;
+    int64_t deadline_ns = real_now_ns + remaining_ns;
+    out->tv_sec = (time_t)(deadline_ns / 1000000000LL);
+    out->tv_nsec = (long)(deadline_ns % 1000000000LL);
+    if (out->tv_nsec < 0) {
+        out->tv_sec -= 1;
+        out->tv_nsec += 1000000000L;
+    }
+    return 0;
+}
+
 static int elisa_kernel_thread_errno(int err) {
     switch (err) {
     case 0:
@@ -194,15 +223,23 @@ int elisa_kernel_thread_timedjoin(void *handle, void **retval, int64_t tv_sec, i
         return 22;
     }
 
-    struct timespec deadline;
-    deadline.tv_sec = (time_t)tv_sec;
-    deadline.tv_nsec = (long)tv_nsec;
-
     pthread_mutex_lock(&state->mutex);
     if (state->detached || state->joined) {
         pthread_mutex_unlock(&state->mutex);
         return 22;
     }
+    pthread_mutex_unlock(&state->mutex);
+
+    struct timespec deadline;
+    int deadline_err = elisa_kernel_monotonic_abs_to_realtime_deadline(tv_sec, tv_nsec, &deadline);
+    if (deadline_err == ETIMEDOUT) {
+        return 60;
+    }
+    if (deadline_err != 0) {
+        return elisa_kernel_thread_errno(deadline_err);
+    }
+
+    pthread_mutex_lock(&state->mutex);
     while (!state->finished) {
         int wait_err = pthread_cond_timedwait(&state->cond, &state->mutex, &deadline);
         if (wait_err == ETIMEDOUT) {

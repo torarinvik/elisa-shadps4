@@ -26,6 +26,14 @@ CUSA07399 stage:
 - execute stage: none
 - first boundary: PENDING
 - first frame: PENDING
+- first frame gate signals:
+  - shader_translate_attempted=0
+  - shader_path_bridge=0 shader_path_native=0
+  - VIDEO_STAGE_opened=0
+  - VIDEO_STAGE_buffers_registered=0
+  - VIDEO_STAGE_flip_submitted=0
+  - VIDEO_STAGE_flip_completed=0
+  - VIDEO_STAGE_first_frame_candidate=0
 CUSA07399 artifact metrics:
 - CUSA module count: 0
 - imports total: 0
@@ -35,6 +43,7 @@ CUSA07399 artifact metrics:
 - unresolved count: 0
 - malformed count: 0
 - current execution stage: 0 (none)
+- last HLE call: module= symbol=
 - current video/audio/input stage: graphics=0 audio-input-service=0
 Top 25 fallback symbols:
 - none

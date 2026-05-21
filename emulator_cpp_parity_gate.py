@@ -169,7 +169,23 @@ def parse_cusa_metrics(results: list[Result]) -> dict[str, int | str]:
         "relocation_count": 0,
         "execution_stage": 0,
         "boundary_status": 0,
+        "last_hle_module": "",
+        "last_hle_symbol": "",
+        "video_stage_opened": 0,
+        "video_stage_buffers_registered": 0,
+        "video_stage_flip_submitted": 0,
+        "video_stage_flip_completed": 0,
+        "video_stage_first_frame_candidate": 0,
+        "shader_translate_attempted": 0,
+        "shader_translate_path_bridge": 0,
+        "shader_translate_path_native": 0,
     }
+    def row_has_kv(row: dict[str, str], key: str) -> bool:
+        if to_int(row.get(key)) > 0:
+            return True
+        if row.get("key") == key and to_int(row.get("value")) > 0:
+            return True
+        return False
     for row in rows:
         summary["module_count"] = max(int(summary["module_count"]), to_int(row.get("module_count")))
         summary["total_imports"] = max(int(summary["total_imports"]), to_int(row.get("total_imports")))
@@ -181,6 +197,26 @@ def parse_cusa_metrics(results: list[Result]) -> dict[str, int | str]:
         summary["relocation_count"] = max(int(summary["relocation_count"]), to_int(row.get("relocated_imports")))
         summary["execution_stage"] = max(int(summary["execution_stage"]), to_int(row.get("execution_stage")))
         summary["boundary_status"] = max(int(summary["boundary_status"]), to_int(row.get("boundary_status")))
+        if row.get("last_hle_module"):
+            summary["last_hle_module"] = row.get("last_hle_module", "")
+        if row.get("last_hle_symbol"):
+            summary["last_hle_symbol"] = row.get("last_hle_symbol", "")
+        if row_has_kv(row, "VIDEO_STAGE_opened"):
+            summary["video_stage_opened"] = 1
+        if row_has_kv(row, "VIDEO_STAGE_buffers_registered"):
+            summary["video_stage_buffers_registered"] = 1
+        if row_has_kv(row, "VIDEO_STAGE_flip_submitted"):
+            summary["video_stage_flip_submitted"] = 1
+        if row_has_kv(row, "VIDEO_STAGE_flip_completed"):
+            summary["video_stage_flip_completed"] = 1
+        if row_has_kv(row, "VIDEO_STAGE_first_frame_candidate"):
+            summary["video_stage_first_frame_candidate"] = 1
+        if row_has_kv(row, "shader_translate_attempted"):
+            summary["shader_translate_attempted"] = 1
+        if row_has_kv(row, "shader_translate_path_bridge"):
+            summary["shader_translate_path_bridge"] = 1
+        if row_has_kv(row, "shader_translate_path_native"):
+            summary["shader_translate_path_native"] = 1
     return summary
 
 
@@ -253,7 +289,17 @@ def cusa_stage_summary(results: list[Result], cusa: dict[str, int | str]) -> dic
     handoff = "PASS" if passed("elisacore test emulator-guest-exec-runtime-tests") else "FAIL"
     exec_stage = stage_name(int(cusa["execution_stage"]))
     boundary = "PASS" if int(cusa["boundary_status"]) != 0 else "PENDING"
-    frame = "PASS" if int(cusa["execution_stage"]) >= 4 else "PENDING"
+    frame_gate = (
+        int(cusa["execution_stage"]) >= 4
+        and int(cusa["video_stage_opened"]) == 1
+        and int(cusa["video_stage_buffers_registered"]) == 1
+        and int(cusa["video_stage_flip_submitted"]) == 1
+        and int(cusa["video_stage_flip_completed"]) == 1
+        and int(cusa["video_stage_first_frame_candidate"]) == 1
+        and int(cusa["shader_translate_attempted"]) == 1
+        and (int(cusa["shader_translate_path_bridge"]) == 1 or int(cusa["shader_translate_path_native"]) == 1)
+    )
+    frame = "PASS" if frame_gate else "PENDING"
     return {
         "load": load,
         "link": link,
@@ -432,6 +478,14 @@ def summarize_progress(results: list[Result]) -> tuple[str, dict[str, list[dict[
     lines.append(f"- execute stage: {stages['execute']}")
     lines.append(f"- first boundary: {stages['boundary']}")
     lines.append(f"- first frame: {stages['frame']}")
+    lines.append("- first frame gate signals:")
+    lines.append(f"  - shader_translate_attempted={cusa['shader_translate_attempted']}")
+    lines.append(f"  - shader_path_bridge={cusa['shader_translate_path_bridge']} shader_path_native={cusa['shader_translate_path_native']}")
+    lines.append(f"  - VIDEO_STAGE_opened={cusa['video_stage_opened']}")
+    lines.append(f"  - VIDEO_STAGE_buffers_registered={cusa['video_stage_buffers_registered']}")
+    lines.append(f"  - VIDEO_STAGE_flip_submitted={cusa['video_stage_flip_submitted']}")
+    lines.append(f"  - VIDEO_STAGE_flip_completed={cusa['video_stage_flip_completed']}")
+    lines.append(f"  - VIDEO_STAGE_first_frame_candidate={cusa['video_stage_first_frame_candidate']}")
 
     lines.append("CUSA07399 artifact metrics:")
     lines.append(f"- CUSA module count: {cusa['module_count']}")
@@ -442,6 +496,7 @@ def summarize_progress(results: list[Result]) -> tuple[str, dict[str, list[dict[
     lines.append(f"- unresolved count: {cusa['unresolved_imports']}")
     lines.append(f"- malformed count: {cusa['malformed_imports']}")
     lines.append(f"- current execution stage: {cusa['execution_stage']} ({stage_name(int(cusa['execution_stage']))})")
+    lines.append(f"- last HLE call: module={cusa['last_hle_module']} symbol={cusa['last_hle_symbol']}")
     lines.append(f"- current video/audio/input stage: graphics={len(queues['graphics_fallbacks'])} audio-input-service={len(queues['audio_input_service_fallbacks'])}")
 
     lines.append("Top 25 fallback symbols:")

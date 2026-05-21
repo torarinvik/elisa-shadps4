@@ -1,5 +1,3 @@
-include "../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
-include "./core/libraries/error_codes.elisa"
 include "./core/libraries/audio/audio_port.elisa"
 include "./core/libraries/audio/audioout_error.elisa"
 include "./core/libraries/audio/audioin_error.elisa"
@@ -8,6 +6,14 @@ include "./core/libraries/audio/audioout_nids.elisa"
 include "./core/libraries/audio/audioin_nids.elisa"
 include "./core/libraries/audio/audioout.elisa"
 include "./core/libraries/audio/audioin.elisa"
+
+extern memcpy(dest: mutable void&, src: void&, n: usize) -> mutable void&
+extern memset(dest: mutable void&, val: int, n: usize) -> mutable void&
+
+def assert(condition: bool) -> void:
+    can Abort.Panic:
+        if not condition:
+            panic("assert failed")
 
 @test
 def audioout_open_validation_order_and_errors() -> void:
@@ -94,9 +100,43 @@ def audioin_open_input_silentstate_cycle() -> void:
         AudioIn_ShutdownBackends()
 
 @test
+def audioin_silent_state_reports_absent_device() -> void:
+    can Abort.Panic:
+        assert sceAudioInInit() == ORBIS_OK
+        hi: s32 = sceAudioInOpen(0, 0u32, 0u32, 256u32, 16000u32, 0u32)
+        assert hi > 0
+        pid: s32 = audioin_get_port_id(hi)
+        assert pid >= 0
+        audioin_backend_open[pid] <- false
+        assert sceAudioInGetSilentState(hi) == ORBIS_AUDIO_IN_SILENT_STATE_DEVICE_NONE
+        assert sceAudioInClose(hi) == ORBIS_OK
+        AudioIn_ShutdownBackends()
+
+@test
+def audioout_openal_queue_restart_smoke() -> void:
+    can Abort.Panic:
+        if sceAudioOutSelectBackendOpenAL(true) != ORBIS_OK:
+            return
+        assert sceAudioOutInit() == ORBIS_OK
+        h: s32 = sceAudioOutOpen(0, 0, 0, 256u32, 48000u32, 1u32)
+        assert h > 0
+
+        frame_bytes: usize = 256usize * 4usize
+        audio: mutable u8[1024]
+        _ = memset(audio[0].ref[mutable u8&] as mutable void&, 0, frame_bytes)
+
+        rc0: s32 = sceAudioOutOutput(h, audio[0].ref[mutable u8&])
+        rc1: s32 = sceAudioOutOutput(h, audio[0].ref[mutable u8&])
+        assert rc0 >= 0
+        assert rc1 >= 0
+
+        assert sceAudioOutClose(h) == ORBIS_OK
+        AudioOut_ShutdownBackends()
+
+@test
 def audio_nid_tables_match_cpp_counts() -> void:
     can Abort.Panic:
-        assert AUDIOOUT_NIDS_COUNT == 69usize
+        assert AUDIOOUT_NIDS_COUNT == 71usize
         assert AUDIOIN_NIDS_COUNT == 42usize
         first_out: AudioOutNidEntry = AudioOut_NidEntryAt(0usize)
         assert first_out.nid == "cx2dYFbzIAg"

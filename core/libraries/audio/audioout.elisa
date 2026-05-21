@@ -652,6 +652,16 @@ def audioout_openal_queue(pid: s32, data: void&, size_bytes: s32, sample_rate: s
         alSourceUnqueueBuffers(src, 1, ubuf)
         processed <- processed - 1
 
+    # Keep source queue bounded across host underrun/stall cycles.
+    queued: mutable s32 = 0
+    alGetSourcei(src, AL_BUFFERS_QUEUED, queued)
+    while queued >= 6:
+        drop_buf: mutable u32 = 0u32
+        alSourceUnqueueBuffers(src, 1, drop_buf)
+        if alGetError() != 0:
+            break
+        queued <- queued - 1
+
     idx: mutable s32 = audioout_openal_next_buf[pid]
     if idx < 0 or idx >= 6:
         idx <- 0
@@ -672,8 +682,10 @@ def audioout_openal_queue(pid: s32, data: void&, size_bytes: s32, sample_rate: s
 
     state: mutable s32 = 0
     alGetSourcei(src, AL_SOURCE_STATE, state)
-    if state != AL_PLAYING:
+    if state == AL_STOPPED or state != AL_PLAYING:
         alSourcePlay(src)
+        if alGetError() != 0:
+            return false
     return true
 
 def audioout_openal_select_format(pid: s32) -> s32:

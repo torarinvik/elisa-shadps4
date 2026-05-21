@@ -462,6 +462,11 @@ void ElisaGuestExec_EmitCusaArtifactImport(const char* source, const char* nid,
             (unsigned long long)resolution);
 }
 
+void ElisaGuestExec_EmitCusaArtifactLastHle(const char* module, const char* symbol) {
+    fprintf(stderr, "CUSA07399_ARTIFACT last_hle_module=%s last_hle_symbol=%s\n",
+            module != NULL ? module : "", symbol != NULL ? symbol : "");
+}
+
 void ElisaGuestExec_EmitCusaArtifactKV(const char* key, uint64_t value) {
     fprintf(stderr, "CUSA07399_ARTIFACT %s=%llu\n",
             key != NULL ? key : "key",
