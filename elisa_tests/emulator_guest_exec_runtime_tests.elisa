@@ -40,6 +40,29 @@ def emulator_guest_exec_synthetic_mapped_trampoline_executes_and_returns() -> vo
             panic("expected mapped trampoline to return 42")
         if GuestExec_LastStatus() != 1:
             panic("expected successful trampoline status")
+        if not GuestExec_UnmapRegion(mapped_entry, 4096.u64()):
+            panic("expected executable test page unmap")
+
+@test
+def emulator_guest_exec_map_protect_unmap_validation_contracts() -> void:
+    can Abort.Panic:
+        GuestExec_ResetState()
+        GuestExec_Enable(true)
+        if not GuestExec_IsSupported():
+            if GuestExec_UnmapRegion(0x1000.uintptr(), 4096.u64()):
+                panic("expected unsupported host unmap to fail")
+            return
+        if GuestExec_UnmapRegion(0.uintptr(), 4096.u64()):
+            panic("expected null unmap to fail")
+        if GuestExec_UnmapRegion(0x1000.uintptr(), 0.u64()):
+            panic("expected zero-size unmap to fail")
+        mapped: VAddr = GuestExec_AllocateRegion(4096.u64(), 3.u32())
+        if mapped == 0.uintptr():
+            panic("expected allocation for unmap validation")
+        if not GuestExec_ProtectRegion(mapped, 4096.u64(), 1.u32()):
+            panic("expected read-only protection")
+        if not GuestExec_UnmapRegion(mapped, 4096.u64()):
+            panic("expected allocated region unmap")
 
 @test
 def emulator_guest_exec_synthetic_function_rejects_null_entry() -> void:
@@ -64,6 +87,54 @@ def emulator_guest_exec_guard_captures_synthetic_crash() -> void:
             panic("expected crash status")
         if GuestExec_LastSignal() == 0:
             panic("expected crash signal")
+
+@test
+def emulator_guest_exec_synthetic_timeout_is_bounded() -> void:
+    can Abort.Panic:
+        if not GuestExec_IsSupported():
+            return
+        GuestExec_ResetCrashState()
+        spin_entry: VAddr = GuestExec_GetSyntheticSpinAddress()
+        if spin_entry == 0.uintptr():
+            panic("expected synthetic spin function address")
+        result: u64 = GuestExec_RunSyntheticFunctionWithTimeout(spin_entry, 1.u64(), 2.u64(), 10.u32())
+        if result != 0xFFFFFFFFFFFFFFFC.u64():
+            panic("expected timeout sentinel")
+        if GuestExec_LastStatus() != -3:
+            panic("expected timeout status")
+        if GuestExec_LastSignal() == 0:
+            panic("expected timeout signal")
+
+@test
+def emulator_guest_exec_synthetic_timeout_allows_fast_return() -> void:
+    can Abort.Panic:
+        if not GuestExec_IsSupported():
+            return
+        entry: VAddr = GuestExec_GetSyntheticAddAddress()
+        result: u64 = GuestExec_RunSyntheticFunctionWithTimeout(entry, 1.u64(), 2.u64(), 100.u32())
+        if result != 0x1237.u64():
+            panic("expected fast synthetic function result")
+        if GuestExec_LastStatus() != 1:
+            panic("expected fast synthetic timeout wrapper success")
+
+@test
+def emulator_guest_exec_guarded_main_uses_guest_trampoline_abi() -> void:
+    can Abort.Panic:
+        if not GuestExec_IsSupported():
+            return
+        GuestExec_ResetState()
+        entry: VAddr = GuestExec_GetSyntheticMainReturnAddress()
+        if entry == 0.uintptr():
+            panic("expected synthetic main-return address")
+        status: s32 = GuestExec_RunMainEntryGuarded(entry, 77, null, 100.u32())
+        if status != 1:
+            panic("expected guarded main-return success")
+        if GuestExec_LastStatus() != 1:
+            panic("expected native guarded main-return status")
+        if GuestExec_ClassifyFirstBoundary() != GUEST_EXEC_BOUNDARY_EXITED_BEFORE_BOUNDARY:
+            panic("expected return-before-boundary classification")
+        if GuestExec_FirstBoundaryReason() != GUEST_EXEC_BOUNDARY_REASON_EXITED_BEFORE_BOUNDARY:
+            panic("expected return-before-boundary reason")
 
 @test
 def emulator_guest_exec_guarded_main_reports_unsupported_on_non_x64_hosts() -> void:

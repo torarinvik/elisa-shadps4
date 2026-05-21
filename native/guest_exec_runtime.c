@@ -146,6 +146,27 @@ static void __attribute__((unused)) elisa_guest_exec_default_exit(int32_t code) 
     }
 }
 
+#if defined(__x86_64__) && !defined(_WIN32)
+static void elisa_guest_exec_call_main_entry(ElisaGuestEntryParams* params,
+                                             ElisaGuestExitFunc exit_func) {
+    if (exit_func == NULL) {
+        exit_func = elisa_guest_exec_default_exit;
+    }
+    __asm__ volatile(
+        "andq $-16, %%rsp\n"
+        "subq $8, %%rsp\n"
+        "pushq 8(%1)\n"
+        "pushq 0(%1)\n"
+        "movq %1, %%rdi\n"
+        "movq %2, %%rsi\n"
+        "call *%0\n"
+        "addq $24, %%rsp\n"
+        :
+        : "r"((void*)params->entry_addr), "r"(params), "r"(exit_func)
+        : "rax", "rsi", "rdi", "memory");
+}
+#endif
+
 int32_t ElisaGuestExec_IsSupported(void) {
 #if defined(_WIN32)
     return 0;
@@ -280,6 +301,18 @@ int32_t ElisaGuestExec_ProtectRegion(uintptr_t address, uint64_t size, uint32_t 
 #endif
 }
 
+int32_t ElisaGuestExec_UnmapRegion(uintptr_t address, uint64_t size) {
+    if (address == 0 || size == 0) {
+        return -1;
+    }
+#if defined(_WIN32)
+    (void)size;
+    return VirtualFree((void*)address, 0, MEM_RELEASE) ? 0 : -1;
+#else
+    return munmap((void*)address, (size_t)size) == 0 ? 0 : -1;
+#endif
+}
+
 uintptr_t ElisaGuestExec_AllocateRegion(uint64_t size, uint32_t prot) {
     if (size == 0) {
         return 0;
@@ -361,6 +394,53 @@ uint64_t ElisaGuestExec_RunSyntheticFunction(uintptr_t entry_addr, uint64_t arg0
 #endif
 }
 
+uint64_t ElisaGuestExec_RunSyntheticFunctionWithTimeout(uintptr_t entry_addr, uint64_t arg0,
+                                                        uint64_t arg1, uint32_t timeout_ms) {
+    if (entry_addr == 0) {
+        elisa_guest_exec_last_status = -1;
+        return UINT64_MAX;
+    }
+#if defined(__x86_64__) && !defined(_WIN32)
+    ElisaGuestExec_ResetCrashState();
+    elisa_guest_exec_install_guards();
+    elisa_guest_exec_guard_active = 1;
+    if (timeout_ms != 0) {
+        struct itimerval timer;
+        memset(&timer, 0, sizeof(timer));
+        timer.it_value.tv_sec = timeout_ms / 1000u;
+        timer.it_value.tv_usec = (timeout_ms % 1000u) * 1000u;
+        setitimer(ITIMER_REAL, &timer, NULL);
+    }
+    if (sigsetjmp(elisa_guest_exec_jmp, 1) != 0) {
+        struct itimerval timer_off;
+        memset(&timer_off, 0, sizeof(timer_off));
+        setitimer(ITIMER_REAL, &timer_off, NULL);
+        elisa_guest_exec_guard_active = 0;
+        elisa_guest_exec_restore_guards();
+        if (elisa_guest_exec_timeout_fired) {
+            elisa_guest_exec_last_status = -3;
+            return UINT64_MAX - 3u;
+        }
+        return UINT64_MAX - 2u;
+    }
+    ElisaGuestExecTestFunc fn = (ElisaGuestExecTestFunc)entry_addr;
+    uint64_t result = fn(arg0, arg1);
+    struct itimerval timer_off;
+    memset(&timer_off, 0, sizeof(timer_off));
+    setitimer(ITIMER_REAL, &timer_off, NULL);
+    elisa_guest_exec_guard_active = 0;
+    elisa_guest_exec_restore_guards();
+    elisa_guest_exec_last_status = 1;
+    return result;
+#else
+    (void)arg0;
+    (void)arg1;
+    (void)timeout_ms;
+    elisa_guest_exec_last_status = -2;
+    return UINT64_MAX - 1u;
+#endif
+}
+
 uint64_t ElisaGuestExec_SyntheticCrash(uint64_t arg0, uint64_t arg1) {
     (void)arg0;
     (void)arg1;
@@ -372,12 +452,36 @@ uint64_t ElisaGuestExec_SyntheticAdd(uint64_t arg0, uint64_t arg1) {
     return arg0 + arg1 + 0x1234u;
 }
 
+uint64_t ElisaGuestExec_SyntheticSpin(uint64_t arg0, uint64_t arg1) {
+    volatile uint64_t sink = arg0 ^ arg1;
+    for (;;) {
+        sink += 1u;
+    }
+}
+
+void ElisaGuestExec_SyntheticMainReturn(ElisaGuestEntryParams* params, ElisaGuestExitFunc exit_func) {
+    (void)exit_func;
+    if (params == NULL || params->argc != 77) {
+        elisa_guest_exec_last_status = -4;
+        return;
+    }
+    elisa_guest_exec_last_status = 1;
+}
+
 uintptr_t ElisaGuestExec_GetSyntheticAddAddress(void) {
     return (uintptr_t)&ElisaGuestExec_SyntheticAdd;
 }
 
 uintptr_t ElisaGuestExec_GetSyntheticCrashAddress(void) {
     return (uintptr_t)&ElisaGuestExec_SyntheticCrash;
+}
+
+uintptr_t ElisaGuestExec_GetSyntheticSpinAddress(void) {
+    return (uintptr_t)&ElisaGuestExec_SyntheticSpin;
+}
+
+uintptr_t ElisaGuestExec_GetSyntheticMainReturnAddress(void) {
+    return (uintptr_t)&ElisaGuestExec_SyntheticMainReturn;
 }
 
 #if defined(__x86_64__) || defined(_M_X64)
@@ -390,9 +494,6 @@ int32_t ElisaGuestExec_RunMainEntry(ElisaGuestEntryParams* params, ElisaGuestExi
 #else
 __attribute__((noreturn)) void ElisaGuestExec_RunMainEntry(ElisaGuestEntryParams* params,
                                                            ElisaGuestExitFunc exit_func) {
-    if (exit_func == NULL) {
-        exit_func = elisa_guest_exec_default_exit;
-    }
     __asm__ volatile(
         "andq $-16, %%rsp\n"
         "subq $8, %%rsp\n"
@@ -422,7 +523,6 @@ int32_t ElisaGuestExec_RunMainEntryGuarded(ElisaGuestEntryParams* params, uint32
         return -1;
     }
 #if defined(__x86_64__) && !defined(_WIN32)
-    typedef void (*ElisaGuestMainEntryFn)(ElisaGuestEntryParams*, ElisaGuestExitFunc);
     ElisaGuestExec_ResetCrashState();
     elisa_guest_exec_install_guards();
     elisa_guest_exec_guard_active = 1;
@@ -444,8 +544,7 @@ int32_t ElisaGuestExec_RunMainEntryGuarded(ElisaGuestEntryParams* params, uint32
         }
         return elisa_guest_exec_last_status;
     }
-    ElisaGuestMainEntryFn entry = (ElisaGuestMainEntryFn)params->entry_addr;
-    entry(params, elisa_guest_exec_default_exit);
+    elisa_guest_exec_call_main_entry(params, elisa_guest_exec_default_exit);
     struct itimerval timer_off;
     memset(&timer_off, 0, sizeof(timer_off));
     setitimer(ITIMER_REAL, &timer_off, NULL);

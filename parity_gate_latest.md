@@ -53,8 +53,8 @@ CUSA07399 stage:
   - VIDEO_STAGE_first_frame_candidate=0
 CUSA07399 artifact metrics:
 - CUSA module count: 4
-- imports total: 1150
-- native HLE count: 840
+- imports total: 1151
+- native HLE count: 841
 - PRX export count: 310
 - AeroLib fallback count: 0
 - unresolved count: 0

@@ -315,3 +315,11 @@ cd "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/eli
 - Result: `passed=15 failed=0 selected=15`
 - What improved: CUSA07399 now reports `AeroLib fallback count: 0` and `unresolved count: 0` at the guarded-entry stage
 - Next blocker: advance past arm64 macOS probe-only handoff toward first guest HLE boundary on an x86_64 native-exec host
+
+## 2026-05-21: Guest Execution Runtime Hardening
+
+- Date: 2026-05-21
+- Command run: `go run ./src test emulator-guest-exec-runtime-tests --project ../elisa-shad-ps4-from-scratch`
+- Result: `passed=14 failed=0 selected=14`
+- What improved: guest-exec now verifies executable mapping cleanup, guarded synthetic timeout recovery, crash capture, and the guarded main-entry trampoline ABI used by real x86_64 guest handoff
+- Next blocker: run the guarded CUSA07399 entry on an x86_64 native-exec host to validate the first real guest HLE/syscall boundary; arm64 macOS remains probe-only by design
