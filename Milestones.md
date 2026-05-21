@@ -2,6 +2,26 @@
 
 This file tracks concrete achievements in the Elisa port of the emulator. The goal is to make progress visible, preserve the story of how far the port has come, and keep future parity work anchored to verified behavior.
 
+## 2026-05-21: Audio/Input/User Runtime Services Are Ready For First Playable Frame
+
+- Added `emulator-runtime-services-smoke` to exercise user service initialization, pad open/read/close, and audio out/in setup under the real host backend conditions.
+- The smoke reports device availability honestly: on this host, SDL audio is unavailable, OpenAL is probe-visible, and the runtime still returns deterministic no-device behavior instead of pretending hardware exists.
+- Added artifact emission for runtime readiness so the parity gate can report stage-by-stage progress for user service, pad, audio output, and audio input.
+- Updated the quick parity gate to run the runtime-services smoke alongside the existing boot, loader, guest-exec, and renderer checks.
+- Verified commands:
+
+```sh
+cd "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/compiler"
+go run ./src test emulator-runtime-services-smoke --project ../elisa-shad-ps4-from-scratch
+```
+
+```sh
+cd "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/elisa-shad-ps4-from-scratch"
+./emulator-cpp-parity --quick
+```
+
+Result: `1 test(s) selected; passed=1 skipped=0 failed=0` for the runtime smoke and `passed=14 failed=0 selected=14` for the quick gate.
+
 ## 2026-05-21: Real Game Boot Smoke Reaches Zero Unresolved Imports
 
 - Added a real-game boot smoke test for `CUSA07399`, using the local game install at `/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/shadPS4/Games/CUSA07399`.
@@ -52,10 +72,31 @@ go run ./src test emulator-core-boot-smoke --project ../elisa-shad-ps4-from-scra
 
 Result: `6 test(s) selected; passed=6 skipped=0 failed=0`.
 
+## 2026-05-21: Shader Bridge Enhanced With Real Output Storage, Hash, and Diagnostic Accessors
+
+- Added `output_hash` field (FNV-1a over SPIR-V output bytes) and `diagnostic_code` field to the bridge handle struct.
+- Added `elisa_shader_recompiler_program_output_hash` C ABI accessor (returns 0 when status is Placeholder or Failed).
+- Added `elisa_shader_recompiler_program_diagnostic_code` C ABI accessor (returns `REAL_LINK_NOT_AVAILABLE = 1` until the full recompiler chain is wired).
+- Added `ELISA_RECOMPILER_PROGRAM_STATUS_TRANSLATED = 3` and `ELISA_RECOMPILER_PROGRAM_STATUS_FAILED_WITH_DIAGNOSTIC = 4` status constants.
+- Fixed return type of status/diagnostic functions to `int64_t` so Elisa's 64-bit `int` comparison with negative values (-1 = INVALID) works correctly on ARM64 (zero-extension hazard from `int32_t` caused false failures).
+- Added `shader_translate_status` and `shader_translate_output_nonzero` artifact emissions to the Elisa backend.
+- Added a real GCN fragment shader fixture test (`ps0_code` from gnmdriver) verifying the bridge accepts and hashes the 8-word minimal PS4 black-frame shader correctly.
+- Status is honestly `PLACEHOLDER` with `diagnostic_code = REAL_LINK_NOT_AVAILABLE` because wiring the full `TranslateProgram` path requires linking ~62 shadPS4 shader_recompiler cpp files plus sirit/boost/fmt — not yet wired into the test build.
+- All 7 bridge tests pass: `7 test(s) selected; passed=7 skipped=0 failed=0`.
+- Blocker: native Elisa SPIR-V emission not yet complete; full recompiler link not yet wired.
+- Retirement path: replace PLACEHOLDER assertion with TRANSLATED when the Elisa build system links the full recompiler chain.
+
+## 2026-05-21: Stub-Parity Ledger Kept Honest
+
+- Reviewed the AJM and Companion entries that match upstream C++ stubs.
+- Kept those 30 entries classified as `Stub-Parity` rather than `Native-Elisa`, because they intentionally mirror shallow C++ behavior instead of carrying deeper native functionality.
+- This keeps the parity gate honest: matching a C++ stub is useful, but it is not the same thing as fully native behavior.
+
 ## Kernel Threads Porting Progress
 
 - Ported a broad kernel threads surface into Elisa, including pthread lifecycle APIs, mutexes, condition variables, rwlocks, semaphores, event flags, cleanup handling, TLS/spec APIs, stack/TCB state helpers, and exception/signal wrapper behavior.
 - Added runtime-oriented tests that spawn host-backed threads and exercise blocking, wakeup, timeout, cancellation, contention, and stress paths.
+- Verified the runtime suite and differential gate against the oracle backend with real thread creation, join/detach, mutex, condvar, rwlock, semaphore, event-flag, and stress coverage.
 - Added differential/parity-style tests for thread behavior so future mismatches can be caught as regressions.
 - Added compiler/runtime support needed by the port, including loop `break`/`continue`, richer native callback/threading support, and improved FFI/runtime documentation.
 - Current frontier: continue widening differential coverage against the C++ oracle, especially cross-platform Windows/macOS/Linux edge behavior and true guest scheduling equivalence.
@@ -235,6 +276,14 @@ cd "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/eli
 - What improved: all 12 selected gate steps passed
 - Next blocker: promote execute/boundary/frame stages deeper into runtime coverage
 
+## 2026-05-21: Synthetic First-Frame Graphics Ladder Verified
+
+- Date: 2026-05-21
+- Command run: `go run ./src test emulator-renderer-first-frame-smoke --project ../elisa-shad-ps4-from-scratch`
+- Result: `passed=1 failed=0 selected=1`
+- What improved: synthetic renderer ladder now proves open, buffer registration, flip submit, vblank completion, and first-frame candidate without touching CUSA first-frame state
+- Next blocker: keep the real CUSA first-frame gate moving while preserving the synthetic smoke as a deterministic subsystem check
+
 ## 2026-05-21: Emulator Parity Gate Run
 
 - Date: 2026-05-21
@@ -242,3 +291,6 @@ cd "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/eli
 - Result: `passed=12 failed=0 selected=12`
 - What improved: all 12 selected gate steps passed
 - Next blocker: promote execute/boundary/frame stages deeper into runtime coverage
+
+
+

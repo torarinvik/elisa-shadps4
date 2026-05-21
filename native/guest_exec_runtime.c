@@ -156,6 +156,44 @@ int32_t ElisaGuestExec_IsSupported(void) {
 #endif
 }
 
+int32_t ElisaGuestExec_SupportedNativeExecution(void) {
+    return ElisaGuestExec_IsSupported();
+}
+
+const char* ElisaGuestExec_HostArchitecture(void) {
+#if defined(_WIN32)
+#if defined(_M_X64)
+    return "x86_64";
+#elif defined(_M_ARM64)
+    return "arm64";
+#else
+    return "unknown";
+#endif
+#elif defined(__x86_64__) || defined(_M_X64)
+    return "x86_64";
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    return "arm64";
+#elif defined(__i386__) || defined(_M_IX86)
+    return "x86";
+#else
+    return "unknown";
+#endif
+}
+
+const char* ElisaGuestExec_HostMode(void) {
+#if defined(_WIN32)
+    return "Windows";
+#elif defined(__APPLE__)
+    return "macOS";
+#elif defined(__linux__)
+    return "Linux";
+#elif defined(__FreeBSD__)
+    return "FreeBSD";
+#else
+    return "unknown";
+#endif
+}
+
 int32_t ElisaGuestExec_LastStatus(void) {
     return elisa_guest_exec_last_status;
 }
@@ -239,6 +277,34 @@ int32_t ElisaGuestExec_ProtectRegion(uintptr_t address, uint64_t size, uint32_t 
     if ((prot & 2u) != 0u) native_prot |= PROT_WRITE;
     if ((prot & 4u) != 0u) native_prot |= PROT_EXEC;
     return mprotect((void*)address, (size_t)size, native_prot) == 0 ? 0 : -1;
+#endif
+}
+
+uintptr_t ElisaGuestExec_AllocateRegion(uint64_t size, uint32_t prot) {
+    if (size == 0) {
+        return 0;
+    }
+#if defined(_WIN32)
+    DWORD protect = PAGE_NOACCESS;
+    if ((prot & 4u) != 0u) {
+        protect = ((prot & 2u) != 0u) ? PAGE_EXECUTE_READWRITE : PAGE_EXECUTE_READ;
+    } else if ((prot & 2u) != 0u) {
+        protect = PAGE_READWRITE;
+    } else if ((prot & 1u) != 0u) {
+        protect = PAGE_READONLY;
+    }
+    void* result = VirtualAlloc(NULL, (SIZE_T)size, MEM_RESERVE | MEM_COMMIT, protect);
+    return (uintptr_t)result;
+#else
+    int native_prot = PROT_NONE;
+    if ((prot & 1u) != 0u) native_prot |= PROT_READ;
+    if ((prot & 2u) != 0u) native_prot |= PROT_WRITE;
+    if ((prot & 4u) != 0u) native_prot |= PROT_EXEC;
+    void* result = mmap(NULL, (size_t)size, native_prot, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (result == MAP_FAILED) {
+        return 0;
+    }
+    return (uintptr_t)result;
 #endif
 }
 
@@ -469,6 +535,13 @@ void ElisaGuestExec_EmitCusaArtifactImport(const char* source, const char* nid,
 void ElisaGuestExec_EmitCusaArtifactLastHle(const char* module, const char* symbol) {
     fprintf(stdout, "CUSA07399_ARTIFACT last_hle_module=%s last_hle_symbol=%s\n",
             module != NULL ? module : "", symbol != NULL ? symbol : "");
+    fflush(stdout);
+}
+
+void ElisaGuestExec_EmitCusaArtifactStringKV(const char* key, const char* value) {
+    fprintf(stdout, "CUSA07399_ARTIFACT %s=%s\n",
+            key != NULL ? key : "key",
+            value != NULL ? value : "");
     fflush(stdout);
 }
 

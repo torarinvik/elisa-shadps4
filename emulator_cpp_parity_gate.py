@@ -19,6 +19,7 @@ COMPILER_DIR = ROOT.parent / "compiler"
 TMP_DIR = Path(os.environ.get("TMPDIR", "/tmp"))
 MILESTONES_PATH = ROOT / "Milestones.md"
 LAST_REPORT_PATH = ROOT / "parity_gate_latest.md"
+FALLBACK_WORKQUEUE_PATH = ROOT / "CUSA07399_FALLBACK_WORKQUEUE.md"
 LEDGER_PATH = ROOT / "parity_ledger.json"
 PROJECT_PATH = ROOT / "project.json"
 CUSA_PATH = ROOT.parent / "shadPS4" / "Games" / "CUSA07399"
@@ -107,7 +108,9 @@ def all_steps() -> list[Step]:
         compiler_test("emulator-core-boot-smoke", category="boot"),
         compiler_test("real-self-loader-tests", category="loader"),
         compiler_test("emulator-real-game-boot-smoke", category="cusa"),
+        compiler_test("emulator-runtime-services-smoke", category="audio-input-system"),
         compiler_test("emulator-guest-exec-runtime-tests", category="guest-exec"),
+        compiler_test("emulator-renderer-first-frame-smoke", category="graphics"),
         compiler_test("kernel-threads-runtime-tests", slow=True, category="threads"),
         compiler_test("video-core-renderer-vulkan-diagnostics-tests", slow=True, category="graphics"),
         compiler_test("video-core-multi-level-page-table-tests", slow=True, category="graphics"),
@@ -160,6 +163,7 @@ def parse_artifact_kv(lines: Iterable[str]) -> list[dict[str, str]]:
         row: dict[str, str] = {}
         for token in payload.split():
             if "=" not in token:
+                row[token.strip()] = "1"
                 continue
             key, value = token.split("=", 1)
             row[key.strip()] = value.strip()
@@ -183,7 +187,11 @@ def to_int(value: str | None) -> int:
 def gather_artifact_rows(results: list[Result]) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     for r in results:
-        rows.extend(parse_artifact_kv(r.output.splitlines()))
+        if r.step.name in {
+            "elisacore test emulator-real-game-boot-smoke",
+            "elisacore test emulator-runtime-services-smoke",
+        }:
+            rows.extend(parse_artifact_kv(r.output.splitlines()))
     if CUSA_ARTIFACT_PATH.exists():
         rows.extend(parse_artifact_kv(CUSA_ARTIFACT_PATH.read_text().splitlines()))
     return rows
@@ -201,11 +209,37 @@ def parse_cusa_metrics(results: list[Result]) -> dict[str, int | str]:
         "malformed_imports": 0,
         "audio_sdl_available": 0,
         "audio_openal_available": 0,
+        "user_service_initialized": 0,
+        "user_service_initial_user": 0,
+        "user_service_login_user_count": 0,
+        "pad_initialized": 0,
+        "pad_open_attempted": 0,
+        "pad_opened": 0,
+        "pad_no_controller": 0,
+        "pad_read_attempted": 0,
+        "pad_read_rc": 0,
+        "pad_closed": 0,
+        "audio_output_attempted": 0,
         "audio_output_opened": 0,
+        "audio_output_write_attempted": 0,
+        "audio_output_write_ok": 0,
+        "audio_output_closed": 0,
+        "audio_input_attempted": 0,
         "audio_input_opened": 0,
+        "audio_input_read_attempted": 0,
+        "audio_input_read_rc": 0,
+        "audio_input_silent_state": 0,
+        "audio_input_closed": 0,
         "relocation_count": 0,
         "execution_stage": 0,
         "boundary_status": 0,
+        "guest_exec_boundary_reason_name": "",
+        "guest_exec_host_arch": "",
+        "guest_exec_host_mode": "",
+        "guest_exec_supported_native_execution": 0,
+        "guest_exec_probe_only": 0,
+        "guest_exec_last_module": "",
+        "guest_exec_last_symbol": "",
         "last_hle_module": "",
         "last_hle_symbol": "",
         "guest_exec_started": 0,
@@ -239,11 +273,42 @@ def parse_cusa_metrics(results: list[Result]) -> dict[str, int | str]:
         summary["malformed_imports"] = max(int(summary["malformed_imports"]), to_int(row.get("malformed_imports")))
         summary["audio_sdl_available"] = max(int(summary["audio_sdl_available"]), to_int(row.get("audio_sdl_available")))
         summary["audio_openal_available"] = max(int(summary["audio_openal_available"]), to_int(row.get("audio_openal_available")))
+        summary["user_service_initialized"] = max(int(summary["user_service_initialized"]), to_int(row.get("user_service_initialized")))
+        summary["user_service_initial_user"] = max(int(summary["user_service_initial_user"]), to_int(row.get("user_service_initial_user")))
+        summary["user_service_login_user_count"] = max(int(summary["user_service_login_user_count"]), to_int(row.get("user_service_login_user_count")))
+        summary["pad_initialized"] = max(int(summary["pad_initialized"]), to_int(row.get("pad_initialized")))
+        summary["pad_open_attempted"] = max(int(summary["pad_open_attempted"]), to_int(row.get("pad_open_attempted")))
+        summary["pad_opened"] = max(int(summary["pad_opened"]), to_int(row.get("pad_opened")))
+        summary["pad_no_controller"] = max(int(summary["pad_no_controller"]), to_int(row.get("pad_no_controller")))
+        summary["pad_read_attempted"] = max(int(summary["pad_read_attempted"]), to_int(row.get("pad_read_attempted")))
+        summary["pad_read_rc"] = max(int(summary["pad_read_rc"]), to_int(row.get("pad_read_rc")))
+        summary["pad_closed"] = max(int(summary["pad_closed"]), to_int(row.get("pad_closed")))
+        summary["audio_output_attempted"] = max(int(summary["audio_output_attempted"]), to_int(row.get("audio_output_attempted")))
         summary["audio_output_opened"] = max(int(summary["audio_output_opened"]), to_int(row.get("audio_output_opened")))
+        summary["audio_output_write_attempted"] = max(int(summary["audio_output_write_attempted"]), to_int(row.get("audio_output_write_attempted")))
+        summary["audio_output_write_ok"] = max(int(summary["audio_output_write_ok"]), to_int(row.get("audio_output_write_ok")))
+        summary["audio_output_closed"] = max(int(summary["audio_output_closed"]), to_int(row.get("audio_output_closed")))
+        summary["audio_input_attempted"] = max(int(summary["audio_input_attempted"]), to_int(row.get("audio_input_attempted")))
         summary["audio_input_opened"] = max(int(summary["audio_input_opened"]), to_int(row.get("audio_input_opened")))
+        summary["audio_input_read_attempted"] = max(int(summary["audio_input_read_attempted"]), to_int(row.get("audio_input_read_attempted")))
+        summary["audio_input_read_rc"] = max(int(summary["audio_input_read_rc"]), to_int(row.get("audio_input_read_rc")))
+        summary["audio_input_silent_state"] = max(int(summary["audio_input_silent_state"]), to_int(row.get("audio_input_silent_state")))
+        summary["audio_input_closed"] = max(int(summary["audio_input_closed"]), to_int(row.get("audio_input_closed")))
         summary["relocation_count"] = max(int(summary["relocation_count"]), to_int(row.get("relocated_imports")))
         summary["execution_stage"] = max(int(summary["execution_stage"]), to_int(row.get("execution_stage")))
         summary["boundary_status"] = max(int(summary["boundary_status"]), to_int(row.get("boundary_status")))
+        if row.get("guest_exec_boundary_reason_name"):
+            summary["guest_exec_boundary_reason_name"] = row.get("guest_exec_boundary_reason_name", "")
+        if row.get("guest_exec_host_arch"):
+            summary["guest_exec_host_arch"] = row.get("guest_exec_host_arch", "")
+        if row.get("guest_exec_host_mode"):
+            summary["guest_exec_host_mode"] = row.get("guest_exec_host_mode", "")
+        summary["guest_exec_supported_native_execution"] = max(int(summary["guest_exec_supported_native_execution"]), to_int(row.get("guest_exec_supported_native_execution")))
+        summary["guest_exec_probe_only"] = max(int(summary["guest_exec_probe_only"]), to_int(row.get("guest_exec_probe_only")))
+        if row.get("guest_exec_last_module"):
+            summary["guest_exec_last_module"] = row.get("guest_exec_last_module", "")
+        if row.get("guest_exec_last_symbol"):
+            summary["guest_exec_last_symbol"] = row.get("guest_exec_last_symbol", "")
         if row.get("last_hle_module"):
             summary["last_hle_module"] = row.get("last_hle_module", "")
         if row.get("last_hle_symbol"):
@@ -291,7 +356,11 @@ def parse_audio_skip_reason(results: list[Result]) -> str:
 
 def subsystem_guess(library: str, module: str, nid: str) -> str:
     probe = f"{library} {module} {nid}".lower()
+    if "ajm" in probe:
+        return "audio_input_service"
     if "video" in probe or "gnm" in probe or "vulkan" in probe:
+        return "graphics"
+    if "font" in probe:
         return "graphics"
     if "audio" in probe:
         return "audio_input_service"
@@ -304,11 +373,11 @@ def subsystem_guess(library: str, module: str, nid: str) -> str:
 
 def fallback_symbols(results: list[Result]) -> list[dict[str, str | int]]:
     rows = gather_artifact_rows(results)
-    out: list[dict[str, str | int]] = []
+    grouped: dict[tuple[str, str, str, str, str, str], dict[str, str | int]] = {}
     for row in rows:
         if row.get("resolution") != "3":
             continue
-        if row.get("fallback_import") is None:
+        if row.get("fallback_import") is None and row.get("fallback_import") != "1":
             continue
         nid = row.get("nid", "")
         library = row.get("library", "")
@@ -317,24 +386,20 @@ def fallback_symbols(results: list[Result]) -> list[dict[str, str | int]]:
         subsystem = row.get("subsystem", "")
         if subsystem == "":
             subsystem = subsystem_guess(library, module, nid)
-        out.append(
-            {
+        key = (nid, library, module, source, subsystem, "AeroLibFallback")
+        if key not in grouped:
+            grouped[key] = {
                 "nid": nid,
                 "library": library,
                 "module": module,
                 "source": source,
                 "subsystem": subsystem,
+                "status": "AeroLibFallback",
+                "count": 0,
             }
-        )
-    counts: dict[tuple[str, str, str, str, str], int] = {}
-    for r in out:
-        key = (str(r["nid"]), str(r["library"]), str(r["module"]), str(r["source"]), str(r["subsystem"]))
-        counts[key] = counts.get(key, 0) + 1
-    rows2 = [
-        {"nid": k[0], "library": k[1], "module": k[2], "source": k[3], "subsystem": k[4], "count": c}
-        for k, c in counts.items()
-    ]
-    rows2.sort(key=lambda item: int(item["count"]), reverse=True)
+        grouped[key]["count"] = int(grouped[key]["count"]) + 1
+    rows2 = list(grouped.values())
+    rows2.sort(key=lambda item: (-int(item["count"]), str(item["source"]), str(item["library"]), str(item["nid"])))
     return rows2
 
 
@@ -398,12 +463,12 @@ def cusa_stage_summary(results: list[Result], cusa: dict[str, int | str]) -> dic
 def host_exec_note() -> str:
     machine = platform.machine().lower()
     if sys.platform == "darwin" and machine in {"arm64", "aarch64"}:
-        return "arm64 macOS remains probe-only unless a translation path exists"
+        return "arm64 macOS probe-only"
     if sys.platform == "win32":
-        return "Windows remains unsupported until the trampoline path exists"
+        return "Windows trampoline not implemented yet"
     if machine in {"x86_64", "amd64"}:
-        return "x86_64 hosts can attempt guarded guest execution"
-    return f"host guest execution support is probe-only on {platform.system()} {platform.machine()}"
+        return f"x86_64 host can attempt guarded guest execution on {platform.system()}"
+    return f"probe-only on {platform.system()} {platform.machine()}"
 
 
 def load_workqueue_rows() -> list[dict[str, str]]:
@@ -521,7 +586,10 @@ def build_fallback_queues(rows: list[dict[str, str | int]]) -> dict[str, list[di
         else:
             queues["kernel_fallbacks"].append(row)
     for key in queues:
-        queues[key] = sorted(queues[key], key=lambda item: int(item.get("count", 0)), reverse=True)
+        queues[key] = sorted(
+            queues[key],
+            key=lambda item: (-int(item.get("count", 0)), str(item.get("source", "")), str(item.get("library", "")), str(item.get("nid", ""))),
+        )
     return queues
 
 
@@ -541,7 +609,7 @@ def score_summary(results: list[Result], cusa: dict[str, int | str], errors: lis
     return passed, total
 
 
-def summarize_progress(results: list[Result], require_first_boundary: bool = False) -> tuple[str, dict[str, list[dict[str, str | int]]], dict[str, int | str], list[str]]:
+def summarize_progress(results: list[Result], require_first_boundary: bool = False) -> tuple[str, dict[str, list[dict[str, str | int]]], dict[str, int | str], list[str], list[dict[str, str | int]]]:
     lines: list[str] = []
     ledger_counts = count_ledger_statuses()
     cusa = parse_cusa_metrics(results)
@@ -578,15 +646,24 @@ def summarize_progress(results: list[Result], require_first_boundary: bool = Fal
     lines.append(f"- handoff: {stages['handoff']}")
     lines.append(f"- execute stage: {stages['execute']}")
     lines.append(f"- first boundary: {stages['boundary']}")
-    lines.append(f"- first frame: {stages['frame']}")
+    synthetic_renderer = "PASS" if any(r.step.name == "elisacore test emulator-renderer-first-frame-smoke" and r.passed for r in results) else "FAIL"
+    lines.append(f"- synthetic renderer smoke: {synthetic_renderer}")
+    lines.append(f"- real CUSA first frame: {stages['frame']}")
     lines.append(f"- first frame ladder: {stages['frame_ladder']}")
     lines.append(f"- host note: {host_exec_note()}")
+    lines.append(f"- guest exec host arch: {cusa['guest_exec_host_arch']}")
+    lines.append(f"- guest exec host mode: {cusa['guest_exec_host_mode']}")
+    lines.append(f"- guest exec supported native execution: {cusa['guest_exec_supported_native_execution']}")
+    lines.append(f"- guest exec probe only: {cusa['guest_exec_probe_only']}")
     lines.append(f"- guest exec started: {cusa['guest_exec_started']}")
     lines.append(f"- guest exec entry reached: {cusa['guest_exec_entry_reached']}")
     lines.append(f"- guest exec first boundary reached: {cusa['guest_exec_first_boundary_reached']}")
-    lines.append(f"- guest exec boundary reason: {cusa['guest_exec_boundary_reason']}")
+    lines.append(f"- guest exec boundary reason: {cusa['guest_exec_boundary_reason']} ({cusa['guest_exec_boundary_reason_name']})")
+    lines.append(f"- guest exec boundary reason name: {cusa['guest_exec_boundary_reason_name']}")
     lines.append(f"- guest exec last pc: 0x{int(cusa['guest_exec_last_pc']):x}")
     lines.append(f"- guest exec last signal: {cusa['guest_exec_last_signal']}")
+    lines.append(f"- guest exec last module: {cusa['guest_exec_last_module']}")
+    lines.append(f"- guest exec last symbol: {cusa['guest_exec_last_symbol']}")
     lines.append("- first frame gate signals:")
     lines.append(f"  - shader_translate_attempted={cusa['shader_translate_attempted']}")
     lines.append(f"  - shader_path_bridge={cusa['shader_translate_path_bridge']} shader_path_native={cusa['shader_translate_path_native']}")
@@ -606,8 +683,22 @@ def summarize_progress(results: list[Result], require_first_boundary: bool = Fal
     lines.append(f"- malformed count: {cusa['malformed_imports']}")
     lines.append(f"- audio SDL available: {cusa['audio_sdl_available']}")
     lines.append(f"- audio OpenAL available: {cusa['audio_openal_available']}")
-    lines.append(f"- audio output opened: {cusa['audio_output_opened']}")
-    lines.append(f"- audio input opened: {cusa['audio_input_opened']}")
+    lines.append("Real CUSA runtime service signals:")
+    lines.append(f"- real CUSA user service initialized: {cusa['user_service_initialized']}")
+    lines.append(f"- user service initial user: {cusa['user_service_initial_user']}")
+    lines.append(f"- user service login user count: {cusa['user_service_login_user_count']}")
+    lines.append(f"- real CUSA pad initialized: {cusa['pad_initialized']}")
+    lines.append(f"- pad open attempted/opened: {cusa['pad_open_attempted']}/{cusa['pad_opened']}")
+    lines.append(f"- pad no controller: {cusa['pad_no_controller']}")
+    lines.append(f"- pad read attempted/rc: {cusa['pad_read_attempted']}/{cusa['pad_read_rc']}")
+    lines.append(f"- pad closed: {cusa['pad_closed']}")
+    lines.append(f"- real CUSA audio output attempted/opened: {cusa['audio_output_attempted']}/{cusa['audio_output_opened']}")
+    lines.append(f"- audio output write attempted/ok: {cusa['audio_output_write_attempted']}/{cusa['audio_output_write_ok']}")
+    lines.append(f"- audio output closed: {cusa['audio_output_closed']}")
+    lines.append(f"- real CUSA audio input attempted/opened: {cusa['audio_input_attempted']}/{cusa['audio_input_opened']}")
+    lines.append(f"- audio input read attempted/rc: {cusa['audio_input_read_attempted']}/{cusa['audio_input_read_rc']}")
+    lines.append(f"- audio input silent state: {cusa['audio_input_silent_state']}")
+    lines.append(f"- audio input closed: {cusa['audio_input_closed']}")
     audio_skip_reason = parse_audio_skip_reason(results)
     if audio_skip_reason:
         lines.append(f"- audio runtime skip reason: {audio_skip_reason}")
@@ -615,10 +706,10 @@ def summarize_progress(results: list[Result], require_first_boundary: bool = Fal
     lines.append(f"- last HLE call: module={cusa['last_hle_module']} symbol={cusa['last_hle_symbol']}")
     lines.append(f"- current video/audio/input stage: graphics={len(queues['graphics_fallbacks'])} audio-input-service={len(queues['audio_input_service_fallbacks'])}")
 
-    lines.append("Top 25 fallback symbols:")
-    for item in fallback_rows[:25]:
+    lines.append("Top 50 fallback symbols:")
+    for item in fallback_rows[:50]:
         lines.append(
-            f"- [{item['count']}] nid={item['nid']} lib={item['library']} module={item['module']} source={item['source']} subsystem={item['subsystem']}"
+            f"- [{item['count']}] nid={item['nid']} lib={item['library']} module={item['module']} source={item['source']} subsystem={item['subsystem']} status={item['status']}"
         )
     if not fallback_rows:
         lines.append("- none")
@@ -636,10 +727,26 @@ def summarize_progress(results: list[Result], require_first_boundary: bool = Fal
     else:
         lines.append("- none")
 
-    return "\n".join(lines), queues, cusa, rules
+    return "\n".join(lines), queues, cusa, rules, fallback_rows
 
 
-def write_report(path: Path, results: list[Result], progress: str, queues: dict[str, list[dict[str, str | int]]]) -> None:
+def parse_previous_fallback_count(previous_report: str | None) -> int | None:
+    if not previous_report:
+        return None
+    match = re.search(r"^- AeroLib fallback count: (\d+)$", previous_report, re.MULTILINE)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def write_report(
+    path: Path,
+    results: list[Result],
+    progress: str,
+    queues: dict[str, list[dict[str, str | int]]],
+    fallback_before: int | None,
+    fallback_after: int,
+) -> None:
     passed = sum(1 for r in results if r.passed)
     failed = len(results) - passed
     lines = ["# Emulator C++ Parity Gate", "", f"Passed: {passed}", f"Failed: {failed}", "", progress, "", "## Agent Work Queues"]
@@ -649,11 +756,50 @@ def write_report(path: Path, results: list[Result], progress: str, queues: dict[
             lines.append("- none")
             continue
         for item in items[:25]:
-            lines.append(f"- [{item['count']}] {item['nid']} {item['library']} {item['module']} ({item['source']})")
+            lines.append(
+                f"- [{item['count']}] {item['nid']} {item['library']} {item['module']} ({item['source']}) subsystem={item['subsystem']} status={item.get('status', 'AeroLibFallback')}"
+            )
+    if fallback_before is not None:
+        lines.extend(
+            [
+                "",
+                "## Fallback Delta",
+                f"- fallback count before: {fallback_before}",
+                f"- fallback count after: {fallback_after}",
+                f"- fallback symbols newly resolved: {max(fallback_before - fallback_after, 0)}",
+            ]
+        )
     lines.extend(["", "## Steps"])
     for r in results:
         status = "PASS" if r.passed else "FAIL"
         lines.append(f"- {status}: {r.step.name}")
+    path.write_text("\n".join(lines) + "\n")
+
+
+def write_fallback_workqueue(
+    path: Path,
+    fallback_rows: list[dict[str, str | int]],
+    cusa: dict[str, int | str],
+    fallback_before: int | None,
+) -> None:
+    lines = [
+        "# CUSA07399 Fallback Workqueue",
+        "",
+        f"Current AeroLib fallback count: {cusa['aerolib_fallback_imports']}",
+    ]
+    if fallback_before is not None:
+        lines.append(f"Previous AeroLib fallback count: {fallback_before}")
+        lines.append(f"Resolved since last report: {max(fallback_before - int(cusa['aerolib_fallback_imports']), 0)}")
+    lines.extend(["", "## Top Fallback Symbols", "", "| Count | Status | Subsystem | NID | Library | Module | Source |", "|---|---|---|---|---|---|---|"])
+    for item in fallback_rows[:50]:
+        lines.append(
+            f"| {item['count']} | {item.get('status', 'AeroLibFallback')} | {item['subsystem']} | `{item['nid']}` | `{item['library']}` | `{item['module']}` | `{item['source']}` |"
+        )
+    lines.extend(["", "## Full Queue", "", "| Count | Status | Subsystem | NID | Library | Module | Source |", "|---|---|---|---|---|---|---|"])
+    for item in fallback_rows:
+        lines.append(
+            f"| {item['count']} | {item.get('status', 'AeroLibFallback')} | {item['subsystem']} | `{item['nid']}` | `{item['library']}` | `{item['module']}` | `{item['source']}` |"
+        )
     path.write_text("\n".join(lines) + "\n")
 
 
@@ -737,7 +883,7 @@ def main() -> int:
             if args.fail_fast:
                 break
 
-    progress, queues, cusa, rules = summarize_progress(results, args.require_first_boundary)
+    progress, queues, cusa, rules, fallback_rows = summarize_progress(results, args.require_first_boundary)
     passed = sum(1 for r in results if r.passed)
     failed = len(results) - passed
 
@@ -746,12 +892,15 @@ def main() -> int:
     print(f"\nGate result: passed={passed} failed={failed} selected={len(results)}")
 
     previous_report = LAST_REPORT_PATH.read_text() if LAST_REPORT_PATH.exists() else None
+    fallback_before = parse_previous_fallback_count(previous_report)
     report_path = args.write_report if args.write_report else LAST_REPORT_PATH
-    write_report(report_path, results, progress, queues)
+    write_report(report_path, results, progress, queues, fallback_before, int(cusa["aerolib_fallback_imports"]))
     print(f"wrote report: {report_path}")
     current_report = report_path.read_text()
     if report_path != LAST_REPORT_PATH:
         LAST_REPORT_PATH.write_text(current_report)
+    write_fallback_workqueue(FALLBACK_WORKQUEUE_PATH, fallback_rows, cusa, fallback_before)
+    print(f"wrote fallback queue: {FALLBACK_WORKQUEUE_PATH}")
 
     if not args.no_milestones:
         cmd = "./emulator-cpp-parity --quick" if args.quick else "./emulator-cpp-parity"

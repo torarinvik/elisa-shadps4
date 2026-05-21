@@ -7,7 +7,6 @@ include "./core/emulator_state.elisa"
 include "./core/guest_exec.elisa"
 include "./core/linker.elisa"
 include "./core/user_settings.elisa"
-include "./emulator.elisa"
 include "./main.elisa"
 
 extern snprintf(buf: mutable u8&?, bufsize: usize, fmt: u8&, ...) -> int effects[Console.Format]
@@ -37,6 +36,13 @@ def RealGameBoot_EmitArtifactSignedKV(file: mutable IOFile&, key: static u8&, va
         written: int = snprintf(line[0].ref[mutable u8&], 128usize, "CUSA07399_ARTIFACT %s=%d", key, value)
         RealGameBoot_WriteLine(file, line[0].ref[mutable u8&], written)
 
+def RealGameBoot_EmitArtifactStringKV(file: mutable IOFile&, key: static u8&, value: static u8&?) -> void:
+    can Memory.Allocate, Console.Format:
+        line: mutable u8[256] = zeroed
+        value_text: static u8& = value if value != null else ""
+        written: int = snprintf(line[0].ref[mutable u8&], 256usize, "CUSA07399_ARTIFACT %s=%s", key, value_text)
+        RealGameBoot_WriteLine(file, line[0].ref[mutable u8&], written)
+
 def RealGameBoot_EmitArtifactStringPair(file: mutable IOFile&, prefix: static u8&, left_key: static u8&, left_value: static u8&?, right_key: static u8&, right_value: static u8&?) -> void:
     can Memory.Allocate, Console.Format:
         line: mutable u8[256] = zeroed
@@ -61,7 +67,7 @@ def RealGameBoot_EmitArtifactImport(file: mutable IOFile&, source: static u8&?, 
         library_text: static u8& = library if library != null else ""
         module_text: static u8& = module if module != null else ""
         subsystem_text: static u8& = subsystem if subsystem != null else ""
-        written: int = snprintf(line[0].ref[mutable u8&], 512usize, "CUSA07399_ARTIFACT fallback_import source=%s nid=%s library=%s module=%s subsystem=%s resolution=%llu", source_text, nid_text, library_text, module_text, subsystem_text, resolution)
+        written: int = snprintf(line[0].ref[mutable u8&], 512usize, "CUSA07399_ARTIFACT fallback_import=1 source=%s nid=%s library=%s module=%s subsystem=%s status=AeroLibFallback resolution=%llu count=1", source_text, nid_text, library_text, module_text, subsystem_text, resolution)
         RealGameBoot_WriteLine(file, line[0].ref[mutable u8&], written)
 
 def RealGameBoot_EmitArtifactLastHle(file: mutable IOFile&, module: static u8&?, symbol: static u8&?) -> void:
@@ -119,8 +125,15 @@ def RealGameBoot_EmitArtifacts(linker: Linker&, guarded_status: s32) -> void:
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "guest_exec_entry_reached", 1 if guest_exec_last_entry_addr != 0.uintptr() else 0)
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "guest_exec_first_boundary_reached", 1 if GuestExec_HasReachedFirstBoundary() else 0)
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "guest_exec_boundary_reason", GuestExec_FirstBoundaryReason().i64().u64())
+        RealGameBoot_EmitArtifactStringKV(file.ref[mutable IOFile&], "guest_exec_boundary_reason_name", GuestExec_FirstBoundaryReasonName())
+        RealGameBoot_EmitArtifactStringKV(file.ref[mutable IOFile&], "guest_exec_host_arch", GuestExec_HostArchitecture())
+        RealGameBoot_EmitArtifactStringKV(file.ref[mutable IOFile&], "guest_exec_host_mode", GuestExec_HostMode())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "guest_exec_supported_native_execution", 1 if GuestExec_SupportedNativeExecution() else 0)
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "guest_exec_probe_only", 1 if GuestExec_IsProbeOnly() else 0)
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "guest_exec_last_pc", GuestExec_LastGuestPC().u64())
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "guest_exec_last_signal", GuestExec_LastSignal().i64().u64())
+        RealGameBoot_EmitArtifactStringKV(file.ref[mutable IOFile&], "guest_exec_last_module", GuestExec_LastModule())
+        RealGameBoot_EmitArtifactStringKV(file.ref[mutable IOFile&], "guest_exec_last_symbol", GuestExec_LastSymbol())
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "malformed_imports", linker.last_malformed_import_count.u64())
         i: mutable usize = 0
         limit: mutable usize = linker.modules.count
@@ -149,27 +162,23 @@ def RealGameBoot_EmitArtifacts(linker: Linker&, guarded_status: s32) -> void:
             RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "module_exec_mismatch", linker.modules[i].executable_segment_permission_mismatch_count.u64())
             RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "module_patched_import_relocations", linker.modules[i].patched_import_relocation_count.u64())
             i <- i + 1
-        emitted_fallback: mutable usize = 0
         for mi in 0..<linker.modules.count:
             mod_ref: Module = linker.modules[mi]
             for ii in 0..<mod_ref.import_symbols.count:
-                if emitted_fallback >= 24usize:
-                    return
                 rec: ImportSymbolRecord = mod_ref.import_symbols[ii]
                 if rec.resolution_kind != IMPORT_RESOLUTION_AEROLIB_FALLBACK:
                     continue
-                subsystem: mutable static u8& = "unknown"
+                subsystem: mutable static u8& = "kernel"
                 if static_strlen(rec.library) > 0:
                     if Linker_StringHasPrefix(rec.library, "libScePad"):
-                        subsystem <- "pad_input"
-                    elif Linker_StringHasPrefix(rec.library, "libSceGnm"):
+                        subsystem <- "audio_input_service"
+                    elif Linker_StringHasPrefix(rec.library, "libSceGnm") or Linker_StringHasPrefix(rec.library, "libSceVideo") or Linker_StringHasPrefix(rec.library, "libSceFont"):
                         subsystem <- "graphics"
-                    elif Linker_StringHasPrefix(rec.library, "libSceAudio"):
-                        subsystem <- "audio"
-                elif Linker_StringHasPrefix(rec.library, "libkernel"):
+                    elif Linker_StringHasPrefix(rec.library, "libSceAudio") or Linker_StringHasPrefix(rec.library, "libSceAjm") or Linker_StringHasPrefix(rec.library, "libSceCommonDialog"):
+                        subsystem <- "audio_input_service"
+                    elif Linker_StringHasPrefix(rec.library, "libSceAppContent") or Linker_StringHasPrefix(rec.library, "libSceContentExport"):
                         subsystem <- "kernel"
                 RealGameBoot_EmitArtifactImport(file.ref[mutable IOFile&], mod_ref.file, rec.nid, rec.library, rec.module, subsystem, rec.resolution_kind.u64())
-                emitted_fallback <- emitted_fallback + 1
         RealGameBoot_EmitArtifactLastHle(file.ref[mutable IOFile&], GuestExec_LastHleModule(), GuestExec_LastHleSymbol())
         _ = IOFile_Flush(file)
         IOFile_Close(file)
