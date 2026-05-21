@@ -184,6 +184,41 @@ def emulator_core_boot_smoke_applies_cli_runtime_flags() -> void:
         BootSmoke_Check(streq(Emulator_GetLastGuestEbootPath(emu), "/app0/eboot.bin") == 1, "expected override-root guest eboot fallback")
 
 @test
+def emulator_core_boot_smoke_import_resolution_classification() -> void:
+    can Memory.Allocate, Abort.Panic:
+        parsed_nid: mutable static u8& = ""
+        parsed_lib: mutable static u8& = ""
+        parsed_mod: mutable static u8& = ""
+        BootSmoke_Check(Module_ParseImportSymbol("D4yla3vx4tY#libkernel#libkernel", parsed_nid.ref[mutable static u8&], parsed_lib.ref[mutable static u8&], parsed_mod.ref[mutable static u8&]), "expected full nid#lib#mod parse")
+        BootSmoke_Check(streq(parsed_nid, "D4yla3vx4tY") == 1, "expected parsed nid")
+        BootSmoke_Check(streq(parsed_lib, "libkernel") == 1, "expected parsed library")
+        BootSmoke_Check(streq(parsed_mod, "libkernel") == 1, "expected parsed module")
+        parsed_nid <- ""
+        parsed_lib <- ""
+        parsed_mod <- ""
+        BootSmoke_Check(Module_ParseImportSymbol("D4yla3vx4tY", parsed_nid.ref[mutable static u8&], parsed_lib.ref[mutable static u8&], parsed_mod.ref[mutable static u8&]), "expected NID-only parse")
+        BootSmoke_Check(streq(parsed_nid, "D4yla3vx4tY") == 1, "expected NID-only parse to preserve nid")
+
+        BootSmoke_ResetRuntime()
+        arena: Arena = zeroed
+        result: mutable int = -1
+        in arena:
+            args: mutable darray[static u8&] = ["shadps4", "CUSA00000"]
+            result <- Main_Run(args)
+        BootSmoke_Check(result == 0, "expected Main_Run success")
+        linker: mutable Linker& = Linker_GetInstance()
+        resolved_addr: mutable u64 = 0
+        resolved_kind: mutable u8 = 0u8
+        BootSmoke_Check(Linker_Resolve(linker, "D4yla3vx4tY", linker.modules[0].ref[mutable Module&], resolved_addr.ref[mutable u64&], resolved_kind.ref[mutable u8&]), "expected HLE match by NID")
+        BootSmoke_Check(resolved_kind == IMPORT_RESOLUTION_NATIVE_HLE, "expected NID resolution classified as NativeElisaHLE")
+        BootSmoke_Check(Linker_Resolve(linker, "D4yla3vx4tY#libkernel#libkernel", linker.modules[0].ref[mutable Module&], resolved_addr.ref[mutable u64&], resolved_kind.ref[mutable u8&]), "expected HLE match by full symbol")
+        BootSmoke_Check(resolved_kind == IMPORT_RESOLUTION_NATIVE_HLE, "expected full symbol resolution classified as NativeElisaHLE")
+        BootSmoke_Check(Linker_Resolve(linker, "DefinitelyUnknownSymbol", linker.modules[0].ref[mutable Module&], resolved_addr.ref[mutable u64&], resolved_kind.ref[mutable u8&]), "expected unknown symbol to fallback")
+        BootSmoke_Check(resolved_kind == IMPORT_RESOLUTION_AEROLIB_FALLBACK, "expected unknown symbol classified as AeroLibFallback")
+        BootSmoke_Check(not Linker_Resolve(linker, "", linker.modules[0].ref[mutable Module&], resolved_addr.ref[mutable u64&], resolved_kind.ref[mutable u8&]), "expected empty symbol to be rejected")
+        BootSmoke_Check(resolved_kind == IMPORT_RESOLUTION_MALFORMED, "expected empty symbol classified as malformed")
+
+@test
 def emulator_core_boot_smoke_utility_commands_do_not_start_game() -> void:
     can Memory.Allocate, Abort.Panic:
         BootSmoke_ResetRuntime()

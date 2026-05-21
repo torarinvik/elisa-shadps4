@@ -10,7 +10,6 @@ ROOT = Path(__file__).resolve().parent
 LEDGER_PATH = ROOT / "parity_ledger.json"
 
 ALLOWED_STATUSES = {
-    "Implemented",
     "Native-Elisa",
     "Stub-Parity",
     "External-C-ABI",
@@ -61,7 +60,7 @@ def main() -> int:
             if status not in ALLOWED_STATUSES:
                 return fail(f"{name}:{symbol}: invalid status {status!r}")
 
-            if status in {"Implemented", "Native-Elisa"}:
+            if status == "Native-Elisa":
                 tests = entry.get("tests", [])
                 if not isinstance(tests, list) or len(tests) == 0:
                     return fail(

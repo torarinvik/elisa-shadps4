@@ -187,6 +187,9 @@ global mutable g_videoout_presenter_state: VideoOutPresenterState = zeroed
 global mutable g_videoout_artifact_opened_emitted: bool = false
 global mutable g_videoout_artifact_buffers_registered_emitted: bool = false
 global mutable g_videoout_artifact_first_flip_emitted: bool = false
+global mutable g_videoout_artifact_flip_completed_emitted: bool = false
+global mutable g_videoout_artifact_first_frame_candidate_emitted: bool = false
+global mutable g_videoout_artifact_event_emitted: bool = false
 
 def videoout_is_supported_pixel_format(pixel_format: u32) -> bool:
     return pixel_format == SCE_VIDEO_OUT_PIXEL_FORMAT_A8R8G8B8_SRGB or pixel_format == SCE_VIDEO_OUT_PIXEL_FORMAT_A8B8G8R8_SRGB or pixel_format == SCE_VIDEO_OUT_PIXEL_FORMAT_A2R10G10B10 or pixel_format == SCE_VIDEO_OUT_PIXEL_FORMAT_A2R10G10B10_SRGB or pixel_format == SCE_VIDEO_OUT_PIXEL_FORMAT_A2R10G10B10_BT2020_PQ or pixel_format == SCE_VIDEO_OUT_PIXEL_FORMAT_A16R16G16B16_FLOAT
@@ -232,6 +235,9 @@ def videoout_reset_port_state() -> void:
     g_videoout_artifact_opened_emitted <- false
     g_videoout_artifact_buffers_registered_emitted <- false
     g_videoout_artifact_first_flip_emitted <- false
+    g_videoout_artifact_flip_completed_emitted <- false
+    g_videoout_artifact_first_frame_candidate_emitted <- false
+    g_videoout_artifact_event_emitted <- false
 
 def videoout_lazy_init() -> void:
     if g_videoout_initialized:
@@ -322,13 +328,17 @@ def videoout_remove_event_binding(is_flip: bool, eq_handle: int) -> void:
 def videoout_trigger_events(is_flip: bool, ident: u64, payload: u64) -> void:
     _ = ident
     _ = payload
+    did_emit: mutable bool = false
     i: mutable int = 0
     while i < VIDEOOUT_MAX_EVENT_BINDINGS:
         if is_flip:
-            _ = g_videoout_flip_event_bindings[i].used
+            did_emit <- did_emit or g_videoout_flip_event_bindings[i].used
         else:
-            _ = g_videoout_vblank_event_bindings[i].used
+            did_emit <- did_emit or g_videoout_vblank_event_bindings[i].used
         i <- i + 1
+    if did_emit and not g_videoout_artifact_event_emitted:
+        c_GuestExec_EmitCusaArtifactKV("VIDEO_STAGE_event_emitted", 1u64)
+        g_videoout_artifact_event_emitted <- true
 
 def videoout_process_flip(index: i32, flip_arg: i64, is_eop: bool) -> void:
     frame_available: mutable bool = false
@@ -366,6 +376,12 @@ def videoout_process_flip(index: i32, flip_arg: i64, is_eop: bool) -> void:
         g_videoout_flip_status.flip_pending_num <- g_videoout_flip_status.flip_pending_num - 1
     g_videoout_presenter_state.present_count <- g_videoout_presenter_state.present_count + 1u64
     g_videoout_presenter_state.hdr_enabled <- g_videoout_is_hdr
+    if not g_videoout_artifact_flip_completed_emitted:
+        c_GuestExec_EmitCusaArtifactKV("VIDEO_STAGE_flip_completed", 1u64)
+        g_videoout_artifact_flip_completed_emitted <- true
+    if g_videoout_presenter_state.present_count > 0u64 and not g_videoout_artifact_first_frame_candidate_emitted:
+        c_GuestExec_EmitCusaArtifactKV("VIDEO_STAGE_first_frame_candidate", 1u64)
+        g_videoout_artifact_first_frame_candidate_emitted <- true
 
     flip_payload: u64 = VIDEOOUT_INTERNAL_EVENT_FLIP | (flip_arg.u64() << 16u64)
     videoout_trigger_events(true, VIDEOOUT_INTERNAL_EVENT_FLIP, flip_payload)
@@ -433,6 +449,7 @@ def sceVideoOutSubmitFlip(a0: i64, a1: i64, a2: i64, a3: i64) -> int:
         return ORBIS_VIDEO_OUT_ERROR_FLIP_QUEUE_FULL
     if not g_videoout_artifact_first_flip_emitted:
         c_GuestExec_EmitCusaArtifactKV("first_flip_submitted", 1u64)
+        c_GuestExec_EmitCusaArtifactKV("VIDEO_STAGE_flip_submitted", 1u64)
         g_videoout_artifact_first_flip_emitted <- true
     return ORBIS_OK
 
@@ -487,6 +504,7 @@ def sceVideoOutRegisterBuffers(a0: i64, a1: i64, a2: void&?, a3: i64, a4: void&?
     g_videoout_groups[group_index].attrib <- attribute
     if not g_videoout_artifact_buffers_registered_emitted:
         c_GuestExec_EmitCusaArtifactKV("videoout_buffers_registered", 1u64)
+        c_GuestExec_EmitCusaArtifactKV("VIDEO_STAGE_buffers_registered", 1u64)
         g_videoout_artifact_buffers_registered_emitted <- true
     return group_index
 
@@ -562,6 +580,7 @@ def sceVideoOutOpen(a0: i64, a1: i64, a2: i64, a3: void&?) -> int:
     g_videoout_last_vblank_tsc <- g_videoout_virtual_tsc
     if not g_videoout_artifact_opened_emitted:
         c_GuestExec_EmitCusaArtifactKV("videoout_opened", 1u64)
+        c_GuestExec_EmitCusaArtifactKV("VIDEO_STAGE_opened", 1u64)
         g_videoout_artifact_opened_emitted <- true
     return VIDEOOUT_MAIN_HANDLE
 

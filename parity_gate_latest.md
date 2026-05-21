@@ -1,69 +1,62 @@
 # Emulator C++ Parity Gate
 
-Passed: 23
-Failed: 4
+Passed: 8
+Failed: 3
 
-Ledger statuses:
+Summary score: 9/16
+Per-subsystem counts:
 - External-C-ABI: 11
-- Implemented: 237
+- Native-Elisa: 237
 - Stub-Parity: 40
-Matrix snapshots:
-- core_libraries_requested_scope_parity_matrix.json: MATCHED=93, MISSING_IN_ELISA=1
-- system_parity_matrix.json: MATCHED=930
-- imgui_big_picture_parity_matrix.json: MATCHED=85
-- shader_recompiler_ir_passes_parity_matrix.json: MATCHED=25
-- shader_recompiler_ir_core_parity_matrix.json: MATCHED=285
-- shader_recompiler_backend_spirv_parity_matrix.json: MATCHED=995
-CUSA07399: where are we?
+Parity gate counts (native/bridge/fallback/unresolved):
+- native: 237
+- bridge: 0
+- fallback: 0
+- unresolved: 0
+CUSA07399 stage:
+- execution stage raw: 0
 - load: FAIL
 - link: FAIL
 - handoff: PASS
-- guarded entry: PENDING
+- execute stage: none
 - first boundary: PENDING
 - first frame: PENDING
 CUSA07399 artifact metrics:
-- module count: 0
-- total imports: 0
-- native HLE imports: 0
-- PRX export imports: 0
-- AeroLib fallback imports: 0
-- unresolved imports: 0
-- loaded modules: 0
-- relocation count: 0
-Post-boot runtime readiness:
-- pad: native-Elisa (pad runtime now consumes shared Elisa controller state with touch/motion/lightbar/vibration paths; evidence: core/libraries/pad/pad.elisa, input/controller.elisa, input/input_handler.elisa)
-- audioout: native-Elisa (runtime state and backend abstraction are present; host audio device open is not required; evidence: core/libraries/audio/audioout.elisa, core/libraries/audio/audioout_backend.elisa)
-- savedata: C++-bridge (mount/param behavior is exposed through the parity bridge; evidence: core/libraries/save_data/savedata.elisa, core/libraries/save_data/savedata_ffi.elisa, core/libraries/save_data/savedata_elisa_bridge.cpp)
-- userservice/systemservice: C-FFI (service metadata and FFI shims are available for post-boot probing; evidence: core/libraries/system/userservice.elisa, core/libraries/system/systemservice.elisa, core/libraries/system/userservice_ffi_bridge.elisa, core/libraries/system/systemservice_ffi_bridge.elisa)
-- netctl/network: stub-parity (non-invasive netctl defaults plus socket conversion FFI; no live network dependency; evidence: core/libraries/network/netctl.elisa, core/libraries/network/net.elisa, core/libraries/network/net_ffi.elisa)
-- NP: stub-parity (NP runtime and module stubs are visible for real-game import readiness; evidence: core/libraries/np/np.elisa, core/libraries/np/np_runtime.elisa)
-- avplayer: C-FFI (FFmpeg-backed media probe surface exists; media decode remains explicit subsystem work; evidence: core/libraries/avplayer/avplayer_impl.elisa, core/libraries/avplayer/avplayer_ffmpeg_ffi.elisa)
+- CUSA module count: 0
+- imports total: 0
+- native HLE count: 0
+- PRX export count: 0
+- AeroLib fallback count: 0
+- unresolved count: 0
+- malformed count: 0
+- current execution stage: 0 (none)
+- current video/audio/input stage: graphics=0 audio-input-service=0
+Top 25 fallback symbols:
+- none
+Top blockers:
+- Gate step failed: elisacore test emulator-core-boot-smoke
+- Gate step failed: elisacore test real-self-loader-tests
+- Gate step failed: elisacore test emulator-real-game-boot-smoke
+
+## Agent Work Queues
+### kernel_fallbacks
+- none
+### graphics_fallbacks
+- none
+### audio_input_service_fallbacks
+- none
+### loader_guest_exec_blockers
+- none
 
 ## Steps
+- PASS: project.json syntax
 - PASS: parity ledger
 - PASS: parity ABI guard
 - PASS: parity workqueue summary
 - PASS: bridge syntax
-- PASS: generate core_libraries_requested_scope_parity_matrix
-- FAIL: check core_libraries_requested_scope_parity_matrix
-- PASS: generate system_parity_matrix
-- PASS: check system_parity_matrix
-- PASS: generate imgui_big_picture_parity_matrix
-- PASS: check imgui_big_picture_parity_matrix
-- PASS: generate shader_recompiler_ir_passes_parity_matrix
-- PASS: check shader_recompiler_ir_passes_parity_matrix
-- PASS: generate shader_recompiler_ir_core_parity_matrix
-- PASS: check shader_recompiler_ir_core_parity_matrix
-- PASS: generate shader_recompiler_backend_spirv_parity_matrix
-- PASS: check shader_recompiler_backend_spirv_parity_matrix
-- PASS: project.json syntax
 - PASS: native guest_exec_runtime warnings
 - PASS: native kernel_threads_runtime warnings
-- PASS: native kernel_threads_runtime_test_support warnings
-- PASS: elisacore test core-platform-tests
-- PASS: elisacore test video-core-multi-level-page-table-tests
-- PASS: elisacore test video-core-renderer-vulkan-diagnostics-tests
-- FAIL: elisacore test real-self-loader-tests
-- PASS: elisacore test emulator-guest-exec-runtime-tests
 - FAIL: elisacore test emulator-core-boot-smoke
+- FAIL: elisacore test real-self-loader-tests
 - FAIL: elisacore test emulator-real-game-boot-smoke
+- PASS: elisacore test emulator-guest-exec-runtime-tests

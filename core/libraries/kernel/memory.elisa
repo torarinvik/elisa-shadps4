@@ -9,6 +9,8 @@ include "./lib_function_stub.elisa"
 
 const KERNEL_MEMORY_PAGE_SIZE: u64 = 16 * 1024
 const KERNEL_MEMORY_MMAP_FAILED: uintptr = 0.uintptr() - 1.uintptr()
+const KERNEL_DIRECT_MEMORY_TYPE_DEFAULT: int = 0
+const KERNEL_DIRECT_MEMORY_BASE: u64 = 0x100000000u64
 
 def KernelMemory_Is16KBAligned(value: u64) -> bool:
     return (value % KERNEL_MEMORY_PAGE_SIZE) == 0
@@ -28,6 +30,8 @@ def KernelMemory_AlignDown(value: u64, alignment: u64) -> u64:
 
 def KernelMemory_WriteOutPtr(out_ptr: mutable void&?&, value: void&?) -> void:
     out_ptr <- value
+
+global mutable g_kernel_direct_alloc_cursor: u64 = KERNEL_DIRECT_MEMORY_BASE
 
 def KernelMemory_MapDirect(addr: mutable void&?&, len: u64, prot: int, flags: int, phys_addr: i64, alignment: u64, name: static u8&) -> int:
     if len == 0 or not KernelMemory_Is16KBAligned(len):
@@ -106,27 +110,58 @@ def sceKernelEnableDmemAliasing() -> int:
     return ORBIS_OK
 
 def sceKernelAllocateDirectMemory(searchStart: i64, searchEnd: i64, len: u64, alignment: u64, memoryType: int, physAddrOut: void&?) -> int:
-    _ = searchStart
-    _ = searchEnd
-    _ = len
-    _ = alignment
+    out_addr: mutable i64&? = physAddrOut as mutable i64&?
+    if out_addr == null:
+        return ORBIS_KERNEL_ERROR_EFAULT
+    if len == 0 or not KernelMemory_Is16KBAligned(len):
+        return ORBIS_KERNEL_ERROR_EINVAL
+    if alignment != 0 and not KernelMemory_Is16KBAligned(alignment):
+        return ORBIS_KERNEL_ERROR_EINVAL
+    if searchEnd <= searchStart:
+        return ORBIS_KERNEL_ERROR_EINVAL
     _ = memoryType
-    _ = physAddrOut
+    align: mutable u64 = alignment
+    if align == 0:
+        align <- KERNEL_MEMORY_PAGE_SIZE
+    min_addr: mutable u64 = KERNEL_DIRECT_MEMORY_BASE
+    if searchStart > 0:
+        min_addr <- searchStart.u64()
+    alloc_start: mutable u64 = KernelMemory_AlignUp(g_kernel_direct_alloc_cursor, align)
+    if alloc_start < min_addr:
+        alloc_start <- KernelMemory_AlignUp(min_addr, align)
+    alloc_end: u64 = alloc_start + len
+    if alloc_end <= alloc_start:
+        return ORBIS_KERNEL_ERROR_ENOMEM
+    if alloc_end > searchEnd.u64():
+        return ORBIS_KERNEL_ERROR_ENOMEM
+    out_addr[0] <- alloc_start.i64()
+    g_kernel_direct_alloc_cursor <- alloc_end
     return ORBIS_OK
 
 def sceKernelAllocateMainDirectMemory(len: u64, alignment: u64, memoryType: int, physAddrOut: void&?) -> int:
-    _ = len
-    _ = alignment
-    _ = memoryType
-    _ = physAddrOut
-    return ORBIS_OK
+    return sceKernelAllocateDirectMemory(KERNEL_DIRECT_MEMORY_BASE.i64(), (KERNEL_DIRECT_MEMORY_BASE + MemoryManager_GetTotalDirectSize(Memory_Instance())).i64(), len, alignment, memoryType, physAddrOut)
 
 def sceKernelAvailableDirectMemorySize(searchStart: u64, searchEnd: u64, alignment: u64, physAddrOut: void&?, sizeOut: void&?) -> int:
-    _ = searchStart
-    _ = searchEnd
-    _ = alignment
-    _ = physAddrOut
-    _ = sizeOut
+    out_phys: mutable i64&? = physAddrOut as mutable i64&?
+    out_size: mutable u64&? = sizeOut as mutable u64&?
+    if out_phys == null or out_size == null:
+        return ORBIS_KERNEL_ERROR_EFAULT
+    if searchEnd <= searchStart:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    if alignment != 0 and not KernelMemory_Is16KBAligned(alignment):
+        return ORBIS_KERNEL_ERROR_EINVAL
+    align: mutable u64 = alignment
+    if align == 0:
+        align <- KERNEL_MEMORY_PAGE_SIZE
+    start: mutable u64 = KernelMemory_AlignUp(searchStart, align)
+    if start < g_kernel_direct_alloc_cursor:
+        start <- KernelMemory_AlignUp(g_kernel_direct_alloc_cursor, align)
+    if start >= searchEnd:
+        out_phys[0] <- 0
+        out_size[0] <- 0u64
+        return ORBIS_OK
+    out_phys[0] <- start.i64()
+    out_size[0] <- KernelMemory_AlignDown(searchEnd - start, KERNEL_MEMORY_PAGE_SIZE)
     return ORBIS_OK
 
 def sceKernelCheckedReleaseDirectMemory(start: u64, len: u64) -> int:
@@ -149,10 +184,18 @@ def sceKernelReserveVirtualRange(addr: void&?, len: u64, flags: int, alignment: 
     return ORBIS_OK
 
 def sceKernelGetDirectMemoryType(addr: u64, directMemoryTypeOut: void&?, directMemoryStartOut: void&?, directMemoryEndOut: void&?) -> int:
-    _ = addr
-    _ = directMemoryTypeOut
-    _ = directMemoryStartOut
-    _ = directMemoryEndOut
+    out_type: mutable int&? = directMemoryTypeOut as mutable int&?
+    out_start: mutable i64&? = directMemoryStartOut as mutable i64&?
+    out_end: mutable i64&? = directMemoryEndOut as mutable i64&?
+    if out_type == null or out_start == null or out_end == null:
+        return ORBIS_KERNEL_ERROR_EFAULT
+    direct_base: u64 = KERNEL_DIRECT_MEMORY_BASE
+    direct_end: u64 = KERNEL_DIRECT_MEMORY_BASE + MemoryManager_GetTotalDirectSize(Memory_Instance())
+    if addr < direct_base or addr >= direct_end:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    out_type[0] <- KERNEL_DIRECT_MEMORY_TYPE_DEFAULT
+    out_start[0] <- direct_base.i64()
+    out_end[0] <- direct_end.i64()
     return ORBIS_OK
 
 def sceKernelGetDirectMemorySize() -> u64:

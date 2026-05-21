@@ -123,7 +123,7 @@ INTERNAL_FILE_REQUIREMENTS: dict[str, list[str]] = {
         "core/libraries/sysmodule/sysmodule_elisa_bridge.cc::SysmoduleElisa_sceSysmoduleLoadModuleInternal",
     ],
     "core/libraries/videoout/driver.cpp": [
-        "core/libraries/videoout/videoout.elisa::c_sceVideoOutSubmitFlip",
+        "core/libraries/videoout/videoout_ffi.elisa::c_sceVideoOutSubmitFlip",
         "core/libraries/videoout/videoout_elisa_bridge.cpp::VideoOutElisa_sceVideoOutSubmitFlip",
     ],
 }

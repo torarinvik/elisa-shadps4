@@ -43,11 +43,26 @@ def emulator_guest_exec_guard_captures_synthetic_crash() -> void:
 @test
 def emulator_guest_exec_guarded_main_reports_unsupported_on_non_x64_hosts() -> void:
     can Abort.Panic:
+        GuestExec_ResetState()
         if GuestExec_IsSupported():
             return
         status: s32 = GuestExec_RunMainEntryGuarded(GuestExec_GetSyntheticAddAddress(), 0, null, 1.u32())
         if status != -2:
             panic("expected guarded main unsupported status")
+        if GuestExec_ClassifyFirstBoundary() != GUEST_EXEC_BOUNDARY_UNSUPPORTED_HOST:
+            panic("expected unsupported host first-boundary classification")
+        if GuestExec_FirstBoundaryReason() != GUEST_EXEC_BOUNDARY_REASON_UNSUPPORTED_HOST:
+            panic("expected unsupported host first-boundary reason")
+        if GuestExec_ExecutionStage() != GUEST_EXEC_STAGE_GUARDED_ENTRY:
+            panic("expected unsupported host to report guarded-entry stage")
+
+@test
+def emulator_guest_exec_guarded_main_null_entry_fails_safely() -> void:
+    can Abort.Panic:
+        GuestExec_ResetState()
+        status: s32 = GuestExec_RunMainEntryGuarded(0.uintptr(), 0, null, 10.u32())
+        if status != -1:
+            panic("expected null entry to return -1")
 
 @test
 def emulator_guest_exec_first_boundary_classifies_missing_handoff() -> void:
@@ -93,3 +108,24 @@ def emulator_guest_exec_first_boundary_classifies_real_hle_boundary() -> void:
         else:
             if stage != GUEST_EXEC_BOUNDARY_UNSUPPORTED_HOST:
                 panic("expected unsupported host boundary classification")
+
+@test
+def emulator_guest_exec_pre_boundary_fault_reports_crash_captured_stage() -> void:
+    can Abort.Panic:
+        if not GuestExec_IsSupported():
+            return
+        GuestExec_ResetState()
+        crash_entry: VAddr = GuestExec_GetSyntheticCrashAddress()
+        if crash_entry == 0.uintptr():
+            panic("expected synthetic crash function address")
+        status: s32 = GuestExec_RunMainEntryGuarded(crash_entry, 0, null, 10.u32())
+        if status >= 0:
+            panic("expected guarded crash status")
+        if GuestExec_LastSignal() == 0:
+            panic("expected crash signal")
+        if GuestExec_ClassifyFirstBoundary() != GUEST_EXEC_BOUNDARY_PRE_BOUNDARY_FAULT:
+            panic("expected pre-boundary fault classification")
+        if GuestExec_FirstBoundaryReason() != GUEST_EXEC_BOUNDARY_REASON_HOST_CRASH:
+            panic("expected host crash first-boundary reason")
+        if GuestExec_ExecutionStage() != GUEST_EXEC_STAGE_CRASH_CAPTURED:
+            panic("expected crash-captured execution stage")

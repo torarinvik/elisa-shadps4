@@ -165,6 +165,7 @@ def parse_cusa_metrics(results: list[Result]) -> dict[str, int | str]:
         "prx_export_imports": 0,
         "aerolib_fallback_imports": 0,
         "unresolved_imports": 0,
+        "malformed_imports": 0,
         "relocation_count": 0,
         "execution_stage": 0,
         "boundary_status": 0,
@@ -176,6 +177,7 @@ def parse_cusa_metrics(results: list[Result]) -> dict[str, int | str]:
         summary["prx_export_imports"] = max(int(summary["prx_export_imports"]), to_int(row.get("prx_export_imports") or row.get("prx_export")))
         summary["aerolib_fallback_imports"] = max(int(summary["aerolib_fallback_imports"]), to_int(row.get("aerolib_fallback_imports") or row.get("aerolib_fallback")))
         summary["unresolved_imports"] = max(int(summary["unresolved_imports"]), to_int(row.get("unresolved_imports")))
+        summary["malformed_imports"] = max(int(summary["malformed_imports"]), to_int(row.get("malformed_imports")))
         summary["relocation_count"] = max(int(summary["relocation_count"]), to_int(row.get("relocated_imports")))
         summary["execution_stage"] = max(int(summary["execution_stage"]), to_int(row.get("execution_stage")))
         summary["boundary_status"] = max(int(summary["boundary_status"]), to_int(row.get("boundary_status")))
@@ -199,19 +201,24 @@ def fallback_symbols(results: list[Result]) -> list[dict[str, str | int]]:
     rows = gather_artifact_rows(results)
     out: list[dict[str, str | int]] = []
     for row in rows:
-        if row.get("import_resolution") != "3":
+        if row.get("resolution") != "3":
             continue
-        nid = row.get("import_nid", "")
-        library = row.get("import_library", "")
-        module = row.get("import_module", "")
-        source = row.get("import_source", "")
+        if row.get("fallback_import") is None:
+            continue
+        nid = row.get("nid", "")
+        library = row.get("library", "")
+        module = row.get("module", "")
+        source = row.get("source", "")
+        subsystem = row.get("subsystem", "")
+        if subsystem == "":
+            subsystem = subsystem_guess(library, module, nid)
         out.append(
             {
                 "nid": nid,
                 "library": library,
                 "module": module,
                 "source": source,
-                "subsystem": subsystem_guess(library, module, nid),
+                "subsystem": subsystem,
             }
         )
     counts: dict[tuple[str, str, str, str, str], int] = {}
@@ -367,12 +374,22 @@ def summarize_progress(results: list[Result]) -> tuple[str, dict[str, list[dict[
     stages = cusa_stage_summary(results, cusa)
 
     passed_score, total_score = score_summary(results, cusa, rules)
+    native_count = ledger_counts.get("Native-Elisa", 0)
+    bridge_count = ledger_counts.get("Temporary-Cpp-Bridge", 0)
+    fallback_count = int(cusa["aerolib_fallback_imports"])
+    unresolved_count = int(cusa["unresolved_imports"])
     lines.append(f"Summary score: {passed_score}/{total_score}")
     lines.append("Per-subsystem counts:")
     for status in sorted(ledger_counts):
         lines.append(f"- {status}: {ledger_counts[status]}")
+    lines.append("Parity gate counts (native/bridge/fallback/unresolved):")
+    lines.append(f"- native: {native_count}")
+    lines.append(f"- bridge: {bridge_count}")
+    lines.append(f"- fallback: {fallback_count}")
+    lines.append(f"- unresolved: {unresolved_count}")
 
     lines.append("CUSA07399 stage:")
+    lines.append(f"- execution stage raw: {cusa['execution_stage']}")
     lines.append(f"- load: {stages['load']}")
     lines.append(f"- link: {stages['link']}")
     lines.append(f"- handoff: {stages['handoff']}")
@@ -387,6 +404,7 @@ def summarize_progress(results: list[Result]) -> tuple[str, dict[str, list[dict[
     lines.append(f"- PRX export count: {cusa['prx_export_imports']}")
     lines.append(f"- AeroLib fallback count: {cusa['aerolib_fallback_imports']}")
     lines.append(f"- unresolved count: {cusa['unresolved_imports']}")
+    lines.append(f"- malformed count: {cusa['malformed_imports']}")
     lines.append(f"- current execution stage: {cusa['execution_stage']} ({stage_name(int(cusa['execution_stage']))})")
     lines.append(f"- current video/audio/input stage: graphics={len(queues['graphics_fallbacks'])} audio-input-service={len(queues['audio_input_service_fallbacks'])}")
 

@@ -178,3 +178,19 @@ Verified command:
 cd "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/elisa-shad-ps4-from-scratch"
 ./emulator-cpp-parity --quick
 ```
+
+## 2026-05-21: Emulator Parity Gate Run
+
+- Date: 2026-05-21
+- Command run: `./emulator-cpp-parity --quick`
+- Result: `passed=9 failed=3 selected=12`
+- What improved: CUSA unresolved imports are zero
+- Next blocker: Gate step failed: native guest_exec_runtime warnings
+
+## 2026-05-21: Emulator Parity Gate Run
+
+- Date: 2026-05-21
+- Command run: `./emulator-cpp-parity --quick`
+- Result: `passed=9 failed=2 selected=11`
+- What improved: CUSA unresolved imports are zero
+- Next blocker: Gate step failed: elisacore test emulator-core-boot-smoke
