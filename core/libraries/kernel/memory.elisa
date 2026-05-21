@@ -2,9 +2,105 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 include "../error_codes.elisa"
+include "../../memory.elisa"
 include "./orbis_error.elisa"
 include "./posix_error.elisa"
 include "./lib_function_stub.elisa"
+
+const KERNEL_MEMORY_PAGE_SIZE: u64 = 16 * 1024
+const KERNEL_MEMORY_MMAP_FAILED: uintptr = 0.uintptr() - 1.uintptr()
+
+def KernelMemory_Is16KBAligned(value: u64) -> bool:
+    return (value % KERNEL_MEMORY_PAGE_SIZE) == 0
+
+def KernelMemory_AlignUp(value: u64, alignment: u64) -> u64:
+    if alignment == 0:
+        return value
+    remainder: u64 = value % alignment
+    if remainder == 0:
+        return value
+    return value + (alignment - remainder)
+
+def KernelMemory_AlignDown(value: u64, alignment: u64) -> u64:
+    if alignment == 0:
+        return value
+    return value - (value % alignment)
+
+def KernelMemory_WriteOutPtr(out_ptr: mutable void&?&, value: void&?) -> void:
+    out_ptr <- value
+
+def KernelMemory_MapDirect(addr: mutable void&?&, len: u64, prot: int, flags: int, phys_addr: i64, alignment: u64, name: static u8&) -> int:
+    if len == 0 or not KernelMemory_Is16KBAligned(len):
+        return ORBIS_KERNEL_ERROR_EINVAL
+    if phys_addr < 0 or not KernelMemory_Is16KBAligned(phys_addr.u64()):
+        return ORBIS_KERNEL_ERROR_EINVAL
+    if alignment != 0 and not KernelMemory_Is16KBAligned(alignment):
+        return ORBIS_KERNEL_ERROR_EINVAL
+    if (prot.u32() & MemoryProt_CpuExec) != 0u32:
+        return ORBIS_KERNEL_ERROR_EACCES
+    mapped: mutable VAddr = 0.uintptr()
+    result: s32 = MemoryManager_MapMemory(
+        Memory_Instance(),
+        mapped.ref[mutable VAddr&],
+        addr.cast[VAddr],
+        len,
+        prot.u32(),
+        flags.u32(),
+        VMAType_Direct,
+        name,
+        false,
+        phys_addr.uintptr(),
+        alignment
+    )
+    if result == 0:
+        KernelMemory_WriteOutPtr(addr, mapped.cast[void&?])
+        return ORBIS_OK
+    return result
+
+def KernelMemory_MapFlexible(addr_in_out: mutable void&?&, len: u64, prot: int, flags: int, name: static u8&) -> int:
+    if len == 0 or not KernelMemory_Is16KBAligned(len):
+        return ORBIS_KERNEL_ERROR_EINVAL
+    mapped: mutable VAddr = 0.uintptr()
+    result: s32 = MemoryManager_MapMemory(
+        Memory_Instance(),
+        mapped.ref[mutable VAddr&],
+        addr_in_out.cast[VAddr],
+        len,
+        prot.u32(),
+        flags.u32(),
+        VMAType_Flexible,
+        name,
+        false,
+        0.uintptr(),
+        0
+    )
+    if result == 0:
+        KernelMemory_WriteOutPtr(addr_in_out, mapped.cast[void&?])
+        return ORBIS_OK
+    return result
+
+def KernelMemory_PosixMmapImpl(addr: void&?, len: u64, prot: int, flags: int, fd: int, phys_addr: i64) -> void&?:
+    if len == 0:
+        return KERNEL_MEMORY_MMAP_FAILED.cast[void&?]
+    vaddr: u64 = addr.cast[u64]
+    aligned_addr: VAddr = KernelMemory_AlignUp(vaddr, KERNEL_MEMORY_PAGE_SIZE).uintptr()
+    aligned_size: u64 = KernelMemory_AlignUp(len, KERNEL_MEMORY_PAGE_SIZE)
+    map_flags: MemoryMapFlags = flags.u32()
+    if (map_flags & MemoryMapFlags_Fixed) != 0u32 and vaddr != aligned_addr.u64():
+        return KERNEL_MEMORY_MMAP_FAILED.cast[void&?]
+    mapped: mutable VAddr = 0.uintptr()
+    result: mutable s32 = 0
+    if (map_flags & MemoryMapFlags_Anon) != 0u32:
+        result <- MemoryManager_MapMemory(Memory_Instance(), mapped.ref[mutable VAddr&], aligned_addr, aligned_size, prot.u32(), map_flags, VMAType_Flexible, "anon", false, 0.uintptr(), 0)
+    elif (map_flags & MemoryMapFlags_Stack) != 0u32:
+        result <- MemoryManager_MapMemory(Memory_Instance(), mapped.ref[mutable VAddr&], aligned_addr, aligned_size, prot.u32(), map_flags, VMAType_Stack, "anon", false, 0.uintptr(), 0)
+    elif (map_flags & MemoryMapFlags_Void) != 0u32:
+        result <- MemoryManager_MapMemory(Memory_Instance(), mapped.ref[mutable VAddr&], aligned_addr, aligned_size, MemoryProt_NoAccess, map_flags, VMAType_Reserved, "anon", false, 0.uintptr(), 0)
+    else:
+        result <- MemoryManager_MapFile(Memory_Instance(), mapped.ref[mutable VAddr&], aligned_addr, aligned_size, prot.u32(), map_flags, fd.s32(), phys_addr)
+    if result != 0:
+        return KERNEL_MEMORY_MMAP_FAILED.cast[void&?]
+    return mapped.cast[void&?]
 
 def sceKernelEnableDmemAliasing() -> int:
     return ORBIS_OK
@@ -60,7 +156,7 @@ def sceKernelGetDirectMemoryType(addr: u64, directMemoryTypeOut: void&?, directM
     return ORBIS_OK
 
 def sceKernelGetDirectMemorySize() -> u64:
-    return 0u64
+    return MemoryManager_GetTotalDirectSize(Memory_Instance())
 
 def sceKernelIsStack(addr: void&?, start: void&?, end: void&?) -> int:
     _ = addr
@@ -71,40 +167,31 @@ def sceKernelIsStack(addr: void&?, start: void&?, end: void&?) -> int:
 def sceKernelIsAddressSanitizerEnabled() -> u32:
     return 0u32
 
-def sceKernelMapNamedDirectMemory(addr: void&?, len: u64, prot: int, flags: int, phys_addr: i64, alignment: u64, name: u8&?) -> int:
-    _ = addr
-    _ = len
-    _ = prot
-    _ = flags
-    _ = phys_addr
-    _ = alignment
-    _ = name
-    return ORBIS_OK
+def sceKernelMapNamedDirectMemory(addr: mutable void&?&, len: u64, prot: int, flags: int, phys_addr: i64, alignment: u64, name: u8&?) -> int:
+    if name == null:
+        return ORBIS_KERNEL_ERROR_EFAULT
+    return KernelMemory_MapDirect(addr, len, prot, flags, phys_addr, alignment, "anon")
 
-def sceKernelMapDirectMemory(addr: void&?, len: u64, prot: int, flags: int, phys_addr: i64, alignment: u64) -> int:
-    _ = addr
-    _ = len
-    _ = prot
-    _ = flags
-    _ = phys_addr
-    _ = alignment
-    return ORBIS_OK
+def sceKernelMapDirectMemory(addr: mutable void&?&, len: u64, prot: int, flags: int, phys_addr: i64, alignment: u64) -> int:
+    return KernelMemory_MapDirect(addr, len, prot, flags, phys_addr, alignment, "anon")
 
-def sceKernelMapDirectMemory2(addr: void&?, len: u64, type: int, prot: int, flags: int, phys_addr: i64, alignment: u64) -> int:
-    _ = addr
-    _ = len
+def sceKernelMapDirectMemory2(addr: mutable void&?&, len: u64, type: int, prot: int, flags: int, phys_addr: i64, alignment: u64) -> int:
     _ = type
-    _ = prot
-    _ = flags
-    _ = phys_addr
-    _ = alignment
-    return ORBIS_OK
+    result: int = KernelMemory_MapDirect(addr, len, prot, flags, phys_addr, alignment, "anon")
+    if result == ORBIS_KERNEL_ERROR_EACCES:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    return result
 
-def sceKernelQueryMemoryProtection(addr: void&?, start: void&?, end: void&?, prot: void&?) -> int:
-    _ = addr
-    _ = start
-    _ = end
-    _ = prot
+def sceKernelQueryMemoryProtection(addr: void&?, start: mutable void&?&, end: mutable void&?&, prot: mutable u32&) -> int:
+    start_addr: mutable VAddr = 0.uintptr()
+    end_addr: mutable VAddr = 0.uintptr()
+    out_prot: mutable u32 = 0u32
+    result: s32 = MemoryManager_QueryProtection(Memory_Instance(), addr.cast[VAddr], start_addr.ref[mutable VAddr&], end_addr.ref[mutable VAddr&], out_prot.ref[mutable u32&])
+    if result != 0:
+        return result
+    start <- start_addr.cast[void&?]
+    end <- end_addr.cast[void&?]
+    prot <- out_prot
     return ORBIS_OK
 
 def sceKernelDirectMemoryQuery(offset: u64, flags: int, query_info: void&?, infoSize: u64) -> int:
@@ -119,39 +206,31 @@ def sceKernelReleaseDirectMemory(start: u64, len: u64) -> int:
     _ = len
     return ORBIS_OK
 
-def sceKernelMmap(addr: void&?, len: u64, prot: int, flags: int, fd: int, phys_addr: i64, res: void&?) -> int:
-    _ = addr
-    _ = len
-    _ = prot
-    _ = flags
-    _ = fd
-    _ = phys_addr
-    _ = res
+def sceKernelMmap(addr: void&?, len: u64, prot: int, flags: int, fd: int, phys_addr: i64, res: mutable void&?&) -> int:
+    mapped: void&? = KernelMemory_PosixMmapImpl(addr, len, prot, flags, fd, phys_addr)
+    if mapped == KERNEL_MEMORY_MMAP_FAILED.cast[void&?]:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    KernelMemory_WriteOutPtr(res, mapped)
     return ORBIS_OK
 
 def sceKernelMunmap(addr: void&?, len: u64) -> int:
-    _ = addr
-    _ = len
+    if len == 0:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    if addr == null or not KernelMemory_Is16KBAligned(addr.cast[u64]) or not KernelMemory_Is16KBAligned(len):
+        return ORBIS_KERNEL_ERROR_EINVAL
+    return MemoryManager_UnmapMemory(Memory_Instance(), addr.cast[VAddr], len)
+
+def sceKernelMapNamedFlexibleMemory(addr_in_out: mutable void&?&, len: u64, prot: int, flags: int, name: u8&?) -> int:
+    if name == null:
+        return ORBIS_KERNEL_ERROR_EFAULT
+    return KernelMemory_MapFlexible(addr_in_out, len, prot, flags, "anon")
+
+def sceKernelAvailableFlexibleMemorySize(out_size: mutable u64&) -> int:
+    out_size <- MemoryManager_GetAvailableFlexibleSize(Memory_Instance())
     return ORBIS_OK
 
-def sceKernelMapNamedFlexibleMemory(addr_in_out: void&?, len: u64, prot: int, flags: int, name: u8&?) -> int:
-    _ = addr_in_out
-    _ = len
-    _ = prot
-    _ = flags
-    _ = name
-    return ORBIS_OK
-
-def sceKernelAvailableFlexibleMemorySize(out_size: void&?) -> int:
-    _ = out_size
-    return ORBIS_OK
-
-def sceKernelMapFlexibleMemory(addr_in_out: void&?, len: u64, prot: int, flags: int) -> int:
-    _ = addr_in_out
-    _ = len
-    _ = prot
-    _ = flags
-    return ORBIS_OK
+def sceKernelMapFlexibleMemory(addr_in_out: mutable void&?&, len: u64, prot: int, flags: int) -> int:
+    return KernelMemory_MapFlexible(addr_in_out, len, prot, flags, "anon")
 
 def _sceKernelRtldSetApplicationHeapAPI(func: void&?) -> void:
     _ = func
@@ -176,21 +255,26 @@ def sceKernelSetVirtualRangeName(addr: void&?, len: u64, name: u8&?) -> int:
     _ = name
     return ORBIS_OK
 
-def sceKernelConfiguredFlexibleMemorySize(sizeOut: void&?) -> int:
-    _ = sizeOut
+def sceKernelConfiguredFlexibleMemorySize(sizeOut: mutable u64&) -> int:
+    sizeOut <- MemoryManager_GetTotalFlexibleSize(Memory_Instance())
     return ORBIS_OK
 
 def sceKernelMprotect(addr: void&?, size: u64, prot: int) -> int:
-    _ = addr
-    _ = size
-    _ = prot
-    return ORBIS_OK
+    in_addr: u64 = addr.cast[u64]
+    aligned_addr: VAddr = KernelMemory_AlignDown(in_addr, KERNEL_MEMORY_PAGE_SIZE).uintptr()
+    aligned_size: u64 = KernelMemory_AlignUp(size + in_addr - aligned_addr.u64(), KERNEL_MEMORY_PAGE_SIZE)
+    if aligned_size == 0:
+        return ORBIS_OK
+    result: s32 = MemoryManager_Protect(Memory_Instance(), aligned_addr, aligned_size, prot.u32())
+    if result == ORBIS_OK:
+        MemoryManager_InvalidateMemory(Memory_Instance(), aligned_addr, aligned_size)
+    return result
 
 def posix_mprotect(addr: void&?, size: u64, prot: int) -> int:
-    _ = addr
-    _ = size
-    _ = prot
-    return -1
+    result: int = sceKernelMprotect(addr, size, prot)
+    if result != ORBIS_OK:
+        return -1
+    return result
 
 def sceKernelMtypeprotect(addr: void&?, size: u64, mtype: int, prot: int) -> int:
     _ = addr
@@ -242,18 +326,13 @@ def sceKernelMemoryPoolGetBlockStats(stats: void&?, size: u64) -> int:
     return ORBIS_OK
 
 def posix_mmap(addr: void&?, len: u64, prot: int, flags: int, fd: int, phys_addr: i64) -> void&?:
-    _ = addr
-    _ = len
-    _ = prot
-    _ = flags
-    _ = fd
-    _ = phys_addr
-    return null
+    return KernelMemory_PosixMmapImpl(addr, len, prot, flags, fd, phys_addr)
 
 def posix_munmap(addr: void&?, len: u64) -> int:
-    _ = addr
-    _ = len
-    return -1
+    result: int = sceKernelMunmap(addr, len)
+    if result != ORBIS_OK:
+        return -1
+    return result
 
 def sceKernelMlock(addr: void&?, len: u64) -> int:
     _ = addr

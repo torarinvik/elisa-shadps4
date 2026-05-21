@@ -49,6 +49,16 @@ global mutable g_send_init_packet: bool = true
 global mutable g_sdk_version: s32 = 0
 global mutable g_tessellation_factors_ring_addr: u64 = GNM_INVALID_QUEUE_ADDR
 global mutable g_compute_queues: array[GnmComputeQueue, GNM_MAX_COMPUTE_QUEUES] = zeroed
+global mutable g_graphics_submit_count: u64 = 0u64
+global mutable g_graphics_init_packet_submit_count: u64 = 0u64
+global mutable g_graphics_last_submit_dcb_addr: u64 = 0u64
+global mutable g_graphics_last_submit_dcb_size: u32 = 0u32
+global mutable g_graphics_last_submit_ccb_addr: u64 = 0u64
+global mutable g_graphics_last_submit_ccb_size: u32 = 0u32
+global mutable g_liverpool_submit_gfx_count: u64 = 0u64
+global mutable g_liverpool_submit_done_count: u64 = 0u64
+global mutable g_rasterizer_flush_count: u64 = 0u64
+global mutable g_rasterizer_on_submit_count: u64 = 0u64
 
 def gnm_c_string_length(value: u8&) -> u32:
     len: mutable u32 = 0
@@ -115,6 +125,32 @@ def gnm_next_compute_queue_slot() -> int:
             return i
         i <- i + 1
     return -1
+
+def gnm_reset_graphics_bootstrap_state() -> void:
+    g_submissions_lock <- 0u32
+    g_frames_submitted <- 0u64
+    g_send_init_packet <- true
+    g_graphics_submit_count <- 0u64
+    g_graphics_init_packet_submit_count <- 0u64
+    g_graphics_last_submit_dcb_addr <- 0u64
+    g_graphics_last_submit_dcb_size <- 0u32
+    g_graphics_last_submit_ccb_addr <- 0u64
+    g_graphics_last_submit_ccb_size <- 0u32
+    g_liverpool_submit_gfx_count <- 0u64
+    g_liverpool_submit_done_count <- 0u64
+    g_rasterizer_flush_count <- 0u64
+    g_rasterizer_on_submit_count <- 0u64
+
+def gnm_record_liverpool_submit_gfx(dcb_addr: u64, dcb_size: u32, ccb_addr: u64, ccb_size: u32) -> void:
+    g_liverpool_submit_gfx_count <- g_liverpool_submit_gfx_count + 1u64
+    g_graphics_last_submit_dcb_addr <- dcb_addr
+    g_graphics_last_submit_dcb_size <- dcb_size
+    g_graphics_last_submit_ccb_addr <- ccb_addr
+    g_graphics_last_submit_ccb_size <- ccb_size
+
+def gnm_record_rasterizer_submit() -> void:
+    g_rasterizer_on_submit_count <- g_rasterizer_on_submit_count + 1u64
+    g_rasterizer_flush_count <- g_rasterizer_flush_count + 1u64
 
 def sceGnmAddEqEvent(eq: OrbisKernelEqueue, id: u64, udata: void&?) -> s32:
     if eq == 0:
@@ -1200,10 +1236,26 @@ def sceGnmSubmitCommandBuffersForWorkload(workload: u32, count: u32, dcb_gpu_add
         if dcb_gpu_addrs[i] == 0u32:
             return ORBIS_GNM_ERROR_SUBMISSION_FAILED_INVALID_ARGUMENT
         i <- i + 1u
-    g_send_init_packet <- false
+    if g_send_init_packet:
+        g_graphics_init_packet_submit_count <- g_graphics_init_packet_submit_count + 1u64
+        gnm_record_liverpool_submit_gfx(0u64, 0u32, 0u64, 0u32)
+        g_send_init_packet <- false
+    i <- 0u32
+    while i < count:
+        ccb_addr: mutable u64 = 0u64
+        ccb_size: mutable u32 = 0u32
+        if ccb_gpu_addrs != null:
+            ccb_addr <- ccb_gpu_addrs[i].u64()
+        if ccb_sizes_in_bytes != null:
+            ccb_size <- ccb_sizes_in_bytes[i]
+        g_graphics_submit_count <- g_graphics_submit_count + 1u64
+        gnm_record_liverpool_submit_gfx(dcb_gpu_addrs[i].u64(), dcb_sizes_in_bytes[i], ccb_addr, ccb_size)
+        gnm_record_rasterizer_submit()
+        i <- i + 1u32
     return ORBIS_OK
 
 def sceGnmSubmitDone() -> int:
+    g_liverpool_submit_done_count <- g_liverpool_submit_done_count + 1u64
     g_send_init_packet <- true
     g_submissions_lock <- 0u
     g_frames_submitted <- g_frames_submitted + 1u64
@@ -1453,4 +1505,5 @@ def Func_F916890425496553() -> int:
 
 def GnmDriver_RegisterLib(sym: void&?) -> void:
     _ = sym
+    gnm_reset_graphics_bootstrap_state()
     return

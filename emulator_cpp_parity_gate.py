@@ -38,6 +38,18 @@ class Result:
         return self.returncode == 0
 
 
+@dataclass(frozen=True)
+class ReadinessProbe:
+    subsystem: str
+    status: str
+    evidence: tuple[str, ...]
+    note: str
+
+    @property
+    def ready(self) -> bool:
+        return self.status != "missing" and all((ROOT / path).exists() for path in self.evidence)
+
+
 def compiler_test(target: str, *, slow: bool = False, category: str = "runtime") -> Step:
     return Step(
         name=f"elisacore test {target}",
@@ -47,6 +59,62 @@ def compiler_test(target: str, *, slow: bool = False, category: str = "runtime")
         slow=slow,
         timeout_seconds=300 if slow else 120,
     )
+
+
+def runtime_readiness_probes() -> list[ReadinessProbe]:
+    return [
+        ReadinessProbe(
+            "pad",
+            "C++-bridge",
+            ("core/libraries/pad/pad_ffi.elisa", "core/libraries/pad/pad_elisa_bridge.cc"),
+            "probe-only controller surface; device/live SDL state remains bridge-backed",
+        ),
+        ReadinessProbe(
+            "audioout",
+            "native-Elisa",
+            ("core/libraries/audio/audioout.elisa", "core/libraries/audio/audioout_backend.elisa"),
+            "runtime state and backend abstraction are present; host audio device open is not required",
+        ),
+        ReadinessProbe(
+            "savedata",
+            "C++-bridge",
+            ("core/libraries/save_data/savedata.elisa", "core/libraries/save_data/savedata_ffi.elisa", "core/libraries/save_data/savedata_elisa_bridge.cpp"),
+            "mount/param behavior is exposed through the parity bridge",
+        ),
+        ReadinessProbe(
+            "userservice/systemservice",
+            "C-FFI",
+            ("core/libraries/system/userservice.elisa", "core/libraries/system/systemservice.elisa", "core/libraries/system/userservice_ffi_bridge.elisa", "core/libraries/system/systemservice_ffi_bridge.elisa"),
+            "service metadata and FFI shims are available for post-boot probing",
+        ),
+        ReadinessProbe(
+            "netctl/network",
+            "stub-parity",
+            ("core/libraries/network/netctl.elisa", "core/libraries/network/net.elisa", "core/libraries/network/net_ffi.elisa"),
+            "non-invasive netctl defaults plus socket conversion FFI; no live network dependency",
+        ),
+        ReadinessProbe(
+            "NP",
+            "stub-parity",
+            ("core/libraries/np/np.elisa", "core/libraries/np/np_runtime.elisa"),
+            "NP runtime and module stubs are visible for real-game import readiness",
+        ),
+        ReadinessProbe(
+            "avplayer",
+            "C-FFI",
+            ("core/libraries/avplayer/avplayer_impl.elisa", "core/libraries/avplayer/avplayer_ffmpeg_ffi.elisa"),
+            "FFmpeg-backed media probe surface exists; media decode remains explicit subsystem work",
+        ),
+    ]
+
+
+def format_runtime_readiness() -> str:
+    lines = ["Post-boot runtime readiness:"]
+    for probe in runtime_readiness_probes():
+        status = probe.status if probe.ready else "missing"
+        evidence = ", ".join(probe.evidence)
+        lines.append(f"- {probe.subsystem}: {status} ({probe.note}; evidence: {evidence})")
+    return "\n".join(lines)
 
 
 def matrix_steps() -> list[Step]:
@@ -223,6 +291,7 @@ def summarize_progress(results: list[Result]) -> str:
             lines.append("- execute-game/frame: not yet promoted into this gate")
     else:
         lines.append("- load/link/handoff: FAIL or not run")
+    lines.append(format_runtime_readiness())
     return "\n".join(lines)
 
 
@@ -244,8 +313,13 @@ def main() -> int:
     parser.add_argument("--list", action="store_true", help="List selected steps and exit.")
     parser.add_argument("--fail-fast", action="store_true", help="Stop at the first failed step.")
     parser.add_argument("--write-report", type=Path, help="Write a markdown parity report to this path.")
+    parser.add_argument("--readiness", action="store_true", help="Print post-boot runtime readiness probes and exit.")
     parser.add_argument("-v", "--verbose", action="store_true", help="Print commands before running.")
     args = parser.parse_args()
+
+    if args.readiness:
+        print(format_runtime_readiness())
+        return 0 if all(probe.ready for probe in runtime_readiness_probes()) else 1
 
     steps = all_steps()
     if args.quick:

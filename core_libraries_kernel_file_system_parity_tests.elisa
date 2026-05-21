@@ -1,0 +1,91 @@
+include "../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "./common/arch.elisa"
+include "./common/io_file.elisa"
+include "./common/path_util.elisa"
+include "./common/string_util.elisa"
+include "./common/va_ctx.elisa"
+
+type s32 = i32
+type s64 = i64
+
+include "./core/file_sys/bridge.elisa"
+include "./core/file_sys/fs.elisa"
+include "./core/libraries/kernel/file_system.elisa"
+
+global mutable g_kernel_file_test_errno: int = 0
+
+def __Error() -> void&?:
+    return g_kernel_file_test_errno.ref[mutable int&].cast[void&]
+
+def SetPosixErrno(e: int) -> void:
+    g_kernel_file_test_errno <- e
+
+def ErrnoToSceKernelError(err: int) -> int:
+    return ORBIS_KERNEL_ERROR_UNKNOWN + err
+
+@test
+def kernel_file_sys_smoke_existing_asset_is_readable() -> void:
+    can Abort.Panic, Memory.Allocate:
+        asset: static u8& = "/etc/hosts"
+        assert fs_exists(asset)
+        f: mutable IOFile = IOFile_opened(asset, FileAccessMode.Read, FileType.BinaryFile, FileShareFlag.ShareReadWrite)
+        assert IOFile_IsOpen(f)
+        assert IOFile_GetSize(f) > 0
+        IOFile_Close(f)
+
+@test
+def kernel_file_sys_smoke_resolves_app0_path() -> void:
+    can Abort.Panic, Memory.Allocate:
+        KernelFile_ResetForTest()
+        app0: static u8& = "/etc"
+        KernelFile_MountForTest(app0, "/app0", false)
+        read_only: mutable bool = true
+        resolved: static u8& = KernelFile_ResolveHostPath("/app0/hosts", read_only.ref[mutable bool&])
+        assert read_only == false
+        assert streq(resolved, "/etc/hosts") == 1
+
+@test
+def kernel_file_sys_open_read_lseek_stat_close_app0_asset() -> void:
+    can Abort.Panic, Memory.Allocate:
+        KernelFile_ResetForTest()
+        app0: static u8& = "/etc"
+        asset: static u8& = "/etc/hosts"
+        assert fs_exists(asset)
+
+        KernelFile_MountForTest(app0, "/app0", false)
+        fd: int = sceKernelOpen("/app0/hosts".cast[u8&?], 0, null)
+        assert fd >= 3
+        st: mutable OrbisKernelStat = zeroed
+        assert sceKernelStat("/app0/hosts".cast[u8&?], st.ref[mutable OrbisKernelStat&].cast[void&?]) == ORBIS_OK
+        assert st.st_size > 5
+        assert st.st_mode == KERNEL_FILE_REGULAR_MODE
+
+        fst: mutable OrbisKernelStat = zeroed
+        assert posix_fstat(fd, fst.ref[mutable OrbisKernelStat&].cast[void&?]) == ORBIS_OK
+        assert fst.st_size == st.st_size
+
+        buf: mutable array[u8, 3] = zeroed
+        assert sceKernelRead(fd, buf[0].ref[mutable void&], 3) == 3
+        assert buf[0] == '{'.u8() or buf[0] == '\n'.u8()
+        assert sceKernelLseek(fd, 1, 0) == 1
+        one: mutable array[u8, 1] = zeroed
+        assert posix_read(fd, one[0].ref[mutable void&], 1) == 1
+        assert one[0] != 0
+        assert sceKernelLseek(fd, -1, 2) == st.st_size - 1
+        assert sceKernelRead(fd, one[0].ref[mutable void&], 1) == 1
+        assert one[0] != 0
+        assert sceKernelClose(fd) == ORBIS_OK
+        assert posix_read(fd, one[0].ref[mutable void&], 1) == -1
+
+@test
+def kernel_file_sys_invalid_fd_and_null_pointer_ordering() -> void:
+    can Abort.Panic, Memory.Allocate:
+        KernelFile_ResetForTest()
+        assert posix_read(99, null, 4) == -1
+        assert sceKernelRead(99, null, 4) == ORBIS_KERNEL_ERROR_EBADF.i64()
+        assert posix_lseek(99, 0, 0) == -1
+        assert sceKernelLseek(99, 0, 0) == ORBIS_KERNEL_ERROR_EBADF.i64()
+        assert posix_close(99) == -1
+        assert sceKernelClose(99) == ORBIS_KERNEL_ERROR_EBADF
+        assert posix_stat(null, null) == -1
+        assert sceKernelStat(null, null) == ORBIS_KERNEL_ERROR_EFAULT
