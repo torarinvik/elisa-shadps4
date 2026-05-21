@@ -6,6 +6,7 @@ include "./core/emulator_settings.elisa"
 include "./core/emulator_state.elisa"
 include "./core/guest_exec.elisa"
 include "./core/linker.elisa"
+include "./core/libraries/kernel/process.elisa"
 include "./core/user_settings.elisa"
 include "./emulator.elisa"
 include "./main.elisa"
@@ -60,6 +61,7 @@ def emulator_core_boot_smoke_runs_game_path_from_main() -> void:
         BootSmoke_Check(linker.hle_libs_initialized, "expected HLE libraries initialized")
         BootSmoke_Check(linker.hle_registered_symbol_count >= 1883usize, "expected broad boot HLE symbol table")
         BootSmoke_Check(SymbolsResolver_FindByNid(linker.hle_symbols, "D4yla3vx4tY") >= 0, "expected libkernel sceKernelError NID")
+        BootSmoke_Check(SymbolsResolver_FindByNid(linker.hle_symbols, "wzvqT4UqKX8") >= 0, "expected libkernel sceKernelLoadStartModule NID")
         BootSmoke_Check(SymbolsResolver_FindByNid(linker.hle_symbols, "JfEPXVxhFqA") >= 0, "expected libSceAudioOut sceAudioOutInit NID")
         BootSmoke_Check(SymbolsResolver_FindByNid(linker.hle_symbols, "SxQprgjttKE") >= 0, "expected libSceAudioIn sceAudioInInit NID")
         BootSmoke_Check(SymbolsResolver_FindByNid(linker.hle_symbols, "K4KnH0QkT2c") >= 0, "expected libSceHmd sceHmdInitialize NID")
@@ -70,6 +72,9 @@ def emulator_core_boot_smoke_runs_game_path_from_main() -> void:
         kernel_error_symbol: SymbolRecord = linker.hle_symbols.symbols[kernel_error_index.usize()]
         BootSmoke_Check(kernel_error_symbol.callable_address == sceKernelError.uintptr().u64(), "expected sceKernelError to bind to its Elisa entrypoint")
         BootSmoke_Check(kernel_error_symbol.callable_address != kernel_error_symbol.virtual_address, "expected sceKernelError binding to replace synthetic HLE address")
+        load_start_index: s32 = SymbolsResolver_FindByNid(linker.hle_symbols, "wzvqT4UqKX8")
+        load_start_symbol: SymbolRecord = linker.hle_symbols.symbols[load_start_index.usize()]
+        BootSmoke_Check(load_start_symbol.callable_address == sceKernelLoadStartModule.uintptr().u64(), "expected sceKernelLoadStartModule to bind to its Elisa entrypoint")
         videoout_index: s32 = SymbolsResolver_FindByNid(linker.hle_symbols, "rWUTcKdkUzQ")
         videoout_symbol: SymbolRecord = linker.hle_symbols.symbols[videoout_index.usize()]
         BootSmoke_Check(videoout_symbol.callable_address == HLELibs_DispatcherTrampoline.uintptr().u64(), "expected unbound generated HLE symbol to use dispatcher trampoline")
@@ -95,6 +100,51 @@ def emulator_core_boot_smoke_runs_game_path_from_main() -> void:
 
         state: mutable EmulatorState& = EmulatorState_GetInstance()
         BootSmoke_Check(EmulatorState_IsGameRunning(state), "expected game running")
+
+@test
+def emulator_core_boot_smoke_load_start_module_routes_guest_modules_through_linker() -> void:
+    can Memory.Allocate, Abort.Panic:
+        BootSmoke_ResetRuntime()
+
+        arena: Arena = zeroed
+        result: mutable int = -1
+        in arena:
+            args: mutable darray[static u8&] = ["shadps4", "CUSA00000"]
+            result <- Main_Run(args)
+        BootSmoke_Check(result == 0, "expected Main_Run success before dynamic module load")
+
+        null_path_result: int = sceKernelLoadStartModule(null, 0u64, null, 0u32, null, null)
+        BootSmoke_Check(null_path_result == ORBIS_KERNEL_ERROR_EFAULT, "expected null module path fault")
+
+        empty_start_result: mutable int = -99
+        empty_path_result: int = sceKernelLoadStartModule("", 0u64, null, 0u32, null, empty_start_result.ref[mutable int&].cast[void&?])
+        BootSmoke_Check(empty_path_result == ORBIS_KERNEL_ERROR_EINVAL, "expected empty module path invalid")
+        BootSmoke_Check(empty_start_result == -99, "expected empty module path not to start")
+
+        linker: mutable Linker& = Linker_GetInstance()
+        before_count: usize = linker.modules.count
+        start_result: mutable int = -99
+        handle: int = sceKernelLoadStartModule("fixture_module.prx", 0u64, null, 0u32, null, start_result.ref[mutable int&].cast[void&?])
+        BootSmoke_Check(handle >= 0, "expected bare module name to load")
+        BootSmoke_Check(start_result == 0, "expected dynamic module start result")
+        BootSmoke_Check(linker.modules.count == before_count + 1usize, "expected dynamic module to be appended")
+        BootSmoke_Check(linker.last_loaded_dynamic_host_path != null, "expected linker to record resolved dynamic host path")
+        BootSmoke_Check(streq(linker.last_loaded_dynamic_host_path, "CUSA00000/fixture_module.prx") == 1, "expected bare module to resolve under app0 root")
+        BootSmoke_Check(streq(linker.modules[handle.usize()].file, "CUSA00000/fixture_module.prx") == 1, "expected dynamic module file path")
+        BootSmoke_Check(linker.last_started_module_index == handle.s32(), "expected dynamic module to be started")
+
+        duplicate_start_result: mutable int = -99
+        duplicate_handle: int = sceKernelLoadStartModule("fixture_module.prx", 0u64, null, 0u32, null, duplicate_start_result.ref[mutable int&].cast[void&?])
+        BootSmoke_Check(duplicate_handle == handle, "expected duplicate dynamic module load to reuse handle")
+        BootSmoke_Check(duplicate_start_result == 0, "expected duplicate dynamic module load to report success")
+        BootSmoke_Check(linker.modules.count == before_count + 1usize, "expected duplicate dynamic module load not to append")
+
+        app0_start_result: mutable int = -99
+        app0_handle: int = sceKernelLoadStartModule("/app0/sce_sys/about/right.sprx", 0u64, null, 0u32, null, app0_start_result.ref[mutable int&].cast[void&?])
+        BootSmoke_Check(app0_handle >= 0, "expected /app0 module path to load")
+        BootSmoke_Check(app0_start_result == 0, "expected /app0 module start result")
+        BootSmoke_Check(linker.last_loaded_dynamic_host_path != null, "expected linker to record app0 dynamic host path")
+        BootSmoke_Check(streq(linker.last_loaded_dynamic_host_path, "CUSA00000/sce_sys/about/right.sprx") == 1, "expected /app0 module to resolve under app0 root")
 
 @test
 def emulator_core_boot_smoke_applies_cli_runtime_flags() -> void:
