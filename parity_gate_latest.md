@@ -13,7 +13,7 @@ Per-subsystem counts:
 Parity gate counts (native/bridge/fallback/unresolved):
 - native: 247
 - bridge: 2
-- fallback: 21
+- fallback: 7
 - unresolved: 0
 Ledger risk counts (missing/unverified):
 - missing: 1
@@ -53,10 +53,10 @@ CUSA07399 stage:
   - VIDEO_STAGE_first_frame_candidate=0
 CUSA07399 artifact metrics:
 - CUSA module count: 4
-- imports total: 1150
-- native HLE count: 819
-- PRX export count: 310
-- AeroLib fallback count: 21
+- imports total: 1151
+- native HLE count: 832
+- PRX export count: 312
+- AeroLib fallback count: 7
 - unresolved count: 0
 - malformed count: 0
 - audio SDL available: 0
@@ -88,20 +88,6 @@ Top 50 fallback symbols:
 - [1] nid=RujUxbr3haM lib=J module=K source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
 - [1] nid=cK6bYHf-Q5E lib=J module=K source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
 - [1] nid=i-XwZjw0OOY lib=J module=K source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=WlyEA-sLDf0 lib=C module=D source=/app0/sce_module/libSceFios2.prx subsystem=kernel status=AeroLibFallback
-- [1] nid=ZT4ODD2Ts9o lib=D module=E source=/app0/sce_module/libSceFios2.prx subsystem=kernel status=AeroLibFallback
-- [1] nid=ZT4ODD2Ts9o lib=c module=a source=/app0/sce_module/libSceNpToolkit.prx subsystem=kernel status=AeroLibFallback
-- [1] nid=__start__Ztext lib= module= source=/app0/sce_module/libc.prx subsystem=kernel status=AeroLibFallback
-- [1] nid=__stop__Ztext lib= module= source=/app0/sce_module/libc.prx subsystem=kernel status=AeroLibFallback
-- [1] nid=-YTW+qXc3CQ lib=A module=B source=/app0/sce_module/libc.prx subsystem=kernel status=AeroLibFallback
-- [1] nid=Fjc4-n1+y2g lib=A module=B source=/app0/sce_module/libc.prx subsystem=kernel status=AeroLibFallback
-- [1] nid=VADc3MNQ3cM lib=A module=B source=/app0/sce_module/libc.prx subsystem=kernel status=AeroLibFallback
-- [1] nid=Wl2o5hOVZdw lib=A module=B source=/app0/sce_module/libc.prx subsystem=kernel status=AeroLibFallback
-- [1] nid=crb5j7mkk1c lib=A module=B source=/app0/sce_module/libc.prx subsystem=kernel status=AeroLibFallback
-- [1] nid=djxxOmW6-aw lib=A module=B source=/app0/sce_module/libc.prx subsystem=kernel status=AeroLibFallback
-- [1] nid=hHlZQUnlxSM lib=A module=B source=/app0/sce_module/libc.prx subsystem=kernel status=AeroLibFallback
-- [1] nid=kbw4UHHSYy0 lib=A module=B source=/app0/sce_module/libc.prx subsystem=kernel status=AeroLibFallback
-- [1] nid=mo0bFmWppIw lib=A module=B source=/app0/sce_module/libc.prx subsystem=kernel status=AeroLibFallback
 Top blockers:
 - none
 Failing scenario ids:
@@ -116,20 +102,6 @@ Failing scenario ids:
 - [1] RujUxbr3haM J K (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
 - [1] cK6bYHf-Q5E J K (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
 - [1] i-XwZjw0OOY J K (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
-- [1] WlyEA-sLDf0 C D (/app0/sce_module/libSceFios2.prx) subsystem=kernel status=AeroLibFallback
-- [1] ZT4ODD2Ts9o D E (/app0/sce_module/libSceFios2.prx) subsystem=kernel status=AeroLibFallback
-- [1] ZT4ODD2Ts9o c a (/app0/sce_module/libSceNpToolkit.prx) subsystem=kernel status=AeroLibFallback
-- [1] __start__Ztext   (/app0/sce_module/libc.prx) subsystem=kernel status=AeroLibFallback
-- [1] __stop__Ztext   (/app0/sce_module/libc.prx) subsystem=kernel status=AeroLibFallback
-- [1] -YTW+qXc3CQ A B (/app0/sce_module/libc.prx) subsystem=kernel status=AeroLibFallback
-- [1] Fjc4-n1+y2g A B (/app0/sce_module/libc.prx) subsystem=kernel status=AeroLibFallback
-- [1] VADc3MNQ3cM A B (/app0/sce_module/libc.prx) subsystem=kernel status=AeroLibFallback
-- [1] Wl2o5hOVZdw A B (/app0/sce_module/libc.prx) subsystem=kernel status=AeroLibFallback
-- [1] crb5j7mkk1c A B (/app0/sce_module/libc.prx) subsystem=kernel status=AeroLibFallback
-- [1] djxxOmW6-aw A B (/app0/sce_module/libc.prx) subsystem=kernel status=AeroLibFallback
-- [1] hHlZQUnlxSM A B (/app0/sce_module/libc.prx) subsystem=kernel status=AeroLibFallback
-- [1] kbw4UHHSYy0 A B (/app0/sce_module/libc.prx) subsystem=kernel status=AeroLibFallback
-- [1] mo0bFmWppIw A B (/app0/sce_module/libc.prx) subsystem=kernel status=AeroLibFallback
 ### graphics_fallbacks
 - none
 ### audio_input_service_fallbacks
@@ -138,9 +110,9 @@ Failing scenario ids:
 - none
 
 ## Fallback Delta
-- fallback count before: 23
-- fallback count after: 21
-- fallback symbols newly resolved: 2
+- fallback count before: 21
+- fallback count after: 7
+- fallback symbols newly resolved: 14
 
 ## Steps
 - PASS: project.json syntax

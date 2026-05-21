@@ -364,14 +364,55 @@ def sceKernelFstat(fd: int, sb: void&?) -> int:
     return result
 
 def posix_ftruncate(fd: int, length: i64) -> int:
-    _ = fd
-    _ = length
-    return -1
+    if length < 0:
+        return KernelFile_PosixFail(POSIX_EINVAL)
+    h: mutable KernelFileHandle&? = KernelFile_GetHandle(fd)
+    if h == null:
+        return KernelFile_PosixFail(POSIX_EBADF)
+    handle: mutable KernelFileHandle& = h
+    if handle.file == null:
+        return KernelFile_PosixFail(POSIX_EBADF)
+    if not io_set_size(handle.file.cast[void&], length.u64()):
+        return KernelFile_PosixFail(POSIX_EIO)
+    handle.size <- length
+    if handle.offset > length:
+        handle.offset <- length
+    return ORBIS_OK
 
 def sceKernelFtruncate(fd: int, length: i64) -> int:
-    _ = fd
-    _ = length
+    result: int = posix_ftruncate(fd, length)
+    if result < 0:
+        return KernelFile_SceErrorFromErrno()
+    return result
+
+def posix_truncate(path: u8&?, length: i64) -> int:
+    if length < 0:
+        return KernelFile_PosixFail(POSIX_EINVAL)
+    if path == null:
+        return KernelFile_PosixFail(POSIX_EFAULT)
+    guest_path: static u8& = path.cast[static u8&]
+    if runtime_strlen(guest_path) > 255:
+        return KernelFile_PosixFail(POSIX_ENAMETOOLONG)
+    read_only: mutable bool = false
+    host_path: static u8& = KernelFile_ResolveHostPath(guest_path, read_only.ref[mutable bool&])
+    if read_only:
+        return KernelFile_PosixFail(POSIX_EROFS)
+    if fs_is_directory(host_path):
+        return KernelFile_PosixFail(POSIX_EISDIR)
+    file: void&? = io_open(host_path, FileAccessMode.ReadWrite, FileType.BinaryFile, FileShareFlag.ShareReadWrite)
+    if file == null:
+        return KernelFile_PosixFail(POSIX_EIO)
+    ok: bool = io_set_size(file.cast[void&], length.u64())
+    io_close(file.cast[void&])
+    if not ok:
+        return KernelFile_PosixFail(POSIX_EIO)
     return ORBIS_OK
+
+def sceKernelTruncate(path: u8&?, length: i64) -> int:
+    result: int = posix_truncate(path, length)
+    if result < 0:
+        return KernelFile_SceErrorFromErrno()
+    return result
 
 def posix_rename(from_path: u8&?, to_path: u8&?) -> int:
     _ = from_path
@@ -521,6 +562,7 @@ def RegisterFileSystem(sym: void&?) -> void:
     LIB_FUNCTION("kBwCPsYX-m4", "libkernel", 1, "libkernel", sceKernelFstat)
     LIB_FUNCTION("ih4CD9-gghM", "libkernel", 1, "libkernel", posix_ftruncate)
     LIB_FUNCTION("VW3TVZiM4-E", "libkernel", 1, "libkernel", sceKernelFtruncate)
+    LIB_FUNCTION("WlyEA-sLDf0", "libkernel", 1, "libkernel", sceKernelTruncate)
     LIB_FUNCTION("NN01qLRhiqU", "libScePosix", 1, "libkernel", posix_rename)
     LIB_FUNCTION("NN01qLRhiqU", "libkernel", 1, "libkernel", posix_rename)
     LIB_FUNCTION("52NcYU9+lEo", "libkernel", 1, "libkernel", sceKernelRename)
