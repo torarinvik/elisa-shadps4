@@ -3,6 +3,7 @@
 
 include "../common/types.elisa"
 include "./module.elisa"
+include "./loader/elf.elisa"
 
 struct SymbolRecord:
     name: mutable static u8&
@@ -164,6 +165,65 @@ def Linker_RelocateAnyImports(self: mutable Linker&, module: mutable Module&) ->
             self.last_relocated_import_count <- self.last_relocated_import_count + 1
         else:
             self.last_unresolved_import_count <- self.last_unresolved_import_count + 1
+    Linker_ApplyModuleRelocations(self.ref[mutable Linker&], module.ref[mutable Module&])
+
+def Linker_ApplyRelocationEntry(self: mutable Linker&, module: mutable Module&, rel: elf_relocation) -> bool:
+    rel_type: u32 = (rel.rel_info & 0xffffffff.u64()).u32()
+    symbol_index: u32 = (rel.rel_info >> 32.u64()).u32()
+    rel_virtual_addr: u64 = module.base_virtual_addr.u64() + rel.rel_offset
+    if rel_type == R_X86_64_RELATIVE:
+        value: u64 = module.base_virtual_addr.u64() + rel.rel_addend.u64()
+        if Module_WriteImageU64(module.ref[mutable Module&], rel_virtual_addr, value):
+            module.applied_relocation_count <- module.applied_relocation_count + 1
+            return true
+        return false
+    if rel_type == R_X86_64_64 or rel_type == R_X86_64_GLOB_DAT or rel_type == R_X86_64_JUMP_SLOT:
+        addend: mutable i64 = rel.rel_addend
+        if rel_type == R_X86_64_GLOB_DAT or rel_type == R_X86_64_JUMP_SLOT:
+            addend <- 0
+        symbol_info: mutable u8 = 0
+        symbol_value: mutable u64 = 0
+        if Module_GetSymbolInfoByIndex(module, symbol_index, symbol_info.ref[mutable u8&], symbol_value.ref[mutable u64&]):
+            if (symbol_info >> 4) == STB_LOCAL:
+                value: u64 = module.base_virtual_addr.u64() + symbol_value + addend.u64()
+                if Module_WriteImageU64(module.ref[mutable Module&], rel_virtual_addr, value):
+                    module.applied_relocation_count <- module.applied_relocation_count + 1
+                    return true
+        symbol_name: static u8& = Module_GetSymbolNameByIndex(module.ref[mutable Module&], symbol_index)
+        resolved_addr: mutable u64 = 0
+        resolved: mutable bool = Linker_Resolve(self.ref[mutable Linker&], symbol_name, module, resolved_addr.ref[mutable u64&])
+        if not resolved:
+            import_index: s32 = Module_FindImportByName(module, symbol_name)
+            if import_index >= 0 and module.import_symbols[import_index.usize()].resolved:
+                resolved_addr <- module.import_symbols[import_index.usize()].resolved_virtual_addr
+                resolved <- true
+        if resolved:
+            value: u64 = resolved_addr + addend.u64()
+            if Module_WriteImageU64(module.ref[mutable Module&], rel_virtual_addr, value):
+                module.applied_relocation_count <- module.applied_relocation_count + 1
+                module.patched_import_relocation_count <- module.patched_import_relocation_count + 1
+                return true
+        return false
+    if rel_type == R_X86_64_DTPMOD64:
+        if Module_WriteImageU64(module.ref[mutable Module&], rel_virtual_addr, module.tls.modid.u64()):
+            module.applied_relocation_count <- module.applied_relocation_count + 1
+            return true
+    return false
+
+def Linker_ApplyRelocationTable(self: mutable Linker&, module: mutable Module&, table_offset: u64, table_size: u64, entry_size: u64) -> void:
+    if table_offset == 0 or table_size == 0 or entry_size == 0:
+        return
+    count: usize = (table_size / entry_size).usize()
+    for i in 0..<count:
+        offset: u64 = table_offset + (i.u64() * entry_size)
+        if offset + size_of(elf_relocation).u64() <= module.dynamic_data.count.u64():
+            rel: elf_relocation = Module_ReadRelocationAt(module, offset.usize())
+            _ = Linker_ApplyRelocationEntry(self.ref[mutable Linker&], module.ref[mutable Module&], rel)
+
+def Linker_ApplyModuleRelocations(self: mutable Linker&, module: mutable Module&) -> void:
+    entry_size: u64 = Module_GetRelaEntrySize(module)
+    Linker_ApplyRelocationTable(self.ref[mutable Linker&], module.ref[mutable Module&], module.dynamic_info.rela_table_offset, module.dynamic_info.rela_table_total_size, entry_size)
+    Linker_ApplyRelocationTable(self.ref[mutable Linker&], module.ref[mutable Module&], module.dynamic_info.jmp_relocation_offset, module.dynamic_info.jmp_relocation_total_size, entry_size)
 
 def Linker_RelocateAllImports(self: mutable Linker&) -> void:
     self.last_relocated_import_count <- 0
@@ -228,8 +288,7 @@ def Linker_FindByAddress(self: mutable Linker&, address: VAddr) -> mutable Modul
     return null
 
 def Linker_Relocate(self: mutable Linker&, module: mutable Module&) -> void:
-    _ = self
-    _ = module
+    Linker_RelocateAnyImports(self.ref[mutable Linker&], module.ref[mutable Module&])
 
 def Linker_Resolve(self: mutable Linker&, name: static u8&, module: mutable Module&, out_virtual_address: mutable u64&) -> bool:
     _ = module

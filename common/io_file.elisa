@@ -144,18 +144,30 @@ extern windows_io_get_mapping(file: void&) -> uintptr
 extern posix_io_get_mapping(file: void&) -> uintptr
 extern windows_fs_directory_size(path: static u8&) -> u64
 extern posix_fs_directory_size(path: static u8&) -> u64
+extern fopen(path: static u8&, mode: static u8&) -> void&?
+extern fclose(stream: void&) -> int
+extern fflush(stream: void&) -> int
+extern fseek(stream: void&, offset: isize, whence: int) -> int
+extern ftell(stream: void&) -> isize
+extern fread(ptr: mutable void&, size: usize, nmemb: usize, stream: void&) -> usize
+extern fwrite(ptr: void&, size: usize, nmemb: usize, stream: void&) -> usize
+
+const C_SEEK_SET: int = 0
+const C_SEEK_CUR: int = 1
+const C_SEEK_END: int = 2
 
 def io_open(path: static u8&, mode: FileAccessMode, file_type: FileType, share: FileShareFlag) -> void&?:
     static if PLATFORM_WINDOWS:
         return windows_io_open(path, mode, file_type, share)
     static else:
-        return posix_io_open(path, mode, file_type, share)
+        _ = share
+        return fopen(path, AccessModeToStr(mode, file_type))
 
 def io_close(file: void&) -> void:
     static if PLATFORM_WINDOWS:
         windows_io_close(file)
     static else:
-        posix_io_close(file)
+        _ = fclose(file)
 
 def io_unlink(path: static u8&) -> void:
     static if PLATFORM_WINDOWS:
@@ -167,13 +179,13 @@ def io_flush(file: void&) -> bool:
     static if PLATFORM_WINDOWS:
         return windows_io_flush(file)
     static else:
-        return posix_io_flush(file)
+        return fflush(file) == 0
 
 def io_commit(file: void&) -> bool:
     static if PLATFORM_WINDOWS:
         return windows_io_commit(file)
     static else:
-        return posix_io_commit(file)
+        return fflush(file) == 0
 
 def io_set_size(file: void&, size: u64) -> bool:
     static if PLATFORM_WINDOWS:
@@ -185,31 +197,38 @@ def io_get_size(file: void&) -> u64:
     static if PLATFORM_WINDOWS:
         return windows_io_get_size(file)
     static else:
-        return posix_io_get_size(file)
+        old_pos: isize = ftell(file)
+        if fseek(file, 0, C_SEEK_END) != 0:
+            return 0
+        end_pos: isize = ftell(file)
+        _ = fseek(file, old_pos, C_SEEK_SET)
+        if end_pos < 0:
+            return 0
+        return end_pos.u64()
 
 def io_seek(file: void&, offset: i64, origin: SeekOrigin) -> bool:
     static if PLATFORM_WINDOWS:
         return windows_io_seek(file, offset, origin)
     static else:
-        return posix_io_seek(file, offset, origin)
+        return fseek(file, offset.isize(), ToSeekOrigin(origin)) == 0
 
 def io_tell(file: void&) -> i64:
     static if PLATFORM_WINDOWS:
         return windows_io_tell(file)
     static else:
-        return posix_io_tell(file)
+        return ftell(file).i64()
 
 def io_read(file: void&, data: mutable void&, elem_size: usize, count: usize) -> usize:
     static if PLATFORM_WINDOWS:
         return windows_io_read(file, data, elem_size, count)
     static else:
-        return posix_io_read(file, data, elem_size, count)
+        return fread(data, elem_size, count, file)
 
 def io_write(file: void&, data: void&, elem_size: usize, count: usize) -> usize:
     static if PLATFORM_WINDOWS:
         return windows_io_write(file, data, elem_size, count)
     static else:
-        return posix_io_write(file, data, elem_size, count)
+        return fwrite(data, elem_size, count, file)
 
 def io_read_string(file: void&, length: usize) -> static u8&:
     static if PLATFORM_WINDOWS:

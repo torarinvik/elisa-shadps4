@@ -79,6 +79,11 @@ struct DynamicModuleInfo:
     symbol_table_offset: mutable u64
     symbol_table_total_size: mutable u64
     symbol_table_entries_size: mutable u64
+    rela_table_offset: mutable u64
+    rela_table_total_size: mutable u64
+    rela_table_entries_size: mutable u64
+    jmp_relocation_offset: mutable u64
+    jmp_relocation_total_size: mutable u64
     import_modules: mutable darray[ModuleInfo]
     export_modules: mutable darray[ModuleInfo]
     import_libs: mutable darray[LibraryInfo]
@@ -100,12 +105,17 @@ struct Module:
     dynamic_info: mutable DynamicModuleInfo
     dynamic_segment: mutable darray[u8]
     dynamic_data: mutable darray[u8]
+    image: mutable darray[u8]
+    image_virtual_base: mutable u64
+    image_virtual_size: mutable u64
+    applied_relocation_count: mutable usize
+    patched_import_relocation_count: mutable usize
     import_symbols: mutable darray[ImportSymbolRecord]
     is_shared_lib: mutable bool
     is_valid: mutable bool
 
 def DynamicModuleInfo_New() -> DynamicModuleInfo:
-    return DynamicModuleInfo(0, 0, 0, 0, 0, 0, 0, zeroed, zeroed, zeroed, zeroed, "")
+    return DynamicModuleInfo(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, zeroed, zeroed, zeroed, zeroed, "")
 
 def Module_New(file: static u8&, name: static u8&, base_virtual_addr: VAddr, is_shared_lib: bool) -> Module:
     info: OrbisKernelModuleInfo = OrbisKernelModuleInfo(0x160.u64(), name, 0)
@@ -125,6 +135,11 @@ def Module_New(file: static u8&, name: static u8&, base_virtual_addr: VAddr, is_
         DynamicModuleInfo_New(),
         zeroed,
         zeroed,
+        zeroed,
+        0,
+        0,
+        0,
+        0,
         zeroed,
         is_shared_lib,
         base_virtual_addr != 0.uintptr()
@@ -187,6 +202,8 @@ def Module_LoadElfFromHostFile(self: mutable Module&) -> bool:
         return false
     elf: mutable Elf = Elf_new()
     Elf_Open(elf.ref[mutable Elf&], self.host_file)
+    if not Elf_IsOpen(elf.ref[Elf&]):
+        return false
     if not Elf_IsElfFile(elf.ref[Elf&]):
         return false
     loaded_dynamic: bool = Module_LoadElfSegments(self.ref[mutable Module&], elf.ref[mutable Elf&])
@@ -212,16 +229,15 @@ def Module_IsLikelyHostFile(path: static u8&) -> bool:
 
 def Module_LoadElfSegments(self: mutable Module&, elf: mutable Elf&) -> bool:
     loaded_dynamic: mutable bool = false
+    Module_PrepareLoadImage(self.ref[mutable Module&], elf)
     for i in 0..<elf.elf_header_value.e_phnum.usize():
         phdr: elf_program_header& = Elf_GetProgramHeader(elf, i)
+        if phdr.p_type == PT_LOAD and phdr.p_memsz > 0:
+            _ = Module_LoadImageSegment(self.ref[mutable Module&], elf, phdr)
         if phdr.p_type == PT_DYNAMIC and phdr.p_filesz > 0:
-            Module_ResizeBytes(self.dynamic_segment.ref[mutable darray[u8]&], phdr.p_filesz.usize())
-            if self.dynamic_segment.count > 0:
-                loaded_dynamic <- Elf_LoadSegment(elf, self.dynamic_segment[0].ref[mutable u8&].uintptr(), phdr.p_offset, phdr.p_filesz.usize())
+            loaded_dynamic <- Elf_LoadSegmentBytes(elf, self.dynamic_segment.ref[mutable darray[u8]&], phdr.p_offset, phdr.p_filesz.usize())
         if phdr.p_type == PT_SCE_DYNLIBDATA and phdr.p_filesz > 0:
-            Module_ResizeBytes(self.dynamic_data.ref[mutable darray[u8]&], phdr.p_filesz.usize())
-            if self.dynamic_data.count > 0:
-                _ = Elf_LoadSegment(elf, self.dynamic_data[0].ref[mutable u8&].uintptr(), phdr.p_offset, phdr.p_filesz.usize())
+            _ = Elf_LoadSegmentBytes(elf, self.dynamic_data.ref[mutable darray[u8]&], phdr.p_offset, phdr.p_filesz.usize())
         if phdr.p_type == PT_TLS:
             self.tls.init_image_size <- phdr.p_filesz.u32()
             self.tls.align <- phdr.p_align.u32()
@@ -234,6 +250,39 @@ def Module_LoadElfSegments(self: mutable Module&, elf: mutable Elf&) -> bool:
             self.eh_frame_hdr_size <- phdr.p_memsz.u32()
     return loaded_dynamic
 
+def Module_PrepareLoadImage(self: mutable Module&, elf: mutable Elf&) -> void:
+    min_vaddr: mutable u64 = 0
+    max_vaddr: mutable u64 = 0
+    for i in 0..<elf.elf_header_value.e_phnum.usize():
+        phdr: elf_program_header& = Elf_GetProgramHeader(elf, i)
+        if phdr.p_type == PT_LOAD and phdr.p_memsz > 0:
+            if min_vaddr == 0 or phdr.p_vaddr < min_vaddr:
+                min_vaddr <- phdr.p_vaddr
+            segment_end: u64 = phdr.p_vaddr + phdr.p_memsz
+            if segment_end > max_vaddr:
+                max_vaddr <- segment_end
+    self.image_virtual_base <- min_vaddr
+    self.image_virtual_size <- 0
+    if max_vaddr > min_vaddr:
+        self.image_virtual_size <- max_vaddr - min_vaddr
+        Module_ResizeBytes(self.image.ref[mutable darray[u8]&], self.image_virtual_size.usize())
+
+def Module_LoadImageSegment(self: mutable Module&, elf: mutable Elf&, phdr: elf_program_header&) -> bool:
+    if self.image_virtual_size == 0:
+        return false
+    if phdr.p_vaddr < self.image_virtual_base:
+        return false
+    offset: u64 = phdr.p_vaddr - self.image_virtual_base
+    if offset + phdr.p_filesz > self.image_virtual_size:
+        return false
+    segment: mutable darray[u8] = []
+    loaded: bool = Elf_LoadSegmentBytes(elf, segment.ref[mutable darray[u8]&], phdr.p_offset, phdr.p_filesz.usize())
+    if not loaded:
+        return false
+    for i in 0..<segment.count:
+        self.image[(offset.usize() + i)] <- segment[i]
+    return true
+
 def Module_ResizeBytes(out: mutable darray[u8]&, size: usize) -> void:
     while out.count < size:
         arena: Arena = zeroed
@@ -245,6 +294,61 @@ def Module_DynamicAt(self: Module&, offset: usize) -> elf_dynamic&:
 
 def Module_SymbolAt(self: Module&, offset: usize) -> elf_symbol&:
     return self.dynamic_data[offset].ref[u8&].cast[elf_symbol&]
+
+def Module_RelocationAt(self: Module&, offset: usize) -> elf_relocation&:
+    return self.dynamic_data[offset].ref[u8&].cast[elf_relocation&]
+
+def Module_ReadU32At(self: Module&, offset: usize) -> u32:
+    if offset + 4 > self.dynamic_data.count:
+        return 0
+    return self.dynamic_data[offset].u32() | (self.dynamic_data[offset + 1].u32() << 8) | (self.dynamic_data[offset + 2].u32() << 16) | (self.dynamic_data[offset + 3].u32() << 24)
+
+def Module_ReadU64At(self: Module&, offset: usize) -> u64:
+    if offset + 8 > self.dynamic_data.count:
+        return 0
+    value: mutable u64 = 0
+    for i in 0..<8:
+        value <- value | (self.dynamic_data[offset + i].u64() << (i.u64() * 8))
+    return value
+
+def Module_ReadI64At(self: Module&, offset: usize) -> i64:
+    return Module_ReadU64At(self, offset).i64()
+
+def Module_ReadRelocationAt(self: Module&, offset: usize) -> elf_relocation:
+    rel: mutable elf_relocation = zeroed
+    rel.rel_offset <- Module_ReadU64At(self, offset)
+    rel.rel_info <- Module_ReadU64At(self, offset + 8)
+    rel.rel_addend <- Module_ReadI64At(self, offset + 16)
+    return rel
+
+def Module_ImageOffsetForVirtualAddress(self: Module&, addr: u64, out_offset: mutable usize&) -> bool:
+    local: mutable u64 = addr
+    if local >= self.base_virtual_addr.u64():
+        local <- local - self.base_virtual_addr.u64()
+    if local < self.image_virtual_base:
+        return false
+    image_offset: u64 = local - self.image_virtual_base
+    if image_offset + 8 > self.image.count.u64():
+        return false
+    out_offset <- image_offset.usize()
+    return true
+
+def Module_WriteImageU64(self: mutable Module&, addr: u64, value: u64) -> bool:
+    offset: mutable usize = 0
+    if not Module_ImageOffsetForVirtualAddress(self, addr, offset.ref[mutable usize&]):
+        return false
+    for i in 0..<8:
+        self.image[offset + i] <- ((value >> (i.u64() * 8)) & 0xff).u8()
+    return true
+
+def Module_ReadImageU64(self: Module&, addr: u64) -> u64:
+    offset: mutable usize = 0
+    if not Module_ImageOffsetForVirtualAddress(self, addr, offset.ref[mutable usize&]):
+        return 0
+    value: mutable u64 = 0
+    for i in 0..<8:
+        value <- value | (self.image[offset + i].u64() << (i.u64() * 8))
+    return value
 
 def Module_ReadDynString(self: Module&, offset: u32) -> static u8&:
     if offset.usize() >= self.dynamic_data.count:
@@ -355,6 +459,16 @@ def Module_LoadDynamicInfo(self: mutable Module&) -> void:
             self.dynamic_info.symbol_table_total_size <- dyn.d_un
         if dyn.d_tag == DT_SCE_SYMENT:
             self.dynamic_info.symbol_table_entries_size <- dyn.d_un
+        if dyn.d_tag == DT_SCE_RELA:
+            self.dynamic_info.rela_table_offset <- dyn.d_un
+        if dyn.d_tag == DT_SCE_RELASZ:
+            self.dynamic_info.rela_table_total_size <- dyn.d_un
+        if dyn.d_tag == DT_SCE_RELAENT:
+            self.dynamic_info.rela_table_entries_size <- dyn.d_un
+        if dyn.d_tag == DT_SCE_JMPREL:
+            self.dynamic_info.jmp_relocation_offset <- dyn.d_un
+        if dyn.d_tag == DT_SCE_PLTRELSZ:
+            self.dynamic_info.jmp_relocation_total_size <- dyn.d_un
         if dyn.d_tag == DT_INIT:
             self.dynamic_info.init_virtual_addr <- dyn.d_un
         if dyn.d_tag == DT_FINI:
@@ -412,6 +526,37 @@ def Module_LoadSymbols(self: mutable Module&) -> void:
                 Module_AddImportSymbol(self.ref[mutable Module&], nid, nid)
         sym_offset <- sym_offset + entry_size
 
+def Module_GetSymbolNameByIndex(self: mutable Module&, symbol_index: u32) -> static u8&:
+    entry_size: mutable u64 = self.dynamic_info.symbol_table_entries_size
+    if entry_size == 0:
+        entry_size <- size_of(elf_symbol).u64()
+    offset: u64 = self.dynamic_info.symbol_table_offset + (symbol_index.u64() * entry_size)
+    if offset + size_of(elf_symbol).u64() > self.dynamic_data.count.u64():
+        return ""
+    name_offset: u32 = Module_ReadU32At(self, offset.usize())
+    if name_offset == 0:
+        return ""
+    return Module_SymbolNidAt(self.ref[mutable Module&], (self.dynamic_info.str_table_offset + name_offset.u64()).u32())
+
+def Module_GetSymbolInfoByIndex(self: Module&, symbol_index: u32, out_info: mutable u8&, out_value: mutable u64&) -> bool:
+    entry_size: mutable u64 = self.dynamic_info.symbol_table_entries_size
+    if entry_size == 0:
+        entry_size <- size_of(elf_symbol).u64()
+    offset: u64 = self.dynamic_info.symbol_table_offset + (symbol_index.u64() * entry_size)
+    if offset + size_of(elf_symbol).u64() > self.dynamic_data.count.u64():
+        return false
+    out_info <- self.dynamic_data[offset.usize() + 4]
+    out_value <- Module_ReadU64At(self, offset.usize() + 8)
+    return true
+
+def Module_FindImportByName(self: Module&, name: static u8&) -> s32:
+    if static_strlen(name) == 0:
+        return -1
+    for i in 0..<self.import_symbols.count:
+        if streq(self.import_symbols[i].nid, name) == 1 or streq(self.import_symbols[i].name, name) == 1:
+            return i.s32()
+    return -1
+
 def Module_AddImportSymbol(self: mutable Module&, nid: static u8&, name: static u8&) -> void:
     arena: Arena = zeroed
     in arena:
@@ -419,6 +564,27 @@ def Module_AddImportSymbol(self: mutable Module&, nid: static u8&, name: static 
 
 def Module_GetImportSymbolCount(self: Module&) -> usize:
     return self.import_symbols.count
+
+def Module_GetRelaRelocationCount(self: Module&) -> usize:
+    if self.dynamic_info.rela_table_offset == 0 or self.dynamic_info.rela_table_total_size == 0:
+        return 0
+    entry_size: u64 = Module_GetRelaEntrySize(self)
+    if entry_size == 0:
+        return 0
+    return (self.dynamic_info.rela_table_total_size / entry_size).usize()
+
+def Module_GetJmpRelocationCount(self: Module&) -> usize:
+    if self.dynamic_info.jmp_relocation_offset == 0 or self.dynamic_info.jmp_relocation_total_size == 0:
+        return 0
+    entry_size: u64 = Module_GetRelaEntrySize(self)
+    if entry_size == 0:
+        return 0
+    return (self.dynamic_info.jmp_relocation_total_size / entry_size).usize()
+
+def Module_GetRelaEntrySize(self: Module&) -> u64:
+    if self.dynamic_info.rela_table_entries_size != 0:
+        return self.dynamic_info.rela_table_entries_size
+    return size_of(elf_relocation).u64()
 
 def Module_GetResolvedImportSymbolCount(self: Module&) -> usize:
     count: mutable usize = 0
