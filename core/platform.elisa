@@ -1,0 +1,113 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../common/types.elisa"
+
+const PLATFORM_IRQ_COMPUTE0_RELMEM: u32 = 0x00
+const PLATFORM_IRQ_COMPUTE1_RELMEM: u32 = 0x01
+const PLATFORM_IRQ_COMPUTE2_RELMEM: u32 = 0x02
+const PLATFORM_IRQ_COMPUTE3_RELMEM: u32 = 0x03
+const PLATFORM_IRQ_COMPUTE4_RELMEM: u32 = 0x04
+const PLATFORM_IRQ_COMPUTE5_RELMEM: u32 = 0x05
+const PLATFORM_IRQ_COMPUTE6_RELMEM: u32 = 0x06
+const PLATFORM_IRQ_GFX_FLIP: u32 = 0x08
+const PLATFORM_IRQ_GPU_IDLE: u32 = 0x09
+const PLATFORM_IRQ_GFX_EOP: u32 = 0x40
+const PLATFORM_IRQ_MAX: u32 = 0x40
+const PLATFORM_IRQ_HANDLER_CAPACITY: usize = 64
+
+struct PlatformIrqHandlerRecord:
+    uid: mutable uintptr
+    signal_count: mutable u64
+    irq: mutable u32
+    persistent: mutable bool
+    active: mutable bool
+
+struct PlatformIrqController:
+    handlers: mutable PlatformIrqHandlerRecord[64]
+    handler_count: mutable usize
+    last_irq: mutable u32
+    last_signal_count: mutable u64
+    rejected_invalid_irq_count: mutable u64
+    rejected_capacity_count: mutable u64
+
+# Elisa cannot carry C++ std::function values directly; the native port records the
+# same subscription lifecycle and leaves host callback invocation to renderer bridges.
+global mutable PlatformIrq: PlatformIrqController = zeroed
+
+def Platform_IsValidInterruptId(irq: u32) -> bool:
+    return irq <= PLATFORM_IRQ_MAX
+
+def Platform_IrqReset() -> void:
+    PlatformIrq <- zeroed
+
+def Platform_IrqFindPersistent(irq: u32, uid: uintptr) -> s32:
+    i: mutable usize = 0
+    while i < PlatformIrq.handler_count:
+        rec: PlatformIrqHandlerRecord = PlatformIrq.handlers[i]
+        if rec.active and rec.persistent and rec.irq == irq and rec.uid == uid:
+            return i.s32()
+        i <- i + 1
+    return -1
+
+def Platform_IrqAppend(irq: u32, uid: uintptr, persistent: bool) -> bool:
+    if PlatformIrq.handler_count >= PLATFORM_IRQ_HANDLER_CAPACITY:
+        PlatformIrq.rejected_capacity_count <- PlatformIrq.rejected_capacity_count + 1.u64()
+        return false
+    index: usize = PlatformIrq.handler_count
+    PlatformIrq.handlers[index] <- PlatformIrqHandlerRecord(uid, 0.u64(), irq, persistent, true)
+    PlatformIrq.handler_count <- PlatformIrq.handler_count + 1
+    return true
+
+def Platform_IrqRegister(irq: u32, uid: uintptr) -> bool:
+    if not Platform_IsValidInterruptId(irq) or uid == 0.uintptr():
+        PlatformIrq.rejected_invalid_irq_count <- PlatformIrq.rejected_invalid_irq_count + 1.u64()
+        return false
+    if Platform_IrqFindPersistent(irq, uid) >= 0:
+        return false
+    return Platform_IrqAppend(irq, uid, true)
+
+def Platform_IrqRegisterOnce(irq: u32, uid: uintptr) -> bool:
+    if not Platform_IsValidInterruptId(irq) or uid == 0.uintptr():
+        PlatformIrq.rejected_invalid_irq_count <- PlatformIrq.rejected_invalid_irq_count + 1.u64()
+        return false
+    return Platform_IrqAppend(irq, uid, false)
+
+def Platform_IrqUnregister(irq: u32, uid: uintptr) -> bool:
+    index: s32 = Platform_IrqFindPersistent(irq, uid)
+    if index < 0:
+        return false
+    PlatformIrq.handlers[index.usize()].active <- false
+    return true
+
+def Platform_IrqSignal(irq: u32) -> u32:
+    if not Platform_IsValidInterruptId(irq):
+        PlatformIrq.rejected_invalid_irq_count <- PlatformIrq.rejected_invalid_irq_count + 1.u64()
+        return 0.u32()
+    PlatformIrq.last_irq <- irq
+    PlatformIrq.last_signal_count <- PlatformIrq.last_signal_count + 1.u64()
+    delivered: mutable u32 = 0.u32()
+    consumed_one_time: mutable bool = false
+    i: mutable usize = 0
+    while i < PlatformIrq.handler_count:
+        if PlatformIrq.handlers[i].active and PlatformIrq.handlers[i].irq == irq:
+            if PlatformIrq.handlers[i].persistent:
+                PlatformIrq.handlers[i].signal_count <- PlatformIrq.handlers[i].signal_count + 1.u64()
+                delivered <- delivered + 1.u32()
+            else:
+                if not consumed_one_time:
+                    PlatformIrq.handlers[i].signal_count <- PlatformIrq.handlers[i].signal_count + 1.u64()
+                    PlatformIrq.handlers[i].active <- false
+                    consumed_one_time <- true
+                    delivered <- delivered + 1.u32()
+        i <- i + 1
+    return delivered
+
+def Platform_IrqActiveHandlerCount() -> usize:
+    count: mutable usize = 0
+    i: mutable usize = 0
+    while i < PlatformIrq.handler_count:
+        if PlatformIrq.handlers[i].active:
+            count <- count + 1
+        i <- i + 1
+    return count

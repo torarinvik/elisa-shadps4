@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../../common/types.elisa"
+
+const VULKAN_GPU_COMMAND_DIAGNOSTIC_RING_SIZE: usize = 64
+
+struct GpuCommandDiagnosticEntry:
+    serial: mutable u64
+    code: mutable u32
+
+struct GpuCommandDiagnosticState:
+    ring: mutable GpuCommandDiagnosticEntry[64]
+    serial: mutable u64
+    dump_count: mutable u64
+    last_dump_reason_code: mutable u32
+    enabled: mutable bool
+
+global mutable VulkanGpuCommandDiagnostics: GpuCommandDiagnosticState = zeroed
+
+def VulkanGpuCommandDiagnostics_Reset() -> void:
+    VulkanGpuCommandDiagnostics <- zeroed
+
+def VulkanGpuCommandDiagnostics_SetEnabled(enabled: bool) -> void:
+    VulkanGpuCommandDiagnostics.enabled <- enabled
+
+def VulkanGpuCommandDiagnostics_IsEnabled() -> bool:
+    return VulkanGpuCommandDiagnostics.enabled
+
+def VulkanGpuCommandDiagnostics_Record(code: u32) -> u64:
+    if not VulkanGpuCommandDiagnostics.enabled:
+        return 0.u64()
+    VulkanGpuCommandDiagnostics.serial <- VulkanGpuCommandDiagnostics.serial + 1.u64()
+    serial: u64 = VulkanGpuCommandDiagnostics.serial
+    slot: usize = ((serial - 1.u64()) % VULKAN_GPU_COMMAND_DIAGNOSTIC_RING_SIZE.u64()).usize()
+    VulkanGpuCommandDiagnostics.ring[slot] <- GpuCommandDiagnosticEntry(serial, code)
+    return serial
+
+def VulkanGpuCommandDiagnostics_LatestSerial() -> u64:
+    latest: mutable u64 = 0.u64()
+    i: mutable usize = 0
+    while i < VULKAN_GPU_COMMAND_DIAGNOSTIC_RING_SIZE:
+        if VulkanGpuCommandDiagnostics.ring[i].serial > latest:
+            latest <- VulkanGpuCommandDiagnostics.ring[i].serial
+        i <- i + 1
+    return latest
+
+def VulkanGpuCommandDiagnostics_Dump(reason_code: u32) -> u64:
+    if not VulkanGpuCommandDiagnostics.enabled:
+        return 0.u64()
+    VulkanGpuCommandDiagnostics.last_dump_reason_code <- reason_code
+    VulkanGpuCommandDiagnostics.dump_count <- VulkanGpuCommandDiagnostics.dump_count + 1.u64()
+    return VulkanGpuCommandDiagnostics_LatestSerial()

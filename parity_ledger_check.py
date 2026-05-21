@@ -11,9 +11,12 @@ LEDGER_PATH = ROOT / "parity_ledger.json"
 
 ALLOWED_STATUSES = {
     "Implemented",
+    "Native-Elisa",
     "Stub-Parity",
     "External-C-ABI",
+    "Temporary-Cpp-Bridge",
     "Missing",
+    "Not-Applicable-External",
 }
 ALLOWED_EXTERNAL_REASONS = {
     "external-library",
@@ -57,10 +60,12 @@ def main() -> int:
             if status not in ALLOWED_STATUSES:
                 return fail(f"{name}:{symbol}: invalid status {status!r}")
 
-            if status == "Implemented":
+            if status in {"Implemented", "Native-Elisa"}:
                 tests = entry.get("tests", [])
                 if not isinstance(tests, list) or len(tests) == 0:
-                    return fail(f"{name}:{symbol}: Implemented entries must provide at least one coverage test tag")
+                    return fail(
+                        f"{name}:{symbol}: {status} entries must provide at least one coverage test tag"
+                    )
 
             if status == "External-C-ABI":
                 reason = entry.get("boundary_reason")
@@ -72,6 +77,19 @@ def main() -> int:
                 shim_owner = entry.get("shim_owner", "")
                 if not shim_owner:
                     return fail(f"{name}:{symbol}: External-C-ABI entry requires shim_owner")
+
+            if status == "Temporary-Cpp-Bridge":
+                blocker = entry.get("bridge_blocker", "")
+                plan = entry.get("retirement_plan", "")
+                if not blocker:
+                    return fail(f"{name}:{symbol}: Temporary-Cpp-Bridge entry requires bridge_blocker")
+                if not plan:
+                    return fail(f"{name}:{symbol}: Temporary-Cpp-Bridge entry requires retirement_plan")
+
+            if status == "Missing":
+                milestone = entry.get("milestone", "")
+                if not milestone:
+                    return fail(f"{name}:{symbol}: Missing entry requires milestone")
 
         for symbol in required:
             if symbol not in by_symbol:

@@ -27,21 +27,51 @@ extern c_GuestExec_WriteU64(address: uintptr, value: u64) -> s32
 @link_name(ElisaGuestExec_RunMainEntry)
 extern c_GuestExec_RunMainEntry(params: mutable GuestEntryParams&, exit_func: void&?) -> void
 
+@link_name(ElisaGuestExec_RunSyntheticFunction)
+extern c_GuestExec_RunSyntheticFunction(entry_addr: uintptr, arg0: u64, arg1: u64) -> u64
+
+@link_name(ElisaGuestExec_GetSyntheticAddAddress)
+extern c_GuestExec_GetSyntheticAddAddress() -> uintptr
+
 global mutable guest_exec_enabled: bool = false
+global mutable guest_exec_probe_mode: bool = false
 global mutable guest_exec_last_map_result: s32 = 0
 global mutable guest_exec_last_entry_addr: VAddr = 0.uintptr()
+global mutable guest_exec_last_argc: int = 0
+global mutable guest_exec_run_count: usize = 0
+global mutable guest_exec_last_main_entry_addr: VAddr = 0.uintptr()
+global mutable guest_exec_main_run_count: usize = 0
 
 def GuestExec_IsSupported() -> bool:
     return c_GuestExec_IsSupported() == 1
 
+def GuestExec_ResetState() -> void:
+    guest_exec_enabled <- false
+    guest_exec_probe_mode <- false
+    guest_exec_last_map_result <- 0
+    guest_exec_last_entry_addr <- 0.uintptr()
+    guest_exec_last_argc <- 0
+    guest_exec_run_count <- 0
+    guest_exec_last_main_entry_addr <- 0.uintptr()
+    guest_exec_main_run_count <- 0
+
 def GuestExec_Enable(enabled: bool) -> void:
     guest_exec_enabled <- enabled
 
+def GuestExec_SetProbeMode(enabled: bool) -> void:
+    guest_exec_probe_mode <- enabled
+
 def GuestExec_IsEnabled() -> bool:
-    return guest_exec_enabled and GuestExec_IsSupported()
+    return guest_exec_enabled and (guest_exec_probe_mode or GuestExec_IsSupported())
+
+def GuestExec_IsProbeMode() -> bool:
+    return guest_exec_probe_mode
 
 def GuestExec_MapRegion(address: VAddr, size: u64, prot: u32) -> bool:
     if not GuestExec_IsEnabled():
+        return false
+    if not GuestExec_IsSupported():
+        guest_exec_last_map_result <- -2
         return false
     result: s32 = c_GuestExec_MapRegion(address, size, prot)
     guest_exec_last_map_result <- result
@@ -50,6 +80,9 @@ def GuestExec_MapRegion(address: VAddr, size: u64, prot: u32) -> bool:
 def GuestExec_ProtectRegion(address: VAddr, size: u64, prot: u32) -> bool:
     if not GuestExec_IsEnabled():
         return false
+    if not GuestExec_IsSupported():
+        guest_exec_last_map_result <- -2
+        return false
     result: s32 = c_GuestExec_ProtectRegion(address, size, prot)
     guest_exec_last_map_result <- result
     return result == 0
@@ -57,17 +90,41 @@ def GuestExec_ProtectRegion(address: VAddr, size: u64, prot: u32) -> bool:
 def GuestExec_WriteBytes(address: VAddr, data: void&?, size: u64) -> bool:
     if not GuestExec_IsEnabled():
         return false
+    if not GuestExec_IsSupported():
+        return false
     return c_GuestExec_WriteBytes(address, data, size) == 0
 
 def GuestExec_WriteU64(address: VAddr, value: u64) -> bool:
     if not GuestExec_IsEnabled():
         return false
+    if not GuestExec_IsSupported():
+        return false
     return c_GuestExec_WriteU64(address, value) == 0
 
-def GuestExec_RunMainEntry(entry_addr: VAddr, argc: int, argv: void&?) -> void:
+def GuestExec_RecordHandoff(entry_addr: VAddr, argc: int, is_main_executable: bool) -> void:
+    guest_exec_last_entry_addr <- entry_addr
+    guest_exec_last_argc <- argc
+    guest_exec_run_count <- guest_exec_run_count + 1
+    if is_main_executable:
+        guest_exec_last_main_entry_addr <- entry_addr
+        guest_exec_main_run_count <- guest_exec_main_run_count + 1
+
+def GuestExec_RunModuleEntry(entry_addr: VAddr, argc: int, argv: void&?, is_main_executable: bool) -> void:
     if not GuestExec_IsEnabled() or entry_addr == 0.uintptr():
         return
-    guest_exec_last_entry_addr <- entry_addr
+    GuestExec_RecordHandoff(entry_addr, argc, is_main_executable)
+    if guest_exec_probe_mode:
+        return
     params: mutable GuestEntryParams = GuestEntryParams(argc, 0, entry_addr, argv)
     c_GuestExec_RunMainEntry(params.ref[mutable GuestEntryParams&], null)
 
+def GuestExec_RunMainEntry(entry_addr: VAddr, argc: int, argv: void&?) -> void:
+    GuestExec_RunModuleEntry(entry_addr, argc, argv, true)
+
+def GuestExec_GetSyntheticAddAddress() -> VAddr:
+    return c_GuestExec_GetSyntheticAddAddress()
+
+def GuestExec_RunSyntheticFunction(entry_addr: VAddr, arg0: u64, arg1: u64) -> u64:
+    if not GuestExec_IsSupported() or entry_addr == 0.uintptr():
+        return 0xFFFFFFFFFFFFFFFF.u64()
+    return c_GuestExec_RunSyntheticFunction(entry_addr, arg0, arg1)

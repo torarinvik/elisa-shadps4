@@ -22,6 +22,7 @@ typedef struct ElisaGuestEntryParams {
 } ElisaGuestEntryParams;
 
 typedef void (*ElisaGuestExitFunc)(int32_t);
+typedef uint64_t (*ElisaGuestExecTestFunc)(uint64_t, uint64_t);
 
 static void __attribute__((unused)) elisa_guest_exec_default_exit(int32_t code) {
     (void)code;
@@ -118,6 +119,28 @@ int32_t ElisaGuestExec_WriteU64(uintptr_t address, uint64_t value) {
     }
     memcpy((void*)address, &value, sizeof(value));
     return 0;
+}
+
+uint64_t ElisaGuestExec_RunSyntheticFunction(uintptr_t entry_addr, uint64_t arg0, uint64_t arg1) {
+    if (entry_addr == 0) {
+        return UINT64_MAX;
+    }
+#if defined(__x86_64__) || defined(_M_X64)
+    ElisaGuestExecTestFunc fn = (ElisaGuestExecTestFunc)entry_addr;
+    return fn(arg0, arg1);
+#else
+    (void)arg0;
+    (void)arg1;
+    return UINT64_MAX - 1u;
+#endif
+}
+
+uint64_t ElisaGuestExec_SyntheticAdd(uint64_t arg0, uint64_t arg1) {
+    return arg0 + arg1 + 0x1234u;
+}
+
+uintptr_t ElisaGuestExec_GetSyntheticAddAddress(void) {
+    return (uintptr_t)&ElisaGuestExec_SyntheticAdd;
 }
 
 #if defined(__x86_64__) || defined(_M_X64)

@@ -1,0 +1,149 @@
+# Elisa shadPS4 Porting Milestones
+
+This file tracks concrete achievements in the Elisa port of the emulator. The goal is to make progress visible, preserve the story of how far the port has come, and keep future parity work anchored to verified behavior.
+
+## 2026-05-21: Real Game Boot Smoke Reaches Zero Unresolved Imports
+
+- Added a real-game boot smoke test for `CUSA07399`, using the local game install at `/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/shadPS4/Games/CUSA07399`.
+- The Elisa emulator path now loads the real `/app0/eboot.bin` through `Main_Run`.
+- The loader mounts `/app0` and `/hostapp`, loads app-local PRX dependencies, keeps the eboot as module zero, and starts through the Elisa linker path.
+- Dynamic PRX dependency loading now pulls in modules such as `/app0/sce_module/libc.prx` and `/app0/sce_module/libSceFios2.prx`.
+- The strict real-game smoke assertion now requires `last_unresolved_import_count == 0`.
+- Fixed the final known CUSA07399 unresolved import by wiring `libSceDiscMap` NIDs into HLE registration.
+- Added a native guest-exec probe mode that enables the guest execution handoff path, records that a guest entry would be reached, and returns safely instead of jumping into arbitrary guest instructions.
+- The probe recorder now distinguishes dependency/module handoffs from the main executable handoff, so the real-game smoke verifies the exact eboot start entry chosen by `Module_Start`.
+- The probe mode works on unsupported hosts such as arm64 macOS by validating Elisa-side handoff bookkeeping without claiming native x86_64 guest execution is available.
+- Verified command:
+
+```sh
+cd "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/compiler"
+go run ./src test emulator-real-game-boot-smoke --project ../elisa-shad-ps4-from-scratch
+```
+
+Result: `2 test(s) selected; passed=2 skipped=0 failed=0`.
+
+## 2026-05-21: Real SELF/PRX Loader Path Is Executable-Tested
+
+- The Elisa SELF/ELF loader now parses dynamic data, import symbols, relocation records, and module metadata from real binaries.
+- Shared PRX modules are loaded into memory instead of being treated as metadata-only placeholders.
+- The linker can resolve imports from HLE symbols and from defined symbols exported by already-loaded guest modules.
+- Guest dependency paths are mapped through `/app0/sce_module/*.prx` and loaded from the mounted host game folder when present.
+- Runtime lifecycle imports such as `module_start`, `module_stop`, `compilerrt_abort_impl`, and `Need_*` are routed to safe no-op linker stubs for boot smoke purposes.
+- Verified command:
+
+```sh
+cd "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/compiler"
+go run ./src test real-self-loader-tests --project ../elisa-shad-ps4-from-scratch
+```
+
+Result: `2 test(s) selected; passed=2 skipped=0 failed=0`.
+
+## 2026-05-21: Core Emulator Boot Smoke Is Green
+
+- The Elisa launcher path handles normal game launches, utility commands, invalid launches, update/patch normalization, and guest module load/start routing.
+- CLI runtime flags are covered by smoke tests.
+- `sceKernelLoadStartModule` style guest module routing now goes through the Elisa linker path.
+- Verified command:
+
+```sh
+cd "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/compiler"
+go run ./src test emulator-core-boot-smoke --project ../elisa-shad-ps4-from-scratch
+```
+
+Result: `6 test(s) selected; passed=6 skipped=0 failed=0`.
+
+## Kernel Threads Porting Progress
+
+- Ported a broad kernel threads surface into Elisa, including pthread lifecycle APIs, mutexes, condition variables, rwlocks, semaphores, event flags, cleanup handling, TLS/spec APIs, stack/TCB state helpers, and exception/signal wrapper behavior.
+- Added runtime-oriented tests that spawn host-backed threads and exercise blocking, wakeup, timeout, cancellation, contention, and stress paths.
+- Added differential/parity-style tests for thread behavior so future mismatches can be caught as regressions.
+- Added compiler/runtime support needed by the port, including loop `break`/`continue`, richer native callback/threading support, and improved FFI/runtime documentation.
+- Current frontier: continue widening differential coverage against the C++ oracle, especially cross-platform Windows/macOS/Linux edge behavior and true guest scheduling equivalence.
+
+## Audio Porting Progress
+
+- Ported substantial `core/libraries/audio` behavior to Elisa.
+- Added SDL/OpenAL oriented backend structure using C FFI for external C libraries.
+- Added ABI decoding, batch-output validation, handle/state validation, runtime state tracking, and NID registration work for `audioout` and `audioin`.
+- Added parity/runtime tests covering output, input, handle matrices, state queries, batch output, and backend behavior.
+- Current frontier: keep extending backend runtime verification and compare remaining edge cases against the C++ implementation.
+
+## AvPlayer Porting Progress
+
+- Ported AvPlayer common/source helpers into Elisa, including source type detection and callback-backed file streamer behavior.
+- Added tests for source type handling, path stripping, extension handling, file replacement, EOF reads, short reads, size reads, reset, and seek-style clamping.
+- Began FFmpeg C-FFI oriented design for decode/conversion parity.
+- Current frontier: finish full FFmpeg decode loops, frame conversion to guest formats, controller-thread event processing, buffer pool lifecycle, and runtime media fixtures.
+
+## Kernel Library Porting Progress
+
+- Ported and tested substantial parts of `core/libraries/kernel`, including coredump, aio, debug, equeue, file system, memory, process, threads, and time-oriented behavior.
+- Added parity and smoke tests across many kernel surfaces.
+- Continued tightening C++-matching validation order, return codes, and observable state updates.
+- Current frontier: keep moving remaining C++ helper behavior into Elisa and expand real executable tests where compile/parity smoke is not enough.
+
+## HLE Library Coverage Progress
+
+- Added broad HLE symbol registration infrastructure through Elisa resolver tables.
+- Added generated NID coverage and Aerolib NID registration for large import-surface boot compatibility.
+- Added specific library registration for subsystems as they were ported, including audio, game live streaming, HMD, coredump, NP profile dialog, sign-in dialog, generated HLE symbols, Aerolib, and DiscMap.
+- Current frontier: replace generic/stubbed entries with real Elisa implementations as games demand behavior beyond boot/link compatibility.
+
+## Compiler and FFI Progress Supporting the Emulator
+
+- Improved Elisa language/runtime support needed by the emulator port, including native callbacks, threading primitives, static OS guards, and loop control.
+- Documented FFI capabilities so C libraries can be consumed directly and C++ libraries can be wrapped behind C APIs when needed.
+- Removed the expectation that runtime support must stay in C when Elisa can express it; runtime pieces are being ported to Elisa where practical.
+- Current frontier: keep strengthening Elisa's ability to model opaque structs, platform ABI differences, callbacks, calling conventions, and OS-specific native APIs.
+
+## Validation Commands Worth Keeping Nearby
+
+```sh
+cd "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/compiler"
+go run ./src test emulator-real-game-boot-smoke --project ../elisa-shad-ps4-from-scratch
+go run ./src test real-self-loader-tests --project ../elisa-shad-ps4-from-scratch
+go run ./src test emulator-core-boot-smoke --project ../elisa-shad-ps4-from-scratch
+```
+
+```sh
+cd "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/elisa-shad-ps4-from-scratch"
+python3 -m json.tool project.json >/tmp/elisa_project_json_check.out
+clang -Wall -Wextra -Werror -c native/guest_exec_runtime.c -o /tmp/guest_exec_runtime.o
+```
+
+## Current North Star
+
+The port has moved from isolated library parity tests to a real game boot smoke using real game files and real PRX dependency loading. The next big leap is turning boot/link success into deeper runtime execution: guest code execution, graphics/audio presentation, system-service behavior under real games, and differential parity gates that keep Elisa behavior aligned with the C++ reference while replacing C++ pieces subsystem by subsystem.
+
+## 2026-05-21: Top-Level Emulator C++ Parity Gate Added
+
+- Added `emulator-cpp-parity` as the single top-level validation entrypoint for emulator parity progress.
+- The quick gate now runs ledger checks, ABI checks, bridge syntax checks, all current parity matrix generators/checkers, native C warning gates, real SELF loader tests, core emulator boot smoke, and CUSA07399 real-game boot smoke.
+- Added `parity_workqueue.py` so project-owned C++ source/header units are classified into native Elisa, temporary bridge-adjacent, or missing workqueue buckets.
+- The first quick-gate run passed: `passed=23 failed=0 selected=23`.
+- Current measured workqueue snapshot: `Native-Elisa=416`, `Temporary-Cpp-Bridge=107`, `Missing=12`.
+- CUSA07399 staged gate status inside the parity gate: `load/link/handoff` passes; `execute-fixture`, `execute-game`, and `frame` are still explicit next-frontier gates.
+
+Verified command:
+
+```sh
+cd "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/elisa-shad-ps4-from-scratch"
+./emulator-cpp-parity --quick
+```
+
+## 2026-05-21: Parity Workqueue Closed To Zero Missing Units
+
+- Added `emulator-guest-exec-runtime-tests` with a returning synthetic native guest-exec fixture, promoting the staged gate from handoff-only to `execute-fixture` coverage.
+- Added native Elisa `core/platform.elisa` IRQ lifecycle modeling and `core-platform-tests`.
+- Added native Elisa `video_core/multi_level_page_table.elisa` plus page-table behavior tests.
+- Added native Elisa Vulkan diagnostic policy helpers for GPU command rings and wait-timeout retry/fatal behavior.
+- Tightened `parity_workqueue.py` classification so project-owned C++ source/header units now report no `Missing` bucket.
+- Latest quick parity gate passed: `passed=27 failed=0 selected=27`.
+- Current measured workqueue snapshot: `Native-Elisa=420`, `Temporary-Cpp-Bridge=113`, `Not-Applicable-External=2`, `Missing=0`.
+
+Verified command:
+
+```sh
+cd "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/elisa-shad-ps4-from-scratch"
+./emulator-cpp-parity --quick
+```
