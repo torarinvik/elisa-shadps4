@@ -15,6 +15,7 @@ ALLOWED_STATUSES = {
     "Stub-Parity",
     "External-C-ABI",
     "Temporary-Cpp-Bridge",
+    "AeroLibFallback",
     "Missing",
     "Not-Applicable-External",
 }
@@ -81,10 +82,13 @@ def main() -> int:
             if status == "Temporary-Cpp-Bridge":
                 blocker = entry.get("bridge_blocker", "")
                 plan = entry.get("retirement_plan", "")
+                notes = str(entry.get("notes", "")).strip()
                 if not blocker:
                     return fail(f"{name}:{symbol}: Temporary-Cpp-Bridge entry requires bridge_blocker")
                 if not plan:
                     return fail(f"{name}:{symbol}: Temporary-Cpp-Bridge entry requires retirement_plan")
+                if not notes:
+                    return fail(f"{name}:{symbol}: Temporary-Cpp-Bridge entry requires retirement notes in notes")
 
             if status == "Missing":
                 milestone = entry.get("milestone", "")

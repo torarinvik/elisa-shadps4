@@ -5,15 +5,19 @@ import argparse
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Iterable
 
 ROOT = Path(__file__).resolve().parent
 COMPILER_DIR = ROOT.parent / "compiler"
 TMP_DIR = Path(os.environ.get("TMPDIR", "/tmp"))
+MILESTONES_PATH = ROOT / "Milestones.md"
+LAST_REPORT_PATH = ROOT / "parity_gate_latest.md"
 
 
 @dataclass(frozen=True)
@@ -158,7 +162,7 @@ def all_steps() -> list[Step]:
     return [
         Step("parity ledger", [sys.executable, "parity_ledger_check.py", "--summary"], category="ledger"),
         Step("parity ABI guard", [sys.executable, "parity_abi_check.py", "--summary"], category="ledger"),
-        Step("parity workqueue summary", [sys.executable, "parity_workqueue.py"], category="ledger"),
+        Step("parity workqueue summary", [sys.executable, "parity_workqueue.py", "--fail-missing"], category="ledger"),
         Step("bridge syntax", [sys.executable, "check_elisa_bridges.py"], category="bridge"),
         *matrix_steps(),
         *native_warning_steps(),
@@ -247,8 +251,97 @@ def count_matrix(path: Path) -> dict[str, int]:
     return counts
 
 
+def parse_artifact_kv(lines: Iterable[str]) -> list[dict[str, str]]:
+    rows: list[dict[str, str]] = []
+    for line in lines:
+        if "CUSA07399_ARTIFACT" not in line:
+            continue
+        payload = line.split("CUSA07399_ARTIFACT", 1)[1].strip()
+        row: dict[str, str] = {}
+        for token in payload.split():
+            if "=" not in token:
+                continue
+            key, value = token.split("=", 1)
+            row[key.strip()] = value.strip()
+        if row:
+            rows.append(row)
+    return rows
+
+
+def to_int(value: str | None) -> int:
+    if value is None:
+        return 0
+    v = value.strip().lower()
+    try:
+        if v.startswith("0x"):
+            return int(v, 16)
+        return int(v)
+    except Exception:
+        return 0
+
+
+def parse_cusa_metrics(results: list[Result]) -> dict[str, int | str]:
+    rows: list[dict[str, str]] = []
+    for r in results:
+        if r.step.name == "elisacore test emulator-real-game-boot-smoke":
+            rows.extend(parse_artifact_kv(r.output.splitlines()))
+    summary: dict[str, int | str] = {
+        "module_count": 0,
+        "total_imports": 0,
+        "native_hle_imports": 0,
+        "prx_export_imports": 0,
+        "aerolib_fallback_imports": 0,
+        "unresolved_imports": 0,
+        "loaded_modules": 0,
+        "relocation_count": 0,
+        "guarded_status": 0,
+        "boundary_status": 0,
+        "execution_stage": 0,
+    }
+    max_modules = 0
+    max_unresolved = 0
+    max_relocations = 0
+    max_loaded = 0
+    max_hle_imports = 0
+    max_prx_imports = 0
+    max_aerolib_imports = 0
+    total_imports = 0
+    for row in rows:
+        if "module_count" in row:
+            max_modules = max(max_modules, to_int(row.get("module_count")))
+            max_unresolved = max(max_unresolved, to_int(row.get("unresolved_imports")))
+            max_relocations = max(max_relocations, to_int(row.get("relocated_imports")))
+            max_hle_imports = max(max_hle_imports, to_int(row.get("native_hle_imports") or row.get("native_hle")))
+            max_prx_imports = max(max_prx_imports, to_int(row.get("prx_export_imports") or row.get("prx_export")))
+            max_aerolib_imports = max(max_aerolib_imports, to_int(row.get("aerolib_fallback_imports") or row.get("aerolib_fallback")))
+        if "module" in row:
+            max_loaded += 1
+            imports = to_int(row.get("imports"))
+            total_imports += imports
+        if "guarded_status" in row:
+            summary["guarded_status"] = to_int(row.get("guarded_status"))
+            summary["boundary_status"] = to_int(row.get("boundary_status"))
+            summary["execution_stage"] = to_int(row.get("execution_stage"))
+    summary["module_count"] = max_modules
+    summary["unresolved_imports"] = max_unresolved
+    summary["relocation_count"] = max_relocations
+    summary["loaded_modules"] = max_loaded
+    summary["total_imports"] = total_imports
+    if max_hle_imports == 0 and max_prx_imports == 0 and max_aerolib_imports == 0:
+        # Backward-compatible fallback when old artifact emitters do not provide per-class counters.
+        known = max_relocations - max_unresolved
+        max_hle_imports = min(to_int(str(summary.get("module_count", 0))), known) if known > 0 else 0
+        max_prx_imports = max(known - max_hle_imports, 0)
+        max_aerolib_imports = 0
+    summary["native_hle_imports"] = max_hle_imports
+    summary["prx_export_imports"] = max_prx_imports
+    summary["aerolib_fallback_imports"] = max_aerolib_imports
+    return summary
+
+
 def summarize_progress(results: list[Result]) -> str:
     lines: list[str] = []
+    cusa_metrics = parse_cusa_metrics(results)
     ledger = count_ledger()
     if ledger:
         lines.append("Ledger statuses:")
@@ -275,22 +368,28 @@ def summarize_progress(results: list[Result]) -> str:
     def passed(name: str) -> bool:
         return any(r.step.name == name and r.passed for r in results)
 
-    lines.append("CUSA07399 staged gate:")
-    if passed("elisacore test emulator-real-game-boot-smoke"):
-        lines.append("- load/link/handoff: PASS")
-        if passed("elisacore test emulator-guest-exec-runtime-tests"):
-            lines.append("- execute-fixture: PASS")
-            machine = platform.machine().lower()
-            if machine in {"x86_64", "amd64"}:
-                lines.append("- execute-game: ARMED_PROBE_ONLY")
-            else:
-                lines.append(f"- execute-game: UNSUPPORTED_HOST ({machine})")
-            lines.append("- frame: not yet promoted into this gate")
-        else:
-            lines.append("- execute-fixture: FAIL or not run")
-            lines.append("- execute-game/frame: not yet promoted into this gate")
-    else:
-        lines.append("- load/link/handoff: FAIL or not run")
+    lines.append("CUSA07399: where are we?")
+    load_state = "PASS" if passed("elisacore test emulator-real-game-boot-smoke") else "FAIL"
+    link_state = "PASS" if to_int(str(cusa_metrics["unresolved_imports"])) == 0 and load_state == "PASS" else "FAIL"
+    handoff_state = "PASS" if passed("elisacore test emulator-guest-exec-runtime-tests") else "FAIL"
+    guarded_state = "PASS" if to_int(str(cusa_metrics["guarded_status"])) >= -3 and load_state == "PASS" else "PENDING"
+    boundary_state = "PASS" if to_int(str(cusa_metrics["boundary_status"])) != 0 else "PENDING"
+    frame_state = "PENDING"
+    lines.append(f"- load: {load_state}")
+    lines.append(f"- link: {link_state}")
+    lines.append(f"- handoff: {handoff_state}")
+    lines.append(f"- guarded entry: {guarded_state}")
+    lines.append(f"- first boundary: {boundary_state}")
+    lines.append(f"- first frame: {frame_state}")
+    lines.append("CUSA07399 artifact metrics:")
+    lines.append(f"- module count: {cusa_metrics['module_count']}")
+    lines.append(f"- total imports: {cusa_metrics['total_imports']}")
+    lines.append(f"- native HLE imports: {cusa_metrics['native_hle_imports']}")
+    lines.append(f"- PRX export imports: {cusa_metrics['prx_export_imports']}")
+    lines.append(f"- AeroLib fallback imports: {cusa_metrics['aerolib_fallback_imports']}")
+    lines.append(f"- unresolved imports: {cusa_metrics['unresolved_imports']}")
+    lines.append(f"- loaded modules: {cusa_metrics['loaded_modules']}")
+    lines.append(f"- relocation count: {cusa_metrics['relocation_count']}")
     lines.append(format_runtime_readiness())
     return "\n".join(lines)
 
@@ -307,12 +406,69 @@ def write_report(path: Path, results: list[Result]) -> None:
     path.write_text("\n".join(lines) + "\n")
 
 
+def parse_report_score(text: str) -> tuple[int, int]:
+    passed_match = re.search(r"^Passed:\s+(\d+)\s*$", text, re.MULTILINE)
+    failed_match = re.search(r"^Failed:\s+(\d+)\s*$", text, re.MULTILINE)
+    if not passed_match or not failed_match:
+        return (0, 10**9)
+    return (int(passed_match.group(1)), int(failed_match.group(1)))
+
+
+def did_gate_improve(previous: str | None, current: str) -> bool:
+    if not previous:
+        return True
+    prev_passed, prev_failed = parse_report_score(previous)
+    cur_passed, cur_failed = parse_report_score(current)
+    if cur_failed < prev_failed:
+        return True
+    if cur_failed == prev_failed and cur_passed > prev_passed:
+        return True
+    return False
+
+
+def next_blocker(results: list[Result], cusa_metrics: dict[str, int | str]) -> str:
+    for r in results:
+        if not r.passed:
+            return f"Fix failing gate step: {r.step.name}"
+    if to_int(str(cusa_metrics.get("unresolved_imports", 0))) > 0:
+        return "Drive unresolved imports to zero for CUSA07399"
+    if to_int(str(cusa_metrics.get("aerolib_fallback_imports", 0))) > 0:
+        return "Replace AeroLib fallback import resolutions with real HLE or PRX exports"
+    if to_int(str(cusa_metrics.get("boundary_status", 0))) == 0:
+        return "Promote guarded entry path to deterministic first-boundary classification"
+    return "Promote first-frame milestone into executable gate coverage"
+
+
+def append_milestone_if_improved(previous_report: str | None, current_report: str, results: list[Result], command: str) -> None:
+    if not did_gate_improve(previous_report, current_report):
+        return
+    passed = sum(1 for r in results if r.passed)
+    failed = len(results) - passed
+    cusa_metrics = parse_cusa_metrics(results)
+    blocker = next_blocker(results, cusa_metrics)
+    entry_lines = [
+        "",
+        f"## {date.today().isoformat()}: Emulator Parity Gate Improved",
+        "",
+        "- Command:",
+        f"  - `{command}`",
+        "- Result:",
+        f"  - `passed={passed} failed={failed} selected={len(results)}`",
+        f"  - `CUSA07399 unresolved imports={cusa_metrics['unresolved_imports']}, AeroLib fallback imports={cusa_metrics['aerolib_fallback_imports']}`",
+        "- Next blocker:",
+        f"  - {blocker}",
+    ]
+    if MILESTONES_PATH.exists():
+        MILESTONES_PATH.write_text(MILESTONES_PATH.read_text().rstrip() + "\n" + "\n".join(entry_lines) + "\n")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the top-level Elisa emulator C++ parity gate.")
     parser.add_argument("--quick", action="store_true", help="Skip slow subsystem runtime targets.")
     parser.add_argument("--list", action="store_true", help="List selected steps and exit.")
     parser.add_argument("--fail-fast", action="store_true", help="Stop at the first failed step.")
     parser.add_argument("--write-report", type=Path, help="Write a markdown parity report to this path.")
+    parser.add_argument("--no-milestones", action="store_true", help="Do not append milestone history even if gate score improves.")
     parser.add_argument("--readiness", action="store_true", help="Print post-boot runtime readiness probes and exit.")
     parser.add_argument("-v", "--verbose", action="store_true", help="Print commands before running.")
     args = parser.parse_args()
@@ -356,9 +512,20 @@ def main() -> int:
     print(summarize_progress(results))
     print(f"\nGate result: passed={passed} failed={failed} selected={len(results)}")
 
-    if args.write_report:
-        write_report(args.write_report, results)
-        print(f"wrote report: {args.write_report}")
+    previous_report = LAST_REPORT_PATH.read_text() if LAST_REPORT_PATH.exists() else None
+    report_path = args.write_report if args.write_report else LAST_REPORT_PATH
+    write_report(report_path, results)
+    print(f"wrote report: {report_path}")
+    current_report = report_path.read_text()
+    if report_path != LAST_REPORT_PATH:
+        LAST_REPORT_PATH.write_text(current_report)
+    cusa_metrics = parse_cusa_metrics(results)
+    if to_int(str(cusa_metrics.get("unresolved_imports", 0))) > 0:
+        print("FAIL policy: truly unresolved imports remain in CUSA07399 artifacts", file=sys.stderr)
+        failed += 1
+    if not args.no_milestones:
+        cmd = "./emulator-cpp-parity --quick" if args.quick else "./emulator-cpp-parity"
+        append_milestone_if_improved(previous_report, current_report, results, cmd)
 
     return 0 if failed == 0 else 1
 

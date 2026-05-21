@@ -3,9 +3,9 @@
 ## Summary
 
 - Total entries: `94`
-- MATCHED: `94`
+- MATCHED: `93`
 - MISMATCH_BEHAVIOR: `0`
-- MISSING_IN_ELISA: `0`
+- MISSING_IN_ELISA: `1`
 - UNTESTED_BEHAVIOR: `0`
 
 ## Entries
@@ -78,31 +78,31 @@
 | `sceSigninDialogTerminate` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | core_libraries_signin_dialog_pure_tests.elisa |
 | `sceSigninDialogUpdateStatus` | `MATCHED` | `OTHER` | `OTHER` | core_libraries_signin_dialog_pure_tests.elisa |
 | `core/libraries/sysmodule/sysmodule_internal.cpp::internal` | `MATCHED` | `HOST_BACKED` | `HOST_BACKED` | - |
-| `core/libraries/videoout/driver.cpp::internal` | `MATCHED` | `HOST_BACKED` | `HOST_BACKED` | - |
-| `sceVideoOutAddFlipEvent` | `MATCHED` | `HOST_BACKED` | `HOST_BACKED` | core_libraries_videoout_ffi_bridge_tests.elisa |
-| `sceVideoOutAddVblankEvent` | `MATCHED` | `HOST_BACKED` | `HOST_BACKED` | core_libraries_videoout_ffi_bridge_tests.elisa |
-| `sceVideoOutAdjustColor` | `MATCHED` | `HOST_BACKED` | `HOST_BACKED` | core_libraries_videoout_ffi_bridge_tests.elisa |
-| `sceVideoOutClose` | `MATCHED` | `HOST_BACKED` | `HOST_BACKED` | core_libraries_videoout_ffi_bridge_tests.elisa |
-| `sceVideoOutColorSettingsSetGamma` | `MATCHED` | `HOST_BACKED` | `HOST_BACKED` | core_libraries_videoout_ffi_bridge_tests.elisa |
-| `sceVideoOutConfigureOutputMode_` | `MATCHED` | `HOST_BACKED` | `HOST_BACKED` | core_libraries_videoout_ffi_bridge_tests.elisa |
-| `sceVideoOutDeleteFlipEvent` | `MATCHED` | `HOST_BACKED` | `HOST_BACKED` | core_libraries_videoout_ffi_bridge_tests.elisa |
-| `sceVideoOutDeleteVblankEvent` | `MATCHED` | `HOST_BACKED` | `HOST_BACKED` | core_libraries_videoout_ffi_bridge_tests.elisa |
-| `sceVideoOutGetBufferLabelAddress` | `MATCHED` | `HOST_BACKED` | `HOST_BACKED` | core_libraries_videoout_ffi_bridge_tests.elisa |
-| `sceVideoOutGetDeviceCapabilityInfo` | `MATCHED` | `HOST_BACKED` | `HOST_BACKED` | core_libraries_videoout_ffi_bridge_tests.elisa |
-| `sceVideoOutGetEventCount` | `MATCHED` | `HOST_BACKED` | `HOST_BACKED` | core_libraries_videoout_ffi_bridge_tests.elisa |
-| `sceVideoOutGetEventData` | `MATCHED` | `HOST_BACKED` | `HOST_BACKED` | core_libraries_videoout_ffi_bridge_tests.elisa |
-| `sceVideoOutGetEventId` | `MATCHED` | `HOST_BACKED` | `HOST_BACKED` | core_libraries_videoout_ffi_bridge_tests.elisa |
-| `sceVideoOutGetFlipStatus` | `MATCHED` | `HOST_BACKED` | `HOST_BACKED` | core_libraries_videoout_ffi_bridge_tests.elisa |
-| `sceVideoOutGetResolutionStatus` | `MATCHED` | `HOST_BACKED` | `HOST_BACKED` | core_libraries_videoout_ffi_bridge_tests.elisa |
-| `sceVideoOutGetVblankStatus` | `MATCHED` | `HOST_BACKED` | `HOST_BACKED` | core_libraries_videoout_ffi_bridge_tests.elisa |
-| `sceVideoOutIsFlipPending` | `MATCHED` | `HOST_BACKED` | `HOST_BACKED` | core_libraries_videoout_ffi_bridge_tests.elisa |
-| `sceVideoOutModeSetAny_` | `MATCHED` | `HOST_BACKED` | `HOST_BACKED` | core_libraries_videoout_ffi_bridge_tests.elisa |
+| `core/libraries/videoout/driver.cpp::internal` | `MISSING_IN_ELISA` | `HOST_BACKED` | `-` | - |
+| `sceVideoOutAddFlipEvent` | `MATCHED` | `HOST_BACKED` | `ERROR_GUARDED` | core_libraries_videoout_ffi_bridge_tests.elisa |
+| `sceVideoOutAddVblankEvent` | `MATCHED` | `HOST_BACKED` | `ERROR_GUARDED` | core_libraries_videoout_ffi_bridge_tests.elisa |
+| `sceVideoOutAdjustColor` | `MATCHED` | `HOST_BACKED` | `ERROR_GUARDED` | core_libraries_videoout_ffi_bridge_tests.elisa |
+| `sceVideoOutClose` | `MATCHED` | `HOST_BACKED` | `ERROR_GUARDED` | core_libraries_videoout_ffi_bridge_tests.elisa |
+| `sceVideoOutColorSettingsSetGamma` | `MATCHED` | `HOST_BACKED` | `ERROR_GUARDED` | core_libraries_videoout_ffi_bridge_tests.elisa |
+| `sceVideoOutConfigureOutputMode_` | `MATCHED` | `HOST_BACKED` | `ERROR_GUARDED` | core_libraries_videoout_ffi_bridge_tests.elisa |
+| `sceVideoOutDeleteFlipEvent` | `MATCHED` | `HOST_BACKED` | `ERROR_GUARDED` | core_libraries_videoout_ffi_bridge_tests.elisa |
+| `sceVideoOutDeleteVblankEvent` | `MATCHED` | `HOST_BACKED` | `ERROR_GUARDED` | core_libraries_videoout_ffi_bridge_tests.elisa |
+| `sceVideoOutGetBufferLabelAddress` | `MATCHED` | `HOST_BACKED` | `ERROR_GUARDED` | core_libraries_videoout_ffi_bridge_tests.elisa |
+| `sceVideoOutGetDeviceCapabilityInfo` | `MATCHED` | `HOST_BACKED` | `STATEFUL` | core_libraries_videoout_ffi_bridge_tests.elisa |
+| `sceVideoOutGetEventCount` | `MATCHED` | `HOST_BACKED` | `ERROR_GUARDED` | core_libraries_videoout_ffi_bridge_tests.elisa |
+| `sceVideoOutGetEventData` | `MATCHED` | `HOST_BACKED` | `ERROR_GUARDED` | core_libraries_videoout_ffi_bridge_tests.elisa |
+| `sceVideoOutGetEventId` | `MATCHED` | `HOST_BACKED` | `ERROR_GUARDED` | core_libraries_videoout_ffi_bridge_tests.elisa |
+| `sceVideoOutGetFlipStatus` | `MATCHED` | `HOST_BACKED` | `ERROR_GUARDED` | core_libraries_videoout_ffi_bridge_tests.elisa |
+| `sceVideoOutGetResolutionStatus` | `MATCHED` | `HOST_BACKED` | `ERROR_GUARDED` | core_libraries_videoout_ffi_bridge_tests.elisa |
+| `sceVideoOutGetVblankStatus` | `MATCHED` | `HOST_BACKED` | `ERROR_GUARDED` | core_libraries_videoout_ffi_bridge_tests.elisa |
+| `sceVideoOutIsFlipPending` | `MATCHED` | `HOST_BACKED` | `ERROR_GUARDED` | core_libraries_videoout_ffi_bridge_tests.elisa |
+| `sceVideoOutModeSetAny_` | `MATCHED` | `HOST_BACKED` | `STATEFUL` | core_libraries_videoout_ffi_bridge_tests.elisa |
 | `sceVideoOutOpen` | `MATCHED` | `HOST_BACKED` | `HOST_BACKED` | core_libraries_videoout_ffi_bridge_tests.elisa |
 | `sceVideoOutRegisterBuffers` | `MATCHED` | `HOST_BACKED` | `HOST_BACKED` | core_libraries_videoout_ffi_bridge_tests.elisa |
-| `sceVideoOutSetBufferAttribute` | `MATCHED` | `HOST_BACKED` | `HOST_BACKED` | core_libraries_videoout_ffi_bridge_tests.elisa |
-| `sceVideoOutSetFlipRate` | `MATCHED` | `HOST_BACKED` | `HOST_BACKED` | core_libraries_videoout_ffi_bridge_tests.elisa |
-| `sceVideoOutSetWindowModeMargins` | `MATCHED` | `STUBBED_ORBIS_OK` | `HOST_BACKED` | - |
-| `sceVideoOutSubmitChangeBufferAttribute` | `MATCHED` | `HOST_BACKED` | `HOST_BACKED` | core_libraries_videoout_ffi_bridge_tests.elisa |
+| `sceVideoOutSetBufferAttribute` | `MATCHED` | `HOST_BACKED` | `STATEFUL` | core_libraries_videoout_ffi_bridge_tests.elisa |
+| `sceVideoOutSetFlipRate` | `MATCHED` | `HOST_BACKED` | `ERROR_GUARDED` | core_libraries_videoout_ffi_bridge_tests.elisa |
+| `sceVideoOutSetWindowModeMargins` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
+| `sceVideoOutSubmitChangeBufferAttribute` | `MATCHED` | `HOST_BACKED` | `ERROR_GUARDED` | core_libraries_videoout_ffi_bridge_tests.elisa |
 | `sceVideoOutSubmitFlip` | `MATCHED` | `HOST_BACKED` | `HOST_BACKED` | core_libraries_videoout_ffi_bridge_tests.elisa |
-| `sceVideoOutUnregisterBuffers` | `MATCHED` | `HOST_BACKED` | `HOST_BACKED` | core_libraries_videoout_ffi_bridge_tests.elisa |
-| `sceVideoOutWaitVblank` | `MATCHED` | `HOST_BACKED` | `HOST_BACKED` | core_libraries_videoout_ffi_bridge_tests.elisa |
+| `sceVideoOutUnregisterBuffers` | `MATCHED` | `HOST_BACKED` | `ERROR_GUARDED` | core_libraries_videoout_ffi_bridge_tests.elisa |
+| `sceVideoOutWaitVblank` | `MATCHED` | `HOST_BACKED` | `ERROR_GUARDED` | core_libraries_videoout_ffi_bridge_tests.elisa |

@@ -6,6 +6,9 @@ include "./gnm_error.elisa"
 include "../kernel/orbis_error.elisa"
 include "../../devtools/widget/common.elisa"
 
+@link_name(ElisaGuestExec_EmitCusaArtifactKV)
+extern c_GuestExec_EmitCusaArtifactKV(key: static u8&?, value: u64) -> void
+
 type s32 = i32
 type s64 = i64
 type OrbisKernelEqueue = s64
@@ -82,6 +85,10 @@ global mutable g_runtime_bridge_last_result: int = ORBIS_OK
 global mutable g_runtime_submit_bridge_cb: GnmRuntimeSubmitCallback? = null
 global mutable g_runtime_submit_flip_bridge_cb: GnmRuntimeSubmitAndFlipCallback? = null
 global mutable g_runtime_submit_done_bridge_cb: GnmRuntimeSubmitDoneCallback? = null
+global mutable g_gnm_artifact_renderer_initialized_emitted: bool = false
+global mutable g_gnm_artifact_submit_seen_emitted: bool = false
+global mutable g_gnm_artifact_submit_path_bridge_emitted: bool = false
+global mutable g_gnm_artifact_submit_path_native_emitted: bool = false
 
 def gnm_c_string_length(value: u8&) -> u32:
     len: mutable u32 = 0
@@ -177,6 +184,10 @@ def gnm_reset_graphics_bootstrap_state() -> void:
     g_runtime_submit_flip_bridge_count <- 0u64
     g_runtime_submit_done_bridge_count <- 0u64
     g_runtime_bridge_last_result <- ORBIS_OK
+    g_gnm_artifact_renderer_initialized_emitted <- false
+    g_gnm_artifact_submit_seen_emitted <- false
+    g_gnm_artifact_submit_path_bridge_emitted <- false
+    g_gnm_artifact_submit_path_native_emitted <- false
 
 def gnm_record_liverpool_submit_gfx(dcb_addr: u64, dcb_size: u32, ccb_addr: u64, ccb_size: u32) -> void:
     g_liverpool_submit_gfx_count <- g_liverpool_submit_gfx_count + 1u64
@@ -253,6 +264,12 @@ def gnm_drive_runtime_present(vo_handle: u32, buf_idx: u32, flip_mode: u32, flip
 
 def gnm_record_submit_batch(count: u32, dcb_gpu_addrs: u32&, dcb_sizes_in_bytes: u32&,
                             ccb_gpu_addrs: u32&?, ccb_sizes_in_bytes: u32&?) -> void:
+    if not g_gnm_artifact_submit_seen_emitted:
+        c_GuestExec_EmitCusaArtifactKV("gnm_submit_seen", 1u64)
+        g_gnm_artifact_submit_seen_emitted <- true
+    if not g_gnm_artifact_renderer_initialized_emitted:
+        c_GuestExec_EmitCusaArtifactKV("renderer_initialized", 1u64)
+        g_gnm_artifact_renderer_initialized_emitted <- true
     if g_send_init_packet:
         g_graphics_init_packet_submit_count <- g_graphics_init_packet_submit_count + 1u64
         gnm_record_liverpool_submit_gfx(0u64, 0u32, 0u64, 0u32)
@@ -1330,6 +1347,9 @@ def sceGnmSubmitAndFlipCommandBuffersForWorkload(workload: u32, count: u32, dcb_
                                                          ccb_gpu_addrs, ccb_sizes_in_bytes,
                                                          vo_handle, buf_idx, flip_mode, flip_arg)
     if runtime_rc != GNM_RUNTIME_BRIDGE_UNBOUND:
+        if not g_gnm_artifact_submit_path_bridge_emitted:
+            c_GuestExec_EmitCusaArtifactKV("gnm_submit_path_bridge", 1u64)
+            g_gnm_artifact_submit_path_bridge_emitted <- true
         if runtime_rc != ORBIS_OK:
             return runtime_rc
         gnm_record_submit_batch(count, dcb_gpu_addrs, dcb_sizes_in_bytes, ccb_gpu_addrs, ccb_sizes_in_bytes)
@@ -1365,6 +1385,12 @@ def sceGnmSubmitCommandBuffersForWorkload(workload: u32, count: u32, dcb_gpu_add
         i <- i + 1u
     runtime_rc: int = gnm_try_runtime_submit_bridge(workload, count, dcb_gpu_addrs, dcb_sizes_in_bytes,
                                                     ccb_gpu_addrs, ccb_sizes_in_bytes)
+    if runtime_rc == GNM_RUNTIME_BRIDGE_UNBOUND and not g_gnm_artifact_submit_path_native_emitted:
+        c_GuestExec_EmitCusaArtifactKV("gnm_submit_path_native", 1u64)
+        g_gnm_artifact_submit_path_native_emitted <- true
+    if runtime_rc != GNM_RUNTIME_BRIDGE_UNBOUND and not g_gnm_artifact_submit_path_bridge_emitted:
+        c_GuestExec_EmitCusaArtifactKV("gnm_submit_path_bridge", 1u64)
+        g_gnm_artifact_submit_path_bridge_emitted <- true
     if runtime_rc != GNM_RUNTIME_BRIDGE_UNBOUND and runtime_rc != ORBIS_OK:
         return runtime_rc
     gnm_record_submit_batch(count, dcb_gpu_addrs, dcb_sizes_in_bytes, ccb_gpu_addrs, ccb_sizes_in_bytes)
