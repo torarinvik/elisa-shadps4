@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 include "../common/types.elisa"
-include "./memory.elisa"
 include "./module.elisa"
 
 struct SymbolRecord:
@@ -55,6 +54,11 @@ struct Linker:
     modules: mutable darray[Module]
     hle_symbols: mutable SymbolsResolver
     last_execute_argc: mutable usize
+    relocated_all_imports: mutable bool
+    last_started_module_index: mutable s32
+    last_start_result: mutable s32
+    hle_libs_initialized: mutable bool
+    hle_registered_symbol_count: mutable usize
 
 global mutable linker_singleton: Linker = Linker(
     0.uintptr(),
@@ -62,20 +66,30 @@ global mutable linker_singleton: Linker = Linker(
     0,
     0,
     0,
-    [],
-    SymbolsResolver_new(),
+    zeroed,
+    SymbolsResolver(zeroed),
+    0,
+    false,
+    -1,
+    0,
+    false,
     0
 )
 
 def Linker_New() -> Linker:
     return Linker(
-        Memory_Instance().ref[mutable MemoryManager&].cast[uintptr],
+        1.uintptr(),
         1,
         0,
         0,
         0,
-        [],
+        zeroed,
         SymbolsResolver_new(),
+        0,
+        false,
+        -1,
+        0,
+        false,
         0
     )
 
@@ -87,6 +101,20 @@ def Linker_Reset() -> void:
 
 def Linker_GetHLESymbols(self: mutable Linker&) -> mutable SymbolsResolver&:
     return self.hle_symbols.ref[mutable SymbolsResolver&]
+
+def SymbolsResolver_AddSymbol(self: mutable SymbolsResolver&, nid: static u8&, name: static u8&, virtual_address: u64) -> void:
+    arena: Arena = zeroed
+    in arena:
+        self.symbols.push(SymbolRecord(nid, name, virtual_address))
+
+def SymbolsResolver_Count(self: SymbolsResolver&) -> usize:
+    return self.symbols.count
+
+def SymbolsResolver_FindByNid(self: SymbolsResolver&, nid: static u8&) -> s32:
+    for i in 0..<self.symbols.count:
+        if streq(self.symbols[i].name, nid) == 1:
+            return i.s32()
+    return -1
 
 def Linker_GetProcParam(self: Linker&) -> VAddr:
     if self.modules.count == 0:
@@ -118,7 +146,7 @@ def Linker_RelocateAnyImports(self: mutable Linker&, module: mutable Module&) ->
     _ = module
 
 def Linker_RelocateAllImports(self: mutable Linker&) -> void:
-    _ = self
+    self.relocated_all_imports <- true
 
 def Linker_AdvanceGenerationCounter(self: mutable Linker&) -> void:
     self.dtv_generation_counter <- self.dtv_generation_counter + 1
@@ -141,7 +169,11 @@ def Linker_LoadModule(self: mutable Linker&, elf_name: static u8&, is_dynamic: b
     module_name: static u8& = elf_name
     module: Module = Module_New(elf_name, module_name, base, is_dynamic)
     Module_LoadModuleToMemory(module.ref[mutable Module&], self.max_tls_index.ref[mutable u32&])
-    self.modules.push(module)
+    if not is_dynamic:
+        self.num_static_modules <- self.num_static_modules + 1
+    arena: Arena = zeroed
+    in arena:
+        self.modules.push(module)
     return (self.modules.count - 1).s32()
 
 def Linker_LoadAndStartModule(self: mutable Linker&, path: static u8&, args: u64, argp: void&?, p_res: mutable int&?) -> s32:
@@ -175,7 +207,7 @@ def Linker_Resolve(self: mutable Linker&, name: static u8&, module: mutable Modu
     _ = module
     out_virtual_address <- 0
     i: mutable usize = 0
-    while i < self.hle_symbols.symbols.len:
+    while i < self.hle_symbols.symbols.count:
         sym: SymbolRecord = self.hle_symbols.symbols[i]
         if streq(sym.name, name) == 1 or streq(sym.nid_name, name) == 1:
             out_virtual_address <- sym.virtual_address
@@ -183,11 +215,27 @@ def Linker_Resolve(self: mutable Linker&, name: static u8&, module: mutable Modu
         i <- i + 1
     return false
 
-def Linker_Execute(self: mutable Linker&, args: darray[static u8&]) -> void:
+def Linker_Execute(self: mutable Linker&, args: darray[static u8&]) -> s32:
     self.last_execute_argc <- args.count
+    if self.modules.count == 0:
+        self.last_started_module_index <- -1
+        self.last_start_result <- -1
+        return -1
+    index: s32 = (self.modules.count - 1).s32()
+    mod_ref: mutable Module&? = Linker_GetModule(self.ref[mutable Linker&], index)
+    if mod_ref == null:
+        self.last_started_module_index <- -1
+        self.last_start_result <- -1
+        return -1
+    result: s32 = Module_Start(mod_ref, args.count.u64(), null, null)
+    self.last_started_module_index <- index
+    self.last_start_result <- result
+    return result
 
 def Linker_DebugDump(self: Linker&) -> darray[static u8&]:
     out: mutable darray[static u8&] = []
-    for i in 0..<self.modules.count:
-        out.push(self.modules[i].name)
+    arena: Arena = zeroed
+    in arena:
+        for i in 0..<self.modules.count:
+            out.push(self.modules[i].name)
     return out

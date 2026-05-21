@@ -2,57 +2,83 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 include "./common/types.elisa"
-include "./core/memory.elisa"
-include "./core/linker.elisa"
 include "./core/emulator_state.elisa"
+include "./core/linker.elisa"
 
 struct SysModuleEntry:
     module_name: mutable static u8&
     callback_ptr: mutable uintptr
 
 struct Emulator:
-    executable_name: mutable static u8&
+    executable_name: mutable static u8&?
     wait_for_debugger_before_run: mutable bool
     memory_ptr: mutable uintptr
     linker_ptr: mutable uintptr
     start_tick: mutable u64
     pending_restart: mutable bool
-    pending_restart_path: mutable static u8&
+    pending_restart_path: mutable static u8&?
     pending_restart_args: mutable darray[static u8&]
-    last_run_path: mutable static u8&
+    last_run_path: mutable static u8&?
     last_run_argc: mutable usize
-    last_game_folder: mutable static u8&
+    last_game_folder: mutable static u8&?
+    last_guest_eboot_path: mutable static u8&?
+    last_param_sfo_path: mutable static u8&?
+    last_linker_load_path: mutable static u8&?
+    last_linker_module_index: mutable s32
+    last_linker_module_count: mutable usize
+    last_linker_execute_argc: mutable usize
+    last_linker_start_result: mutable s32
+    app0_mounted: mutable bool
+    hostapp_mounted: mutable bool
     play_time_updates: mutable darray[static u8&]
 
 global mutable emulator_singleton: Emulator = Emulator(
-    "",
+    null,
     false,
-    0.uintptr(),
-    0.uintptr(),
-    0.u64(),
-    false,
-    "",
-    [],
-    "",
     0,
-    "",
-    []
+    0,
+    0,
+    false,
+    null,
+    zeroed,
+    null,
+    0,
+    null,
+    null,
+    null,
+    null,
+    -1,
+    0,
+    0,
+    0,
+    false,
+    false,
+    zeroed
 )
 
 def Emulator_New() -> Emulator:
     return Emulator(
         "",
         false,
-        Memory_Instance().ref[mutable MemoryManager&].cast[uintptr],
-        Linker_GetInstance().ref[mutable Linker&].cast[uintptr],
+        1.uintptr(),
+        1.uintptr(),
         0.u64(),
         false,
         "",
-        [],
+        zeroed,
         "",
         0,
         "",
-        []
+        "",
+        "",
+        "",
+        -1,
+        0,
+        0,
+        0,
+        false,
+        false,
+        zeroed
     )
 
 def Emulator_GetInstance() -> mutable Emulator&:
@@ -63,22 +89,151 @@ def Emulator_GetInstance() -> mutable Emulator&:
 def Emulator_Reset() -> void:
     emulator_singleton <- Emulator_New()
 
+def Emulator_Substr(input: static u8&, start: usize, len: usize) -> static u8&:
+    arena: Arena = zeroed
+    out: mutable darray[u8] = []
+    in arena:
+        for i in 0..<len:
+            out.push(input[start + i])
+        out.push(0)
+    return out[0].ref[static u8&]
+
+def Emulator_Concat2(lhs: static u8&, rhs: static u8&) -> static u8&:
+    lhs_len: usize = static_strlen(lhs)
+    rhs_len: usize = static_strlen(rhs)
+    arena: Arena = zeroed
+    out: mutable darray[u8] = []
+    in arena:
+        for i in 0..<lhs_len:
+            out.push(lhs[i])
+        for j in 0..<rhs_len:
+            out.push(rhs[j])
+        out.push(0)
+    return out[0].ref[static u8&]
+
+def Emulator_PathEndsWith(path: static u8&, suffix: static u8&) -> bool:
+    path_len: usize = static_strlen(path)
+    suffix_len: usize = static_strlen(suffix)
+    if suffix_len > path_len:
+        return false
+    return streq(path[path_len - suffix_len].ref[u8&], suffix) == 1
+
+def Emulator_TrimTrailingSlash(path: static u8&) -> static u8&:
+    len: mutable usize = static_strlen(path)
+    while len > 1 and path[len - 1] == '/'.u8():
+        len <- len - 1
+    if len == static_strlen(path):
+        return path
+    return Emulator_Substr(path, 0, len)
+
+def Emulator_DirName(path: static u8&) -> static u8&:
+    trimmed: static u8& = Emulator_TrimTrailingSlash(path)
+    len: usize = static_strlen(trimmed)
+    if len == 0:
+        return ""
+    i: mutable usize = len
+    while i > 0:
+        if trimmed[i - 1] == '/'.u8():
+            if i == 1:
+                return "/"
+            return Emulator_Substr(trimmed, 0, i - 1)
+        i <- i - 1
+    return ""
+
+def Emulator_BaseName(path: static u8&) -> static u8&:
+    trimmed: static u8& = Emulator_TrimTrailingSlash(path)
+    len: usize = static_strlen(trimmed)
+    i: mutable usize = len
+    while i > 0:
+        if trimmed[i - 1] == '/'.u8():
+            return Emulator_Substr(trimmed, i, len - i)
+        i <- i - 1
+    return trimmed
+
+def Emulator_PathJoin(lhs: static u8&, rhs: static u8&) -> static u8&:
+    if static_strlen(lhs) == 0:
+        return rhs
+    if static_strlen(rhs) == 0:
+        return lhs
+    if lhs[static_strlen(lhs) - 1] == '/'.u8():
+        return Emulator_Concat2(lhs, rhs)
+    return Emulator_Concat2(Emulator_Concat2(lhs, "/"), rhs)
+
+def Emulator_StripKnownOverlaySuffix(folder: static u8&) -> static u8&:
+    base: static u8& = Emulator_BaseName(folder)
+    parent: static u8& = Emulator_DirName(folder)
+    suffix_update: static u8& = "-UPDATE"
+    suffix_patch: static u8& = "-patch"
+    suffix_mods: static u8& = "-mods"
+    suffix: mutable static u8& = ""
+    if Emulator_PathEndsWith(base, suffix_update):
+        suffix <- suffix_update
+    elif Emulator_PathEndsWith(base, suffix_patch):
+        suffix <- suffix_patch
+    elif Emulator_PathEndsWith(base, suffix_mods):
+        suffix <- suffix_mods
+    if static_strlen(suffix) == 0:
+        return folder
+    stripped: static u8& = Emulator_Substr(base, 0, static_strlen(base) - static_strlen(suffix))
+    return Emulator_PathJoin(parent, stripped)
+
+def Emulator_NormalizeBootFile(file: static u8&) -> static u8&:
+    trimmed: static u8& = Emulator_TrimTrailingSlash(file)
+    if Emulator_PathEndsWith(trimmed, "/eboot.bin") or streq(Emulator_BaseName(trimmed), "eboot.bin") == 1:
+        return trimmed
+    return Emulator_PathJoin(trimmed, "eboot.bin")
+
+def Emulator_RelativeEbootName(file: static u8&, game_folder: static u8&) -> static u8&:
+    folder_len: usize = static_strlen(game_folder)
+    file_len: usize = static_strlen(file)
+    if folder_len > 0 and file_len > folder_len:
+        prefix_matches: mutable bool = true
+        i: mutable usize = 0
+        while i < folder_len:
+            if file[i] != game_folder[i]:
+                prefix_matches <- false
+            i <- i + 1
+        if prefix_matches and file[folder_len] == '/'.u8():
+            return Emulator_Substr(file, folder_len + 1, file_len - folder_len - 1)
+    return Emulator_BaseName(file)
+
 def Emulator_Run(self: mutable Emulator&, file: static u8&, args: darray[static u8&], game_folder: static u8&?) -> void:
-    self.last_run_path <- file
-    self.last_run_argc <- args.count
+    boot_file: static u8& = Emulator_NormalizeBootFile(file)
+    resolved_game_folder: mutable static u8& = ""
     if game_folder != null:
-        self.last_game_folder <- game_folder
+        resolved_game_folder <- Emulator_TrimTrailingSlash(game_folder)
     else:
-        self.last_game_folder <- ""
+        resolved_game_folder <- Emulator_StripKnownOverlaySuffix(Emulator_DirName(boot_file))
+    guest_eboot_name: static u8& = Emulator_RelativeEbootName(boot_file, resolved_game_folder)
+    guest_eboot_path: static u8& = Emulator_PathJoin("/app0", guest_eboot_name)
+
+    self.last_run_path <- boot_file
+    self.last_run_argc <- args.count
+    self.last_game_folder <- resolved_game_folder
+    self.last_guest_eboot_path <- guest_eboot_path
+    self.last_param_sfo_path <- Emulator_PathJoin(resolved_game_folder, "sce_sys/param.sfo")
+    self.last_linker_load_path <- guest_eboot_path
+    linker: mutable Linker& = Linker_GetInstance()
+    loaded_index: s32 = Linker_LoadModule(linker, guest_eboot_path, false)
+    Linker_RelocateAllImports(linker)
+    start_result: s32 = Linker_Execute(linker, args)
+    self.last_linker_module_index <- loaded_index
+    self.last_linker_module_count <- linker.modules.count
+    self.last_linker_execute_argc <- linker.last_execute_argc
+    self.last_linker_start_result <- start_result
+    self.app0_mounted <- true
+    self.hostapp_mounted <- true
     self.start_tick <- self.start_tick + 1
     state: mutable EmulatorState& = EmulatorState_GetInstance()
     EmulatorState_SetGameRunning(state, true)
     self.pending_restart <- false
 
 def Emulator_UpdatePlayTime(self: mutable Emulator&, serial: static u8&) -> void:
-    if serial.len == 0:
+    if static_strlen(serial) == 0:
         return
-    self.play_time_updates.push(serial)
+    arena: Arena = zeroed
+    in arena:
+        self.play_time_updates.push(serial)
 
 def Emulator_Restart(self: mutable Emulator&, eboot_path: static u8&, guest_args: darray[static u8&]) -> void:
     self.pending_restart <- true
@@ -88,10 +243,13 @@ def Emulator_Restart(self: mutable Emulator&, eboot_path: static u8&, guest_args
 def Emulator_TakePendingRestartArgs(self: mutable Emulator&) -> darray[static u8&]:
     if not self.pending_restart:
         return []
+    arena: Arena = zeroed
     out: mutable darray[static u8&] = []
-    out.push(self.pending_restart_path)
-    for i in 0..<self.pending_restart_args.count:
-        out.push(self.pending_restart_args[i])
+    in arena:
+        if self.pending_restart_path != null:
+            out.push(self.pending_restart_path)
+        for i in 0..<self.pending_restart_args.count:
+            out.push(self.pending_restart_args[i])
     self.pending_restart <- false
     self.pending_restart_path <- ""
     self.pending_restart_args.clear()
@@ -101,10 +259,24 @@ def Emulator_ExecuteRestartArgs(self: mutable Emulator&, args: darray[static u8&
     if args.count == 0:
         return
     eboot: static u8& = args[0]
+    arena: Arena = zeroed
     passthrough: mutable darray[static u8&] = []
-    for i in 1..<args.count:
-        passthrough.push(args[i])
+    in arena:
+        for i in 1..<args.count:
+            passthrough.push(args[i])
     Emulator_Run(self.ref[mutable Emulator&], eboot, passthrough, null)
 
 def Emulator_GetLastRunPath(self: Emulator&) -> static u8&:
-    return self.last_run_path
+    return self.last_run_path if self.last_run_path != null else ""
+
+def Emulator_GetLastGameFolder(self: Emulator&) -> static u8&:
+    return self.last_game_folder if self.last_game_folder != null else ""
+
+def Emulator_GetLastGuestEbootPath(self: Emulator&) -> static u8&:
+    return self.last_guest_eboot_path if self.last_guest_eboot_path != null else ""
+
+def Emulator_GetLastParamSfoPath(self: Emulator&) -> static u8&:
+    return self.last_param_sfo_path if self.last_param_sfo_path != null else ""
+
+def Emulator_GetLastLinkerLoadPath(self: Emulator&) -> static u8&:
+    return self.last_linker_load_path if self.last_linker_load_path != null else ""

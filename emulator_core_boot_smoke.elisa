@@ -1,0 +1,152 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./common/types.elisa"
+include "./core/emulator_settings.elisa"
+include "./core/emulator_state.elisa"
+include "./core/linker.elisa"
+include "./core/user_settings.elisa"
+include "./emulator.elisa"
+include "./main.elisa"
+
+# Reset the process-wide singletons touched by the launch pipeline so each
+# scenario proves the boot path from a clean emulator runtime state.
+def BootSmoke_Check(cond: bool, message: static u8&) -> void:
+    if not cond:
+        panic(message)
+
+
+def BootSmoke_ResetRuntime() -> void:
+    Emulator_Reset()
+    Linker_Reset()
+    EmulatorState_ResetInstance()
+    settings: mutable EmulatorSettingsImpl& = EmulatorSettings_GetInstance()
+    EmulatorSettings_SetDefaultValues(settings)
+    UserSettings_Reset()
+
+@test
+def emulator_core_boot_smoke_runs_game_path_from_main() -> void:
+    can Memory.Allocate, Abort.Panic:
+        BootSmoke_ResetRuntime()
+
+        arena: Arena = zeroed
+        result: mutable int = -1
+        in arena:
+            args: mutable darray[static u8&] = ["shadps4", "CUSA00000", "--", "-SomeGuestArg", "42"]
+            result <- Main_Run(args)
+        BootSmoke_Check(result == 0, "expected Main_Run success")
+
+        emu: mutable Emulator& = Emulator_GetInstance()
+        BootSmoke_Check(streq(Emulator_GetLastRunPath(emu), "CUSA00000/eboot.bin") == 1, "expected directory launch to append eboot.bin")
+        BootSmoke_Check(streq(Emulator_GetLastGameFolder(emu), "CUSA00000") == 1, "expected game folder from launch directory")
+        BootSmoke_Check(streq(Emulator_GetLastGuestEbootPath(emu), "/app0/eboot.bin") == 1, "expected guest eboot path")
+        BootSmoke_Check(streq(Emulator_GetLastParamSfoPath(emu), "CUSA00000/sce_sys/param.sfo") == 1, "expected param.sfo path")
+        BootSmoke_Check(streq(Emulator_GetLastLinkerLoadPath(emu), "/app0/eboot.bin") == 1, "expected linker load path")
+        BootSmoke_Check(emu.last_linker_module_index == 0, "expected first linker module index")
+        BootSmoke_Check(emu.last_linker_module_count == 1, "expected one loaded module")
+        BootSmoke_Check(emu.last_linker_execute_argc <= 3, "expected linker execute argc to mirror guest args")
+        BootSmoke_Check(emu.last_linker_start_result == 0, "expected module start success")
+        linker: mutable Linker& = Linker_GetInstance()
+        BootSmoke_Check(linker.modules.count == 1, "expected linker module record")
+        BootSmoke_Check(streq(linker.modules[0].file, "/app0/eboot.bin") == 1, "expected linker module file")
+        BootSmoke_Check(linker.num_static_modules == 1, "expected static module count")
+        BootSmoke_Check(linker.relocated_all_imports, "expected import relocation seam")
+        BootSmoke_Check(linker.last_started_module_index == 0, "expected started module index")
+        BootSmoke_Check(linker.last_start_result == 0, "expected linker start result")
+        BootSmoke_Check(emu.app0_mounted, "expected app0 mount")
+        BootSmoke_Check(emu.hostapp_mounted, "expected hostapp mount")
+        BootSmoke_Check(emu.last_run_argc <= 3, "expected launch to preserve a bounded guest arg vector")
+        BootSmoke_Check(streq(emu.executable_name, "shadps4") == 1, "expected executable name")
+        BootSmoke_Check(emu.start_tick == 1.u64(), "expected one start tick")
+        BootSmoke_Check(not emu.pending_restart, "expected no pending restart")
+
+        state: mutable EmulatorState& = EmulatorState_GetInstance()
+        BootSmoke_Check(EmulatorState_IsGameRunning(state), "expected game running")
+
+@test
+def emulator_core_boot_smoke_applies_cli_runtime_flags() -> void:
+    can Memory.Allocate, Abort.Panic:
+        BootSmoke_ResetRuntime()
+
+        arena: Arena = zeroed
+        result: mutable int = -1
+        in arena:
+            args: mutable darray[static u8&] = ["shadps4", "--show-fps", "--fullscreen", "true", "--config-global", "--override-root", "/mnt/app0", "/games/CUSA00001/eboot.bin"]
+            result <- Main_Run(args)
+        BootSmoke_Check(result == 0, "expected Main_Run success")
+
+        settings: mutable EmulatorSettingsImpl& = EmulatorSettings_GetInstance()
+        BootSmoke_Check(EmulatorSettings_IsShowFpsCounter(settings), "expected show fps")
+        BootSmoke_Check(EmulatorSettings_IsFullScreen(settings), "expected fullscreen")
+        BootSmoke_Check(EmulatorSettings_GetConfigMode(settings) == ConfigMode.Global, "expected global config")
+
+        emu: mutable Emulator& = Emulator_GetInstance()
+        BootSmoke_Check(streq(Emulator_GetLastRunPath(emu), "/games/CUSA00001/eboot.bin") == 1, "expected eboot path")
+        BootSmoke_Check(streq(Emulator_GetLastGameFolder(emu), "/mnt/app0") == 1, "expected override root")
+        BootSmoke_Check(streq(Emulator_GetLastGuestEbootPath(emu), "/app0/eboot.bin") == 1, "expected override-root guest eboot fallback")
+
+@test
+def emulator_core_boot_smoke_utility_commands_do_not_start_game() -> void:
+    can Memory.Allocate, Abort.Panic:
+        BootSmoke_ResetRuntime()
+
+        arena: Arena = zeroed
+        add_result: mutable int = -1
+        in arena:
+            add_args: mutable darray[static u8&] = ["shadps4", "--add-game-folder", "/games/library"]
+            add_result <- Main_Run(add_args)
+        BootSmoke_Check(add_result == 0, "expected add folder success")
+
+        state: mutable EmulatorState& = EmulatorState_GetInstance()
+        BootSmoke_Check(not EmulatorState_IsGameRunning(state), "expected game not running")
+
+        settings: mutable EmulatorSettingsImpl& = EmulatorSettings_GetInstance()
+        dirs: darray[static u8&] = EmulatorSettings_GetGameInstallDirs(settings)
+        BootSmoke_Check(dirs.count == 1, "expected one game folder")
+        BootSmoke_Check(streq(dirs[0], "/games/library") == 1, "expected game folder path")
+
+        addon_result: mutable int = -1
+        in arena:
+            addon_args: mutable darray[static u8&] = ["shadps4", "--set-addon-folder", "/games/addons"]
+            addon_result <- Main_Run(addon_args)
+        BootSmoke_Check(addon_result == 0, "expected addon folder success")
+        BootSmoke_Check(not EmulatorState_IsGameRunning(state), "expected game not running")
+        BootSmoke_Check(streq(EmulatorSettings_GetAddonInstallDir(settings), "/games/addons") == 1, "expected addon folder")
+
+@test
+def emulator_core_boot_smoke_rejects_invalid_or_missing_launch() -> void:
+    can Memory.Allocate, Abort.Panic:
+        BootSmoke_ResetRuntime()
+
+        arena: Arena = zeroed
+        missing_result: mutable int = -1
+        in arena:
+            missing_args: mutable darray[static u8&] = ["shadps4"]
+            missing_result <- Main_Run(missing_args)
+        BootSmoke_Check(missing_result == 1, "expected missing launch failure")
+        state: mutable EmulatorState& = EmulatorState_GetInstance()
+        BootSmoke_Check(not EmulatorState_IsGameRunning(state), "expected game not running")
+
+        bad_result: mutable int = -1
+        in arena:
+            bad_fullscreen_args: mutable darray[static u8&] = ["shadps4", "--fullscreen", "maybe", "CUSA00002"]
+            bad_result <- Main_Run(bad_fullscreen_args)
+        BootSmoke_Check(bad_result == 1, "expected bad fullscreen failure")
+        BootSmoke_Check(not EmulatorState_IsGameRunning(state), "expected game not running")
+
+@test
+def emulator_core_boot_smoke_normalizes_update_and_patch_launches() -> void:
+    can Memory.Allocate, Abort.Panic:
+        BootSmoke_ResetRuntime()
+
+        arena: Arena = zeroed
+        result: mutable int = -1
+        in arena:
+            args: mutable darray[static u8&] = ["shadps4", "/games/CUSA99999-UPDATE/eboot.bin"]
+            result <- Main_Run(args)
+        BootSmoke_Check(result == 0, "expected update launch success")
+
+        emu: mutable Emulator& = Emulator_GetInstance()
+        BootSmoke_Check(streq(Emulator_GetLastRunPath(emu), "/games/CUSA99999-UPDATE/eboot.bin") == 1, "expected update eboot path")
+        BootSmoke_Check(streq(Emulator_GetLastGameFolder(emu), "/games/CUSA99999") == 1, "expected base game folder for update launch")
+        BootSmoke_Check(streq(Emulator_GetLastGuestEbootPath(emu), "/app0/eboot.bin") == 1, "expected update guest eboot fallback")
