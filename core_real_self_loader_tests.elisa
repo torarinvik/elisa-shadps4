@@ -57,6 +57,28 @@ def RealSelfLoader_CheckMappedRelocationMirror(module: Module&) -> bool:
         j <- j + 1
     return found
 
+def RealSelfLoader_FindAnyDefinedNid(module: Module&, out_nid: mutable static u8&) -> bool:
+    out_nid <- ""
+    if module.dynamic_info.symbol_table_offset == 0 or module.dynamic_info.symbol_table_total_size == 0:
+        return false
+    entry_size: mutable u64 = module.dynamic_info.symbol_table_entries_size
+    if entry_size == 0:
+        entry_size <- size_of(elf_symbol).u64()
+    symbol_count: usize = (module.dynamic_info.symbol_table_total_size / entry_size).usize()
+    i: mutable usize = 0
+    while i < symbol_count:
+        info: mutable u8 = 0
+        value: mutable u64 = 0
+        if Module_GetSymbolInfoByIndex(module, i.u32(), info.ref[mutable u8&], value.ref[mutable u64&]):
+            name: static u8& = Module_GetSymbolNameByIndex(module.ref[mutable Module&], i.u32())
+            if static_strlen(name) > 0:
+                addr: mutable u64 = 0
+                if Module_FindDefinedSymbolAddress(module.ref[mutable Module&], name, addr.ref[mutable u64&]) and addr > 0:
+                    out_nid <- name
+                    return true
+        i <- i + 1
+    return false
+
 @test
 def real_self_loader_parses_dynamic_imports_and_relocations() -> void:
     can Memory.Allocate, Abort.Panic:
@@ -114,3 +136,55 @@ def real_self_loader_loads_guest_prx_through_dynamic_module_path() -> void:
         RealSelfLoader_Check(Module_GetImportSymbolCount(module) > 0, "expected real PRX imports")
         RealSelfLoader_Check(Module_GetResolvedImportSymbolCount(module) == Module_GetImportSymbolCount(module), "expected real PRX imports to resolve before start")
         RealSelfLoader_Check(module.applied_relocation_count > 0usize, "expected real PRX relocations before start")
+
+@test
+def real_self_loader_import_symbol_parsing_and_resolution_kinds() -> void:
+    can Memory.Allocate, Abort.Panic:
+        Linker_Reset()
+        linker: mutable Linker& = Linker_GetInstance()
+        HLELibs_InitForLinker(linker)
+        scratch_module: mutable Module = Module_New("/app0/eboot.bin", "/app0/eboot.bin", MODULE_LOAD_BASE.uintptr(), false)
+
+        parsed_nid: mutable static u8& = ""
+        parsed_lib: mutable static u8& = ""
+        parsed_mod: mutable static u8& = ""
+        RealSelfLoader_Check(Module_ParseImportSymbol("abcd1234#libkernel#libkernel", parsed_nid.ref[mutable static u8&], parsed_lib.ref[mutable static u8&], parsed_mod.ref[mutable static u8&]), "expected full nid#lib#module parse success")
+        RealSelfLoader_Check(streq(parsed_nid, "abcd1234") == 1, "expected parsed nid")
+        RealSelfLoader_Check(streq(parsed_lib, "libkernel") == 1, "expected parsed library")
+        RealSelfLoader_Check(streq(parsed_mod, "libkernel") == 1, "expected parsed module")
+
+        parsed_nid <- ""
+        parsed_lib <- ""
+        parsed_mod <- ""
+        RealSelfLoader_Check(Module_ParseImportSymbol("D4yla3vx4tY", parsed_nid.ref[mutable static u8&], parsed_lib.ref[mutable static u8&], parsed_mod.ref[mutable static u8&]), "expected nid-only parse success")
+        RealSelfLoader_Check(streq(parsed_nid, "D4yla3vx4tY") == 1, "expected nid-only preserved")
+        RealSelfLoader_Check(static_strlen(parsed_lib) == 0 and static_strlen(parsed_mod) == 0, "expected empty lib/module for nid-only")
+
+        resolved_addr: mutable u64 = 0
+        resolved_kind: mutable u8 = IMPORT_RESOLUTION_UNRESOLVED
+        RealSelfLoader_Check(Linker_Resolve(linker, "D4yla3vx4tY", scratch_module.ref[mutable Module&], resolved_addr.ref[mutable u64&], resolved_kind.ref[mutable u8&]), "expected HLE nid resolve")
+        RealSelfLoader_Check(resolved_kind == IMPORT_RESOLUTION_NATIVE_HLE, "expected HLE kind by nid")
+
+        resolved_addr <- 0
+        resolved_kind <- IMPORT_RESOLUTION_UNRESOLVED
+        RealSelfLoader_Check(Linker_Resolve(linker, "D4yla3vx4tY#libkernel#libkernel", scratch_module.ref[mutable Module&], resolved_addr.ref[mutable u64&], resolved_kind.ref[mutable u8&]), "expected HLE full-symbol resolve")
+        RealSelfLoader_Check(resolved_kind == IMPORT_RESOLUTION_NATIVE_HLE, "expected HLE kind by full symbol")
+
+        resolved_addr <- 0
+        resolved_kind <- IMPORT_RESOLUTION_UNRESOLVED
+        RealSelfLoader_Check(not Linker_Resolve(linker, "", scratch_module.ref[mutable Module&], resolved_addr.ref[mutable u64&], resolved_kind.ref[mutable u8&]), "expected empty symbol unresolved")
+        RealSelfLoader_Check(resolved_kind == IMPORT_RESOLUTION_MALFORMED, "expected malformed kind for empty symbol")
+
+        resolved_addr <- 0
+        resolved_kind <- IMPORT_RESOLUTION_UNRESOLVED
+        RealSelfLoader_Check(Linker_Resolve(linker, "ZZZUnknownNid123", scratch_module.ref[mutable Module&], resolved_addr.ref[mutable u64&], resolved_kind.ref[mutable u8&]), "expected unknown symbol fallback resolve")
+        RealSelfLoader_Check(resolved_kind == IMPORT_RESOLUTION_AEROLIB_FALLBACK, "expected fallback kind for unknown symbol")
+
+        index: s32 = Linker_LoadModuleFromHost(linker, "/app0/eboot.bin", REAL_SELF_TEST_EBOOT, false)
+        RealSelfLoader_Check(index >= 0, "expected real eboot for PRX-export test")
+        exported_nid: mutable static u8& = ""
+        RealSelfLoader_Check(RealSelfLoader_FindAnyDefinedNid(linker.modules[index.usize()], exported_nid.ref[mutable static u8&]), "expected at least one defined symbol nid")
+        resolved_addr <- 0
+        resolved_kind <- IMPORT_RESOLUTION_UNRESOLVED
+        RealSelfLoader_Check(Linker_Resolve(linker, exported_nid, linker.modules[index.usize()].ref[mutable Module&], resolved_addr.ref[mutable u64&], resolved_kind.ref[mutable u8&]), "expected defined symbol to resolve as PRX export")
+        RealSelfLoader_Check(resolved_kind == IMPORT_RESOLUTION_PRX_EXPORT, "expected PRX-export classification")

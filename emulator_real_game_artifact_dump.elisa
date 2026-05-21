@@ -7,6 +7,10 @@ include "./core/emulator_state.elisa"
 include "./core/guest_exec.elisa"
 include "./core/linker.elisa"
 include "./core/user_settings.elisa"
+include "./core/libraries/pad/pad.elisa"
+include "./core/libraries/audio/audioout.elisa"
+include "./core/libraries/system/userservice.elisa"
+include "./core/libraries/save_data/savedata.elisa"
 include "./emulator.elisa"
 include "./main.elisa"
 
@@ -28,8 +32,72 @@ def RealGameArtifact_Emit(linker: Linker&, guarded_status: s32) -> void:
     if limit > 16:
         limit <- 16
     while i < limit:
-        GuestExec_EmitCusaArtifactModule(linker.modules[i].file, linker.modules[i].host_file, 1 if linker.modules[i].is_shared_lib else 0, linker.modules[i].applied_relocation_count.u64(), Module_GetImportSymbolCount(linker.modules[i]).u64(), Module_GetResolvedImportSymbolCount(linker.modules[i]).u64())
+        native_hle: mutable u64 = 0
+        prx_export: mutable u64 = 0
+        aerolib_fallback: mutable u64 = 0
+        malformed: mutable u64 = 0
+        unresolved: mutable u64 = 0
+        for import_index in 0..<linker.modules[i].import_symbols.count:
+            import_ref: ImportSymbolRecord = linker.modules[i].import_symbols[import_index]
+            if import_ref.resolution_kind == IMPORT_RESOLUTION_NATIVE_HLE:
+                native_hle <- native_hle + 1
+            elif import_ref.resolution_kind == IMPORT_RESOLUTION_PRX_EXPORT:
+                prx_export <- prx_export + 1
+            elif import_ref.resolution_kind == IMPORT_RESOLUTION_AEROLIB_FALLBACK:
+                aerolib_fallback <- aerolib_fallback + 1
+            elif import_ref.resolution_kind == IMPORT_RESOLUTION_MALFORMED:
+                malformed <- malformed + 1
+            elif not import_ref.resolved:
+                unresolved <- unresolved + 1
+        GuestExec_EmitCusaArtifactModule(linker.modules[i].file, linker.modules[i].host_file, 1 if linker.modules[i].is_shared_lib else 0, linker.modules[i].applied_relocation_count.u64(), Module_GetImportSymbolCount(linker.modules[i]).u64(), Module_GetResolvedImportSymbolCount(linker.modules[i]).u64(), native_hle, prx_export, aerolib_fallback, malformed, unresolved)
         i <- i + 1
+    emitted_fallback: mutable u64 = 0
+    for module_index in 0..<linker.modules.count:
+        for import_index in 0..<linker.modules[module_index].import_symbols.count:
+            import_ref: ImportSymbolRecord = linker.modules[module_index].import_symbols[import_index]
+            if import_ref.resolution_kind == IMPORT_RESOLUTION_AEROLIB_FALLBACK and emitted_fallback < 64:
+                GuestExec_EmitCusaArtifactImport(import_ref.source_module_path, import_ref.nid, import_ref.library, import_ref.module, import_ref.resolution_kind.u64())
+                emitted_fallback <- emitted_fallback + 1
+
+def RealGameArtifact_EmitRuntimeStages() -> void:
+    pad_stage: mutable u64 = 0u64
+    audio_stage: mutable u64 = 0u64
+    user_stage: mutable u64 = 0u64
+    save_stage: mutable u64 = 0u64
+    np_stage: mutable u64 = 0u64
+
+    pad_init_r: int = scePadInit()
+    if pad_init_r == ORBIS_OK:
+        pad_handle: int = scePadOpen(1, 0, 0, null)
+        if pad_handle > 0:
+            pad_stage <- 1u64
+            _ = scePadClose(pad_handle)
+
+    audio_init_r: s32 = sceAudioOutInit()
+    if audio_init_r == ORBIS_OK or audio_init_r == ORBIS_AUDIO_OUT_ERROR_ALREADY_INIT:
+        audio_handle: s32 = sceAudioOutOpen(1, 0, 0, 256u32, 48000u32, 1u32)
+        if audio_handle > 0:
+            audio_stage <- 1u64
+            _ = sceAudioOutClose(audio_handle)
+
+    user_init_r: int = sceUserServiceInitialize(null)
+    if user_init_r == ORBIS_OK:
+        initial_user: mutable int = 0
+        if sceUserServiceGetInitialUser(initial_user.ref[mutable int&]) == ORBIS_OK:
+            user_stage <- 1u64
+
+    save_init_r: int = sceSaveDataInitialize(null)
+    save_mount_r: int = sceSaveDataMount(null, null)
+    if save_init_r == ORBIS_OK or save_mount_r == ORBIS_OK:
+        save_stage <- 1u64
+
+    np_stage <- 0u64
+
+    GuestExec_EmitCusaArtifactKV("INPUT_STAGE", pad_stage)
+    GuestExec_EmitCusaArtifactKV("AUDIO_STAGE", audio_stage)
+    GuestExec_EmitCusaArtifactKV("USER_STAGE", user_stage)
+    GuestExec_EmitCusaArtifactKV("SAVE_STAGE", save_stage)
+    GuestExec_EmitCusaArtifactKV("NP_STAGE", np_stage)
 
 def main() -> int:
     can Memory.Allocate, Abort.Panic:
@@ -47,4 +115,5 @@ def main() -> int:
         entry: VAddr = linker.modules[0].last_start_entry_addr
         guarded_status: s32 = GuestExec_RunMainEntryGuarded(entry, 0, null, 25.u32())
         RealGameArtifact_Emit(linker, guarded_status)
+        RealGameArtifact_EmitRuntimeStages()
     return 0

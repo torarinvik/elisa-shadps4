@@ -43,13 +43,52 @@ def RealGameBoot_CheckMappedImageMirror(module: Module&) -> bool:
 def RealGameBoot_EmitArtifacts(linker: Linker&, guarded_status: s32) -> void:
     GuestExec_EmitCusaArtifactStage()
     GuestExec_EmitCusaArtifactSummary(linker.modules.count.u64(), linker.last_total_import_count.u64(), linker.last_unresolved_import_count.u64(), linker.last_relocated_import_count.u64(), linker.last_native_hle_resolved_count.u64(), linker.last_prx_export_resolved_count.u64(), linker.last_aerolib_fallback_resolved_count.u64(), linker.hle_registered_symbol_count.u64(), linker.modules[0].last_start_entry_addr.u64(), guest_exec_last_main_entry_addr.u64(), guarded_status, GuestExec_LastSignal(), GuestExec_LastFaultAddress().u64())
+    GuestExec_EmitCusaArtifactKV("malformed_imports", linker.last_malformed_import_count.u64())
     i: mutable usize = 0
     limit: mutable usize = linker.modules.count
     if limit > 8:
         limit <- 8
     while i < limit:
-        GuestExec_EmitCusaArtifactModule(linker.modules[i].file, linker.modules[i].host_file, 1 if linker.modules[i].is_shared_lib else 0, linker.modules[i].applied_relocation_count.u64(), Module_GetImportSymbolCount(linker.modules[i]).u64(), Module_GetResolvedImportSymbolCount(linker.modules[i]).u64())
+        native_count: mutable u64 = 0
+        prx_count: mutable u64 = 0
+        fallback_count: mutable u64 = 0
+        malformed_count: mutable u64 = 0
+        unresolved_count: mutable u64 = 0
+        for j in 0..<linker.modules[i].import_symbols.count:
+            rec: ImportSymbolRecord = linker.modules[i].import_symbols[j]
+            if rec.resolution_kind == IMPORT_RESOLUTION_NATIVE_HLE:
+                native_count <- native_count + 1
+            elif rec.resolution_kind == IMPORT_RESOLUTION_PRX_EXPORT:
+                prx_count <- prx_count + 1
+            elif rec.resolution_kind == IMPORT_RESOLUTION_AEROLIB_FALLBACK:
+                fallback_count <- fallback_count + 1
+            elif rec.resolution_kind == IMPORT_RESOLUTION_MALFORMED:
+                malformed_count <- malformed_count + 1
+            elif not rec.resolved:
+                unresolved_count <- unresolved_count + 1
+        GuestExec_EmitCusaArtifactModule(linker.modules[i].file, linker.modules[i].host_file, 1 if linker.modules[i].is_shared_lib else 0, linker.modules[i].applied_relocation_count.u64(), Module_GetImportSymbolCount(linker.modules[i]).u64(), Module_GetResolvedImportSymbolCount(linker.modules[i]).u64(), native_count, prx_count, fallback_count, malformed_count, unresolved_count)
         i <- i + 1
+    emitted_fallback: mutable usize = 0
+    for mi in 0..<linker.modules.count:
+        mod_ref: Module = linker.modules[mi]
+        for ii in 0..<mod_ref.import_symbols.count:
+            if emitted_fallback >= 24usize:
+                return
+            rec: ImportSymbolRecord = mod_ref.import_symbols[ii]
+            if rec.resolution_kind != IMPORT_RESOLUTION_AEROLIB_FALLBACK:
+                continue
+            subsystem: mutable static u8& = "unknown"
+            if static_strlen(rec.library) > 0:
+                if Linker_StringHasPrefix(rec.library, "libScePad"):
+                    subsystem <- "pad_input"
+                elif Linker_StringHasPrefix(rec.library, "libSceGnm"):
+                    subsystem <- "graphics"
+                elif Linker_StringHasPrefix(rec.library, "libSceAudio"):
+                    subsystem <- "audio"
+                elif Linker_StringHasPrefix(rec.library, "libkernel"):
+                    subsystem <- "kernel"
+            GuestExec_EmitCusaArtifactImport(mod_ref.file, rec.nid, rec.library, rec.module, subsystem, rec.resolution_kind.u64())
+            emitted_fallback <- emitted_fallback + 1
 
 @test
 def emulator_real_game_boot_smoke_loads_cusa07399_eboot() -> void:
@@ -82,6 +121,7 @@ def emulator_real_game_boot_smoke_loads_cusa07399_eboot() -> void:
         RealGameBoot_Check(linker.last_start_result == 0, "expected linker start result")
         RealGameBoot_Check(linker.last_unresolved_import_count == 0usize, "expected real game and dependency imports to resolve")
         RealGameBoot_Check(linker.last_relocated_import_count > 0usize, "expected real game import relocations")
+        RealGameBoot_Check(linker.last_prx_export_resolved_count > 0usize, "expected CUSA07399 to include PRX-export-backed imports")
 
         module: Module = linker.modules[0]
         RealGameBoot_Check(streq(module.file, "/app0/eboot.bin") == 1, "expected guest module name")

@@ -1,6 +1,14 @@
 // SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE 1
+#endif
+
+#if defined(__APPLE__) && !defined(_XOPEN_SOURCE)
+#define _XOPEN_SOURCE 700
+#endif
+
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
@@ -16,6 +24,24 @@
 #include <sys/mman.h>
 #include <sys/time.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <sys/ucontext.h>
+#if !defined(MAP_ANONYMOUS) && defined(MAP_ANON)
+#define MAP_ANONYMOUS MAP_ANON
+#endif
+#elif defined(__linux__)
+#include <ucontext.h>
+#endif
+#endif
+
+#if !defined(_WIN32)
+#if !defined(MAP_ANONYMOUS)
+#if defined(MAP_ANON)
+#define MAP_ANONYMOUS MAP_ANON
+#else
+#define MAP_ANONYMOUS 0x1000
+#endif
+#endif
 #endif
 
 typedef struct ElisaGuestEntryParams {
@@ -44,8 +70,22 @@ static struct sigaction elisa_guest_exec_old_fpe;
 static struct sigaction elisa_guest_exec_old_alrm;
 
 static uintptr_t elisa_guest_exec_extract_pc(void* uctx) {
+    if (uctx == NULL) return 0;
+#if defined(__x86_64__)
+#if defined(__APPLE__)
+    ucontext_t* uc = (ucontext_t*)uctx;
+    return (uintptr_t)uc->uc_mcontext->__ss.__rip;
+#elif defined(__linux__)
+    ucontext_t* uc = (ucontext_t*)uctx;
+    return (uintptr_t)(uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
+#else
     (void)uctx;
     return 0;
+#endif
+#else
+    (void)uctx;
+    return 0;
+#endif
 }
 
 static void elisa_guest_exec_signal_handler(int sig, siginfo_t* info, void* uctx) {
@@ -137,7 +177,9 @@ void ElisaGuestExec_ResetCrashState(void) {
     elisa_guest_exec_last_signal = 0;
     elisa_guest_exec_last_fault_address = 0;
     elisa_guest_exec_last_guest_pc = 0;
+#if !defined(_WIN32)
     elisa_guest_exec_timeout_fired = 0;
+#endif
 }
 
 int32_t ElisaGuestExec_MapRegion(uintptr_t address, uint64_t size, uint32_t prot) {
@@ -354,7 +396,7 @@ int32_t ElisaGuestExec_RunMainEntryGuarded(ElisaGuestEntryParams* params, uint32
 }
 
 void ElisaGuestExec_EmitCusaArtifactStage(void) {
-    fprintf(stderr, "CUSA07399_ARTIFACT stage=load link=pass handoff=pass\n");
+    fprintf(stderr, "CUSA07399_EXEC_STAGE stage=load link=pass handoff=pass\n");
 }
 
 void ElisaGuestExec_EmitCusaArtifactSummary(uint64_t module_count, uint64_t total_imports,
@@ -393,13 +435,31 @@ void ElisaGuestExec_EmitCusaArtifactSummary(uint64_t module_count, uint64_t tota
 
 void ElisaGuestExec_EmitCusaArtifactModule(const char* module, const char* host, int32_t shared,
                                            uint64_t relocations, uint64_t imports,
-                                           uint64_t resolved) {
+                                           uint64_t resolved, uint64_t native_hle,
+                                           uint64_t prx_export, uint64_t aerolib_fallback,
+                                           uint64_t malformed, uint64_t unresolved) {
     fprintf(stderr,
             "CUSA07399_ARTIFACT module=%s host=%s shared=%d relocations=%llu "
-            "imports=%llu resolved=%llu\n",
+            "imports=%llu resolved=%llu native_hle=%llu prx_export=%llu "
+            "aerolib_fallback=%llu malformed=%llu unresolved=%llu\n",
             module != NULL ? module : "", host != NULL ? host : "", shared,
             (unsigned long long)relocations, (unsigned long long)imports,
-            (unsigned long long)resolved);
+            (unsigned long long)resolved, (unsigned long long)native_hle,
+            (unsigned long long)prx_export, (unsigned long long)aerolib_fallback,
+            (unsigned long long)malformed, (unsigned long long)unresolved);
+}
+
+void ElisaGuestExec_EmitCusaArtifactImport(const char* source, const char* nid,
+                                           const char* library, const char* module,
+                                           const char* subsystem,
+                                           uint64_t resolution) {
+    fprintf(stderr,
+            "CUSA07399_ARTIFACT fallback_import source=%s nid=%s library=%s "
+            "module=%s subsystem=%s resolution=%llu\n",
+            source != NULL ? source : "", nid != NULL ? nid : "",
+            library != NULL ? library : "", module != NULL ? module : "",
+            subsystem != NULL ? subsystem : "",
+            (unsigned long long)resolution);
 }
 
 void ElisaGuestExec_EmitCusaArtifactKV(const char* key, uint64_t value) {

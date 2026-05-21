@@ -51,6 +51,9 @@ extern c_GuestExec_LastFaultAddress() -> uintptr
 @link_name(ElisaGuestExec_ResetCrashState)
 extern c_GuestExec_ResetCrashState() -> void
 
+@link_name(ElisaGuestExec_LastGuestPC)
+extern c_GuestExec_LastGuestPC() -> uintptr
+
 @link_name(ElisaGuestExec_EmitCusaArtifactStage)
 extern c_GuestExec_EmitCusaArtifactStage() -> void
 
@@ -58,7 +61,13 @@ extern c_GuestExec_EmitCusaArtifactStage() -> void
 extern c_GuestExec_EmitCusaArtifactSummary(module_count: u64, total_imports: u64, unresolved_imports: u64, relocated_imports: u64, native_hle_resolved: u64, prx_export_resolved: u64, aerolib_fallback_resolved: u64, hle_symbols: u64, entry: u64, main_entry: u64, guarded_status: s32, last_signal: s32, fault_address: u64, last_guest_pc: u64, boundary_status: s32, boundary_reason: s32, execution_stage: s32) -> void
 
 @link_name(ElisaGuestExec_EmitCusaArtifactModule)
-extern c_GuestExec_EmitCusaArtifactModule(module: static u8&?, host: static u8&?, shared: s32, relocations: u64, imports: u64, resolved: u64) -> void
+extern c_GuestExec_EmitCusaArtifactModule(module: static u8&?, host: static u8&?, shared: s32, relocations: u64, imports: u64, resolved: u64, native_hle: u64, prx_export: u64, aerolib_fallback: u64, malformed: u64, unresolved: u64) -> void
+
+@link_name(ElisaGuestExec_EmitCusaArtifactImport)
+extern c_GuestExec_EmitCusaArtifactImport(source: static u8&?, nid: static u8&?, library: static u8&?, module: static u8&?, subsystem: static u8&?, resolution: u64) -> void
+
+@link_name(ElisaGuestExec_EmitCusaArtifactKV)
+extern c_GuestExec_EmitCusaArtifactKV(key: static u8&?, value: u64) -> void
 
 global mutable guest_exec_enabled: bool = false
 global mutable guest_exec_probe_mode: bool = false
@@ -74,9 +83,12 @@ global mutable guest_exec_first_boundary_reason: s32 = 0
 global mutable guest_exec_execution_stage: s32 = 0
 
 const GUEST_EXEC_STAGE_NONE: s32 = 0
-const GUEST_EXEC_STAGE_HANDOFF: s32 = 1
-const GUEST_EXEC_STAGE_GUARDED_ENTRY: s32 = 2
-const GUEST_EXEC_STAGE_FIRST_BOUNDARY: s32 = 3
+const GUEST_EXEC_STAGE_LOAD: s32 = 1
+const GUEST_EXEC_STAGE_LINK: s32 = 2
+const GUEST_EXEC_STAGE_HANDOFF: s32 = 3
+const GUEST_EXEC_STAGE_GUARDED_ENTRY: s32 = 4
+const GUEST_EXEC_STAGE_FIRST_BOUNDARY: s32 = 5
+const GUEST_EXEC_STAGE_CRASH_CAPTURED: s32 = 6
 
 const GUEST_EXEC_BOUNDARY_NOT_REACHED: s32 = 0
 const GUEST_EXEC_BOUNDARY_FIRST_HLE_IMPORT: s32 = 1
@@ -199,6 +211,8 @@ def GuestExec_RunMainEntryGuarded(entry_addr: VAddr, argc: int, argv: void&?, ti
             guest_exec_first_boundary_reason <- GUEST_EXEC_BOUNDARY_REASON_TIMEOUT
         elif status < 0:
             guest_exec_first_boundary_reason <- GUEST_EXEC_BOUNDARY_REASON_HOST_CRASH
+            if c_GuestExec_LastSignal() != 0:
+                guest_exec_execution_stage <- GUEST_EXEC_STAGE_CRASH_CAPTURED
         else:
             guest_exec_first_boundary_reason <- GUEST_EXEC_BOUNDARY_REASON_EXITED_BEFORE_BOUNDARY
     if guest_exec_first_boundary_reached:
@@ -227,6 +241,17 @@ def GuestExec_LastFaultAddress() -> VAddr:
 
 def GuestExec_ResetCrashState() -> void:
     c_GuestExec_ResetCrashState()
+
+def GuestExec_LastGuestPC() -> VAddr:
+    return c_GuestExec_LastGuestPC()
+
+def GuestExec_RecordLoad() -> void:
+    if guest_exec_execution_stage < GUEST_EXEC_STAGE_LOAD:
+        guest_exec_execution_stage <- GUEST_EXEC_STAGE_LOAD
+
+def GuestExec_RecordLink() -> void:
+    if guest_exec_execution_stage < GUEST_EXEC_STAGE_LINK:
+        guest_exec_execution_stage <- GUEST_EXEC_STAGE_LINK
 
 def GuestExec_RecordFirstBoundary(reason: s32) -> void:
     if guest_exec_main_run_count == 0:
@@ -258,7 +283,11 @@ def GuestExec_FirstBoundaryReason() -> s32:
     return GUEST_EXEC_BOUNDARY_REASON_EXITED_BEFORE_BOUNDARY
 
 def GuestExec_ExecutionStage() -> s32:
+    if guest_exec_execution_stage >= GUEST_EXEC_STAGE_GUARDED_ENTRY or guest_exec_first_boundary_reached:
+        return guest_exec_execution_stage
     if guest_exec_main_run_count == 0:
+        if guest_exec_execution_stage > GUEST_EXEC_STAGE_NONE:
+            return guest_exec_execution_stage
         return GUEST_EXEC_STAGE_NONE
     if guest_exec_execution_stage > GUEST_EXEC_STAGE_NONE:
         return guest_exec_execution_stage
@@ -299,7 +328,13 @@ def GuestExec_EmitCusaArtifactStage() -> void:
     c_GuestExec_EmitCusaArtifactStage()
 
 def GuestExec_EmitCusaArtifactSummary(module_count: u64, total_imports: u64, unresolved_imports: u64, relocated_imports: u64, native_hle_resolved: u64, prx_export_resolved: u64, aerolib_fallback_resolved: u64, hle_symbols: u64, entry: u64, main_entry: u64, guarded_status: s32, last_signal: s32, fault_address: u64) -> void:
-    c_GuestExec_EmitCusaArtifactSummary(module_count, total_imports, unresolved_imports, relocated_imports, native_hle_resolved, prx_export_resolved, aerolib_fallback_resolved, hle_symbols, entry, main_entry, guarded_status, last_signal, fault_address, 0u64, GuestExec_ClassifyFirstBoundary(), GuestExec_FirstBoundaryReason(), GuestExec_ExecutionStage())
+    c_GuestExec_EmitCusaArtifactSummary(module_count, total_imports, unresolved_imports, relocated_imports, native_hle_resolved, prx_export_resolved, aerolib_fallback_resolved, hle_symbols, entry, main_entry, guarded_status, last_signal, fault_address, GuestExec_LastGuestPC().u64(), GuestExec_ClassifyFirstBoundary(), GuestExec_FirstBoundaryReason(), GuestExec_ExecutionStage())
 
-def GuestExec_EmitCusaArtifactModule(module: static u8&?, host: static u8&?, shared: s32, relocations: u64, imports: u64, resolved: u64) -> void:
-    c_GuestExec_EmitCusaArtifactModule(module, host, shared, relocations, imports, resolved)
+def GuestExec_EmitCusaArtifactModule(module: static u8&?, host: static u8&?, shared: s32, relocations: u64, imports: u64, resolved: u64, native_hle: u64, prx_export: u64, aerolib_fallback: u64, malformed: u64, unresolved: u64) -> void:
+    c_GuestExec_EmitCusaArtifactModule(module, host, shared, relocations, imports, resolved, native_hle, prx_export, aerolib_fallback, malformed, unresolved)
+
+def GuestExec_EmitCusaArtifactImport(source: static u8&?, nid: static u8&?, library: static u8&?, module: static u8&?, subsystem: static u8&?, resolution: u64) -> void:
+    c_GuestExec_EmitCusaArtifactImport(source, nid, library, module, subsystem, resolution)
+
+def GuestExec_EmitCusaArtifactKV(key: static u8&?, value: u64) -> void:
+    c_GuestExec_EmitCusaArtifactKV(key, value)
