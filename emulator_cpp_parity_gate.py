@@ -95,6 +95,7 @@ def all_steps() -> list[Step]:
         Step("parity workqueue summary", [sys.executable, "parity_workqueue.py", "--fail-missing"], category="ledger"),
         Step("bridge syntax", [sys.executable, "check_elisa_bridges.py"], category="bridge"),
         compiler_test("core-libraries-audio-parity-tests", category="audio"),
+        compiler_test("core-libraries-np-parity-tests", category="hle"),
         Step(
             "native guest_exec_runtime warnings",
             guest_exec_warning_cmd,
@@ -664,6 +665,10 @@ def summarize_progress(results: list[Result], require_first_boundary: bool = Fal
     lines.append(f"- guest exec last signal: {cusa['guest_exec_last_signal']}")
     lines.append(f"- guest exec last module: {cusa['guest_exec_last_module']}")
     lines.append(f"- guest exec last symbol: {cusa['guest_exec_last_symbol']}")
+    if int(cusa["guest_exec_probe_only"]) == 1:
+        lines.append(f"- first boundary blocker: probe-only host ({cusa['guest_exec_host_arch']} {cusa['guest_exec_host_mode']})")
+    elif int(cusa["guest_exec_supported_native_execution"]) == 0:
+        lines.append(f"- first boundary blocker: unsupported host ({cusa['guest_exec_host_arch']} {cusa['guest_exec_host_mode']})")
     lines.append("- first frame gate signals:")
     lines.append(f"  - shader_translate_attempted={cusa['shader_translate_attempted']}")
     lines.append(f"  - shader_path_bridge={cusa['shader_translate_path_bridge']} shader_path_native={cusa['shader_translate_path_native']}")

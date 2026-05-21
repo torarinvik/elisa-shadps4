@@ -39,6 +39,7 @@ extern oracle_sem_create(value: int, max_value: int, out_error: mutable int&?) -
 extern oracle_sem_destroy(handle: void&?) -> int
 extern oracle_sem_wait(handle: void&?, need_count: int) -> int
 extern oracle_sem_trywait(handle: void&?, need_count: int) -> int
+extern oracle_sem_timedwait(handle: void&?, need_count: int, usec: u64) -> int
 extern oracle_sem_post(handle: void&?, signal_count: int) -> int
 extern oracle_sem_cancel(handle: void&?, set_value: int, out_waiters: mutable int&?) -> int
 
@@ -81,6 +82,7 @@ extern elisa_adapter_sem_create(value: int, max_value: int, out_error: mutable i
 extern elisa_adapter_sem_destroy(handle: void&?) -> int
 extern elisa_adapter_sem_wait(handle: void&?, need_count: int) -> int
 extern elisa_adapter_sem_trywait(handle: void&?, need_count: int) -> int
+extern elisa_adapter_sem_timedwait(handle: void&?, need_count: int, usec: u64) -> int
 extern elisa_adapter_sem_post(handle: void&?, signal_count: int) -> int
 extern elisa_adapter_sem_cancel(handle: void&?, set_value: int, out_waiters: mutable int&?) -> int
 
@@ -221,3 +223,67 @@ def parity_gate_metadata() -> void:
     can Abort.Panic:
         host_win: int = parity_host_is_windows()
         assert host_win == 0 or host_win == 1
+
+@test
+def parity_mutex_cond_contention_timeout_stress_cycles() -> void:
+    can Abort.Panic:
+        cycle: mutable int = 0
+        trusted Unsafe.AssumeProgress:
+            while cycle < 80:
+                oe: mutable int = 0
+                ee: mutable int = 0
+                om: void&? = oracle_mutex_create(3, oe.ref[mutable int&])
+                em: void&? = elisa_adapter_mutex_create(3, ee.ref[mutable int&])
+                diff_eq_int("mutex_create_error", oe, ee)
+                diff_eq_int("mutex_lock", oracle_mutex_lock(om), elisa_adapter_mutex_lock(em))
+                diff_eq_int("mutex_trylock_busy", oracle_mutex_trylock(om), elisa_adapter_mutex_trylock(em))
+                diff_eq_int("mutex_unlock", oracle_mutex_unlock(om), elisa_adapter_mutex_unlock(em))
+
+                oc: void&? = oracle_cond_create(oe.ref[mutable int&])
+                ec: void&? = elisa_adapter_cond_create(ee.ref[mutable int&])
+                diff_eq_int("cond_create_error", oe, ee)
+                diff_eq_int("cond_timedwait_timeout", oracle_cond_timedwait(oc, om, 0, 1000000), elisa_adapter_cond_timedwait(ec, em, 0, 1000000))
+                diff_eq_int("cond_signal", oracle_cond_signal(oc), elisa_adapter_cond_signal(ec))
+                diff_eq_int("cond_destroy", oracle_cond_destroy(oc), elisa_adapter_cond_destroy(ec))
+                diff_eq_int("mutex_destroy", oracle_mutex_destroy(om), elisa_adapter_mutex_destroy(em))
+                cycle <- cycle + 1
+
+@test
+def parity_rwlock_sema_event_cancel_timeout_stress_cycles() -> void:
+    can Abort.Panic:
+        cycle: mutable int = 0
+        trusted Unsafe.AssumeProgress:
+            while cycle < 60:
+                oe: mutable int = 0
+                ee: mutable int = 0
+
+                orw: void&? = oracle_rwlock_create(oe.ref[mutable int&])
+                erw: void&? = elisa_adapter_rwlock_create(ee.ref[mutable int&])
+                diff_eq_int("rwlock_create_error", oe, ee)
+                diff_eq_int("rwlock_rdlock", oracle_rwlock_rdlock(orw), elisa_adapter_rwlock_rdlock(erw))
+                diff_eq_int("rwlock_trywrlock_busy", oracle_rwlock_trywrlock(orw), elisa_adapter_rwlock_trywrlock(erw))
+                diff_eq_int("rwlock_unlock", oracle_rwlock_unlock(orw), elisa_adapter_rwlock_unlock(erw))
+                diff_eq_int("rwlock_destroy", oracle_rwlock_destroy(orw), elisa_adapter_rwlock_destroy(erw))
+
+                os: void&? = oracle_sem_create(0, 4, oe.ref[mutable int&])
+                es: void&? = elisa_adapter_sem_create(0, 4, ee.ref[mutable int&])
+                diff_eq_int("sem_create_error", oe, ee)
+                diff_eq_int("sem_timedwait_timeout", oracle_sem_timedwait(os, 1, 1000u64), elisa_adapter_sem_timedwait(es, 1, 1000u64))
+                ow: mutable int = 0
+                ew: mutable int = 0
+                diff_eq_int("sem_cancel", oracle_sem_cancel(os, 0, ow.ref[mutable int&]), elisa_adapter_sem_cancel(es, 0, ew.ref[mutable int&]))
+                diff_eq_int("sem_waiters_after_cancel", ow, ew)
+                diff_eq_int("sem_destroy", oracle_sem_destroy(os), elisa_adapter_sem_destroy(es))
+
+                oeve: void&? = oracle_event_create(0u64, oe.ref[mutable int&])
+                eeve: void&? = elisa_adapter_event_create(0u64, ee.ref[mutable int&])
+                diff_eq_int("event_create_error", oe, ee)
+                bits_o: mutable u64 = 0u64
+                bits_e: mutable u64 = 0u64
+                diff_eq_int("event_wait_timeout", oracle_event_wait(oeve, 0x1u64, 0x02u32, bits_o.ref[mutable u64&], 1000u64), elisa_adapter_event_wait(eeve, 0x1u64, 0x02u32, bits_e.ref[mutable u64&], 1000u64))
+                ow2: mutable int = 0
+                ew2: mutable int = 0
+                diff_eq_int("event_cancel", oracle_event_cancel(oeve, 0u64, ow2.ref[mutable int&]), elisa_adapter_event_cancel(eeve, 0u64, ew2.ref[mutable int&]))
+                diff_eq_int("event_waiters_after_cancel", ow2, ew2)
+                diff_eq_int("event_destroy", oracle_event_destroy(oeve), elisa_adapter_event_destroy(eeve))
+                cycle <- cycle + 1

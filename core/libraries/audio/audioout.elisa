@@ -7,6 +7,10 @@ include "./audioout_nids.elisa"
 include "./sdl_audio_out.elisa"
 include "./openal_audio_out.elisa"
 include "./openal_manager.elisa"
+include "../../guest_exec.elisa"
+
+@link_name(ElisaGuestExec_EmitCusaArtifactKV)
+extern c_GuestExec_EmitCusaArtifactKV(key: static u8&?, value: u64) -> void
 
 const AUDIOOUT_HANDLE_TAG: s32 = 0x20000000
 
@@ -29,6 +33,10 @@ global mutable audioout_param_ptr_offset_bytes: usize = 8usize
 global mutable audioout_param_ptr_width_bytes: usize = 8usize
 global mutable audioout_openal_s16_stereo_tmp: s16[102400] = zeroed
 global mutable audioout_openal_f32_stereo_tmp: f32[102400] = zeroed
+
+def audioout_emit_u64(key: static u8&, value: u64) -> void:
+    if GuestExec_IsEnabled():
+        c_GuestExec_EmitCusaArtifactKV(key, value)
 
 def audioout_get_port_id(handle: s32) -> s32:
     pid: s32 = handle & 0xff
@@ -76,6 +84,8 @@ def sceAudioOutInit() -> s32:
     if audioout_inited:
         return ORBIS_AUDIO_OUT_ERROR_ALREADY_INIT
     audioout_inited <- true
+    audioout_emit_u64("audio_sdl_available", 1u64 if AudioFFI_InitSDL() == ORBIS_OK else 0u64)
+    audioout_emit_u64("audio_openal_available", 1u64 if AudioFFI_ProbeOpenAL() else 0u64)
     return ORBIS_OK
 
 def sceAudioOutSelectBackendOpenAL(enable: bool) -> s32:
@@ -105,6 +115,7 @@ def sceAudioOutSetOutputParamLayout64(is_64bit: bool) -> s32:
 def sceAudioOutOpen(user_id: s32, port_type: s32, index: s32, length: u32, sample_rate: u32, param_type: u32) -> s32:
     _ = user_id
     _ = index
+    audioout_emit_u64("audio_output_attempted", 1u64)
     if not audioout_inited:
         return ORBIS_AUDIO_OUT_ERROR_NOT_INIT
     if length == 0u32 or length > 2048u32 or (length & 0xffu32) != 0u32:
@@ -172,6 +183,7 @@ def sceAudioOutOpen(user_id: s32, port_type: s32, index: s32, length: u32, sampl
     while vi < 8:
         audioout_volume[vbase + vi] <- ORBIS_AUDIO_OUT_VOLUME_0DB
         vi <- vi + 1
+    audioout_emit_u64("audio_output_opened", 1u64)
     return AUDIOOUT_HANDLE_TAG | ((port_type & 0xff) << 16) | pid
 
 def sceAudioOutClose(handle: s32) -> s32:
@@ -197,6 +209,7 @@ def sceAudioOutClose(handle: s32) -> s32:
     audioout_data_format[pid] <- 0u32
     audioout_frame_bytes[pid] <- 0u32
     audioout_backend_is_openal[pid] <- false
+    audioout_emit_u64("audio_output_closed", 1u64)
     return ORBIS_OK
 
 def sceAudioOutGetLastOutputTime(handle: s32, output_time: mutable u64&?) -> s32:
@@ -256,6 +269,7 @@ def sceAudioOutGetPortState(handle: s32, state: void&?) -> s32:
     return ORBIS_OK
 
 def sceAudioOutOutput(handle: s32, ptr: mutable u8&?) -> s32:
+    audioout_emit_u64("audio_output_write_attempted", 1u64)
     if not audioout_inited:
         return ORBIS_AUDIO_OUT_ERROR_NOT_INIT
     pid: s32 = audioout_get_port_id(handle)
@@ -291,9 +305,11 @@ def sceAudioOutOutput(handle: s32, ptr: mutable u8&?) -> s32:
     if fmt == 2u32 or fmt == 5u32 or fmt == 6u32 or fmt == 7u32:
         ch <- 8
     ret_frames: u32 = audioout_frames[pid]
+    audioout_emit_u64("audio_output_write_ok", 1u64)
     return (ret_frames as s32) * ch
 
 def sceAudioOutOutputs(param: void&?, num: u32) -> s32:
+    audioout_emit_u64("audio_output_write_attempted", 1u64)
     if not audioout_inited:
         return ORBIS_AUDIO_OUT_ERROR_NOT_INIT
     if num == 0u32 or num > ORBIS_AUDIO_OUT_NUM_PORTS:

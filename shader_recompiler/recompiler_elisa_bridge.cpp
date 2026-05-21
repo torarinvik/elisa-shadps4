@@ -59,21 +59,6 @@ std::unordered_set<const void*> g_freed_handles;
     return hash;
 }
 
-[[nodiscard]] std::uint64_t FnvHash64Bytes(const std::uint8_t* data, const std::size_t size) {
-    constexpr std::uint64_t kFnvOffsetBasis = 1469598103934665603ull;
-    constexpr std::uint64_t kFnvPrime = 1099511628211ull;
-
-    if (!data || size == 0) {
-        return 0u;
-    }
-    std::uint64_t hash = kFnvOffsetBasis;
-    for (std::size_t i = 0; i < size; ++i) {
-        hash ^= static_cast<std::uint64_t>(data[i]);
-        hash *= kFnvPrime;
-    }
-    return hash;
-}
-
 [[nodiscard]] bool IsLiveHandle(const ElisaRecompilerProgramHandle* handle) {
     return handle && g_live_handles.find(handle) != g_live_handles.end() &&
            handle->magic == kElisaRecompilerProgramMagicLive;
@@ -117,12 +102,10 @@ int elisa_shader_recompiler_translate_program(const std::uint32_t* code_words,
     handle->output_byte_size = 0u;
     handle->output_hash = 0u;
     handle->diagnostic_code = kElisaRecompilerDiagnosticRealLinkNotAvailable;
-    // NOTE: The real shadPS4 TranslateProgram + EmitSPIRV path requires linking ~62 cpp files
-    // from shader_recompiler/ plus sirit, boost, fmt, and magic_enum. Until the build system
-    // is extended to include that full dependency chain, the bridge reports Placeholder status.
-    // The pools/info/runtime_info/profile parameters are received but not forwarded.
-    // Retirement: replace when the Elisa build system links the full recompiler chain and
-    // the native Elisa backend emits SPIR-V directly.
+    // NOTE: The real shadPS4 TranslateProgram + EmitSPIRV path requires linking the full
+    // shader_recompiler dependency chain. Until that is wired into this target, keep the
+    // bridge honest: return a live owned handle with deterministic metadata, but do not claim
+    // translation or manufacture fake SPIR-V output.
     handle->status = kElisaRecompilerProgramStatusPlaceholder;
     handle->output_data.clear();
     (void)pools;

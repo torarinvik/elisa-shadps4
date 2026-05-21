@@ -4,6 +4,10 @@
 include "../error_codes.elisa"
 include "./userservice_error.elisa"
 include "./userservice_ffi_bridge.elisa"
+include "../../guest_exec.elisa"
+
+@link_name(ElisaGuestExec_EmitCusaArtifactKV)
+extern c_GuestExec_EmitCusaArtifactKV(key: static u8&?, value: u64) -> void
 
 const ORBIS_USER_SERVICE_MAX_LOGIN_USERS: int = 4
 const ORBIS_USER_SERVICE_MAX_REGISTER_USERS: int = 16
@@ -38,6 +42,10 @@ global mutable g_userservice_event_head: int = 0
 global mutable g_userservice_event_tail: int = 0
 global mutable g_userservice_event_count: int = 0
 global mutable g_userservice_use_ffi_bridge: bool = false
+
+def userservice_emit_u64(key: static u8&, value: u64) -> void:
+    if GuestExec_IsEnabled():
+        c_GuestExec_EmitCusaArtifactKV(key, value)
 
 def UserService_SetUseFfiBridge(enabled: bool) -> void:
     g_userservice_use_ffi_bridge <- enabled
@@ -92,6 +100,7 @@ def UserService_WriteNameForSlot(slot: int, user_name: mutable u8&?, size: int) 
     return ORBIS_OK
 
 def sceUserServiceInitializeForShellCore() -> int:
+    userservice_emit_u64("user_service_initialized", 1u64)
     return ORBIS_OK
 
 def sceUserServiceTerminateForShellCore() -> int:
@@ -395,6 +404,7 @@ def sceUserServiceGetInitialUser(user_id: mutable int&?) -> int:
     if user_id == null:
         return ORBIS_USER_SERVICE_ERROR_INVALID_ARGUMENT
     user_id <- g_userservice_initial_user
+    userservice_emit_u64("user_service_initial_user", g_userservice_initial_user.u64())
     return ORBIS_OK
 
 def sceUserServiceGetIPDLeft() -> int:
@@ -441,6 +451,14 @@ def sceUserServiceGetLoginUserIdList(userIdList: mutable void&?) -> int:
         ffi_list: mutable OrbisUserServiceLoginUserIdList& = userIdList.cast[mutable OrbisUserServiceLoginUserIdList&]
         ffi_r: int = UserService_FfiGetLoginUserIdList(ffi_list)
         if ffi_r != ELISA_FFI_BRIDGE_UNAVAILABLE:
+            if ffi_r == ORBIS_OK:
+                count: mutable u64 = 0u64
+                i_count: mutable int = 0
+                while i_count < ORBIS_USER_SERVICE_MAX_LOGIN_USERS:
+                    if ffi_list.user_id[i_count.usize()] != ORBIS_USER_SERVICE_USER_ID_INVALID:
+                        count <- count + 1u64
+                    i_count <- i_count + 1
+                userservice_emit_u64("user_service_login_user_count", count)
             return ffi_r
     if userIdList == null:
         return ORBIS_USER_SERVICE_ERROR_INVALID_ARGUMENT
@@ -453,6 +471,7 @@ def sceUserServiceGetLoginUserIdList(userIdList: mutable void&?) -> int:
     while i < ORBIS_USER_SERVICE_MAX_LOGIN_USERS:
         list.user_id[i.usize()] <- g_userservice_slot_user_id[i.usize()]
         i <- i + 1
+    userservice_emit_u64("user_service_login_user_count", ORBIS_USER_SERVICE_MAX_LOGIN_USERS as u64)
     return ORBIS_OK
 
 def sceUserServiceGetMicLevel() -> int:
@@ -809,9 +828,11 @@ def sceUserServiceGetVolumeForSidetone() -> int:
 
 def sceUserServiceInitialize(initParams: mutable void&?) -> int:
     _ = initParams
+    userservice_emit_u64("user_service_initialized", 1u64)
     return ORBIS_OK
 
 def sceUserServiceInitialize2() -> int:
+    userservice_emit_u64("user_service_initialized", 1u64)
     return ORBIS_OK
 
 def sceUserServiceIsGuestUser() -> int:
@@ -1437,3 +1458,11 @@ def Func_D2B814603E7B4477() -> int:
 
 def UserService_RegisterLib(sym: void&?) -> void:
     _ = sym
+    LIB_FUNCTION("Psl9mfs3duM", "libSceUserServiceForShellCore", 1, "libSceUserService", sceUserServiceInitializeForShellCore)
+    LIB_FUNCTION("CydP+QtA0KI", "libSceUserServiceForShellCore", 1, "libSceUserService", sceUserServiceTerminateForShellCore)
+    LIB_FUNCTION("CdWp0oHWGr0", "libSceUserService", 1, "libSceUserService", sceUserServiceGetInitialUser)
+    LIB_FUNCTION("fPhymKNvK-A", "libSceUserService", 1, "libSceUserService", sceUserServiceGetLoginUserIdList)
+    LIB_FUNCTION("j3YMu1MVNNo", "libSceUserService", 1, "libSceUserService", sceUserServiceInitialize)
+    LIB_FUNCTION("az-0R6eviZ0", "libSceUserService", 1, "libSceUserService", sceUserServiceInitialize2)
+    LIB_FUNCTION("bwFjS+bX9mA", "libSceUserService", 1, "libSceUserService", sceUserServiceTerminate)
+    LIB_FUNCTION("spW--yoLQ9o", "libSceUserService", 1, "libSceUserService", sceUserServiceUnregisterEventCallback)

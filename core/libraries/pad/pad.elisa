@@ -2,6 +2,10 @@ include "../error_codes.elisa"
 include "./pad_errors.elisa"
 include "../kernel/lib_function_stub.elisa"
 include "../../../input/controller.elisa"
+include "../../guest_exec.elisa"
+
+@link_name(ElisaGuestExec_EmitCusaArtifactKV)
+extern c_GuestExec_EmitCusaArtifactKV(key: static u8&?, value: u64) -> void
 
 type s32 = i32
 
@@ -128,6 +132,10 @@ global mutable g_touch_count: array[u8, ORBIS_PAD_MAX_HANDLES] = zeroed
 global mutable g_secondary_touch_count: array[u8, ORBIS_PAD_MAX_HANDLES] = zeroed
 global mutable g_previous_touch_num: array[u8, ORBIS_PAD_MAX_HANDLES] = zeroed
 global mutable g_was_secondary_touch_reset: array[bool, ORBIS_PAD_MAX_HANDLES] = zeroed
+
+def pad_emit_u64(key: static u8&, value: u64) -> void:
+    if GuestExec_IsEnabled():
+        c_GuestExec_EmitCusaArtifactKV(key, value)
 
 def pad_ensure_controllers() -> mutable InputGameControllers&:
     if not g_pad_controllers_ready:
@@ -286,10 +294,12 @@ def pad_alloc_slot() -> int:
 def scePadInit() -> int:
     g_initialized <- true
     _ = pad_ensure_controllers()
+    pad_emit_u64("pad_initialized", 1u64)
     return ORBIS_OK
 
 def scePadOpen(userId: s32, type: s32, index: s32, pParam: void&?) -> int:
     _ = pParam
+    pad_emit_u64("pad_open_attempted", 1u64)
     if not g_initialized:
         return ORBIS_PAD_ERROR_NOT_INITIALIZED
     if userId < 0:
@@ -323,6 +333,7 @@ def scePadOpen(userId: s32, type: s32, index: s32, pParam: void&?) -> int:
     g_handle_vibration_large[slot] <- 0u8
     _ = scePadResetLightBar(handle)
     _ = scePadResetOrientation(handle)
+    pad_emit_u64("pad_opened", 1u64)
     return handle
 
 def scePadOpenExt(userId: s32, type: s32, index: s32, pParam: void&?) -> int:
@@ -347,6 +358,7 @@ def scePadClose(handle: s32) -> int:
     g_handle_colour[slot] <- 0u32
     g_handle_vibration_small[slot] <- 0u8
     g_handle_vibration_large[slot] <- 0u8
+    pad_emit_u64("pad_closed", 1u64)
     return ORBIS_OK
 
 def scePadGetControllerInformation(handle: s32, pInfo: mutable OrbisPadControllerInformation&?) -> int:
@@ -390,6 +402,7 @@ def scePadGetExtControllerInformation(handle: s32, pInfo: mutable OrbisPadExtend
     return ORBIS_OK
 
 def scePadRead(handle: s32, pData: mutable OrbisPadData&?, num: s32) -> int:
+    pad_emit_u64("pad_read_attempted", 1u64)
     slot: int = pad_find_handle(handle)
     if slot == -1:
         return ORBIS_PAD_ERROR_INVALID_HANDLE
@@ -400,6 +413,8 @@ def scePadRead(handle: s32, pData: mutable OrbisPadData&?, num: s32) -> int:
         pData[0] <- zeroed
         pData[0].orientation_w <- 1.0f32
         pData[0].connected <- false
+        pad_emit_u64("pad_no_controller", 1u64)
+        pad_emit_u64("pad_read_rc", 1u64)
         return 1
     Input_GameControllerUpdateAxisSmoothing(ctrl)
     Input_GameControllerGyro(ctrl)
@@ -424,15 +439,22 @@ def scePadRead(handle: s32, pData: mutable OrbisPadData&?, num: s32) -> int:
             connected_count.ref[mutable int&]
         )
         pad_fill_state(handle, slot, one.ref[mutable InputState&], connected, connected_count, pData[0].ref[mutable OrbisPadData&])
+        if not connected or connected_count <= 0:
+            pad_emit_u64("pad_no_controller", 1u64)
+        pad_emit_u64("pad_read_rc", 1u64)
         return 1
 
     i: mutable int = 0
     while i < ret_num and i < num:
         pad_fill_state(handle, slot, states[i.usize()].ref[mutable InputState&], connected, connected_count, pData[i.usize()].ref[mutable OrbisPadData&])
         i <- i + 1
+    if not connected or connected_count <= 0:
+        pad_emit_u64("pad_no_controller", 1u64)
+    pad_emit_u64("pad_read_rc", i.u64())
     return i
 
 def scePadReadState(handle: s32, pData: mutable OrbisPadData&?) -> int:
+    pad_emit_u64("pad_read_attempted", 1u64)
     slot: int = pad_find_handle(handle)
     if slot == -1:
         return ORBIS_PAD_ERROR_INVALID_HANDLE
@@ -443,6 +465,8 @@ def scePadReadState(handle: s32, pData: mutable OrbisPadData&?) -> int:
         pData[0] <- zeroed
         pData[0].orientation_w <- 1.0f32
         pData[0].connected <- false
+        pad_emit_u64("pad_no_controller", 1u64)
+        pad_emit_u64("pad_read_rc", 1u64)
         return ORBIS_OK
     Input_GameControllerUpdateAxisSmoothing(ctrl)
     Input_GameControllerGyro(ctrl)
@@ -457,6 +481,9 @@ def scePadReadState(handle: s32, pData: mutable OrbisPadData&?) -> int:
         connected_count.ref[mutable int&]
     )
     pad_fill_state(handle, slot, state.ref[mutable InputState&], connected, connected_count, pData[0].ref[mutable OrbisPadData&])
+    if not connected or connected_count <= 0:
+        pad_emit_u64("pad_no_controller", 1u64)
+    pad_emit_u64("pad_read_rc", 1u64)
     return ORBIS_OK
 
 def scePadGetInfo(data: mutable OrbisPadInfo&?) -> int:
@@ -897,3 +924,6 @@ def RegisterLib(sym: void&?) -> void:
     LIB_FUNCTION("UeUUvNOgXKU", "libScePad", 1, "libScePad", Func_51E514BCD3A05CA5)
     LIB_FUNCTION("ickjfjk9okM", "libScePad", 1, "libScePad", Func_89C9237E393DA243)
     LIB_FUNCTION("7xA+hFtvBCA", "libScePad", 1, "libScePad", Func_EF103E845B6F0420)
+
+def Pad_RegisterLib(sym: void&?) -> void:
+    RegisterLib(sym)

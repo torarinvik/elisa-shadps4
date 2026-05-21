@@ -6,6 +6,10 @@ include "./audioin_error.elisa"
 include "./audio_ffi.elisa"
 include "./audioin_nids.elisa"
 include "./sdl_audio_in.elisa"
+include "../../guest_exec.elisa"
+
+@link_name(ElisaGuestExec_EmitCusaArtifactKV)
+extern c_GuestExec_EmitCusaArtifactKV(key: static u8&?, value: u64) -> void
 
 const AUDIOIN_HANDLE_TAG: s32 = 0x30000000
 
@@ -14,6 +18,10 @@ global mutable audioin_silent_mask: bool[ORBIS_AUDIO_IN_NUM_PORTS] = [true, true
 global mutable audioin_backend_open: bool[ORBIS_AUDIO_IN_NUM_PORTS] = [false, false, false, false, false, false, false]
 global mutable audioin_samples: u32[ORBIS_AUDIO_IN_NUM_PORTS] = [0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32]
 global mutable audioin_frame_bytes: u32[ORBIS_AUDIO_IN_NUM_PORTS] = [0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32]
+
+def audioin_emit_u64(key: static u8&, value: u64) -> void:
+    if GuestExec_IsEnabled():
+        c_GuestExec_EmitCusaArtifactKV(key, value)
 
 
 def audioin_get_port_id(handle: s32) -> s32:
@@ -50,6 +58,7 @@ def sceAudioInOpen(userId: s32, type: u32, index: u32, len: u32, freq: u32, para
     _ = userId
     _ = type
     _ = index
+    audioin_emit_u64("audio_input_attempted", 1u64)
     if len == 0u32 or len > 2048u32:
         return ORBIS_AUDIO_IN_ERROR_INVALID_SIZE
     if param != 0u32 and param != 1u32:
@@ -73,6 +82,7 @@ def sceAudioInOpen(userId: s32, type: u32, index: u32, len: u32, freq: u32, para
     audioin_samples[pid] <- len
     audioin_frame_bytes[pid] <- frame_bytes
     audioin_silent_mask[pid] <- false
+    audioin_emit_u64("audio_input_opened", 1u64)
     return AUDIOIN_HANDLE_TAG | (((type as i32) & 0xff) << 16) | pid
 
 def sceAudioInHqOpen(userId: s32, type: u32, index: u32, len: u32, freq: u32, param: u32) -> s32:
@@ -88,9 +98,11 @@ def sceAudioInClose(handle: s32) -> s32:
     audioin_backend_open[pid] <- false
     AudioFFI_AudioInSDLClose(pid)
     audioin_silent_mask[pid] <- true
+    audioin_emit_u64("audio_input_closed", 1u64)
     return ORBIS_OK
 
 def sceAudioInInput(handle: s32, dest: mutable u8&?) -> s32:
+    audioin_emit_u64("audio_input_read_attempted", 1u64)
     pid: s32 = audioin_get_port_id(handle)
     if pid < 0:
         return ORBIS_AUDIO_IN_ERROR_INVALID_HANDLE
@@ -103,7 +115,9 @@ def sceAudioInInput(handle: s32, dest: mutable u8&?) -> s32:
     want_bytes: u32 = audioin_samples[pid] * audioin_frame_bytes[pid]
     got_bytes: u32 = AudioFFI_AudioInSDLRead(pid, dest as mutable void&, want_bytes)
     if got_bytes == 0u32:
+        audioin_emit_u64("audio_input_read_rc", 0u64)
         return 0
+    audioin_emit_u64("audio_input_read_rc", got_bytes.u64())
     return (got_bytes / audioin_frame_bytes[pid]) as i32
 
 def sceAudioInGetSilentState(handle: s32) -> s32:
@@ -113,7 +127,9 @@ def sceAudioInGetSilentState(handle: s32) -> s32:
     if not audioin_open_mask[pid]:
         return ORBIS_AUDIO_IN_ERROR_NOT_OPENED
     if not audioin_backend_open[pid]:
+        audioin_emit_u64("audio_input_silent_state", 0u64)
         return ORBIS_AUDIO_IN_SILENT_STATE_DEVICE_NONE
+    audioin_emit_u64("audio_input_silent_state", 1u64)
     return 0
 
 # Stubs
