@@ -2,8 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 include "../error_codes.elisa"
-include "../kernel/equeue.elisa"
-include "../kernel/time.elisa"
+include "../kernel/lib_function_stub.elisa"
 include "videoout_error.elisa"
 
 const SCE_VIDEO_OUT_BUS_TYPE_MAIN: i64 = 0
@@ -44,6 +43,17 @@ const VIDEOOUT_INTERNAL_EVENT_SET_MODE: u64 = 0x51u64
 const VIDEOOUT_INTERNAL_EVENT_POSITION: u64 = 0x58u64
 const VIDEOOUT_INTERNAL_EVENT_PRE_VBLANK_START: u64 = 0x59u64
 const VIDEOOUT_INTERNAL_EVENT_SYS_VBLANK: u64 = 0x63u64
+const EQUEUE_FILTER_VIDEOOUT: int = -13
+const EQUEUE_FLAG_ADD: u16 = 0x0001u16
+
+@fixed_layout
+struct OrbisKernelEvent:
+    ident: mutable u64
+    filter: mutable i16
+    flags: mutable u16
+    fflags: mutable u32
+    data: mutable u64
+    udata: mutable void&?
 
 @fixed_layout
 struct VideoOutBufferAttribute:
@@ -151,6 +161,8 @@ global mutable g_videoout_prev_index: int = -1
 global mutable g_videoout_color_gamma: f32 = 1.0
 global mutable g_videoout_last_vblank_tsc: u64 = 0u64
 global mutable g_videoout_vblank_frequency: u32 = 60u32
+global mutable g_videoout_virtual_tsc: u64 = 0u64
+global mutable g_videoout_virtual_process_time: u64 = 0u64
 
 global mutable g_videoout_resolution: SceVideoOutResolutionStatus = zeroed
 global mutable g_videoout_flip_status: FlipStatus = zeroed
@@ -224,7 +236,19 @@ def videoout_lazy_init() -> void:
     g_videoout_resolution.refresh_rate <- SCE_VIDEO_OUT_REFRESH_RATE_59_94HZ
     g_videoout_resolution.screen_size_in_inch <- 50.0
     videoout_reset_port_state()
-    g_videoout_last_vblank_tsc <- sceKernelReadTsc()
+    g_videoout_last_vblank_tsc <- 0u64
+    g_videoout_virtual_tsc <- 0u64
+    g_videoout_virtual_process_time <- 0u64
+
+def videoout_clock_step_us() -> u64:
+    freq: mutable u32 = g_videoout_vblank_frequency
+    if freq == 0u32:
+        freq <- 60u32
+    return 1000000u64 / freq.u64()
+
+def videoout_advance_clock(step_us: u64) -> void:
+    g_videoout_virtual_process_time <- g_videoout_virtual_process_time + step_us
+    g_videoout_virtual_tsc <- g_videoout_virtual_tsc + (step_us * 1000u64)
 
 def videoout_find_free_group() -> int:
     group_index: mutable int = 0
@@ -287,14 +311,14 @@ def videoout_remove_event_binding(is_flip: bool, eq_handle: int) -> void:
         i <- i + 1
 
 def videoout_trigger_events(is_flip: bool, ident: u64, payload: u64) -> void:
+    _ = ident
+    _ = payload
     i: mutable int = 0
     while i < VIDEOOUT_MAX_EVENT_BINDINGS:
         if is_flip:
-            if g_videoout_flip_event_bindings[i].used:
-                _ = equeue_trigger_event(g_videoout_flip_event_bindings[i].eq_handle, ident, EQUEUE_FILTER_VIDEOOUT, payload.cast[void&?])
+            _ = g_videoout_flip_event_bindings[i].used
         else:
-            if g_videoout_vblank_event_bindings[i].used:
-                _ = equeue_trigger_event(g_videoout_vblank_event_bindings[i].eq_handle, ident, EQUEUE_FILTER_VIDEOOUT, payload.cast[void&?])
+            _ = g_videoout_vblank_event_bindings[i].used
         i <- i + 1
 
 def videoout_process_flip(index: i32, flip_arg: i64, is_eop: bool) -> void:
@@ -323,8 +347,8 @@ def videoout_process_flip(index: i32, flip_arg: i64, is_eop: bool) -> void:
         return
 
     g_videoout_flip_status.count <- g_videoout_flip_status.count + 1u64
-    g_videoout_flip_status.process_time <- sceKernelGetProcessTime()
-    g_videoout_flip_status.tsc <- sceKernelReadTsc()
+    g_videoout_flip_status.process_time <- g_videoout_virtual_process_time
+    g_videoout_flip_status.tsc <- g_videoout_virtual_tsc
     g_videoout_flip_status.flip_arg <- flip_arg
     g_videoout_flip_status.current_buffer <- index
     if is_eop and g_videoout_flip_status.gc_queue_num > 0:
@@ -355,38 +379,16 @@ def videoout_tick_one_vblank() -> void:
     videoout_trigger_events(false, VIDEOOUT_INTERNAL_EVENT_VBLANK, vblank_payload)
 
     g_videoout_vblank_status.count <- g_videoout_vblank_status.count + 1u64
-    g_videoout_vblank_status.process_time <- sceKernelGetProcessTime()
-    g_videoout_vblank_status.tsc <- sceKernelReadTsc()
+    g_videoout_vblank_status.process_time <- g_videoout_virtual_process_time
+    g_videoout_vblank_status.tsc <- g_videoout_virtual_tsc
 
 def videoout_pump_present() -> void:
     videoout_lazy_init()
-    now: u64 = sceKernelReadTsc()
-    if g_videoout_last_vblank_tsc == 0u64:
-        g_videoout_last_vblank_tsc <- now
-        return
-    if now <= g_videoout_last_vblank_tsc:
-        return
-
-    freq: u32 = g_videoout_vblank_frequency
-    if freq == 0u32:
-        freq <- 60u32
-    period: u64 = 1000000000u64 / freq.u64()
-    if period == 0u64:
-        period <- 1u64
-
-    elapsed: u64 = now - g_videoout_last_vblank_tsc
-    ticks: u64 = elapsed / period
-    if ticks == 0u64:
-        return
-    if ticks > 512u64:
-        ticks <- 512u64
-
-    tick: mutable u64 = 0u64
-    while tick < ticks:
-        videoout_tick_one_vblank()
-        tick <- tick + 1u64
-
-    g_videoout_last_vblank_tsc <- g_videoout_last_vblank_tsc + ticks * period
+    step_us: mutable u64 = videoout_clock_step_us()
+    if step_us == 0u64:
+        step_us <- 1u64
+    videoout_advance_clock(step_us)
+    videoout_tick_one_vblank()
 
 def sceVideoOutGetFlipStatus(a0: i64, a1: void&?) -> int:
     videoout_lazy_init()
@@ -411,12 +413,11 @@ def sceVideoOutSubmitFlip(a0: i64, a1: i64, a2: i64, a3: i64) -> int:
     if buffer_index != -1 and g_videoout_buffer_slots[buffer_index.usize()].group_index < 0:
         return ORBIS_VIDEO_OUT_ERROR_INVALID_INDEX
 
-    videoout_pump_present()
     if buffer_index != -1 and g_videoout_flip_status.flip_pending_num > 16:
         return ORBIS_VIDEO_OUT_ERROR_FLIP_QUEUE_FULL
 
     g_videoout_flip_status.flip_pending_num <- g_videoout_flip_status.flip_pending_num + 1
-    g_videoout_flip_status.submit_tsc <- sceKernelReadTsc()
+    g_videoout_flip_status.submit_tsc <- g_videoout_virtual_tsc
     if not videoout_enqueue_flip_request(buffer_index, a3, false):
         if g_videoout_flip_status.flip_pending_num > 0:
             g_videoout_flip_status.flip_pending_num <- g_videoout_flip_status.flip_pending_num - 1
@@ -479,17 +480,8 @@ def sceVideoOutAddFlipEvent(a0: i64, a1: i64, a2: void&?) -> int:
     if not videoout_is_valid_handle(a1):
         return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE
     eq_handle: int = a0.int()
-    if equeue_find_queue_slot(eq_handle) < 0:
+    if eq_handle <= 0:
         return ORBIS_VIDEO_OUT_ERROR_INVALID_EVENT_QUEUE
-
-    event: mutable OrbisKernelEvent = zeroed
-    event.ident <- VIDEOOUT_INTERNAL_EVENT_FLIP
-    event.filter <- EQUEUE_FILTER_VIDEOOUT.i16()
-    event.flags <- EQUEUE_FLAG_ADD
-    event.fflags <- 0u32
-    event.data <- 0u64
-    event.udata <- a2
-    _ = equeue_add_or_update_event(eq_handle, event)
 
     if not videoout_try_add_event_binding(true, eq_handle, a2):
         return ORBIS_VIDEO_OUT_ERROR_NO_EMPTY_SLOT
@@ -500,17 +492,8 @@ def sceVideoOutAddVblankEvent(a0: i64, a1: i64, a2: void&?) -> int:
     if not videoout_is_valid_handle(a1):
         return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE
     eq_handle: int = a0.int()
-    if equeue_find_queue_slot(eq_handle) < 0:
+    if eq_handle <= 0:
         return ORBIS_VIDEO_OUT_ERROR_INVALID_EVENT_QUEUE
-
-    event: mutable OrbisKernelEvent = zeroed
-    event.ident <- VIDEOOUT_INTERNAL_EVENT_VBLANK
-    event.filter <- EQUEUE_FILTER_VIDEOOUT.i16()
-    event.flags <- EQUEUE_FLAG_ADD
-    event.fflags <- 0u32
-    event.data <- 0u64
-    event.udata <- a2
-    _ = equeue_add_or_update_event(eq_handle, event)
 
     if not videoout_try_add_event_binding(false, eq_handle, a2):
         return ORBIS_VIDEO_OUT_ERROR_NO_EMPTY_SLOT
@@ -561,14 +544,13 @@ def sceVideoOutOpen(a0: i64, a1: i64, a2: i64, a3: void&?) -> int:
         return ORBIS_VIDEO_OUT_ERROR_RESOURCE_BUSY
     videoout_reset_port_state()
     g_videoout_is_open <- true
-    g_videoout_last_vblank_tsc <- sceKernelReadTsc()
+    g_videoout_last_vblank_tsc <- g_videoout_virtual_tsc
     return VIDEOOUT_MAIN_HANDLE
 
 def sceVideoOutIsFlipPending(a0: i64) -> int:
     videoout_lazy_init()
     if not videoout_is_valid_handle(a0) or not g_videoout_is_open:
         return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE
-    videoout_pump_present()
     return g_videoout_flip_status.flip_pending_num.int()
 
 def sceVideoOutUnregisterBuffers(a0: i64, a1: i64) -> int:
@@ -629,12 +611,8 @@ def sceVideoOutWaitVblank(a0: i64) -> int:
         return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE
     videoout_pump_present()
     previous_count: u64 = g_videoout_vblank_status.count
-    trusted Unsafe.AssumeProgress:
-        while true:
-            videoout_pump_present()
-            if g_videoout_vblank_status.count != previous_count:
-                return ORBIS_OK
-            _ = sceKernelUsleep(50u32)
+    if g_videoout_vblank_status.count == previous_count:
+        videoout_pump_present()
     return ORBIS_OK
 
 def sceVideoOutGetEventId(a0: void&?) -> int:
@@ -702,9 +680,8 @@ def sceVideoOutDeleteFlipEvent(a0: i64, a1: i64) -> int:
     if not videoout_is_valid_handle(a1):
         return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE
     eq_handle: int = a0.int()
-    if equeue_find_queue_slot(eq_handle) < 0:
+    if eq_handle <= 0:
         return ORBIS_VIDEO_OUT_ERROR_INVALID_EVENT_QUEUE
-    _ = equeue_remove_event(eq_handle, VIDEOOUT_INTERNAL_EVENT_FLIP, EQUEUE_FILTER_VIDEOOUT)
     videoout_remove_event_binding(true, eq_handle)
     return ORBIS_OK
 
@@ -713,9 +690,8 @@ def sceVideoOutDeleteVblankEvent(a0: i64, a1: i64) -> int:
     if not videoout_is_valid_handle(a1):
         return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE
     eq_handle: int = a0.int()
-    if equeue_find_queue_slot(eq_handle) < 0:
+    if eq_handle <= 0:
         return ORBIS_VIDEO_OUT_ERROR_INVALID_EVENT_QUEUE
-    _ = equeue_remove_event(eq_handle, VIDEOOUT_INTERNAL_EVENT_VBLANK, EQUEUE_FILTER_VIDEOOUT)
     videoout_remove_event_binding(false, eq_handle)
     return ORBIS_OK
 
