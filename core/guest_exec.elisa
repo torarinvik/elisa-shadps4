@@ -69,6 +69,7 @@ global mutable guest_exec_run_count: usize = 0
 global mutable guest_exec_last_main_entry_addr: VAddr = 0.uintptr()
 global mutable guest_exec_main_run_count: usize = 0
 global mutable guest_exec_last_game_execution_status: s32 = 0
+global mutable guest_exec_first_boundary_reached: bool = false
 
 const GUEST_EXEC_BOUNDARY_NOT_REACHED: s32 = 0
 const GUEST_EXEC_BOUNDARY_FIRST_HLE_IMPORT: s32 = 1
@@ -91,6 +92,7 @@ def GuestExec_ResetState() -> void:
     guest_exec_last_main_entry_addr <- 0.uintptr()
     guest_exec_main_run_count <- 0
     guest_exec_last_game_execution_status <- 0
+    guest_exec_first_boundary_reached <- false
     c_GuestExec_ResetCrashState()
 
 def GuestExec_Enable(enabled: bool) -> void:
@@ -163,6 +165,7 @@ def GuestExec_RunMainEntryGuarded(entry_addr: VAddr, argc: int, argv: void&?, ti
     if entry_addr == 0.uintptr():
         guest_exec_last_game_execution_status <- -1
         return -1
+    GuestExec_RecordHandoff(entry_addr, argc, true)
     if not GuestExec_IsSupported():
         guest_exec_last_game_execution_status <- -2
         return -2
@@ -194,6 +197,14 @@ def GuestExec_LastFaultAddress() -> VAddr:
 def GuestExec_ResetCrashState() -> void:
     c_GuestExec_ResetCrashState()
 
+def GuestExec_RecordFirstBoundary() -> void:
+    if guest_exec_main_run_count == 0:
+        return
+    guest_exec_first_boundary_reached <- true
+
+def GuestExec_HasReachedFirstBoundary() -> bool:
+    return guest_exec_first_boundary_reached
+
 def GuestExec_ClassifyGameExecutionStage() -> s32:
     if guest_exec_main_run_count == 0:
         guest_exec_last_game_execution_status <- 0
@@ -214,6 +225,8 @@ def GuestExec_ClassifyFirstBoundary() -> s32:
         return GUEST_EXEC_BOUNDARY_UNSUPPORTED_HOST
     if guest_exec_probe_mode:
         return GUEST_EXEC_BOUNDARY_ARMED_PROBE_ONLY
+    if guest_exec_first_boundary_reached:
+        return GUEST_EXEC_BOUNDARY_FIRST_HLE_IMPORT
     status: mutable s32 = guest_exec_last_game_execution_status
     if status == 0:
         status <- GuestExec_LastStatus()

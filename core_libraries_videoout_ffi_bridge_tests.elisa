@@ -60,3 +60,84 @@ def videoout_ffi_bridge_remaining_exports() -> void:
 
         assert sceVideoOutConfigureOutputMode_(-1, 0, null, null, 0, 0) == ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE
         assert sceVideoOutSubmitChangeBufferAttribute(-1, 0, attr_buf[0].ref[mutable u8&].cast[void&?]) == ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE
+
+@test
+def videoout_native_lifecycle_vblank_and_labels() -> void:
+    can Abort.Panic:
+        _ = sceVideoOutClose(1)
+
+        handle: int = sceVideoOutOpen(0, 0, 0, null)
+        assert handle == 1
+        assert sceVideoOutSetFlipRate(handle.i64(), 0) == ORBIS_OK
+
+        attr: mutable VideoOutBufferAttribute = zeroed
+        sceVideoOutSetBufferAttribute(attr.ref[mutable VideoOutBufferAttribute&].cast[void&?], 0x80000000, 0, 0, 64, 64, 64)
+
+        frame_buffer: mutable array[u8, 256] = zeroed
+        addresses: mutable array[u64, 1] = zeroed
+        addresses[0] <- frame_buffer[0].ref[mutable u8&].cast[u64]
+
+        group_index: int = sceVideoOutRegisterBuffers(
+            handle.i64(),
+            0,
+            addresses[0].ref[mutable u64&].cast[void&?],
+            1,
+            attr.ref[mutable VideoOutBufferAttribute&].cast[void&?]
+        )
+        assert group_index == 0
+
+        assert sceVideoOutSubmitFlip(handle.i64(), 0, 1, 0x1234) == ORBIS_OK
+        assert sceVideoOutIsFlipPending(handle.i64()) >= 1
+        assert sceVideoOutWaitVblank(handle.i64()) == ORBIS_OK
+        assert sceVideoOutIsFlipPending(handle.i64()) == 0
+
+        flip_status: mutable FlipStatus = zeroed
+        assert sceVideoOutGetFlipStatus(handle.i64(), flip_status.ref[mutable FlipStatus&].cast[void&?]) == ORBIS_OK
+        assert flip_status.count >= 1u64
+        assert flip_status.current_buffer == 0
+
+        vblank_status: mutable SceVideoOutVblankStatus = zeroed
+        assert sceVideoOutGetVblankStatus(handle.i64(), vblank_status.ref[mutable SceVideoOutVblankStatus&].cast[void&?]) == ORBIS_OK
+        assert vblank_status.count >= 1u64
+
+        label_addr: mutable i64 = 0
+        assert sceVideoOutGetBufferLabelAddress(handle.i64(), label_addr.ref[mutable i64&].cast[void&?]) == 16
+        assert label_addr != 0
+
+        changed_attr: mutable VideoOutBufferAttribute = zeroed
+        sceVideoOutSetBufferAttribute(changed_attr.ref[mutable VideoOutBufferAttribute&].cast[void&?], 0x80000000, 0, 0, 64, 64, 128)
+        assert sceVideoOutSubmitChangeBufferAttribute(handle.i64(), group_index.i64(), changed_attr.ref[mutable VideoOutBufferAttribute&].cast[void&?]) == ORBIS_OK
+
+        assert sceVideoOutUnregisterBuffers(handle.i64(), group_index.i64()) == ORBIS_OK
+        assert sceVideoOutClose(handle.i64()) == ORBIS_OK
+
+@test
+def videoout_native_queue_full_contract() -> void:
+    can Abort.Panic:
+        _ = sceVideoOutClose(1)
+
+        handle: int = sceVideoOutOpen(0, 0, 0, null)
+        assert handle == 1
+
+        attr: mutable VideoOutBufferAttribute = zeroed
+        sceVideoOutSetBufferAttribute(attr.ref[mutable VideoOutBufferAttribute&].cast[void&?], 0x80000000, 0, 0, 64, 64, 64)
+
+        frame_buffer: mutable array[u8, 256] = zeroed
+        addresses: mutable array[u64, 1] = zeroed
+        addresses[0] <- frame_buffer[0].ref[mutable u8&].cast[u64]
+
+        assert sceVideoOutRegisterBuffers(
+            handle.i64(),
+            0,
+            addresses[0].ref[mutable u64&].cast[void&?],
+            1,
+            attr.ref[mutable VideoOutBufferAttribute&].cast[void&?]
+        ) == 0
+
+        i: mutable int = 0
+        while i < 17:
+            assert sceVideoOutSubmitFlip(handle.i64(), 0, 1, i.i64()) == ORBIS_OK
+            i <- i + 1
+        assert sceVideoOutSubmitFlip(handle.i64(), 0, 1, 99) == ORBIS_VIDEO_OUT_ERROR_FLIP_QUEUE_FULL
+
+        assert sceVideoOutClose(handle.i64()) == ORBIS_OK

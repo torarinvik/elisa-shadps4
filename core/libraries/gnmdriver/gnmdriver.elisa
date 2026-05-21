@@ -43,6 +43,12 @@ struct GnmComputeQueue:
     read_ptr_addr: mutable u32&?
     next_offs_dw: mutable u32
 
+type GnmRuntimeSubmitCallback = func(u32, u32, u32&?, u32&?, u32&?, u32&?) -> int
+type GnmRuntimeSubmitAndFlipCallback = func(u32, u32, u32&?, u32&?, u32&?, u32&?, u32, u32, u32, i64) -> int
+type GnmRuntimeSubmitDoneCallback = func() -> int
+
+const GNM_RUNTIME_BRIDGE_UNBOUND: int = 0x7fff0001
+
 global mutable g_submissions_lock: u32 = 0
 global mutable g_frames_submitted: u64 = 0
 global mutable g_send_init_packet: bool = true
@@ -59,6 +65,23 @@ global mutable g_liverpool_submit_gfx_count: u64 = 0u64
 global mutable g_liverpool_submit_done_count: u64 = 0u64
 global mutable g_rasterizer_flush_count: u64 = 0u64
 global mutable g_rasterizer_on_submit_count: u64 = 0u64
+global mutable g_runtime_scheduler_submit_count: u64 = 0u64
+global mutable g_runtime_scheduler_last_tick: u64 = 0u64
+global mutable g_runtime_present_prepare_count: u64 = 0u64
+global mutable g_runtime_present_count: u64 = 0u64
+global mutable g_runtime_present_success_count: u64 = 0u64
+global mutable g_runtime_last_present_ok: bool = false
+global mutable g_runtime_last_flip_vo_handle: u32 = 0u32
+global mutable g_runtime_last_flip_buf_idx: u32 = 0u32
+global mutable g_runtime_last_flip_mode: u32 = 0u32
+global mutable g_runtime_last_flip_arg: i64 = 0
+global mutable g_runtime_submit_bridge_count: u64 = 0u64
+global mutable g_runtime_submit_flip_bridge_count: u64 = 0u64
+global mutable g_runtime_submit_done_bridge_count: u64 = 0u64
+global mutable g_runtime_bridge_last_result: int = ORBIS_OK
+global mutable g_runtime_submit_bridge_cb: GnmRuntimeSubmitCallback? = null
+global mutable g_runtime_submit_flip_bridge_cb: GnmRuntimeSubmitAndFlipCallback? = null
+global mutable g_runtime_submit_done_bridge_cb: GnmRuntimeSubmitDoneCallback? = null
 
 def gnm_c_string_length(value: u8&) -> u32:
     len: mutable u32 = 0
@@ -140,6 +163,20 @@ def gnm_reset_graphics_bootstrap_state() -> void:
     g_liverpool_submit_done_count <- 0u64
     g_rasterizer_flush_count <- 0u64
     g_rasterizer_on_submit_count <- 0u64
+    g_runtime_scheduler_submit_count <- 0u64
+    g_runtime_scheduler_last_tick <- 0u64
+    g_runtime_present_prepare_count <- 0u64
+    g_runtime_present_count <- 0u64
+    g_runtime_present_success_count <- 0u64
+    g_runtime_last_present_ok <- false
+    g_runtime_last_flip_vo_handle <- 0u32
+    g_runtime_last_flip_buf_idx <- 0u32
+    g_runtime_last_flip_mode <- 0u32
+    g_runtime_last_flip_arg <- 0
+    g_runtime_submit_bridge_count <- 0u64
+    g_runtime_submit_flip_bridge_count <- 0u64
+    g_runtime_submit_done_bridge_count <- 0u64
+    g_runtime_bridge_last_result <- ORBIS_OK
 
 def gnm_record_liverpool_submit_gfx(dcb_addr: u64, dcb_size: u32, ccb_addr: u64, ccb_size: u32) -> void:
     g_liverpool_submit_gfx_count <- g_liverpool_submit_gfx_count + 1u64
@@ -151,6 +188,88 @@ def gnm_record_liverpool_submit_gfx(dcb_addr: u64, dcb_size: u32, ccb_addr: u64,
 def gnm_record_rasterizer_submit() -> void:
     g_rasterizer_on_submit_count <- g_rasterizer_on_submit_count + 1u64
     g_rasterizer_flush_count <- g_rasterizer_flush_count + 1u64
+
+def GnmDriver_BindRuntimeFramePathCallbacks(submit_cb: GnmRuntimeSubmitCallback?,
+                                            submit_flip_cb: GnmRuntimeSubmitAndFlipCallback?,
+                                            submit_done_cb: GnmRuntimeSubmitDoneCallback?) -> void:
+    g_runtime_submit_bridge_cb <- submit_cb
+    g_runtime_submit_flip_bridge_cb <- submit_flip_cb
+    g_runtime_submit_done_bridge_cb <- submit_done_cb
+
+def GnmDriver_ClearRuntimeFramePathCallbacks() -> void:
+    g_runtime_submit_bridge_cb <- null
+    g_runtime_submit_flip_bridge_cb <- null
+    g_runtime_submit_done_bridge_cb <- null
+
+def gnm_try_runtime_submit_bridge(workload: u32, count: u32, dcb_gpu_addrs: u32&?, dcb_sizes_in_bytes: u32&?,
+                                  ccb_gpu_addrs: u32&?, ccb_sizes_in_bytes: u32&?) -> int:
+    if g_runtime_submit_bridge_cb == null:
+        return GNM_RUNTIME_BRIDGE_UNBOUND
+    submit_cb: GnmRuntimeSubmitCallback = g_runtime_submit_bridge_cb as GnmRuntimeSubmitCallback
+    rc: int = submit_cb(workload, count, dcb_gpu_addrs, dcb_sizes_in_bytes, ccb_gpu_addrs, ccb_sizes_in_bytes)
+    g_runtime_submit_bridge_count <- g_runtime_submit_bridge_count + 1u64
+    g_runtime_bridge_last_result <- rc
+    return rc
+
+def gnm_try_runtime_submit_flip_bridge(workload: u32, count: u32, dcb_gpu_addrs: u32&?, dcb_sizes_in_bytes: u32&?,
+                                       ccb_gpu_addrs: u32&?, ccb_sizes_in_bytes: u32&?,
+                                       vo_handle: u32, buf_idx: u32, flip_mode: u32, flip_arg: i64) -> int:
+    if g_runtime_submit_flip_bridge_cb == null:
+        return GNM_RUNTIME_BRIDGE_UNBOUND
+    submit_flip_cb: GnmRuntimeSubmitAndFlipCallback = g_runtime_submit_flip_bridge_cb as GnmRuntimeSubmitAndFlipCallback
+    rc: int = submit_flip_cb(workload, count, dcb_gpu_addrs, dcb_sizes_in_bytes, ccb_gpu_addrs, ccb_sizes_in_bytes,
+                             vo_handle, buf_idx, flip_mode, flip_arg)
+    g_runtime_submit_flip_bridge_count <- g_runtime_submit_flip_bridge_count + 1u64
+    g_runtime_bridge_last_result <- rc
+    return rc
+
+def gnm_try_runtime_submit_done_bridge() -> int:
+    if g_runtime_submit_done_bridge_cb == null:
+        return GNM_RUNTIME_BRIDGE_UNBOUND
+    submit_done_cb: GnmRuntimeSubmitDoneCallback = g_runtime_submit_done_bridge_cb as GnmRuntimeSubmitDoneCallback
+    rc: int = submit_done_cb()
+    g_runtime_submit_done_bridge_count <- g_runtime_submit_done_bridge_count + 1u64
+    g_runtime_bridge_last_result <- rc
+    return rc
+
+def gnm_drive_runtime_submit(dcb_addr: u64, dcb_size: u32, ccb_addr: u64, ccb_size: u32) -> void:
+    g_runtime_scheduler_submit_count <- g_runtime_scheduler_submit_count + 1u64
+    g_runtime_scheduler_last_tick <- g_runtime_scheduler_last_tick + 1u64
+    _ = dcb_addr
+    _ = dcb_size
+    _ = ccb_addr
+    _ = ccb_size
+
+def gnm_drive_runtime_present(vo_handle: u32, buf_idx: u32, flip_mode: u32, flip_arg: i64, cpu_address: u64) -> void:
+    g_runtime_present_prepare_count <- g_runtime_present_prepare_count + 1u64
+    g_runtime_present_count <- g_runtime_present_count + 1u64
+    g_runtime_present_success_count <- g_runtime_present_success_count + 1u64
+    g_runtime_last_present_ok <- true
+    g_runtime_last_flip_vo_handle <- vo_handle
+    g_runtime_last_flip_buf_idx <- buf_idx
+    g_runtime_last_flip_mode <- flip_mode
+    g_runtime_last_flip_arg <- flip_arg
+    _ = cpu_address
+
+def gnm_record_submit_batch(count: u32, dcb_gpu_addrs: u32&, dcb_sizes_in_bytes: u32&,
+                            ccb_gpu_addrs: u32&?, ccb_sizes_in_bytes: u32&?) -> void:
+    if g_send_init_packet:
+        g_graphics_init_packet_submit_count <- g_graphics_init_packet_submit_count + 1u64
+        gnm_record_liverpool_submit_gfx(0u64, 0u32, 0u64, 0u32)
+        g_send_init_packet <- false
+    i: mutable u32 = 0u32
+    while i < count:
+        ccb_addr: mutable u64 = 0u64
+        ccb_size: mutable u32 = 0u32
+        if ccb_gpu_addrs != null:
+            ccb_addr <- ccb_gpu_addrs[i].u64()
+        if ccb_sizes_in_bytes != null:
+            ccb_size <- ccb_sizes_in_bytes[i]
+        g_graphics_submit_count <- g_graphics_submit_count + 1u64
+        gnm_record_liverpool_submit_gfx(dcb_gpu_addrs[i].u64(), dcb_sizes_in_bytes[i], ccb_addr, ccb_size)
+        gnm_record_rasterizer_submit()
+        gnm_drive_runtime_submit(dcb_gpu_addrs[i].u64(), dcb_sizes_in_bytes[i], ccb_addr, ccb_size)
+        i <- i + 1u32
 
 def sceGnmAddEqEvent(eq: OrbisKernelEqueue, id: u64, udata: void&?) -> s32:
     if eq == 0:
@@ -1207,19 +1326,27 @@ def sceGnmSubmitAndFlipCommandBuffersForWorkload(workload: u32, count: u32, dcb_
     final_size_in_bytes: u32 = dcb_sizes_in_bytes[count - 1u32]
     if final_buffer == 0u32 or final_size_in_bytes == 0u32:
         return ORBIS_GNM_ERROR_SUBMISSION_FAILED_INVALID_ARGUMENT
-    _ = vo_handle
-    _ = buf_idx
-    _ = flip_mode
-    _ = flip_arg
-    return sceGnmSubmitCommandBuffersForWorkload(count, count, dcb_gpu_addrs, dcb_sizes_in_bytes,
-                                                ccb_gpu_addrs, ccb_sizes_in_bytes)
+    runtime_rc: int = gnm_try_runtime_submit_flip_bridge(workload, count, dcb_gpu_addrs, dcb_sizes_in_bytes,
+                                                         ccb_gpu_addrs, ccb_sizes_in_bytes,
+                                                         vo_handle, buf_idx, flip_mode, flip_arg)
+    if runtime_rc != GNM_RUNTIME_BRIDGE_UNBOUND:
+        if runtime_rc != ORBIS_OK:
+            return runtime_rc
+        gnm_record_submit_batch(count, dcb_gpu_addrs, dcb_sizes_in_bytes, ccb_gpu_addrs, ccb_sizes_in_bytes)
+        gnm_drive_runtime_present(vo_handle, buf_idx, flip_mode, flip_arg, final_buffer.u64())
+        return ORBIS_OK
+    submit_result: int = sceGnmSubmitCommandBuffersForWorkload(workload, count, dcb_gpu_addrs, dcb_sizes_in_bytes,
+                                                               ccb_gpu_addrs, ccb_sizes_in_bytes)
+    if submit_result != ORBIS_OK:
+        return submit_result
+    gnm_drive_runtime_present(vo_handle, buf_idx, flip_mode, flip_arg, final_buffer.u64())
+    return ORBIS_OK
 
 def sceGnmSubmitCommandBuffers(count: u32, dcb_gpu_addrs: u32&?, dcb_sizes_in_bytes: u32&?, ccb_gpu_addrs: u32&?, ccb_sizes_in_bytes: u32&?) -> s32:
     return sceGnmSubmitCommandBuffersForWorkload(count, count, dcb_gpu_addrs, dcb_sizes_in_bytes,
                                                 ccb_gpu_addrs, ccb_sizes_in_bytes)
 
 def sceGnmSubmitCommandBuffersForWorkload(workload: u32, count: u32, dcb_gpu_addrs: u32&?, dcb_sizes_in_bytes: u32&?, ccb_gpu_addrs: u32&?, ccb_sizes_in_bytes: u32&?) -> int:
-    _ = workload
     if dcb_gpu_addrs == null or dcb_sizes_in_bytes == null:
         return ORBIS_GNM_ERROR_SUBMISSION_FAILED_INVALID_ARGUMENT
     i: mutable u32 = 0u
@@ -1236,25 +1363,17 @@ def sceGnmSubmitCommandBuffersForWorkload(workload: u32, count: u32, dcb_gpu_add
         if dcb_gpu_addrs[i] == 0u32:
             return ORBIS_GNM_ERROR_SUBMISSION_FAILED_INVALID_ARGUMENT
         i <- i + 1u
-    if g_send_init_packet:
-        g_graphics_init_packet_submit_count <- g_graphics_init_packet_submit_count + 1u64
-        gnm_record_liverpool_submit_gfx(0u64, 0u32, 0u64, 0u32)
-        g_send_init_packet <- false
-    i <- 0u32
-    while i < count:
-        ccb_addr: mutable u64 = 0u64
-        ccb_size: mutable u32 = 0u32
-        if ccb_gpu_addrs != null:
-            ccb_addr <- ccb_gpu_addrs[i].u64()
-        if ccb_sizes_in_bytes != null:
-            ccb_size <- ccb_sizes_in_bytes[i]
-        g_graphics_submit_count <- g_graphics_submit_count + 1u64
-        gnm_record_liverpool_submit_gfx(dcb_gpu_addrs[i].u64(), dcb_sizes_in_bytes[i], ccb_addr, ccb_size)
-        gnm_record_rasterizer_submit()
-        i <- i + 1u32
+    runtime_rc: int = gnm_try_runtime_submit_bridge(workload, count, dcb_gpu_addrs, dcb_sizes_in_bytes,
+                                                    ccb_gpu_addrs, ccb_sizes_in_bytes)
+    if runtime_rc != GNM_RUNTIME_BRIDGE_UNBOUND and runtime_rc != ORBIS_OK:
+        return runtime_rc
+    gnm_record_submit_batch(count, dcb_gpu_addrs, dcb_sizes_in_bytes, ccb_gpu_addrs, ccb_sizes_in_bytes)
     return ORBIS_OK
 
 def sceGnmSubmitDone() -> int:
+    runtime_rc: int = gnm_try_runtime_submit_done_bridge()
+    if runtime_rc != GNM_RUNTIME_BRIDGE_UNBOUND and runtime_rc != ORBIS_OK:
+        return runtime_rc
     g_liverpool_submit_done_count <- g_liverpool_submit_done_count + 1u64
     g_send_init_packet <- true
     g_submissions_lock <- 0u

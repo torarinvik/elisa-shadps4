@@ -65,9 +65,9 @@ def runtime_readiness_probes() -> list[ReadinessProbe]:
     return [
         ReadinessProbe(
             "pad",
-            "C++-bridge",
-            ("core/libraries/pad/pad_ffi.elisa", "core/libraries/pad/pad_elisa_bridge.cc"),
-            "probe-only controller surface; device/live SDL state remains bridge-backed",
+            "native-Elisa",
+            ("core/libraries/pad/pad.elisa", "input/controller.elisa", "input/input_handler.elisa"),
+            "pad runtime now consumes shared Elisa controller state with touch/motion/lightbar/vibration paths",
         ),
         ReadinessProbe(
             "audioout",

@@ -6,6 +6,7 @@ include "./module.elisa"
 include "./loader/elf.elisa"
 include "./memory.elisa"
 include "./guest_exec.elisa"
+include "./tls.elisa"
 
 struct SymbolRecord:
     name: mutable static u8&
@@ -120,6 +121,7 @@ def Linker_GetInstance() -> mutable Linker&:
 
 def Linker_Reset() -> void:
     GuestExec_ResetState()
+    TLS_ResetForTests()
     linker_singleton <- Linker_New()
 
 def Linker_GetHLESymbols(self: mutable Linker&) -> mutable SymbolsResolver&:
@@ -403,13 +405,27 @@ def Linker_AdvanceGenerationCounter(self: mutable Linker&) -> void:
     self.dtv_generation_counter <- self.dtv_generation_counter + 1
 
 def Linker_TlsGetAddr(self: Linker&, module_index: u64, offset: u64) -> uintptr:
-    _ = self
-    return (module_index * 0x1000 + offset).uintptr()
+    GuestExec_RecordFirstBoundary()
+    if module_index == 0u64:
+        return offset.uintptr()
+    module_slot: u64 = module_index - 1u64
+    if module_slot >= self.modules.count.u64():
+        return offset.uintptr()
+    module: Module = self.modules[module_slot.usize()]
+    if module.tls.image_virtual_addr != 0.uintptr():
+        return module.tls.image_virtual_addr + offset.uintptr()
+    return module.base_virtual_addr + offset.uintptr()
 
 def Linker_AllocateTlsForThread(self: mutable Linker&, is_primary: bool) -> uintptr:
+    _ = self
     _ = is_primary
-    self.static_tls_size <- self.static_tls_size + 0x100
-    return (0x7000000000.u64() + self.static_tls_size.u64()).uintptr()
+    InitializeTLS()
+    tcb: mutable Tcb& = GetTcbBase()
+    if tcb.tcb_self == 0.uintptr():
+        tcb.tcb_self <- tcb.ref[mutable Tcb&].cast[uintptr]
+    if tcb.tcb_thread == 0.uintptr():
+        tcb.tcb_thread <- tcb.tcb_self
+    return tcb.ref[mutable Tcb&].cast[uintptr]
 
 def Linker_FreeTlsForNonPrimaryThread(self: mutable Linker&, pointer: void&?) -> void:
     _ = self

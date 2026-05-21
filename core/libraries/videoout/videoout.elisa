@@ -2,88 +2,782 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 include "../error_codes.elisa"
-include "videoout_ffi.elisa"
+include "../kernel/equeue.elisa"
+include "../kernel/time.elisa"
+include "videoout_error.elisa"
+
+const SCE_VIDEO_OUT_BUS_TYPE_MAIN: i64 = 0
+const SCE_VIDEO_OUT_REFRESH_RATE_59_94HZ: u64 = 3u64
+const SCE_VIDEO_OUT_BUFFER_ATTRIBUTE_OPTION_NONE: u32 = 0u32
+
+const SCE_VIDEO_OUT_PIXEL_FORMAT_A8R8G8B8_SRGB: u32 = 0x80000000u32
+const SCE_VIDEO_OUT_PIXEL_FORMAT_A8B8G8R8_SRGB: u32 = 0x80002200u32
+const SCE_VIDEO_OUT_PIXEL_FORMAT_A2R10G10B10: u32 = 0x88060000u32
+const SCE_VIDEO_OUT_PIXEL_FORMAT_A2R10G10B10_SRGB: u32 = 0x88000000u32
+const SCE_VIDEO_OUT_PIXEL_FORMAT_A2R10G10B10_BT2020_PQ: u32 = 0x88740000u32
+const SCE_VIDEO_OUT_PIXEL_FORMAT_A16R16G16B16_FLOAT: u32 = 0xC1060000u32
+
+const ORBIS_VIDEO_OUT_DEVICE_CAPABILITY_BT2020_PQ: u64 = 0x80u64
+
+const VIDEOOUT_MAIN_HANDLE: int = 1
+const VIDEOOUT_MAX_DISPLAY_BUFFERS: int = 16
+const VIDEOOUT_MAX_DISPLAY_BUFFER_GROUPS: int = 4
+const VIDEOOUT_MAX_EVENT_BINDINGS: int = 64
+const VIDEOOUT_MAX_PENDING_REQUESTS: int = 64
+const VIDEOOUT_MODE_STRUCT_SIZE: i64 = 32
+
+const VIDEOOUT_TILING_TILE: i32 = 0
+const VIDEOOUT_TILING_LINEAR: i32 = 1
+
+const VIDEOOUT_COLORIMETRY_ANY: u8 = 0xffu8
+const VIDEOOUT_COLORIMETRY_BT2020_PQ: u8 = 12u8
+
+const VIDEOOUT_EVENT_ID_FLIP: int = 0
+const VIDEOOUT_EVENT_ID_VBLANK: int = 1
+const VIDEOOUT_EVENT_ID_PRE_VBLANK_START: int = 2
+const VIDEOOUT_EVENT_ID_SET_MODE: int = 8
+const VIDEOOUT_EVENT_ID_POSITION: int = 12
+
+const VIDEOOUT_INTERNAL_EVENT_FLIP: u64 = 0x6u64
+const VIDEOOUT_INTERNAL_EVENT_VBLANK: u64 = 0x7u64
+const VIDEOOUT_INTERNAL_EVENT_SET_MODE: u64 = 0x51u64
+const VIDEOOUT_INTERNAL_EVENT_POSITION: u64 = 0x58u64
+const VIDEOOUT_INTERNAL_EVENT_PRE_VBLANK_START: u64 = 0x59u64
+const VIDEOOUT_INTERNAL_EVENT_SYS_VBLANK: u64 = 0x63u64
+
+@fixed_layout
+struct VideoOutBufferAttribute:
+    pixel_format: mutable u32
+    tiling_mode: mutable i32
+    aspect_ratio: mutable i32
+    width: mutable u32
+    height: mutable u32
+    pitch_in_pixel: mutable u32
+    option: mutable u32
+    reserved0: mutable u32
+    reserved1: mutable u64
+
+@fixed_layout
+struct VideoOutBufferAttributeGroupState:
+    is_occupied: mutable bool
+    attrib: mutable VideoOutBufferAttribute
+
+@fixed_layout
+struct VideoOutBufferSlot:
+    group_index: mutable i32
+    address_left: mutable u64
+    address_right: mutable u64
+
+@fixed_layout
+struct FlipStatus:
+    count: mutable u64
+    process_time: mutable u64
+    tsc: mutable u64
+    flip_arg: mutable i64
+    submit_tsc: mutable u64
+    reserved0: mutable u64
+    gc_queue_num: mutable i32
+    flip_pending_num: mutable i32
+    current_buffer: mutable i32
+    reserved1: mutable u32
+
+@fixed_layout
+struct SceVideoOutResolutionStatus:
+    full_width: mutable i32
+    full_height: mutable i32
+    pane_width: mutable i32
+    pane_height: mutable i32
+    refresh_rate: mutable u64
+    screen_size_in_inch: mutable f32
+    flags: mutable u16
+    reserved0: mutable u16
+    reserved1: mutable u32[3]
+
+@fixed_layout
+struct SceVideoOutVblankStatus:
+    count: mutable u64
+    process_time: mutable u64
+    tsc: mutable u64
+    reserved: mutable u64[1]
+    flags: mutable u8
+    pad1: mutable u8[7]
+
+@fixed_layout
+struct SceVideoOutDeviceCapabilityInfo:
+    capability: mutable u64
+
+@fixed_layout
+struct SceVideoOutColorSettings:
+    gamma: mutable f32
+    reserved: mutable u32[3]
+
+@fixed_layout
+struct VideoOutMode:
+    size: mutable u32
+    encoding: mutable u8
+    range: mutable u8
+    colorimetry: mutable u8
+    depth: mutable u8
+    refresh_rate: mutable u64
+    resolution: mutable u64
+    reserved: mutable u8[8]
+
+@fixed_layout
+struct VideoOutFlipRequest:
+    index: mutable i32
+    flip_arg: mutable i64
+    is_eop: mutable bool
+
+@fixed_layout
+struct VideoOutEventBinding:
+    used: mutable bool
+    eq_handle: mutable int
+    udata: mutable void&?
+
+@fixed_layout
+struct VideoOutPresenterState:
+    present_count: mutable u64
+    last_present_addr: mutable u64
+    last_present_width: mutable u32
+    last_present_height: mutable u32
+    last_present_format: mutable u32
+    hdr_enabled: mutable bool
+
+global mutable g_videoout_initialized: bool = false
+global mutable g_videoout_is_open: bool = false
+global mutable g_videoout_is_hdr: bool = false
+global mutable g_videoout_flip_rate: int = 0
+global mutable g_videoout_prev_index: int = -1
+global mutable g_videoout_color_gamma: f32 = 1.0
+global mutable g_videoout_last_vblank_tsc: u64 = 0u64
+global mutable g_videoout_vblank_frequency: u32 = 60u32
+
+global mutable g_videoout_resolution: SceVideoOutResolutionStatus = zeroed
+global mutable g_videoout_flip_status: FlipStatus = zeroed
+global mutable g_videoout_vblank_status: SceVideoOutVblankStatus = zeroed
+
+global mutable g_videoout_buffer_slots: VideoOutBufferSlot[VIDEOOUT_MAX_DISPLAY_BUFFERS] = zeroed
+global mutable g_videoout_buffer_labels: u64[VIDEOOUT_MAX_DISPLAY_BUFFERS] = zeroed
+global mutable g_videoout_groups: VideoOutBufferAttributeGroupState[VIDEOOUT_MAX_DISPLAY_BUFFER_GROUPS] = zeroed
+
+global mutable g_videoout_flip_requests: VideoOutFlipRequest[VIDEOOUT_MAX_PENDING_REQUESTS] = zeroed
+global mutable g_videoout_flip_request_head: int = 0
+global mutable g_videoout_flip_request_tail: int = 0
+global mutable g_videoout_flip_request_count: int = 0
+
+global mutable g_videoout_flip_event_bindings: VideoOutEventBinding[VIDEOOUT_MAX_EVENT_BINDINGS] = zeroed
+global mutable g_videoout_vblank_event_bindings: VideoOutEventBinding[VIDEOOUT_MAX_EVENT_BINDINGS] = zeroed
+
+global mutable g_videoout_presenter_state: VideoOutPresenterState = zeroed
+
+def videoout_is_supported_pixel_format(pixel_format: u32) -> bool:
+    return pixel_format == SCE_VIDEO_OUT_PIXEL_FORMAT_A8R8G8B8_SRGB or pixel_format == SCE_VIDEO_OUT_PIXEL_FORMAT_A8B8G8R8_SRGB or pixel_format == SCE_VIDEO_OUT_PIXEL_FORMAT_A2R10G10B10 or pixel_format == SCE_VIDEO_OUT_PIXEL_FORMAT_A2R10G10B10_SRGB or pixel_format == SCE_VIDEO_OUT_PIXEL_FORMAT_A2R10G10B10_BT2020_PQ or pixel_format == SCE_VIDEO_OUT_PIXEL_FORMAT_A16R16G16B16_FLOAT
+
+def videoout_is_valid_handle(handle: i64) -> bool:
+    return handle == VIDEOOUT_MAIN_HANDLE.i64()
+
+def videoout_clear_event_bindings() -> void:
+    i: mutable int = 0
+    while i < VIDEOOUT_MAX_EVENT_BINDINGS:
+        g_videoout_flip_event_bindings[i] <- zeroed
+        g_videoout_vblank_event_bindings[i] <- zeroed
+        i <- i + 1
+
+def videoout_reset_port_state() -> void:
+    g_videoout_is_open <- false
+    g_videoout_is_hdr <- false
+    g_videoout_flip_rate <- 0
+    g_videoout_prev_index <- -1
+
+    g_videoout_flip_status <- zeroed
+    g_videoout_flip_status.flip_arg <- -1
+    g_videoout_flip_status.current_buffer <- -1
+    g_videoout_vblank_status <- zeroed
+
+    g_videoout_flip_request_head <- 0
+    g_videoout_flip_request_tail <- 0
+    g_videoout_flip_request_count <- 0
+
+    i: mutable int = 0
+    while i < VIDEOOUT_MAX_DISPLAY_BUFFERS:
+        g_videoout_buffer_slots[i] <- zeroed
+        g_videoout_buffer_slots[i].group_index <- -1
+        g_videoout_buffer_labels[i] <- 0u64
+        i <- i + 1
+
+    group_index: mutable int = 0
+    while group_index < VIDEOOUT_MAX_DISPLAY_BUFFER_GROUPS:
+        g_videoout_groups[group_index] <- zeroed
+        group_index <- group_index + 1
+
+    videoout_clear_event_bindings()
+
+def videoout_lazy_init() -> void:
+    if g_videoout_initialized:
+        return
+    g_videoout_initialized <- true
+    g_videoout_resolution <- zeroed
+    g_videoout_resolution.full_width <- 1280
+    g_videoout_resolution.full_height <- 720
+    g_videoout_resolution.pane_width <- 1280
+    g_videoout_resolution.pane_height <- 720
+    g_videoout_resolution.refresh_rate <- SCE_VIDEO_OUT_REFRESH_RATE_59_94HZ
+    g_videoout_resolution.screen_size_in_inch <- 50.0
+    videoout_reset_port_state()
+    g_videoout_last_vblank_tsc <- sceKernelReadTsc()
+
+def videoout_find_free_group() -> int:
+    group_index: mutable int = 0
+    while group_index < VIDEOOUT_MAX_DISPLAY_BUFFER_GROUPS:
+        if not g_videoout_groups[group_index].is_occupied:
+            return group_index
+        group_index <- group_index + 1
+    return -1
+
+def videoout_validate_buffer_attribute(attribute: VideoOutBufferAttribute) -> int:
+    if not videoout_is_supported_pixel_format(attribute.pixel_format):
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_PIXEL_FORMAT
+    if attribute.reserved0 != 0u32 or attribute.reserved1 != 0u64:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_VALUE
+    if attribute.aspect_ratio != 0:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_ASPECT_RATIO
+    if attribute.width > attribute.pitch_in_pixel:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_PITCH
+    if attribute.tiling_mode < VIDEOOUT_TILING_TILE or attribute.tiling_mode > VIDEOOUT_TILING_LINEAR:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_TILING_MODE
+    return ORBIS_OK
+
+def videoout_enqueue_flip_request(index: i32, flip_arg: i64, is_eop: bool) -> bool:
+    if g_videoout_flip_request_count >= VIDEOOUT_MAX_PENDING_REQUESTS:
+        return false
+    g_videoout_flip_requests[g_videoout_flip_request_tail] <- VideoOutFlipRequest(index, flip_arg, is_eop)
+    g_videoout_flip_request_tail <- (g_videoout_flip_request_tail + 1) % VIDEOOUT_MAX_PENDING_REQUESTS
+    g_videoout_flip_request_count <- g_videoout_flip_request_count + 1
+    return true
+
+def videoout_try_add_event_binding(is_flip: bool, eq_handle: int, udata: void&?) -> bool:
+    i: mutable int = 0
+    while i < VIDEOOUT_MAX_EVENT_BINDINGS:
+        if is_flip:
+            if not g_videoout_flip_event_bindings[i].used:
+                g_videoout_flip_event_bindings[i].used <- true
+                g_videoout_flip_event_bindings[i].eq_handle <- eq_handle
+                g_videoout_flip_event_bindings[i].udata <- udata
+                return true
+        else:
+            if not g_videoout_vblank_event_bindings[i].used:
+                g_videoout_vblank_event_bindings[i].used <- true
+                g_videoout_vblank_event_bindings[i].eq_handle <- eq_handle
+                g_videoout_vblank_event_bindings[i].udata <- udata
+                return true
+        i <- i + 1
+    return false
+
+def videoout_remove_event_binding(is_flip: bool, eq_handle: int) -> void:
+    i: mutable int = 0
+    while i < VIDEOOUT_MAX_EVENT_BINDINGS:
+        if is_flip:
+            if g_videoout_flip_event_bindings[i].used and g_videoout_flip_event_bindings[i].eq_handle == eq_handle:
+                g_videoout_flip_event_bindings[i] <- zeroed
+                return
+        else:
+            if g_videoout_vblank_event_bindings[i].used and g_videoout_vblank_event_bindings[i].eq_handle == eq_handle:
+                g_videoout_vblank_event_bindings[i] <- zeroed
+                return
+        i <- i + 1
+
+def videoout_trigger_events(is_flip: bool, ident: u64, payload: u64) -> void:
+    i: mutable int = 0
+    while i < VIDEOOUT_MAX_EVENT_BINDINGS:
+        if is_flip:
+            if g_videoout_flip_event_bindings[i].used:
+                _ = equeue_trigger_event(g_videoout_flip_event_bindings[i].eq_handle, ident, EQUEUE_FILTER_VIDEOOUT, payload.cast[void&?])
+        else:
+            if g_videoout_vblank_event_bindings[i].used:
+                _ = equeue_trigger_event(g_videoout_vblank_event_bindings[i].eq_handle, ident, EQUEUE_FILTER_VIDEOOUT, payload.cast[void&?])
+        i <- i + 1
+
+def videoout_process_flip(index: i32, flip_arg: i64, is_eop: bool) -> void:
+    frame_available: mutable bool = false
+    if index == -1:
+        frame_available <- true
+        g_videoout_presenter_state.last_present_addr <- 0u64
+        g_videoout_presenter_state.last_present_width <- g_videoout_resolution.pane_width.u32()
+        g_videoout_presenter_state.last_present_height <- g_videoout_resolution.pane_height.u32()
+        g_videoout_presenter_state.last_present_format <- SCE_VIDEO_OUT_PIXEL_FORMAT_A8R8G8B8_SRGB
+    elif index >= 0 and index < VIDEOOUT_MAX_DISPLAY_BUFFERS:
+        slot: VideoOutBufferSlot = g_videoout_buffer_slots[index.usize()]
+        if slot.group_index >= 0 and slot.group_index < VIDEOOUT_MAX_DISPLAY_BUFFER_GROUPS:
+            group_state: VideoOutBufferAttributeGroupState = g_videoout_groups[slot.group_index.usize()]
+            frame_available <- true
+            g_videoout_presenter_state.last_present_addr <- slot.address_left
+            g_videoout_presenter_state.last_present_width <- group_state.attrib.width
+            g_videoout_presenter_state.last_present_height <- group_state.attrib.height
+            g_videoout_presenter_state.last_present_format <- group_state.attrib.pixel_format
+
+    if not frame_available:
+        if is_eop and g_videoout_flip_status.gc_queue_num > 0:
+            g_videoout_flip_status.gc_queue_num <- g_videoout_flip_status.gc_queue_num - 1
+        if g_videoout_flip_status.flip_pending_num > 0:
+            g_videoout_flip_status.flip_pending_num <- g_videoout_flip_status.flip_pending_num - 1
+        return
+
+    g_videoout_flip_status.count <- g_videoout_flip_status.count + 1u64
+    g_videoout_flip_status.process_time <- sceKernelGetProcessTime()
+    g_videoout_flip_status.tsc <- sceKernelReadTsc()
+    g_videoout_flip_status.flip_arg <- flip_arg
+    g_videoout_flip_status.current_buffer <- index
+    if is_eop and g_videoout_flip_status.gc_queue_num > 0:
+        g_videoout_flip_status.gc_queue_num <- g_videoout_flip_status.gc_queue_num - 1
+    if g_videoout_flip_status.flip_pending_num > 0:
+        g_videoout_flip_status.flip_pending_num <- g_videoout_flip_status.flip_pending_num - 1
+    g_videoout_presenter_state.present_count <- g_videoout_presenter_state.present_count + 1u64
+    g_videoout_presenter_state.hdr_enabled <- g_videoout_is_hdr
+
+    flip_payload: u64 = VIDEOOUT_INTERNAL_EVENT_FLIP | (flip_arg.u64() << 16u64)
+    videoout_trigger_events(true, VIDEOOUT_INTERNAL_EVENT_FLIP, flip_payload)
+
+    if g_videoout_prev_index >= 0 and g_videoout_prev_index < VIDEOOUT_MAX_DISPLAY_BUFFERS:
+        g_videoout_buffer_labels[g_videoout_prev_index.usize()] <- 0u64
+    g_videoout_prev_index <- index.int()
+
+def videoout_tick_one_vblank() -> void:
+    flip_divisor: mutable u64 = (g_videoout_flip_rate + 1).u64()
+    if flip_divisor == 0u64:
+        flip_divisor <- 1u64
+    if g_videoout_vblank_status.count % flip_divisor == 0u64 and g_videoout_flip_request_count > 0:
+        req: VideoOutFlipRequest = g_videoout_flip_requests[g_videoout_flip_request_head]
+        g_videoout_flip_request_head <- (g_videoout_flip_request_head + 1) % VIDEOOUT_MAX_PENDING_REQUESTS
+        g_videoout_flip_request_count <- g_videoout_flip_request_count - 1
+        videoout_process_flip(req.index, req.flip_arg, req.is_eop)
+
+    vblank_payload: u64 = VIDEOOUT_INTERNAL_EVENT_VBLANK | (g_videoout_vblank_status.count << 16u64)
+    videoout_trigger_events(false, VIDEOOUT_INTERNAL_EVENT_VBLANK, vblank_payload)
+
+    g_videoout_vblank_status.count <- g_videoout_vblank_status.count + 1u64
+    g_videoout_vblank_status.process_time <- sceKernelGetProcessTime()
+    g_videoout_vblank_status.tsc <- sceKernelReadTsc()
+
+def videoout_pump_present() -> void:
+    videoout_lazy_init()
+    now: u64 = sceKernelReadTsc()
+    if g_videoout_last_vblank_tsc == 0u64:
+        g_videoout_last_vblank_tsc <- now
+        return
+    if now <= g_videoout_last_vblank_tsc:
+        return
+
+    freq: u32 = g_videoout_vblank_frequency
+    if freq == 0u32:
+        freq <- 60u32
+    period: u64 = 1000000000u64 / freq.u64()
+    if period == 0u64:
+        period <- 1u64
+
+    elapsed: u64 = now - g_videoout_last_vblank_tsc
+    ticks: u64 = elapsed / period
+    if ticks == 0u64:
+        return
+    if ticks > 512u64:
+        ticks <- 512u64
+
+    tick: mutable u64 = 0u64
+    while tick < ticks:
+        videoout_tick_one_vblank()
+        tick <- tick + 1u64
+
+    g_videoout_last_vblank_tsc <- g_videoout_last_vblank_tsc + ticks * period
 
 def sceVideoOutGetFlipStatus(a0: i64, a1: void&?) -> int:
-    return c_sceVideoOutGetFlipStatus(a0, a1)
+    videoout_lazy_init()
+    status: mutable FlipStatus&? = a1 as mutable FlipStatus&?
+    if status == null:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_ADDRESS
+    if not videoout_is_valid_handle(a0):
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE
+    videoout_pump_present()
+    status[0] <- g_videoout_flip_status
+    return ORBIS_OK
 
 def sceVideoOutSubmitFlip(a0: i64, a1: i64, a2: i64, a3: i64) -> int:
-    return c_sceVideoOutSubmitFlip(a0, a1, a2, a3)
+    videoout_lazy_init()
+    if not videoout_is_valid_handle(a0):
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE
+
+    _ = a2
+    buffer_index: i32 = a1.i32()
+    if buffer_index < -1 or buffer_index >= VIDEOOUT_MAX_DISPLAY_BUFFERS:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_INDEX
+    if buffer_index != -1 and g_videoout_buffer_slots[buffer_index.usize()].group_index < 0:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_INDEX
+
+    videoout_pump_present()
+    if buffer_index != -1 and g_videoout_flip_status.flip_pending_num > 16:
+        return ORBIS_VIDEO_OUT_ERROR_FLIP_QUEUE_FULL
+
+    g_videoout_flip_status.flip_pending_num <- g_videoout_flip_status.flip_pending_num + 1
+    g_videoout_flip_status.submit_tsc <- sceKernelReadTsc()
+    if not videoout_enqueue_flip_request(buffer_index, a3, false):
+        if g_videoout_flip_status.flip_pending_num > 0:
+            g_videoout_flip_status.flip_pending_num <- g_videoout_flip_status.flip_pending_num - 1
+        return ORBIS_VIDEO_OUT_ERROR_FLIP_QUEUE_FULL
+    return ORBIS_OK
 
 def sceVideoOutRegisterBuffers(a0: i64, a1: i64, a2: void&?, a3: i64, a4: void&?) -> int:
-    return c_sceVideoOutRegisterBuffers(a0, a1, a2, a3, a4)
+    videoout_lazy_init()
+    if a2 == null or a4 == null:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_ADDRESS
+    if not videoout_is_valid_handle(a0) or not g_videoout_is_open:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE
+
+    start_index: int = a1.int()
+    buffer_num: int = a3.int()
+    if start_index < 0 or buffer_num <= 0 or start_index >= VIDEOOUT_MAX_DISPLAY_BUFFERS or buffer_num > VIDEOOUT_MAX_DISPLAY_BUFFERS or start_index > VIDEOOUT_MAX_DISPLAY_BUFFERS - buffer_num:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_VALUE
+
+    group_index: int = videoout_find_free_group()
+    if group_index < 0:
+        return ORBIS_VIDEO_OUT_ERROR_NO_EMPTY_SLOT
+
+    range_index: mutable int = 0
+    while range_index < buffer_num:
+        slot_index: int = start_index + range_index
+        if g_videoout_buffer_slots[slot_index.usize()].group_index != -1:
+            return ORBIS_VIDEO_OUT_ERROR_SLOT_OCCUPIED
+        range_index <- range_index + 1
+
+    attribute_in: VideoOutBufferAttribute&? = a4 as VideoOutBufferAttribute&?
+    if attribute_in == null:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_ADDRESS
+    attribute: VideoOutBufferAttribute = attribute_in[0]
+    validate_result: int = videoout_validate_buffer_attribute(attribute)
+    if validate_result != ORBIS_OK:
+        return validate_result
+
+    addresses: u64&? = a2 as u64&?
+    if addresses == null:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_ADDRESS
+
+    entry_index: mutable int = 0
+    while entry_index < buffer_num:
+        slot_index2: int = start_index + entry_index
+        addr_word: u64 = addresses[entry_index.usize()]
+        if addr_word == 0u64:
+            return ORBIS_VIDEO_OUT_ERROR_INVALID_ADDRESS
+        g_videoout_buffer_slots[slot_index2.usize()].group_index <- group_index.i32()
+        g_videoout_buffer_slots[slot_index2.usize()].address_left <- addr_word
+        g_videoout_buffer_slots[slot_index2.usize()].address_right <- 0u64
+        g_videoout_buffer_labels[slot_index2.usize()] <- 0u64
+        entry_index <- entry_index + 1
+
+    g_videoout_groups[group_index].is_occupied <- true
+    g_videoout_groups[group_index].attrib <- attribute
+    return group_index
 
 def sceVideoOutAddFlipEvent(a0: i64, a1: i64, a2: void&?) -> int:
-    return c_sceVideoOutAddFlipEvent(a0, a1, a2)
+    videoout_lazy_init()
+    if not videoout_is_valid_handle(a1):
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE
+    eq_handle: int = a0.int()
+    if equeue_find_queue_slot(eq_handle) < 0:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_EVENT_QUEUE
+
+    event: mutable OrbisKernelEvent = zeroed
+    event.ident <- VIDEOOUT_INTERNAL_EVENT_FLIP
+    event.filter <- EQUEUE_FILTER_VIDEOOUT.i16()
+    event.flags <- EQUEUE_FLAG_ADD
+    event.fflags <- 0u32
+    event.data <- 0u64
+    event.udata <- a2
+    _ = equeue_add_or_update_event(eq_handle, event)
+
+    if not videoout_try_add_event_binding(true, eq_handle, a2):
+        return ORBIS_VIDEO_OUT_ERROR_NO_EMPTY_SLOT
+    return ORBIS_OK
 
 def sceVideoOutAddVblankEvent(a0: i64, a1: i64, a2: void&?) -> int:
-    return c_sceVideoOutAddVblankEvent(a0, a1, a2)
+    videoout_lazy_init()
+    if not videoout_is_valid_handle(a1):
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE
+    eq_handle: int = a0.int()
+    if equeue_find_queue_slot(eq_handle) < 0:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_EVENT_QUEUE
+
+    event: mutable OrbisKernelEvent = zeroed
+    event.ident <- VIDEOOUT_INTERNAL_EVENT_VBLANK
+    event.filter <- EQUEUE_FILTER_VIDEOOUT.i16()
+    event.flags <- EQUEUE_FLAG_ADD
+    event.fflags <- 0u32
+    event.data <- 0u64
+    event.udata <- a2
+    _ = equeue_add_or_update_event(eq_handle, event)
+
+    if not videoout_try_add_event_binding(false, eq_handle, a2):
+        return ORBIS_VIDEO_OUT_ERROR_NO_EMPTY_SLOT
+    return ORBIS_OK
 
 def sceVideoOutSetFlipRate(a0: i64, a1: i64) -> int:
-    return c_sceVideoOutSetFlipRate(a0, a1)
+    videoout_lazy_init()
+    if not videoout_is_valid_handle(a0) or not g_videoout_is_open:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE
+    rate: int = a1.int()
+    if rate < 0 or rate > 60:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_VALUE
+    g_videoout_flip_rate <- rate
+    return ORBIS_OK
 
 def sceVideoOutSetBufferAttribute(a0: void&?, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64, a6: i64) -> void:
-    c_sceVideoOutSetBufferAttribute(a0, a1, a2, a3, a4, a5, a6)
+    attribute: mutable VideoOutBufferAttribute&? = a0 as mutable VideoOutBufferAttribute&?
+    if attribute == null:
+        return
+    attribute.pixel_format <- a1.u32()
+    attribute.tiling_mode <- a2.i32()
+    attribute.aspect_ratio <- a3.i32()
+    attribute.width <- a4.u32()
+    attribute.height <- a5.u32()
+    attribute.pitch_in_pixel <- a6.u32()
+    attribute.option <- SCE_VIDEO_OUT_BUFFER_ATTRIBUTE_OPTION_NONE
+    attribute.reserved0 <- 0u32
+    attribute.reserved1 <- 0u64
 
 def sceVideoOutGetResolutionStatus(a0: i64, a1: void&?) -> int:
-    return c_sceVideoOutGetResolutionStatus(a0, a1)
+    videoout_lazy_init()
+    if not videoout_is_valid_handle(a0) or not g_videoout_is_open:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE
+    out_status: mutable SceVideoOutResolutionStatus&? = a1 as mutable SceVideoOutResolutionStatus&?
+    if out_status == null:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_ADDRESS
+    out_status[0] <- g_videoout_resolution
+    return ORBIS_OK
 
 def sceVideoOutOpen(a0: i64, a1: i64, a2: i64, a3: void&?) -> int:
-    return c_sceVideoOutOpen(a0, a1, a2, a3)
+    videoout_lazy_init()
+    _ = a0
+    _ = a3
+    _ = a1
+    if a2 != 0:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_VALUE
+    if g_videoout_is_open:
+        return ORBIS_VIDEO_OUT_ERROR_RESOURCE_BUSY
+    videoout_reset_port_state()
+    g_videoout_is_open <- true
+    g_videoout_last_vblank_tsc <- sceKernelReadTsc()
+    return VIDEOOUT_MAIN_HANDLE
 
 def sceVideoOutIsFlipPending(a0: i64) -> int:
-    return c_sceVideoOutIsFlipPending(a0)
+    videoout_lazy_init()
+    if not videoout_is_valid_handle(a0) or not g_videoout_is_open:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE
+    videoout_pump_present()
+    return g_videoout_flip_status.flip_pending_num.int()
 
 def sceVideoOutUnregisterBuffers(a0: i64, a1: i64) -> int:
-    return c_sceVideoOutUnregisterBuffers(a0, a1)
+    videoout_lazy_init()
+    if not videoout_is_valid_handle(a0) or not g_videoout_is_open:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE
+    attribute_index: int = a1.int()
+    if attribute_index < 0 or attribute_index >= VIDEOOUT_MAX_DISPLAY_BUFFER_GROUPS or not g_videoout_groups[attribute_index].is_occupied:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_VALUE
+
+    g_videoout_groups[attribute_index].is_occupied <- false
+    i: mutable int = 0
+    while i < VIDEOOUT_MAX_DISPLAY_BUFFERS:
+        if g_videoout_buffer_slots[i].group_index == attribute_index.i32():
+            g_videoout_buffer_slots[i].group_index <- -1
+        i <- i + 1
+    return ORBIS_OK
 
 def sceVideoOutGetBufferLabelAddress(a0: i64, a1: void&?) -> int:
-    return c_sceVideoOutGetBufferLabelAddress(a0, a1)
+    videoout_lazy_init()
+    out_addr: mutable i64&? = a1 as mutable i64&?
+    if out_addr == null:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_ADDRESS
+    if not videoout_is_valid_handle(a0):
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE
+    out_addr[0] <- g_videoout_buffer_labels[0].ref[mutable u64&].cast[i64]
+    return VIDEOOUT_MAX_DISPLAY_BUFFERS
 
 def sceVideoOutClose(a0: i64) -> int:
-    return c_sceVideoOutClose(a0)
+    videoout_lazy_init()
+    if not videoout_is_valid_handle(a0) or not g_videoout_is_open:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE
+    videoout_reset_port_state()
+    return ORBIS_OK
 
 def sceVideoOutGetVblankStatus(a0: i64, a1: void&?) -> int:
-    return c_sceVideoOutGetVblankStatus(a0, a1)
+    videoout_lazy_init()
+    out_status: mutable SceVideoOutVblankStatus&? = a1 as mutable SceVideoOutVblankStatus&?
+    if out_status == null:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_ADDRESS
+    if not videoout_is_valid_handle(a0):
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE
+    videoout_pump_present()
+    out_status[0] <- g_videoout_vblank_status
+    return ORBIS_OK
 
 def sceVideoOutGetDeviceCapabilityInfo(a0: i64, a1: void&?) -> int:
-    return c_sceVideoOutGetDeviceCapabilityInfo(a0, a1)
+    videoout_lazy_init()
+    _ = a0
+    out_info: mutable SceVideoOutDeviceCapabilityInfo&? = a1 as mutable SceVideoOutDeviceCapabilityInfo&?
+    if out_info != null:
+        out_info.capability <- 0u64
+    return ORBIS_OK
 
 def sceVideoOutWaitVblank(a0: i64) -> int:
-    return c_sceVideoOutWaitVblank(a0)
+    videoout_lazy_init()
+    if not videoout_is_valid_handle(a0):
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE
+    videoout_pump_present()
+    previous_count: u64 = g_videoout_vblank_status.count
+    trusted Unsafe.AssumeProgress:
+        while true:
+            videoout_pump_present()
+            if g_videoout_vblank_status.count != previous_count:
+                return ORBIS_OK
+            _ = sceKernelUsleep(50u32)
+    return ORBIS_OK
 
 def sceVideoOutGetEventId(a0: void&?) -> int:
-    return c_sceVideoOutGetEventId(a0)
+    ev: OrbisKernelEvent&? = a0 as OrbisKernelEvent&?
+    if ev == null:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_ADDRESS
+    if ev.filter.int() != EQUEUE_FILTER_VIDEOOUT:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_EVENT
+    if ev.ident == VIDEOOUT_INTERNAL_EVENT_FLIP:
+        return VIDEOOUT_EVENT_ID_FLIP
+    if ev.ident == VIDEOOUT_INTERNAL_EVENT_VBLANK or ev.ident == VIDEOOUT_INTERNAL_EVENT_SYS_VBLANK:
+        return VIDEOOUT_EVENT_ID_VBLANK
+    if ev.ident == VIDEOOUT_INTERNAL_EVENT_PRE_VBLANK_START:
+        return VIDEOOUT_EVENT_ID_PRE_VBLANK_START
+    if ev.ident == VIDEOOUT_INTERNAL_EVENT_SET_MODE:
+        return VIDEOOUT_EVENT_ID_SET_MODE
+    if ev.ident == VIDEOOUT_INTERNAL_EVENT_POSITION:
+        return VIDEOOUT_EVENT_ID_POSITION
+    return ORBIS_VIDEO_OUT_ERROR_INVALID_EVENT
 
 def sceVideoOutGetEventData(a0: void&?, a1: void&?) -> int:
-    return c_sceVideoOutGetEventData(a0, a1)
+    ev: OrbisKernelEvent&? = a0 as OrbisKernelEvent&?
+    out_data: mutable i64&? = a1 as mutable i64&?
+    if ev == null or out_data == null:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_ADDRESS
+    if ev.filter.int() != EQUEUE_FILTER_VIDEOOUT:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_EVENT
+
+    event_data: u64 = ev.data >> 16u64
+    if ev.ident != VIDEOOUT_INTERNAL_EVENT_FLIP or ev.data.cast[i64] >= 0:
+        out_data[0] <- event_data.cast[i64]
+    else:
+        out_data[0] <- (event_data | 0xffff000000000000u64).cast[i64]
+    return ORBIS_OK
 
 def sceVideoOutGetEventCount(a0: void&?) -> int:
-    return c_sceVideoOutGetEventCount(a0)
+    ev: OrbisKernelEvent&? = a0 as OrbisKernelEvent&?
+    if ev == null:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_ADDRESS
+    if ev.filter.int() != EQUEUE_FILTER_VIDEOOUT:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_EVENT
+    return ((ev.data >> 12u64) & 0xfu64).int()
 
 def sceVideoOutColorSettingsSetGamma(a0: void&?, a1: f32) -> int:
-    return c_sceVideoOutColorSettingsSetGamma(a0, a1)
+    settings: mutable SceVideoOutColorSettings&? = a0 as mutable SceVideoOutColorSettings&?
+    if settings == null:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_ADDRESS
+    if a1 < 0.1 or a1 > 2.0:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_VALUE
+    settings.gamma <- a1
+    return ORBIS_OK
 
 def sceVideoOutAdjustColor(a0: i64, a1: void&?) -> int:
-    return c_sceVideoOutAdjustColor(a0, a1)
+    videoout_lazy_init()
+    settings: SceVideoOutColorSettings&? = a1 as SceVideoOutColorSettings&?
+    if settings == null:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_ADDRESS
+    if not videoout_is_valid_handle(a0):
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE
+    g_videoout_color_gamma <- settings.gamma
+    return ORBIS_OK
 
 def sceVideoOutDeleteFlipEvent(a0: i64, a1: i64) -> int:
-    return c_sceVideoOutDeleteFlipEvent(a0, a1)
+    videoout_lazy_init()
+    if not videoout_is_valid_handle(a1):
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE
+    eq_handle: int = a0.int()
+    if equeue_find_queue_slot(eq_handle) < 0:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_EVENT_QUEUE
+    _ = equeue_remove_event(eq_handle, VIDEOOUT_INTERNAL_EVENT_FLIP, EQUEUE_FILTER_VIDEOOUT)
+    videoout_remove_event_binding(true, eq_handle)
+    return ORBIS_OK
 
 def sceVideoOutDeleteVblankEvent(a0: i64, a1: i64) -> int:
-    return c_sceVideoOutDeleteVblankEvent(a0, a1)
+    videoout_lazy_init()
+    if not videoout_is_valid_handle(a1):
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE
+    eq_handle: int = a0.int()
+    if equeue_find_queue_slot(eq_handle) < 0:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_EVENT_QUEUE
+    _ = equeue_remove_event(eq_handle, VIDEOOUT_INTERNAL_EVENT_VBLANK, EQUEUE_FILTER_VIDEOOUT)
+    videoout_remove_event_binding(false, eq_handle)
+    return ORBIS_OK
 
 def sceVideoOutModeSetAny_(a0: void&?, a1: i64) -> void:
-    c_sceVideoOutModeSetAny_(a0, a1)
+    if a0 == null or a1 < VIDEOOUT_MODE_STRUCT_SIZE:
+        return
+    bytes: mutable u8&? = a0 as mutable u8&?
+    if bytes == null:
+        return
+    i: mutable i64 = 0
+    while i < a1:
+        bytes[i.usize()] <- 0xffu8
+        i <- i + 1
+    mode: mutable VideoOutMode&? = a0 as mutable VideoOutMode&?
+    if mode != null:
+        mode.size <- a1.u32()
 
 def sceVideoOutConfigureOutputMode_(a0: i64, a1: i64, a2: void&?, a3: void&?, a4: i64, a5: i64) -> int:
-    return c_sceVideoOutConfigureOutputMode_(a0, a1, a2, a3, a4, a5)
+    videoout_lazy_init()
+    _ = a3
+    _ = a5
+    if not videoout_is_valid_handle(a0) or not g_videoout_is_open:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE
+    if a2 == null or a4 < VIDEOOUT_MODE_STRUCT_SIZE:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_ADDRESS
+    if a1 != 0:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_VALUE
+    mode: VideoOutMode&? = a2 as VideoOutMode&?
+    if mode == null:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_ADDRESS
+    if mode.colorimetry == VIDEOOUT_COLORIMETRY_ANY:
+        g_videoout_is_hdr <- false
+    elif mode.colorimetry == VIDEOOUT_COLORIMETRY_BT2020_PQ:
+        g_videoout_is_hdr <- true
+    else:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_VALUE
+    return ORBIS_OK
 
 def sceVideoOutSetWindowModeMargins(a0: i64, a1: i64, a2: i64) -> int:
-    return c_sceVideoOutSetWindowModeMargins(a0, a1, a2)
+    _ = a0
+    _ = a1
+    _ = a2
+    return ORBIS_OK
 
 def sceVideoOutSubmitChangeBufferAttribute(a0: i64, a1: i64, a2: void&?) -> int:
-    return c_sceVideoOutSubmitChangeBufferAttribute(a0, a1, a2)
+    videoout_lazy_init()
+    if not videoout_is_valid_handle(a0) or not g_videoout_is_open:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_HANDLE
+    if a2 == null:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_VALUE
+    attribute_index: int = a1.int()
+    if attribute_index < 0 or attribute_index >= VIDEOOUT_MAX_DISPLAY_BUFFER_GROUPS or not g_videoout_groups[attribute_index].is_occupied:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_VALUE
+    attribute_ref: VideoOutBufferAttribute&? = a2 as VideoOutBufferAttribute&?
+    if attribute_ref == null:
+        return ORBIS_VIDEO_OUT_ERROR_INVALID_VALUE
+    attribute: VideoOutBufferAttribute = attribute_ref[0]
+    validate_result: int = videoout_validate_buffer_attribute(attribute)
+    if validate_result != ORBIS_OK:
+        return validate_result
+    g_videoout_groups[attribute_index].attrib <- attribute
+    return ORBIS_OK
 
 def RegisterLib(sym: void&?) -> void:
     _ = sym

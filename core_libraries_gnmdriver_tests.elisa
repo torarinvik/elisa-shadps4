@@ -4,6 +4,44 @@
 include "../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
 include "./core/libraries/gnmdriver/gnmdriver.elisa"
 
+global mutable g_test_submit_bridge_calls: u32 = 0u32
+global mutable g_test_submit_flip_bridge_calls: u32 = 0u32
+global mutable g_test_submit_done_bridge_calls: u32 = 0u32
+global mutable g_test_last_submit_workload: u32 = 0u32
+global mutable g_test_last_submit_count: u32 = 0u32
+global mutable g_test_last_flip_arg: i64 = 0
+
+def gnmdriver_test_submit_bridge(workload: u32, count: u32, dcb_gpu_addrs: u32&?, dcb_sizes_in_bytes: u32&?,
+                                 ccb_gpu_addrs: u32&?, ccb_sizes_in_bytes: u32&?) -> int:
+    g_test_submit_bridge_calls <- g_test_submit_bridge_calls + 1u32
+    g_test_last_submit_workload <- workload
+    g_test_last_submit_count <- count
+    _ = dcb_gpu_addrs
+    _ = dcb_sizes_in_bytes
+    _ = ccb_gpu_addrs
+    _ = ccb_sizes_in_bytes
+    return ORBIS_OK
+
+def gnmdriver_test_submit_flip_bridge(workload: u32, count: u32, dcb_gpu_addrs: u32&?, dcb_sizes_in_bytes: u32&?,
+                                      ccb_gpu_addrs: u32&?, ccb_sizes_in_bytes: u32&?,
+                                      vo_handle: u32, buf_idx: u32, flip_mode: u32, flip_arg: i64) -> int:
+    g_test_submit_flip_bridge_calls <- g_test_submit_flip_bridge_calls + 1u32
+    g_test_last_submit_workload <- workload
+    g_test_last_submit_count <- count
+    g_test_last_flip_arg <- flip_arg
+    _ = dcb_gpu_addrs
+    _ = dcb_sizes_in_bytes
+    _ = ccb_gpu_addrs
+    _ = ccb_sizes_in_bytes
+    _ = vo_handle
+    _ = buf_idx
+    _ = flip_mode
+    return ORBIS_OK
+
+def gnmdriver_test_submit_done_bridge() -> int:
+    g_test_submit_done_bridge_calls <- g_test_submit_done_bridge_calls + 1u32
+    return ORBIS_OK
+
 @test
 def gnmdriver_stub_defaults_do_not_crash() -> void:
     can Abort.Panic:
@@ -77,6 +115,14 @@ def gnmdriver_connected_submit_smoke_records_liverpool_and_rasterizer_progress()
         assert g_liverpool_submit_gfx_count == 0u64
         assert g_rasterizer_on_submit_count == 0u64
         assert g_rasterizer_flush_count == 0u64
+        assert g_runtime_scheduler_submit_count == 0u64
+        assert g_runtime_scheduler_last_tick == 0u64
+        assert g_runtime_present_prepare_count == 0u64
+        assert g_runtime_present_count == 0u64
+        assert g_runtime_present_success_count == 0u64
+        assert g_runtime_submit_bridge_count == 0u64
+        assert g_runtime_submit_flip_bridge_count == 0u64
+        assert g_runtime_submit_done_bridge_count == 0u64
 
         dcb_addrs: mutable u32[2] = [0x1000u32, 0x2000u32]
         dcb_sizes: mutable u32[2] = [0x40u32, 0x80u32]
@@ -91,6 +137,8 @@ def gnmdriver_connected_submit_smoke_records_liverpool_and_rasterizer_progress()
         assert g_liverpool_submit_gfx_count == 3u64
         assert g_rasterizer_on_submit_count == 2u64
         assert g_rasterizer_flush_count == 2u64
+        assert g_runtime_scheduler_submit_count == 2u64
+        assert g_runtime_scheduler_last_tick >= 1u64
         assert g_graphics_last_submit_dcb_addr == 0x2000u64
         assert g_graphics_last_submit_dcb_size == 0x80u32
         assert g_graphics_last_submit_ccb_addr == 0x4000u64
@@ -102,6 +150,7 @@ def gnmdriver_connected_submit_smoke_records_liverpool_and_rasterizer_progress()
         assert g_graphics_submit_count == 3u64
         assert g_liverpool_submit_gfx_count == 4u64
         assert g_rasterizer_on_submit_count == 3u64
+        assert g_runtime_scheduler_submit_count == 3u64
         assert g_graphics_last_submit_ccb_addr == 0u64
         assert g_graphics_last_submit_ccb_size == 0u32
 
@@ -115,3 +164,68 @@ def gnmdriver_connected_submit_smoke_records_liverpool_and_rasterizer_progress()
         assert g_graphics_init_packet_submit_count == 2u64
         assert g_graphics_submit_count == 4u64
         assert g_liverpool_submit_gfx_count == 6u64
+        assert g_runtime_scheduler_submit_count == 4u64
+
+        assert sceGnmSubmitAndFlipCommandBuffers(1u32, dcb_addrs[0].ref[u32&], dcb_sizes[0].ref[u32&],
+                                                 ccb_addrs[0].ref[u32&], ccb_sizes[0].ref[u32&],
+                                                 7u32, 2u32, 1u32, 42.i64()) == ORBIS_OK
+        assert g_graphics_submit_count == 5u64
+        assert g_liverpool_submit_gfx_count == 7u64
+        assert g_rasterizer_on_submit_count == 5u64
+        assert g_runtime_scheduler_submit_count == 5u64
+        assert g_runtime_present_prepare_count == 1u64
+        assert g_runtime_present_count == 1u64
+        assert g_runtime_present_success_count == 1u64
+        assert g_runtime_last_present_ok
+        assert g_runtime_last_flip_vo_handle == 7u32
+        assert g_runtime_last_flip_buf_idx == 2u32
+        assert g_runtime_last_flip_mode == 1u32
+        assert g_runtime_last_flip_arg == 42.i64()
+
+@test
+def gnmdriver_runtime_frame_path_callbacks_dispatch() -> void:
+    can Abort.Panic:
+        GnmDriver_RegisterLib(null)
+        GnmDriver_BindRuntimeFramePathCallbacks(
+            gnmdriver_test_submit_bridge.cast[GnmRuntimeSubmitCallback],
+            gnmdriver_test_submit_flip_bridge.cast[GnmRuntimeSubmitAndFlipCallback],
+            gnmdriver_test_submit_done_bridge.cast[GnmRuntimeSubmitDoneCallback]
+        )
+
+        g_test_submit_bridge_calls <- 0u32
+        g_test_submit_flip_bridge_calls <- 0u32
+        g_test_submit_done_bridge_calls <- 0u32
+        g_test_last_submit_workload <- 0u32
+        g_test_last_submit_count <- 0u32
+        g_test_last_flip_arg <- 0
+
+        dcb_addrs: mutable u32[1] = [0x5000u32]
+        dcb_sizes: mutable u32[1] = [0x40u32]
+        ccb_addrs: mutable u32[1] = [0x6000u32]
+        ccb_sizes: mutable u32[1] = [0x20u32]
+
+        assert sceGnmSubmitCommandBuffers(1u32, dcb_addrs[0].ref[u32&], dcb_sizes[0].ref[u32&],
+                                          ccb_addrs[0].ref[u32&], ccb_sizes[0].ref[u32&]) == ORBIS_OK
+        assert g_test_submit_bridge_calls == 1u32
+        assert g_test_submit_flip_bridge_calls == 0u32
+        assert g_runtime_submit_bridge_count == 1u64
+        assert g_runtime_submit_flip_bridge_count == 0u64
+        assert g_test_last_submit_workload == 1u32
+        assert g_test_last_submit_count == 1u32
+
+        assert sceGnmSubmitAndFlipCommandBuffers(1u32, dcb_addrs[0].ref[u32&], dcb_sizes[0].ref[u32&],
+                                                 ccb_addrs[0].ref[u32&], ccb_sizes[0].ref[u32&],
+                                                 3u32, 0u32, 1u32, 99.i64()) == ORBIS_OK
+        assert g_test_submit_bridge_calls == 1u32
+        assert g_test_submit_flip_bridge_calls == 1u32
+        assert g_runtime_submit_bridge_count == 1u64
+        assert g_runtime_submit_flip_bridge_count == 1u64
+        assert g_test_last_submit_workload == 1u32
+        assert g_test_last_submit_count == 1u32
+        assert g_test_last_flip_arg == 99.i64()
+
+        assert sceGnmSubmitDone() == ORBIS_OK
+        assert g_test_submit_done_bridge_calls == 1u32
+        assert g_runtime_submit_done_bridge_count == 1u64
+
+        GnmDriver_ClearRuntimeFramePathCallbacks()

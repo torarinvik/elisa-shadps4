@@ -24,7 +24,8 @@ Use a C++ bridge with a C ABI, not direct raw calls into C++ symbols.
 2. DTO layouts are checked with `c-bind-check` against `pad_elisa_bridge.hh`.
 3. The native Elisa wrapper lowers cleanly.
 4. The project-local native bridge test links a foreign C stub and verifies lifecycle plus struct output forwarding.
+5. `pad.elisa` now consumes shared Elisa controller/input state (`input/controller.elisa`, `input/input_handler.elisa`) for live button/axis, touch, motion, lightbar, and vibration behavior.
 
 ## Remaining Integration Step
 
-Link `pad_elisa_bridge.cc` into a full shadPS4 runtime target once that target can provide the C++ pad dependencies (`UserService`, controller state, settings, and backend services). The C ABI boundary is ready for that swap.
+`pad_elisa_bridge.cc` remains available for builds that still need direct C++ pad/runtime coupling, but it is no longer required for core Elisa pad/input behavior.

@@ -1,16 +1,22 @@
 include "../error_codes.elisa"
 include "./pad_errors.elisa"
+include "../kernel/lib_function_stub.elisa"
+include "../../../input/controller.elisa"
 
 type s32 = i32
 type OrbisUserServiceUserId = s32
 
 @fixed_layout
 struct OrbisPadControllerInformation:
-    touch_pad_dummy: mutable u8[16]
-    stick_dummy: mutable u8[2]
+    touchPadPixelDensity: mutable f32
+    touchPadResolutionX: mutable u16
+    touchPadResolutionY: mutable u16
+    deadZoneLeft: mutable u8
+    deadZoneRight: mutable u8
     connectionType: mutable u8
     connectedCount: mutable u8
     connected: mutable bool
+    pad0: mutable u8[2]
     deviceClass: mutable s32
     reserve: mutable u8[8]
 
@@ -20,6 +26,7 @@ struct OrbisPadExtendedControllerInformation:
     padType1: mutable u16
     padType2: mutable u16
     capability: mutable u8
+    pad0: mutable u8[3]
     data: mutable u8[8]
 
 @fixed_layout
@@ -44,10 +51,38 @@ struct OrbisPadData:
     l2: mutable u8
     r2: mutable u8
     pad0: mutable u8[2]
-    pad1: mutable u8[80]
+    orientation_x: mutable f32
+    orientation_y: mutable f32
+    orientation_z: mutable f32
+    orientation_w: mutable f32
+    acceleration_x: mutable f32
+    acceleration_y: mutable f32
+    acceleration_z: mutable f32
+    angularVelocity_x: mutable f32
+    angularVelocity_y: mutable f32
+    angularVelocity_z: mutable f32
+    touchNum: mutable u8
+    touchReserve: mutable u8[3]
+    time_since_touch_held_down: mutable u32
+    touch0_x: mutable u16
+    touch0_y: mutable u16
+    touch0_id: mutable u8
+    touch0_reserve: mutable u8[3]
+    touch1_x: mutable u16
+    touch1_y: mutable u16
+    touch1_id: mutable u8
+    touch1_reserve: mutable u8[3]
     connected: mutable bool
+    connectedPad: mutable u8[3]
     timestamp: mutable u64
-    pad2: mutable u8[32]
+    extensionUnitId: mutable u32
+    extensionReserve: mutable u8
+    extensionDataLength: mutable u8
+    extensionData: mutable u8[10]
+    connectedCount: mutable u8
+    reserve: mutable u8[2]
+    deviceUniqueDataLen: mutable u8
+    deviceUniqueData: mutable u8[12]
 
 @fixed_layout
 struct OrbisPadInfo:
@@ -55,7 +90,11 @@ struct OrbisPadInfo:
     unk2: mutable u32
     pad_handle: mutable u32
     unk3: mutable u32
+    unk4: mutable u32
+    unk5: mutable u32
     colour: mutable u32
+    unk6: mutable u32
+    unk: mutable u32[30]
 
 @fixed_layout
 struct OrbisPadDeviceClassExtendedInformation:
@@ -65,8 +104,9 @@ struct OrbisPadDeviceClassExtendedInformation:
 const ORBIS_PAD_PORT_TYPE_STANDARD: s32 = 0
 const ORBIS_PAD_PORT_TYPE_SPECIAL: s32 = 2
 const ORBIS_PAD_PORT_TYPE_REMOTE_CONTROL: s32 = 16
-const ORBIS_PAD_USER_SERVICE_USER_ID_SYSTEM: s32 = -2
+const ORBIS_PAD_USER_SERVICE_USER_ID_SYSTEM: s32 = 0xff
 const ORBIS_PAD_MAX_HANDLES: int = 16
+const ORBIS_PAD_BUTTON_INTERCEPTED: u32 = 0x80000000u32
 
 @fixed_layout
 struct PadHandleEntry:
@@ -75,11 +115,150 @@ struct PadHandleEntry:
     pad_type: mutable s32
     index: mutable s32
     handle: mutable s32
+    controller_index: mutable s32
+    motion_sensor_enabled: mutable bool
 
 global mutable g_initialized: bool = false
 global mutable g_pad_handle_counter: s32 = 1
 global mutable g_entries: array[PadHandleEntry, ORBIS_PAD_MAX_HANDLES] = zeroed
 global mutable g_handle_colour: array[u32, ORBIS_PAD_MAX_HANDLES] = zeroed
+global mutable g_handle_vibration_small: array[u8, ORBIS_PAD_MAX_HANDLES] = zeroed
+global mutable g_handle_vibration_large: array[u8, ORBIS_PAD_MAX_HANDLES] = zeroed
+global mutable g_pad_controllers_ready: bool = false
+global mutable g_touch_count: array[u8, ORBIS_PAD_MAX_HANDLES] = zeroed
+global mutable g_secondary_touch_count: array[u8, ORBIS_PAD_MAX_HANDLES] = zeroed
+global mutable g_previous_touch_num: array[u8, ORBIS_PAD_MAX_HANDLES] = zeroed
+global mutable g_was_secondary_touch_reset: array[bool, ORBIS_PAD_MAX_HANDLES] = zeroed
+
+def pad_ensure_controllers() -> mutable InputGameControllers&:
+    if not g_pad_controllers_ready:
+        controllers: mutable InputGameControllers& = Input_ControllersEnsure()
+        Input_GameControllersTryOpenSDLControllers(controllers)
+        g_pad_controllers_ready <- true
+    return Input_ControllersEnsure()
+
+def pad_colour_for_user(user_id: s32) -> u32:
+    if user_id == 2:
+        return (255u32 + (0u32 << 8) + (0u32 << 16))
+    if user_id == 3:
+        return (0u32 + (255u32 << 8) + (0u32 << 16))
+    if user_id == 4:
+        return (255u32 + (0u32 << 8) + (255u32 << 16))
+    return (0u32 + (0u32 << 8) + (255u32 << 16))
+
+def pad_resolve_controller_index(user_id: s32, pad_type: s32) -> s32:
+    if user_id == ORBIS_PAD_USER_SERVICE_USER_ID_SYSTEM or pad_type == ORBIS_PAD_PORT_TYPE_REMOTE_CONTROL:
+        return 4
+    idx_opt: u8? = Input_GamepadIndexFromUserId(user_id)
+    if idx_opt == null:
+        return 0
+    return idx_opt.s32()
+
+def pad_get_controller(slot: int) -> mutable InputGameController&?:
+    if slot < 0 or slot >= ORBIS_PAD_MAX_HANDLES:
+        return null
+    cidx: s32 = g_entries[slot].controller_index
+    if cidx < 0 or cidx >= INPUT_MAX_CONTROLLERS.s32():
+        return null
+    ctrls: mutable InputGameControllers& = pad_ensure_controllers()
+    return ctrls.controllers[cidx.usize()].ref[mutable InputGameController&]
+
+def pad_touch_num_from_state(state: mutable InputState&) -> u8:
+    n: mutable u8 = 0
+    if state.touchpad[0].state:
+        n <- n + 1
+    if state.touchpad[1].state:
+        n <- n + 1
+    return n
+
+def pad_fill_state(handle: s32, slot: int, state: mutable InputState&, connected: bool, connected_count: int, out_data: mutable OrbisPadData&) -> void:
+    out_data <- zeroed
+    out_data.orientation_w <- 1.0f32
+    if not connected:
+        out_data.connected <- false
+        out_data.connectedCount <- 0u8
+        return
+
+    left_x_ix: usize = Input_AxisIndex(Axis.LeftX)
+    left_y_ix: usize = Input_AxisIndex(Axis.LeftY)
+    right_x_ix: usize = Input_AxisIndex(Axis.RightX)
+    right_y_ix: usize = Input_AxisIndex(Axis.RightY)
+    trig_l_ix: usize = Input_AxisIndex(Axis.TriggerLeft)
+    trig_r_ix: usize = Input_AxisIndex(Axis.TriggerRight)
+    out_data.buttons <- state.buttonsState
+    out_data.left_x <- state.axes[left_x_ix].u8()
+    out_data.left_y <- state.axes[left_y_ix].u8()
+    out_data.right_x <- state.axes[right_x_ix].u8()
+    out_data.right_y <- state.axes[right_y_ix].u8()
+    out_data.l2 <- state.axes[trig_l_ix].u8()
+    out_data.r2 <- state.axes[trig_r_ix].u8()
+    out_data.acceleration_x <- state.acceleration.x * 0.098f32
+    out_data.acceleration_y <- state.acceleration.y * 0.098f32
+    out_data.acceleration_z <- state.acceleration.z * 0.098f32
+    out_data.angularVelocity_x <- state.angularVelocity.x
+    out_data.angularVelocity_y <- state.angularVelocity.y
+    out_data.angularVelocity_z <- state.angularVelocity.z
+
+    if not g_entries[slot].motion_sensor_enabled:
+        out_data.acceleration_x <- 0.0f32
+        out_data.acceleration_y <- 0.0f32
+        out_data.acceleration_z <- 0.0f32
+        out_data.angularVelocity_x <- 0.0f32
+        out_data.angularVelocity_y <- 0.0f32
+        out_data.angularVelocity_z <- 0.0f32
+
+    out_data.touchNum <- pad_touch_num_from_state(state)
+    touch0_id: mutable u8 = 1u8
+    touch1_id: mutable u8 = 2u8
+    if handle == 1:
+        if g_touch_count[slot] >= 127u8:
+            g_touch_count[slot] <- 0u8
+        if g_secondary_touch_count[slot] >= 127u8:
+            g_secondary_touch_count[slot] <- 0u8
+        if out_data.touchNum == 1u8 and g_previous_touch_num[slot] == 0u8:
+            g_touch_count[slot] <- g_touch_count[slot] + 1u8
+            g_secondary_touch_count[slot] <- g_touch_count[slot]
+        elif out_data.touchNum == 2u8 and g_previous_touch_num[slot] == 1u8:
+            g_secondary_touch_count[slot] <- g_secondary_touch_count[slot] + 1u8
+        elif out_data.touchNum == 0u8 and g_previous_touch_num[slot] > 0u8:
+            if g_touch_count[slot] < g_secondary_touch_count[slot]:
+                g_touch_count[slot] <- g_secondary_touch_count[slot]
+            elif g_was_secondary_touch_reset[slot]:
+                g_touch_count[slot] <- g_secondary_touch_count[slot]
+                g_was_secondary_touch_reset[slot] <- false
+        g_previous_touch_num[slot] <- out_data.touchNum
+        if out_data.touchNum == 1u8:
+            touch0_id <- g_touch_count[slot]
+            touch1_id <- 0u8
+        elif out_data.touchNum == 2u8:
+            touch0_id <- g_touch_count[slot]
+            touch1_id <- g_secondary_touch_count[slot]
+        else:
+            touch0_id <- 0u8
+            touch1_id <- 0u8
+
+    if (not state.touchpad[0].state) and state.touchpad[1].state:
+        out_data.touch0_x <- state.touchpad[1].x
+        out_data.touch0_y <- state.touchpad[1].y
+        out_data.touch0_id <- touch1_id
+    else:
+        out_data.touch0_x <- state.touchpad[0].x
+        out_data.touch0_y <- state.touchpad[0].y
+        out_data.touch0_id <- touch0_id
+        out_data.touch1_x <- state.touchpad[1].x
+        out_data.touch1_y <- state.touchpad[1].y
+        out_data.touch1_id <- touch1_id
+
+    ctrl: mutable InputGameController&? = pad_get_controller(slot)
+    if ctrl != null and ctrl.last_touch_down_timestamp != 0u64 and state.time > ctrl.last_touch_down_timestamp:
+        out_data.time_since_touch_held_down <- (state.time - ctrl.last_touch_down_timestamp).u32()
+    else:
+        out_data.time_since_touch_held_down <- 0u32
+
+    out_data.connected <- true
+    out_data.timestamp <- state.time
+    out_data.connectedCount <- (0 if connected_count < 0 else connected_count).u8()
+    out_data.deviceUniqueDataLen <- 0u8
 
 def pad_find_slot(user_id: s32, pad_type: s32, index: s32) -> int:
     i: mutable int = 0
@@ -107,33 +286,42 @@ def pad_alloc_slot() -> int:
 
 def scePadInit() -> int:
     g_initialized <- true
+    _ = pad_ensure_controllers()
     return ORBIS_OK
 
 def scePadOpen(userId: OrbisUserServiceUserId, type: s32, index: s32, pParam: void&?) -> int:
     _ = pParam
     if not g_initialized:
         return ORBIS_PAD_ERROR_NOT_INITIALIZED
-    if userId < 0 and userId != ORBIS_PAD_USER_SERVICE_USER_ID_SYSTEM:
+    if userId < 0:
         return ORBIS_DEVICE_SERVICE_ERROR_INVALID_USER
     if pad_find_slot(userId, type, index) != -1:
         return ORBIS_PAD_ERROR_ALREADY_OPENED
     if userId == ORBIS_PAD_USER_SERVICE_USER_ID_SYSTEM:
-        if type != ORBIS_PAD_PORT_TYPE_REMOTE_CONTROL:
-            return ORBIS_DEVICE_SERVICE_ERROR_INVALID_USER
-    else:
         if type == ORBIS_PAD_PORT_TYPE_REMOTE_CONTROL:
-            return ORBIS_PAD_ERROR_INVALID_ARG
+            # valid path
+            _ = 0
+        else:
+            return ORBIS_DEVICE_SERVICE_ERROR_INVALID_USER
+    elif type == ORBIS_PAD_PORT_TYPE_REMOTE_CONTROL:
+        return ORBIS_PAD_ERROR_INVALID_ARG
     slot: int = pad_alloc_slot()
     if slot == -1:
         return ORBIS_PAD_ERROR_FATAL
     handle: s32 = g_pad_handle_counter
     g_pad_handle_counter <- g_pad_handle_counter + 1
+    controller_index: s32 = pad_resolve_controller_index(userId, type)
+    _ = pad_ensure_controllers()
     g_entries[slot].used <- true
     g_entries[slot].user_id <- userId
     g_entries[slot].pad_type <- type
     g_entries[slot].index <- index
     g_entries[slot].handle <- handle
+    g_entries[slot].controller_index <- controller_index
+    g_entries[slot].motion_sensor_enabled <- true
     g_handle_colour[slot] <- 0
+    g_handle_vibration_small[slot] <- 0u8
+    g_handle_vibration_large[slot] <- 0u8
     _ = scePadResetLightBar(handle)
     _ = scePadResetOrientation(handle)
     return handle
@@ -156,48 +344,120 @@ def scePadClose(handle: s32) -> int:
     slot: int = pad_find_handle(handle)
     if slot == -1:
         return ORBIS_PAD_ERROR_INVALID_HANDLE
-    g_entries[slot].used <- false
+    g_entries[slot] <- zeroed
+    g_handle_colour[slot] <- 0u32
+    g_handle_vibration_small[slot] <- 0u8
+    g_handle_vibration_large[slot] <- 0u8
     return ORBIS_OK
 
 def scePadGetControllerInformation(handle: s32, pInfo: mutable OrbisPadControllerInformation&?) -> int:
-    if pad_find_handle(handle) == -1:
+    slot: int = pad_find_handle(handle)
+    if slot == -1:
         return ORBIS_PAD_ERROR_INVALID_HANDLE
     if pInfo == null:
         return ORBIS_PAD_ERROR_INVALID_ARG
+    pInfo[0] <- zeroed
+    pInfo[0].touchPadPixelDensity <- 1.0f32
+    pInfo[0].touchPadResolutionX <- 1920u16
+    pInfo[0].touchPadResolutionY <- 950u16
+    pInfo[0].deadZoneLeft <- 1u8
+    pInfo[0].deadZoneRight <- 1u8
     pInfo[0].connectionType <- ORBIS_PAD_PORT_TYPE_STANDARD.u8()
-    pInfo[0].connectedCount <- 1
+    pInfo[0].connectedCount <- 1u8
     pInfo[0].connected <- true
     pInfo[0].deviceClass <- 0
+    if g_entries[slot].pad_type == ORBIS_PAD_PORT_TYPE_SPECIAL:
+        pInfo[0].connectionType <- ORBIS_PAD_PORT_TYPE_SPECIAL.u8()
+    ctrl: mutable InputGameController&? = pad_get_controller(slot)
+    if ctrl != null:
+        pInfo[0].connected <- ctrl.connected
+        pInfo[0].connectedCount <- (0 if ctrl.connected_count < 0 else ctrl.connected_count).u8()
     return ORBIS_OK
 
 def scePadGetExtControllerInformation(handle: s32, pInfo: mutable OrbisPadExtendedControllerInformation&?) -> int:
-    if pad_find_handle(handle) == -1:
+    slot: int = pad_find_handle(handle)
+    if slot == -1:
         return ORBIS_PAD_ERROR_INVALID_HANDLE
     if pInfo == null:
         return ORBIS_PAD_ERROR_INVALID_ARG
-    pInfo[0].base.connectionType <- ORBIS_PAD_PORT_TYPE_STANDARD.u8()
-    pInfo[0].base.connectedCount <- 1
+    pInfo[0] <- zeroed
+    _ = scePadGetControllerInformation(handle, pInfo[0].base.ref[mutable OrbisPadControllerInformation&])
     # C++ sets base via scePadGetControllerInformation, then clears connected for non-special pad mode.
-    pInfo[0].base.connected <- false
-    pInfo[0].base.deviceClass <- 0
+    if g_entries[slot].pad_type != ORBIS_PAD_PORT_TYPE_SPECIAL:
+        pInfo[0].base.connected <- false
     pInfo[0].padType1 <- 0
     pInfo[0].padType2 <- 0
     pInfo[0].capability <- 0
     return ORBIS_OK
 
 def scePadRead(handle: s32, pData: mutable OrbisPadData&?, num: s32) -> int:
-    if pad_find_handle(handle) == -1:
+    slot: int = pad_find_handle(handle)
+    if slot == -1:
         return ORBIS_PAD_ERROR_INVALID_HANDLE
     if pData == null or num <= 0:
         return ORBIS_PAD_ERROR_INVALID_ARG
-    pData[0] <- zeroed
-    pData[0].connected <- true
-    return 1
+    ctrl: mutable InputGameController&? = pad_get_controller(slot)
+    if ctrl == null:
+        pData[0] <- zeroed
+        pData[0].orientation_w <- 1.0f32
+        pData[0].connected <- false
+        return 1
+    Input_GameControllerUpdateAxisSmoothing(ctrl.ref[mutable InputGameController&])
+    Input_GameControllerGyro(ctrl.ref[mutable InputGameController&])
+    Input_GameControllerAcceleration(ctrl.ref[mutable InputGameController&])
+
+    connected: mutable bool = false
+    connected_count: mutable int = 0
+    states: mutable InputState[64] = zeroed
+    ret_num: int = Input_GameControllerReadStates(
+        ctrl.ref[mutable InputGameController&],
+        states[0].ref[mutable InputState&],
+        num,
+        connected.ref[mutable bool&],
+        connected_count.ref[mutable int&]
+    )
+    if ret_num <= 0:
+        one: mutable InputState = zeroed
+        Input_GameControllerReadState(
+            ctrl.ref[InputGameController&],
+            one.ref[mutable InputState&],
+            connected.ref[mutable bool&],
+            connected_count.ref[mutable int&]
+        )
+        pad_fill_state(handle, slot, one.ref[mutable InputState&], connected, connected_count, pData[0].ref[mutable OrbisPadData&])
+        return 1
+
+    i: mutable int = 0
+    while i < ret_num and i < num:
+        pad_fill_state(handle, slot, states[i.usize()].ref[mutable InputState&], connected, connected_count, pData[i.usize()].ref[mutable OrbisPadData&])
+        i <- i + 1
+    return i
 
 def scePadReadState(handle: s32, pData: mutable OrbisPadData&?) -> int:
-    r: int = scePadRead(handle, pData, 1)
-    if r < 0:
-        return r
+    slot: int = pad_find_handle(handle)
+    if slot == -1:
+        return ORBIS_PAD_ERROR_INVALID_HANDLE
+    if pData == null:
+        return ORBIS_PAD_ERROR_INVALID_ARG
+    ctrl: mutable InputGameController&? = pad_get_controller(slot)
+    if ctrl == null:
+        pData[0] <- zeroed
+        pData[0].orientation_w <- 1.0f32
+        pData[0].connected <- false
+        return ORBIS_OK
+    Input_GameControllerUpdateAxisSmoothing(ctrl.ref[mutable InputGameController&])
+    Input_GameControllerGyro(ctrl.ref[mutable InputGameController&])
+    Input_GameControllerAcceleration(ctrl.ref[mutable InputGameController&])
+    state: mutable InputState = zeroed
+    connected: mutable bool = false
+    connected_count: mutable int = 0
+    Input_GameControllerReadState(
+        ctrl.ref[InputGameController&],
+        state.ref[mutable InputState&],
+        connected.ref[mutable bool&],
+        connected_count.ref[mutable int&]
+    )
+    pad_fill_state(handle, slot, state.ref[mutable InputState&], connected, connected_count, pData[0].ref[mutable OrbisPadData&])
     return ORBIS_OK
 
 def scePadGetInfo(data: mutable OrbisPadInfo&?) -> int:
@@ -205,10 +465,17 @@ def scePadGetInfo(data: mutable OrbisPadInfo&?) -> int:
         return ORBIS_PAD_ERROR_INVALID_ARG
     data[0] <- zeroed
     data[0].unk1 <- 1
-    data[0].pad_handle <- 1
+    data[0].pad_handle <- 1u32
     data[0].unk3 <- 0x00000101
-    slot: int = pad_find_handle(1)
+    slot: mutable int = -1
+    i: mutable int = 0
+    while i < ORBIS_PAD_MAX_HANDLES:
+        if g_entries[i].used:
+            slot <- i
+            break
+        i <- i + 1
     if slot != -1:
+        data[0].pad_handle <- g_entries[slot].handle.u32()
         data[0].colour <- g_handle_colour[slot]
     return ORBIS_OK
 
@@ -216,8 +483,16 @@ def scePadResetLightBar(handle: s32) -> int:
     slot: int = pad_find_handle(handle)
     if slot == -1:
         return ORBIS_PAD_ERROR_INVALID_HANDLE
-    # Matches C++ fallback behavior when no concrete user color data is available: blue.
-    g_handle_colour[slot] <- (0 + (0 << 8) + (255 << 16))
+    g_handle_colour[slot] <- pad_colour_for_user(g_entries[slot].user_id)
+    ctrl: mutable InputGameController&? = pad_get_controller(slot)
+    if ctrl != null:
+        rgb: u32 = g_handle_colour[slot]
+        Input_GameControllerSetLightBarRGB(
+            ctrl.ref[mutable InputGameController&],
+            (rgb & 0xffu32).u8(),
+            ((rgb >> 8) & 0xffu32).u8(),
+            ((rgb >> 16) & 0xffu32).u8()
+        )
     return ORBIS_OK
 
 def scePadSetLightBar(handle: s32, pParam: OrbisPadLightBarParam&?) -> int:
@@ -229,6 +504,14 @@ def scePadSetLightBar(handle: s32, pParam: OrbisPadLightBarParam&?) -> int:
     if pParam[0].r < 0x0d and pParam[0].g < 0x0d and pParam[0].b < 0x0d:
         return ORBIS_PAD_ERROR_INVALID_LIGHTBAR_SETTING
     g_handle_colour[slot] <- (pParam[0].r.u32() + (pParam[0].g.u32() << 8) + (pParam[0].b.u32() << 16))
+    ctrl: mutable InputGameController&? = pad_get_controller(slot)
+    if ctrl != null:
+        Input_GameControllerSetLightBarRGB(
+            ctrl.ref[mutable InputGameController&],
+            pParam[0].r,
+            pParam[0].g,
+            pParam[0].b
+        )
     return ORBIS_OK
 
 def scePadSetLightBarForTracker(handle: s32, pParam: OrbisPadLightBarParam&?) -> int:
@@ -238,13 +521,31 @@ def scePadSetLightBarForTracker(handle: s32, pParam: OrbisPadLightBarParam&?) ->
     if pParam == null:
         return ORBIS_PAD_ERROR_INVALID_ARG
     g_handle_colour[slot] <- (pParam[0].r.u32() + (pParam[0].g.u32() << 8) + (pParam[0].b.u32() << 16))
+    ctrl: mutable InputGameController&? = pad_get_controller(slot)
+    if ctrl != null:
+        Input_GameControllerSetLightBarRGB(
+            ctrl.ref[mutable InputGameController&],
+            pParam[0].r,
+            pParam[0].g,
+            pParam[0].b
+        )
     return ORBIS_OK
 
 def scePadSetVibration(handle: s32, pParam: OrbisPadVibrationParam&?) -> int:
-    if pad_find_handle(handle) == -1:
+    slot: int = pad_find_handle(handle)
+    if slot == -1:
         return ORBIS_PAD_ERROR_INVALID_HANDLE
     if pParam == null:
         return ORBIS_PAD_ERROR_INVALID_ARG
+    g_handle_vibration_large[slot] <- pParam[0].largeMotor
+    g_handle_vibration_small[slot] <- pParam[0].smallMotor
+    ctrl: mutable InputGameController&? = pad_get_controller(slot)
+    if ctrl != null:
+        _ = Input_GameControllerSetVibration(
+            ctrl.ref[mutable InputGameController&],
+            pParam[0].smallMotor,
+            pParam[0].largeMotor
+        )
     return ORBIS_OK
 
 # remaining C++ exports currently stubbed in upstream; keep ORBIS_OK defaults
@@ -384,8 +685,10 @@ def scePadResetLightBarAllByPortType() -> int:
     return ORBIS_OK
 
 def scePadResetOrientation(handle: s32) -> int:
-    if pad_find_handle(handle) == -1:
+    slot: int = pad_find_handle(handle)
+    if slot == -1:
         return ORBIS_PAD_ERROR_INVALID_HANDLE
+    _ = pad_get_controller(slot)
     return ORBIS_OK
 
 def scePadResetOrientationForTracker() -> int:
@@ -427,8 +730,10 @@ def scePadSetLoginUserNumber() -> int:
     return ORBIS_OK
 
 def scePadSetMotionSensorState(handle: s32, bEnable: bool) -> int:
-    _ = handle
-    _ = bEnable
+    slot: int = pad_find_handle(handle)
+    if slot == -1:
+        return ORBIS_PAD_ERROR_INVALID_HANDLE
+    g_entries[slot].motion_sensor_enabled <- bEnable
     return ORBIS_OK
 
 def scePadSetProcessFocus() -> int:
@@ -501,4 +806,95 @@ def Func_EF103E845B6F0420() -> int:
 
 def RegisterLib(sym: void&?) -> void:
     _ = sym
-    return
+    LIB_FUNCTION("6ncge5+l5Qs", "libScePad", 1, "libScePad", scePadClose)
+    LIB_FUNCTION("kazv1NzSB8c", "libScePad", 1, "libScePad", scePadConnectPort)
+    LIB_FUNCTION("AcslpN1jHR8", "libScePad", 1, "libScePad", scePadDeviceClassGetExtendedInformation)
+    LIB_FUNCTION("IHPqcbc0zCA", "libScePad", 1, "libScePad", scePadDeviceClassParseData)
+    LIB_FUNCTION("d7bXuEBycDI", "libScePad", 1, "libScePad", scePadDeviceOpen)
+    LIB_FUNCTION("0aziJjRZxqQ", "libScePad", 1, "libScePad", scePadDisableVibration)
+    LIB_FUNCTION("pnZXireDoeI", "libScePad", 1, "libScePad", scePadDisconnectDevice)
+    LIB_FUNCTION("9ez71nWSvD0", "libScePad", 1, "libScePad", scePadDisconnectPort)
+    LIB_FUNCTION("77ooWxGOIVs", "libScePad", 1, "libScePad", scePadEnableAutoDetect)
+    LIB_FUNCTION("+cE4Jx431wc", "libScePad", 1, "libScePad", scePadEnableExtensionPort)
+    LIB_FUNCTION("E1KEw5XMGQQ", "libScePad", 1, "libScePad", scePadEnableSpecificDeviceClass)
+    LIB_FUNCTION("DD-KiRLBqkQ", "libScePad", 1, "libScePad", scePadEnableUsbConnection)
+    LIB_FUNCTION("Q66U8FdrMaw", "libScePad", 1, "libScePad", scePadGetBluetoothAddress)
+    LIB_FUNCTION("qtasqbvwgV4", "libScePad", 1, "libScePad", scePadGetCapability)
+    LIB_FUNCTION("gjP9-KQzoUk", "libScePad", 1, "libScePad", scePadGetControllerInformation)
+    LIB_FUNCTION("Uq6LgTJEmQs", "libScePad", 1, "libScePad", scePadGetDataInternal)
+    LIB_FUNCTION("hDgisSGkOgw", "libScePad", 1, "libScePad", scePadGetDeviceId)
+    LIB_FUNCTION("4rS5zG7RFaM", "libScePad", 1, "libScePad", scePadGetDeviceInfo)
+    LIB_FUNCTION("hGbf2QTBmqc", "libScePad", 1, "libScePad", scePadGetExtControllerInformation)
+    LIB_FUNCTION("1DmZjZAuzEM", "libScePad", 1, "libScePad", scePadGetExtensionUnitInfo)
+    LIB_FUNCTION("PZSoY8j0Pko", "libScePad", 1, "libScePad", scePadGetFeatureReport)
+    LIB_FUNCTION("u1GRHp+oWoY", "libScePad", 1, "libScePad", scePadGetHandle)
+    LIB_FUNCTION("kiA9bZhbnAg", "libScePad", 1, "libScePad", scePadGetIdleCount)
+    LIB_FUNCTION("1Odcw19nADw", "libScePad", 1, "libScePad", scePadGetInfo)
+    LIB_FUNCTION("4x5Im8pr0-4", "libScePad", 1, "libScePad", scePadGetInfoByPortType)
+    LIB_FUNCTION("vegw8qax5MI", "libScePad", 1, "libScePad", scePadGetLicenseControllerInformation)
+    LIB_FUNCTION("WPIB7zBWxVE", "libScePad", 1, "libScePad", scePadGetMotionSensorPosition)
+    LIB_FUNCTION("k4+nDV9vbT0", "libScePad", 1, "libScePad", scePadGetMotionTimerUnit)
+    LIB_FUNCTION("do-JDWX+zRs", "libScePad", 1, "libScePad", scePadGetSphereRadius)
+    LIB_FUNCTION("QuOaoOcSOw0", "libScePad", 1, "libScePad", scePadGetVersionInfo)
+    LIB_FUNCTION("hv1luiJrqQM", "libScePad", 1, "libScePad", scePadInit)
+    LIB_FUNCTION("bi0WNvZ1nug", "libScePad", 1, "libScePad", scePadIsBlasterConnected)
+    LIB_FUNCTION("mEC+xJKyIjQ", "libScePad", 1, "libScePad", scePadIsDS4Connected)
+    LIB_FUNCTION("d2Qk-i8wGak", "libScePad", 1, "libScePad", scePadIsLightBarBaseBrightnessControllable)
+    LIB_FUNCTION("4y9RNPSBsqg", "libScePad", 1, "libScePad", scePadIsMoveConnected)
+    LIB_FUNCTION("9e56uLgk5y0", "libScePad", 1, "libScePad", scePadIsMoveReproductionModel)
+    LIB_FUNCTION("pFTi-yOrVeQ", "libScePad", 1, "libScePad", scePadIsValidHandle)
+    LIB_FUNCTION("CfwUlQtCFi4", "libScePad", 1, "libScePad", scePadMbusInit)
+    LIB_FUNCTION("s7CvzS+9ZIs", "libScePad", 1, "libScePad", scePadMbusTerm)
+    LIB_FUNCTION("xk0AcarP3V4", "libScePad", 1, "libScePad", scePadOpen)
+    LIB_FUNCTION("WFIiSfXGUq8", "libScePad", 1, "libScePad", scePadOpenExt)
+    LIB_FUNCTION("71E9e6n+2R8", "libScePad", 1, "libScePad", scePadOpenExt2)
+    LIB_FUNCTION("DrUu8cPrje8", "libScePad", 1, "libScePad", scePadOutputReport)
+    LIB_FUNCTION("q1cHNfGycLI", "libScePad", 1, "libScePad", scePadRead)
+    LIB_FUNCTION("fm1r2vv5+OU", "libScePad", 1, "libScePad", scePadReadBlasterForTracker)
+    LIB_FUNCTION("QjwkT2Ycmew", "libScePad", 1, "libScePad", scePadReadExt)
+    LIB_FUNCTION("2NhkFTRnXHk", "libScePad", 1, "libScePad", scePadReadForTracker)
+    LIB_FUNCTION("3u4M8ck9vJM", "libScePad", 1, "libScePad", scePadReadHistory)
+    LIB_FUNCTION("YndgXqQVV7c", "libScePad", 1, "libScePad", scePadReadState)
+    LIB_FUNCTION("5Wf4q349s+Q", "libScePad", 1, "libScePad", scePadReadStateExt)
+    LIB_FUNCTION("DscD1i9HX1w", "libScePad", 1, "libScePad", scePadResetLightBar)
+    LIB_FUNCTION("+4c9xRLmiXQ", "libScePad", 1, "libScePad", scePadResetLightBarAll)
+    LIB_FUNCTION("+Yp6+orqf1M", "libScePad", 1, "libScePad", scePadResetLightBarAllByPortType)
+    LIB_FUNCTION("rIZnR6eSpvk", "libScePad", 1, "libScePad", scePadResetOrientation)
+    LIB_FUNCTION("jbAqAvLEP4A", "libScePad", 1, "libScePad", scePadResetOrientationForTracker)
+    LIB_FUNCTION("KLmYx9ij2h0", "libScePad", 1, "libScePad", scePadSetAngularVelocityBiasCorrectionState)
+    LIB_FUNCTION("r44mAxdSG+U", "libScePad", 1, "libScePad", scePadSetAngularVelocityDeadbandState)
+    LIB_FUNCTION("ew647HuKi2Y", "libScePad", 1, "libScePad", scePadSetAutoPowerOffCount)
+    LIB_FUNCTION("MbTt1EHYCTg", "libScePad", 1, "libScePad", scePadSetButtonRemappingInfo)
+    LIB_FUNCTION("MLA06oNfF+4", "libScePad", 1, "libScePad", scePadSetConnection)
+    LIB_FUNCTION("bsbHFI0bl5s", "libScePad", 1, "libScePad", scePadSetExtensionReport)
+    LIB_FUNCTION("xqgVCEflEDY", "libScePad", 1, "libScePad", scePadSetFeatureReport)
+    LIB_FUNCTION("lrjFx4xWnY8", "libScePad", 1, "libScePad", scePadSetForceIntercepted)
+    LIB_FUNCTION("RR4novUEENY", "libScePad", 1, "libScePad", scePadSetLightBar)
+    LIB_FUNCTION("dhQXEvmrVNQ", "libScePad", 1, "libScePad", scePadSetLightBarBaseBrightness)
+    LIB_FUNCTION("etaQhgPHDRY", "libScePad", 1, "libScePad", scePadSetLightBarBlinking)
+    LIB_FUNCTION("iHuOWdvQVpg", "libScePad", 1, "libScePad", scePadSetLightBarForTracker)
+    LIB_FUNCTION("o-6Y99a8dKU", "libScePad", 1, "libScePad", scePadSetLoginUserNumber)
+    LIB_FUNCTION("clVvL4ZDntw", "libScePad", 1, "libScePad", scePadSetMotionSensorState)
+    LIB_FUNCTION("flYYxek1wy8", "libScePad", 1, "libScePad", scePadSetProcessFocus)
+    LIB_FUNCTION("DmBx8K+jDWw", "libScePad", 1, "libScePad", scePadSetProcessPrivilege)
+    LIB_FUNCTION("FbxEpTRDou8", "libScePad", 1, "libScePad", scePadSetProcessPrivilegeOfButtonRemapping)
+    LIB_FUNCTION("yah8Bk4TcYY", "libScePad", 1, "libScePad", scePadSetShareButtonMaskForRemotePlay)
+    LIB_FUNCTION("vDLMoJLde8I", "libScePad", 1, "libScePad", scePadSetTiltCorrectionState)
+    LIB_FUNCTION("z+GEemoTxOo", "libScePad", 1, "libScePad", scePadSetUserColor)
+    LIB_FUNCTION("yFVnOdGxvZY", "libScePad", 1, "libScePad", scePadSetVibration)
+    LIB_FUNCTION("8BOObG94-tc", "libScePad", 1, "libScePad", scePadSetVibrationForce)
+    LIB_FUNCTION("--jrY4SHfm8", "libScePad", 1, "libScePad", scePadSetVrTrackingMode)
+    LIB_FUNCTION("zFJ35q3RVnY", "libScePad", 1, "libScePad", scePadShareOutputData)
+    LIB_FUNCTION("80XdmVYsNPA", "libScePad", 1, "libScePad", scePadStartRecording)
+    LIB_FUNCTION("gAHvg6JPIic", "libScePad", 1, "libScePad", scePadStopRecording)
+    LIB_FUNCTION("Oi7FzRWFr0Y", "libScePad", 1, "libScePad", scePadSwitchConnection)
+    LIB_FUNCTION("0MB5x-ieRGI", "libScePad", 1, "libScePad", scePadVertualDeviceAddDevice)
+    LIB_FUNCTION("N7tpsjWQ87s", "libScePad", 1, "libScePad", scePadVirtualDeviceAddDevice)
+    LIB_FUNCTION("PFec14-UhEQ", "libScePad", 1, "libScePad", scePadVirtualDeviceDeleteDevice)
+    LIB_FUNCTION("pjPCronWdxI", "libScePad", 1, "libScePad", scePadVirtualDeviceDisableButtonRemapping)
+    LIB_FUNCTION("LKXfw7VJYqg", "libScePad", 1, "libScePad", scePadVirtualDeviceGetRemoteSetting)
+    LIB_FUNCTION("IWOyO5jKuZg", "libScePad", 1, "libScePad", scePadVirtualDeviceInsertData)
+    LIB_FUNCTION("KY0hSB+Uyfo", "libScePad", 1, "libScePad", Func_298D21481F94C9FA)
+    LIB_FUNCTION("UeUUvNOgXKU", "libScePad", 1, "libScePad", Func_51E514BCD3A05CA5)
+    LIB_FUNCTION("ickjfjk9okM", "libScePad", 1, "libScePad", Func_89C9237E393DA243)
+    LIB_FUNCTION("7xA+hFtvBCA", "libScePad", 1, "libScePad", Func_EF103E845B6F0420)
