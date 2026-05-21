@@ -13,7 +13,7 @@ Per-subsystem counts:
 Parity gate counts (native/bridge/fallback/unresolved):
 - native: 247
 - bridge: 2
-- fallback: 7
+- fallback: 0
 - unresolved: 0
 Ledger risk counts (missing/unverified):
 - missing: 1
@@ -53,10 +53,10 @@ CUSA07399 stage:
   - VIDEO_STAGE_first_frame_candidate=0
 CUSA07399 artifact metrics:
 - CUSA module count: 4
-- imports total: 1151
-- native HLE count: 832
-- PRX export count: 312
-- AeroLib fallback count: 7
+- imports total: 1150
+- native HLE count: 839
+- PRX export count: 311
+- AeroLib fallback count: 0
 - unresolved count: 0
 - malformed count: 0
 - audio SDL available: 0
@@ -81,13 +81,7 @@ Real CUSA runtime service signals:
 - last HLE call: module=libc symbol=RpQJJVKTiFM
 - current video/audio/input stage: graphics=0 audio-input-service=0
 Top 50 fallback symbols:
-- [1] nid=-hJRce8wn1U lib=J module=K source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=Cxwy7wHq4J0 lib=J module=K source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=OcAgPxcq5Vk lib=J module=K source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=PR5k1penBLM lib=J module=K source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=RujUxbr3haM lib=J module=K source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=cK6bYHf-Q5E lib=J module=K source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=i-XwZjw0OOY lib=J module=K source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- none
 Top blockers:
 - none
 Failing scenario ids:
@@ -95,13 +89,7 @@ Failing scenario ids:
 
 ## Agent Work Queues
 ### kernel_fallbacks
-- [1] -hJRce8wn1U J K (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
-- [1] Cxwy7wHq4J0 J K (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
-- [1] OcAgPxcq5Vk J K (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
-- [1] PR5k1penBLM J K (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
-- [1] RujUxbr3haM J K (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
-- [1] cK6bYHf-Q5E J K (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
-- [1] i-XwZjw0OOY J K (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
+- none
 ### graphics_fallbacks
 - none
 ### audio_input_service_fallbacks
@@ -110,9 +98,9 @@ Failing scenario ids:
 - none
 
 ## Fallback Delta
-- fallback count before: 21
-- fallback count after: 7
-- fallback symbols newly resolved: 14
+- fallback count before: 7
+- fallback count after: 0
+- fallback symbols newly resolved: 7
 
 ## Steps
 - PASS: project.json syntax
