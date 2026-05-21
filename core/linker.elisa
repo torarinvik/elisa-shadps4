@@ -158,6 +158,12 @@ def Linker_FindByName(self: Linker&, name: static u8&) -> u32:
             return i.u32()
     return 0xFFFFFFFF.u32()
 
+def Linker_FindByFileOrHost(self: Linker&, name: static u8&) -> u32:
+    for i in 0..<self.modules.count:
+        if streq(self.modules[i].file, name) == 1 or streq(self.modules[i].host_file, name) == 1:
+            return i.u32()
+    return 0xFFFFFFFF.u32()
+
 def Linker_MaxTlsIndex(self: Linker&) -> u32:
     return self.max_tls_index
 
@@ -208,6 +214,23 @@ def Linker_StringContainsSlash(input: static u8&) -> bool:
             return true
     return false
 
+def Linker_StringHasSuffix(input: static u8&, suffix: static u8&) -> bool:
+    input_len: usize = static_strlen(input)
+    suffix_len: usize = static_strlen(suffix)
+    if suffix_len > input_len:
+        return false
+    start: usize = input_len - suffix_len
+    for i in 0..<suffix_len:
+        if input[start + i] != suffix[i]:
+            return false
+    return true
+
+def Linker_FileExists(path: static u8&) -> bool:
+    file: mutable IOFile = IOFile_new()
+    opened: bool = IOFile_Open(file.ref[mutable IOFile&], path, FileAccessMode.Read) == 0
+    IOFile_Close(file.ref[mutable IOFile&])
+    return opened
+
 def Linker_ResolveGuestModulePath(self: Linker&, guest_path: static u8&) -> static u8&:
     len: usize = static_strlen(guest_path)
     if len == 0:
@@ -227,6 +250,56 @@ def Linker_ResolveGuestModulePath(self: Linker&, guest_path: static u8&) -> stat
 
 def Linker_StaticTlsSize(self: Linker&) -> usize:
     return self.static_tls_size
+
+def Linker_DependencyGuestPath(name: static u8&) -> static u8&:
+    if static_strlen(name) == 0:
+        return ""
+    if Linker_StringContainsSlash(name):
+        return name
+    if Linker_StringHasSuffix(name, ".prx") or Linker_StringHasSuffix(name, ".sprx"):
+        return Linker_PathJoin("/app0/sce_module", name)
+    return Linker_PathJoin("/app0/sce_module", Linker_Concat2(name, ".prx"))
+
+def Linker_LoadGuestDependency(self: mutable Linker&, dependency_name: static u8&) -> s32:
+    guest_path: static u8& = Linker_DependencyGuestPath(dependency_name)
+    if static_strlen(guest_path) == 0:
+        return -1
+    host_path: static u8& = Linker_ResolveGuestModulePath(self.ref[Linker&], guest_path)
+    if static_strlen(host_path) == 0:
+        return -1
+    existing: mutable u32 = Linker_FindByFileOrHost(self.ref[Linker&], guest_path)
+    if existing != 0xFFFFFFFF.u32():
+        return existing.s32()
+    existing <- Linker_FindByFileOrHost(self.ref[Linker&], host_path)
+    if existing != 0xFFFFFFFF.u32():
+        return existing.s32()
+    if not Linker_FileExists(host_path):
+        return -1
+    idx: s32 = Linker_LoadModuleFromHost(self.ref[mutable Linker&], guest_path, host_path, true)
+    if idx < 0:
+        return idx
+    mod_ref: mutable Module&? = Linker_GetModule(self.ref[mutable Linker&], idx)
+    if mod_ref == null:
+        return -1
+    Linker_RelocateAnyImports(self.ref[mutable Linker&], mod_ref)
+    if mod_ref.tls.image_size != 0:
+        Linker_AdvanceGenerationCounter(self.ref[mutable Linker&])
+    _ = Module_Start(mod_ref, 0, null, null)
+    return idx
+
+def Linker_LoadDependencyClosure(self: mutable Linker&) -> void:
+    initial_count: usize = self.modules.count
+    index: mutable usize = 0
+    while index < self.modules.count:
+        dep_count: usize = self.modules[index].dynamic_info.import_modules.count
+        dep_index: mutable usize = 0
+        while dep_index < dep_count:
+            dep_name: static u8& = self.modules[index].dynamic_info.import_modules[dep_index].name
+            _ = Linker_LoadGuestDependency(self.ref[mutable Linker&], dep_name)
+            dep_index <- dep_index + 1
+        index <- index + 1
+    if self.modules.count != initial_count:
+        self.relocated_all_imports <- false
 
 def Linker_RelocateAnyImports(self: mutable Linker&, module: mutable Module&) -> void:
     for i in 0..<module.import_symbols.count:
@@ -349,7 +422,7 @@ def Linker_LoadModuleFromHost(self: mutable Linker&, guest_name: static u8&, hos
     return (self.modules.count - 1).s32()
 
 def Linker_LoadAndStartModule(self: mutable Linker&, path: static u8&, args: u64, argp: void&?, p_res: mutable int&?) -> s32:
-    existing: u32 = Linker_FindByName(self.ref[Linker&], path)
+    existing: u32 = Linker_FindByFileOrHost(self.ref[Linker&], path)
     if existing != 0xFFFFFFFF.u32():
         self.last_started_module_index <- existing.s32()
         self.last_start_result <- 0
@@ -372,6 +445,9 @@ def Linker_LoadAndStartModule(self: mutable Linker&, path: static u8&, args: u64
         self.last_start_result <- -1
         self.last_entry_addr <- 0.uintptr()
         return -1
+    Linker_RelocateAnyImports(self.ref[mutable Linker&], mod_ref)
+    if mod_ref.tls.image_size != 0:
+        Linker_AdvanceGenerationCounter(self.ref[mutable Linker&])
     self.last_entry_addr <- Module_GetEntryAddress(mod_ref, 0.uintptr())
     start_result: s32 = Module_Start(mod_ref, args, argp, null)
     self.last_started_module_index <- idx
@@ -407,6 +483,9 @@ def Linker_Resolve(self: mutable Linker&, name: static u8&, module: mutable Modu
             out_virtual_address <- sym.callable_address
             return true
         i <- i + 1
+    for module_index in 0..<self.modules.count:
+        if Module_FindDefinedSymbolAddress(self.modules[module_index].ref[mutable Module&], name, out_virtual_address.ref[mutable u64&]):
+            return true
     return false
 
 def Linker_Execute(self: mutable Linker&, args: darray[static u8&]) -> s32:
@@ -416,15 +495,14 @@ def Linker_Execute(self: mutable Linker&, args: darray[static u8&]) -> s32:
         self.last_start_result <- -1
         self.last_entry_addr <- 0.uintptr()
         return -1
-    index: mutable s32 = 0
-    module: mutable Module& = self.modules[index.usize()].ref[mutable Module&]
-    self.static_tls_size <- module.tls.image_size.usize()
-    module.tls.offset <- module.tls.image_size
+    Linker_LoadDependencyClosure(self.ref[mutable Linker&])
+    self.static_tls_size <- self.modules[0].tls.image_size.usize()
+    self.modules[0].tls.offset <- self.modules[0].tls.image_size
     if not self.relocated_all_imports:
         Linker_RelocateAllImports(self.ref[mutable Linker&])
     memory: mutable MemoryManager& = Memory_Instance()
     MemoryManager_SetupMemoryRegions(memory, ORBIS_KERNEL_FLEXIBLE_MEMORY_SIZE, true, true)
-    index <- (self.modules.count - 1).s32()
+    index: mutable s32 = 0
     mod_ref: mutable Module&? = Linker_GetModule(self.ref[mutable Linker&], index)
     if mod_ref == null:
         self.last_started_module_index <- -1

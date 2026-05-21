@@ -2,9 +2,12 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 include "./common/types.elisa"
+include "./core/hle_libs.elisa"
 include "./core/linker.elisa"
 
 const REAL_SELF_TEST_EBOOT: static u8& = "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/shadPS4/Games/CUSA05716/eboot.bin"
+const REAL_SELF_TEST_APP0_ROOT: static u8& = "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/shadPS4/Games/CUSA05716"
+const REAL_SELF_TEST_LIBC_PRX: static u8& = "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/shadPS4/Games/CUSA05716/sce_module/libc.prx"
 
 def RealSelfLoader_Check(cond: bool, message: static u8&) -> void:
     if not cond:
@@ -83,3 +86,31 @@ def real_self_loader_parses_dynamic_imports_and_relocations() -> void:
         relocated: Module = linker.modules[index.usize()]
         RealSelfLoader_Check(relocated.applied_relocation_count > 0, "expected at least one relocation write into the loaded image")
         RealSelfLoader_Check(RealSelfLoader_CheckMappedRelocationMirror(relocated), "expected relocation writes to mirror into guest memory backing")
+
+@test
+def real_self_loader_loads_guest_prx_through_dynamic_module_path() -> void:
+    can Memory.Allocate, Abort.Panic:
+        Linker_Reset()
+        linker: mutable Linker& = Linker_GetInstance()
+        HLELibs_InitForLinker(linker)
+        Linker_SetApp0HostRoot(linker, REAL_SELF_TEST_APP0_ROOT)
+        start_result: mutable int = -99
+        handle: s32 = Linker_LoadAndStartGuestModule(linker, "/app0/sce_module/libc.prx", 0u64, null, start_result.ref[mutable int&])
+        RealSelfLoader_Check(handle >= 0, "expected real libc.prx dynamic module handle")
+        RealSelfLoader_Check(start_result == 0, "expected real libc.prx start result")
+        RealSelfLoader_Check(linker.modules.count == 1, "expected one dynamically loaded PRX")
+        RealSelfLoader_Check(linker.last_loaded_dynamic_host_path != null, "expected resolved host path for real PRX")
+        RealSelfLoader_Check(streq(linker.last_loaded_dynamic_host_path, REAL_SELF_TEST_LIBC_PRX) == 1, "expected real PRX host path")
+        RealSelfLoader_Check(linker.last_started_module_index == handle, "expected real PRX start index")
+        module: Module = linker.modules[handle.usize()]
+        RealSelfLoader_Check(streq(module.host_file, REAL_SELF_TEST_LIBC_PRX) == 1, "expected real PRX host file to be preserved")
+        RealSelfLoader_Check(module.is_shared_lib, "expected dynamic PRX to be marked shared")
+        RealSelfLoader_Check(module.is_valid, "expected real PRX module to be valid")
+        RealSelfLoader_Check(module.dynamic_segment.count > 0, "expected real PRX dynamic segment")
+        RealSelfLoader_Check(module.dynamic_data.count > 0, "expected real PRX dynamic data")
+        RealSelfLoader_Check(module.image.count > 0, "expected real PRX image bytes")
+        RealSelfLoader_Check(module.mapped_segment_count > 0, "expected real PRX mapped segments")
+        RealSelfLoader_Check(module.dynamic_info.str_table_size > 0, "expected real PRX string table metadata")
+        RealSelfLoader_Check(Module_GetImportSymbolCount(module) > 0, "expected real PRX imports")
+        RealSelfLoader_Check(Module_GetResolvedImportSymbolCount(module) == Module_GetImportSymbolCount(module), "expected real PRX imports to resolve before start")
+        RealSelfLoader_Check(module.applied_relocation_count > 0usize, "expected real PRX relocations before start")

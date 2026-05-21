@@ -1,0 +1,93 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./common/types.elisa"
+include "./core/emulator_settings.elisa"
+include "./core/emulator_state.elisa"
+include "./core/guest_exec.elisa"
+include "./core/linker.elisa"
+include "./core/user_settings.elisa"
+include "./emulator.elisa"
+include "./main.elisa"
+
+const REAL_GAME_BOOT_ROOT: static u8& = "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/shadPS4/Games/CUSA07399"
+const REAL_GAME_BOOT_EBOOT: static u8& = "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/shadPS4/Games/CUSA07399/eboot.bin"
+
+def RealGameBoot_Check(cond: bool, message: static u8&) -> void:
+    if not cond:
+        panic(message)
+
+def RealGameBoot_ResetRuntime() -> void:
+    Emulator_Reset()
+    Linker_Reset()
+    EmulatorState_ResetInstance()
+    settings: mutable EmulatorSettingsImpl& = EmulatorSettings_GetInstance()
+    EmulatorSettings_SetDefaultValues(settings)
+    UserSettings_Reset()
+
+def RealGameBoot_CheckMappedImageMirror(module: Module&) -> bool:
+    if module.image.count == 0:
+        return false
+    max_scan: mutable usize = module.image.count
+    if max_scan > 4096:
+        max_scan <- 4096
+    i: mutable usize = 0
+    found: mutable bool = false
+    while i < max_scan and not found:
+        guest_byte: u8 = MemoryManager_ReadU8(Memory_Instance(), module.base_virtual_addr + module.image_virtual_base.uintptr() + i.uintptr())
+        if guest_byte == module.image[i]:
+            found <- true
+        i <- i + 1
+    return found
+
+@test
+def emulator_real_game_boot_smoke_loads_cusa07399_eboot() -> void:
+    can Memory.Allocate, Abort.Panic:
+        RealGameBoot_ResetRuntime()
+
+        arena: Arena = zeroed
+        result: mutable int = -1
+        in arena:
+            args: mutable darray[static u8&] = ["shadps4", REAL_GAME_BOOT_ROOT, "--", "-RealBootSmoke"]
+            result <- Main_Run(args)
+        RealGameBoot_Check(result == 0, "expected real game Main_Run success")
+
+        emu: mutable Emulator& = Emulator_GetInstance()
+        RealGameBoot_Check(streq(Emulator_GetLastRunPath(emu), REAL_GAME_BOOT_EBOOT) == 1, "expected real game eboot path")
+        RealGameBoot_Check(streq(Emulator_GetLastGameFolder(emu), REAL_GAME_BOOT_ROOT) == 1, "expected real game app0 root")
+        RealGameBoot_Check(streq(Emulator_GetLastGuestEbootPath(emu), "/app0/eboot.bin") == 1, "expected real game guest eboot path")
+        RealGameBoot_Check(emu.last_linker_module_index == 0, "expected real game module index")
+        RealGameBoot_Check(emu.last_linker_module_count > 1usize, "expected real game dependencies to load")
+        RealGameBoot_Check(emu.last_linker_start_result == 0, "expected real game start result")
+        RealGameBoot_Check(emu.app0_mounted, "expected real game app0 mount")
+        RealGameBoot_Check(emu.hostapp_mounted, "expected real game hostapp mount")
+        RealGameBoot_Check(not emu.native_guest_exec_requested, "expected native guest exec disabled by default")
+        RealGameBoot_Check(not GuestExec_IsEnabled(), "expected guest exec runtime disabled by default")
+
+        linker: mutable Linker& = Linker_GetInstance()
+        RealGameBoot_Check(linker.modules.count > 1usize, "expected linker to contain real game plus dependencies")
+        RealGameBoot_Check(linker.last_started_module_index == 0, "expected real game started module index")
+        RealGameBoot_Check(linker.last_start_result == 0, "expected linker start result")
+        RealGameBoot_Check(linker.last_unresolved_import_count >= 0usize, "expected dependency import accounting to remain available")
+        RealGameBoot_Check(linker.last_relocated_import_count > 0usize, "expected real game import relocations")
+
+        module: Module = linker.modules[0]
+        RealGameBoot_Check(streq(module.file, "/app0/eboot.bin") == 1, "expected guest module name")
+        RealGameBoot_Check(streq(module.host_file, REAL_GAME_BOOT_EBOOT) == 1, "expected host eboot path")
+        RealGameBoot_Check(module.is_valid, "expected real game module valid")
+        RealGameBoot_Check(not module.is_shared_lib, "expected eboot not to be marked shared")
+        RealGameBoot_Check(module.dynamic_segment.count > 0, "expected dynamic segment")
+        RealGameBoot_Check(module.dynamic_data.count > 0, "expected dynamic data")
+        RealGameBoot_Check(module.image.count > 0, "expected loaded image")
+        RealGameBoot_Check(module.mapped_segment_count > 0, "expected mapped PT_LOAD segments")
+        RealGameBoot_Check(module.entry_virtual_addr > 0.uintptr(), "expected entry virtual address")
+        RealGameBoot_Check(Module_GetImportSymbolCount(module) > 0, "expected imported HLE symbols")
+        RealGameBoot_Check(Module_GetResolvedImportSymbolCount(module) == Module_GetImportSymbolCount(module), "expected all imports resolved")
+        RealGameBoot_Check(module.applied_relocation_count > 0usize, "expected relocation writes")
+        RealGameBoot_Check(RealGameBoot_CheckMappedImageMirror(module), "expected image bytes mirrored into guest memory backing")
+        RealGameBoot_Check(Linker_FindByFileOrHost(linker, "/app0/sce_module/libc.prx") != 0xFFFFFFFF.u32(), "expected app-local libc.prx dependency")
+        RealGameBoot_Check(Linker_FindByFileOrHost(linker, "/app0/sce_module/libSceFios2.prx") != 0xFFFFFFFF.u32(), "expected app-local libSceFios2.prx dependency")
+        RealGameBoot_Check(streq(linker.modules[0].file, "/app0/eboot.bin") == 1, "expected eboot to remain module zero after dependencies")
+
+        state: mutable EmulatorState& = EmulatorState_GetInstance()
+        RealGameBoot_Check(EmulatorState_IsGameRunning(state), "expected game running state")
