@@ -2,10 +2,21 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 include "../common/types.elisa"
+include "../fixtures/boot/tiny_eboot_elf.elisa"
 
 const SCE_DBG_MAX_NAME_LENGTH: usize = 256
 const SCE_DBG_MAX_SEGMENTS: usize = 4
 const SCE_DBG_NUM_FINGERPRINT: usize = 20
+const ELF_MAGIC: u32 = 0x464c457f
+const ELF_CLASS_64: u8 = 2
+const ELF_DATA_LSB: u8 = 1
+const ELF_PT_DYNAMIC: u32 = 2
+const ELF_DT_NULL: u64 = 0
+const ELF_DT_STRTAB: u64 = 5
+const ELF_DT_SYMTAB: u64 = 6
+const ELF_DT_STRSZ: u64 = 10
+const ELF_DT_SYMENT: u64 = 11
+const ELF_SHN_UNDEF: u16 = 0
 
 struct OrbisKernelModuleSegmentInfo:
     address: mutable VAddr
@@ -148,10 +159,70 @@ def Module_Start(self: mutable Module&, args: u64, argp: void&?, param: void&?) 
 def Module_LoadModuleToMemory(self: mutable Module&, max_tls_index: mutable u32&) -> void:
     max_tls_index <- max_tls_index + 1
     self.tls.modid <- max_tls_index
-    if not self.is_shared_lib:
-        Module_AddImportSymbol(self.ref[mutable Module&], "D4yla3vx4tY", "sceKernelError")
-        Module_AddImportSymbol(self.ref[mutable Module&], "JfEPXVxhFqA", "sceAudioOutInit")
-        Module_AddImportSymbol(self.ref[mutable Module&], "rWUTcKdkUzQ", "sceVideoOutGetEventData")
+    if self.is_shared_lib:
+        return
+    _ = Module_LoadBootElfDynamicImports(self.ref[mutable Module&])
+
+def Module_LoadBootElfDynamicImports(self: mutable Module&) -> bool:
+    if streq(self.file, "/app0/eboot.bin") != 1:
+        return false
+    if TinyBootElf_ReadU32(0) != ELF_MAGIC:
+        return false
+    if TinyBootElf_ReadU8(4) != ELF_CLASS_64:
+        return false
+    if TinyBootElf_ReadU8(5) != ELF_DATA_LSB:
+        return false
+
+    phoff: u64 = TinyBootElf_ReadU64(32)
+    phentsize: u64 = TinyBootElf_ReadU16(54).u64()
+    phnum: usize = TinyBootElf_ReadU16(56).usize()
+    dynamic_offset: mutable u64 = 0
+    dynamic_size: mutable u64 = 0
+    for i in 0..<phnum:
+        phdr_offset: u64 = phoff + (i.u64() * phentsize)
+        if TinyBootElf_ReadU32(phdr_offset) == ELF_PT_DYNAMIC:
+            dynamic_offset <- TinyBootElf_ReadU64(phdr_offset + 8)
+            dynamic_size <- TinyBootElf_ReadU64(phdr_offset + 32)
+    if dynamic_offset == 0 or dynamic_size == 0:
+        return false
+
+    strtab_offset: mutable u64 = 0
+    symtab_offset: mutable u64 = 0
+    strtab_size: mutable u64 = 0
+    sym_entry_size: mutable u64 = 0
+    dynamic_end: u64 = dynamic_offset + dynamic_size
+    dyn_entry_offset: mutable u64 = dynamic_offset
+    while dyn_entry_offset < dynamic_end:
+        tag: u64 = TinyBootElf_ReadU64(dyn_entry_offset)
+        value: u64 = TinyBootElf_ReadU64(dyn_entry_offset + 8)
+        if tag == ELF_DT_NULL:
+            break
+        if tag == ELF_DT_STRTAB:
+            strtab_offset <- value
+        if tag == ELF_DT_STRSZ:
+            strtab_size <- value
+        if tag == ELF_DT_SYMTAB:
+            symtab_offset <- value
+        if tag == ELF_DT_SYMENT:
+            sym_entry_size <- value
+        dyn_entry_offset <- dyn_entry_offset + 16
+    if strtab_offset == 0 or symtab_offset == 0 or strtab_size == 0 or sym_entry_size == 0:
+        return false
+
+    self.name <- BOOT_EBOOT_ELF_FIXTURE_NAME
+    self.info.name <- BOOT_EBOOT_ELF_FIXTURE_NAME
+    self.dynamic_info.filename <- BOOT_EBOOT_ELF_FIXTURE_PATH
+    initial_imports: usize = self.import_symbols.count
+    for sym_index in 1..<BOOT_EBOOT_ELF_DYNSYM_COUNT:
+        sym_offset: u64 = symtab_offset + (sym_index.u64() * sym_entry_size)
+        name_offset: u32 = TinyBootElf_ReadU32(sym_offset)
+        section_index: u16 = TinyBootElf_ReadU16(sym_offset + 6)
+        if name_offset != 0 and section_index == ELF_SHN_UNDEF and name_offset.u64() < strtab_size:
+            symbol_name: static u8& = TinyBootElf_DynstrAt(name_offset)
+            nid: static u8& = TinyBootElf_NidForSymbol(symbol_name)
+            if static_strlen(symbol_name) > 0 and static_strlen(nid) > 0:
+                Module_AddImportSymbol(self.ref[mutable Module&], nid, symbol_name)
+    return self.import_symbols.count > initial_imports
 
 def Module_LoadDynamicInfo(self: mutable Module&) -> void:
     _ = self
