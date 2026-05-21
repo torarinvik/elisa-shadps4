@@ -4,12 +4,12 @@
 include "../common/types.elisa"
 
 type MemoryPermission = u32
-const MemoryPermission_None: MemoryPermission = 0u32()
-const MemoryPermission_Read: MemoryPermission = 1u32()
-const MemoryPermission_Write: MemoryPermission = 2u32()
-const MemoryPermission_ReadWrite: MemoryPermission = 3u32()
-const MemoryPermission_Execute: MemoryPermission = 4u32()
-const MemoryPermission_ReadWriteExecute: MemoryPermission = 7u32()
+const MemoryPermission_None: MemoryPermission = 0u32
+const MemoryPermission_Read: MemoryPermission = 1u32
+const MemoryPermission_Write: MemoryPermission = 2u32
+const MemoryPermission_ReadWrite: MemoryPermission = 3u32
+const MemoryPermission_Execute: MemoryPermission = 4u32
+const MemoryPermission_ReadWriteExecute: MemoryPermission = 7u32
 
 struct AddressRange:
     begin: mutable VAddr
@@ -35,7 +35,7 @@ def AddressSpace_New() -> AddressSpace:
         0x7C0004000.u64(),
         0x4000000000.uintptr(),
         0x5F9000000000.u64(),
-        []
+        zeroed
     )
 
 def AddressSpace_BackingBase(self: AddressSpace&) -> VAddr:
@@ -63,13 +63,15 @@ def AddressSpace_Map(self: mutable AddressSpace&, virtual_addr: VAddr, size: u64
     _ = phys_addr
     if size == 0:
         return 0.uintptr()
-    target: VAddr = virtual_addr
+    target: mutable VAddr = virtual_addr
     if target == 0.uintptr():
         target <- AddressSpace_ChooseNextSystemManaged(self.ref[mutable AddressSpace&], size)
-    perms: MemoryPermission = MemoryPermission_ReadWrite
+    perms: mutable MemoryPermission = MemoryPermission_ReadWrite
     if exec:
         perms <- MemoryPermission_ReadWriteExecute
-    self.mapped_ranges.push(AddressRange(target, size, perms))
+    arena: Arena = zeroed
+    in arena:
+        self.mapped_ranges.push(AddressRange(target, size, perms))
     return target
 
 def AddressSpace_MapFile(self: mutable AddressSpace&, virtual_addr: VAddr, size: u64, offset: u64, prot: u32, fd: uintptr) -> VAddr:
@@ -77,10 +79,12 @@ def AddressSpace_MapFile(self: mutable AddressSpace&, virtual_addr: VAddr, size:
     _ = fd
     if size == 0:
         return 0.uintptr()
-    target: VAddr = virtual_addr
+    target: mutable VAddr = virtual_addr
     if target == 0.uintptr():
         target <- AddressSpace_ChooseNextSystemManaged(self.ref[mutable AddressSpace&], size)
-    self.mapped_ranges.push(AddressRange(target, size, prot))
+    arena: Arena = zeroed
+    in arena:
+        self.mapped_ranges.push(AddressRange(target, size, prot))
     return target
 
 def AddressSpace_Unmap(self: mutable AddressSpace&, virtual_addr: VAddr, size: u64) -> void:
@@ -94,7 +98,7 @@ def AddressSpace_Unmap(self: mutable AddressSpace&, virtual_addr: VAddr, size: u
             while j + 1 < self.mapped_ranges.count:
                 self.mapped_ranges[j] <- self.mapped_ranges[j + 1]
                 j <- j + 1
-            _ = self.mapped_ranges.pop()
+            self.mapped_ranges.count <- self.mapped_ranges.count - 1
             return
         i <- i + 1
 
@@ -110,7 +114,7 @@ def AddressSpace_GetUsableRegions(self: AddressSpace&) -> darray[AddressRange]:
 def AddressSpace_ChooseNextSystemManaged(self: mutable AddressSpace&, size: u64) -> VAddr:
     if self.mapped_ranges.count == 0:
         return self.system_managed_base
-    last_end: VAddr = self.system_managed_base
+    last_end: mutable VAddr = self.system_managed_base
     for i in 0..<self.mapped_ranges.count:
         end_addr: VAddr = self.mapped_ranges[i].begin + self.mapped_ranges[i].size.uintptr()
         if end_addr > last_end:

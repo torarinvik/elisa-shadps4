@@ -3,6 +3,7 @@
 
 include "../common/types.elisa"
 include "./loader/elf.elisa"
+include "./memory.elisa"
 include "../fixtures/boot/tiny_eboot_elf.elisa"
 
 const SCE_DBG_MAX_NAME_LENGTH: usize = 256
@@ -18,6 +19,9 @@ const ELF_DT_SYMTAB: u64 = 6
 const ELF_DT_STRSZ: u64 = 10
 const ELF_DT_SYMENT: u64 = 11
 const ELF_SHN_UNDEF: u16 = 0
+const MODULE_LOAD_BASE: u64 = 0x800000000
+const MODULE_BLOCK_ALIGN: u64 = 0x1000
+const MODULE_TRAMPOLINE_SIZE: u64 = 8 * 1024 * 1024
 
 struct OrbisKernelModuleSegmentInfo:
     address: mutable VAddr
@@ -74,6 +78,12 @@ struct ThreadLocalImage:
 struct DynamicModuleInfo:
     init_virtual_addr: mutable u64
     fini_virtual_addr: mutable u64
+    preinit_array_virtual_addr: mutable u64
+    preinit_array_size: mutable u64
+    init_array_virtual_addr: mutable u64
+    init_array_size: mutable u64
+    fini_array_virtual_addr: mutable u64
+    fini_array_size: mutable u64
     str_table_offset: mutable u64
     str_table_size: mutable u64
     symbol_table_offset: mutable u64
@@ -95,6 +105,7 @@ struct Module:
     host_file: mutable static u8&
     name: mutable static u8&
     base_virtual_addr: mutable VAddr
+    entry_virtual_addr: mutable VAddr
     proc_param_virtual_addr: mutable VAddr
     eh_frame_hdr_addr: mutable VAddr
     eh_frame_addr: mutable VAddr
@@ -108,14 +119,21 @@ struct Module:
     image: mutable darray[u8]
     image_virtual_base: mutable u64
     image_virtual_size: mutable u64
+    base_size: mutable u64
+    aligned_base_size: mutable u64
+    trampoline_virtual_addr: mutable VAddr
+    mapped_segment_count: mutable u32
     applied_relocation_count: mutable usize
     patched_import_relocation_count: mutable usize
+    last_start_entry_addr: mutable VAddr
+    last_start_preinit_count: mutable u64
+    last_start_init_count: mutable u64
     import_symbols: mutable darray[ImportSymbolRecord]
     is_shared_lib: mutable bool
     is_valid: mutable bool
 
 def DynamicModuleInfo_New() -> DynamicModuleInfo:
-    return DynamicModuleInfo(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, zeroed, zeroed, zeroed, zeroed, "")
+    return DynamicModuleInfo(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, zeroed, zeroed, zeroed, zeroed, "")
 
 def Module_New(file: static u8&, name: static u8&, base_virtual_addr: VAddr, is_shared_lib: bool) -> Module:
     info: OrbisKernelModuleInfo = OrbisKernelModuleInfo(0x160.u64(), name, 0)
@@ -125,6 +143,7 @@ def Module_New(file: static u8&, name: static u8&, base_virtual_addr: VAddr, is_
         file,
         name,
         base_virtual_addr,
+        0.uintptr(),
         0.uintptr(),
         0.uintptr(),
         0.uintptr(),
@@ -140,6 +159,13 @@ def Module_New(file: static u8&, name: static u8&, base_virtual_addr: VAddr, is_
         0,
         0,
         0,
+        0.uintptr(),
+        0,
+        0,
+        0,
+        0.uintptr(),
+        0,
+        0,
         zeroed,
         is_shared_lib,
         base_virtual_addr != 0.uintptr()
@@ -152,7 +178,9 @@ def Module_GetBaseAddress(self: Module&) -> VAddr:
     return self.base_virtual_addr
 
 def Module_GetEntryAddress(self: Module&, elf_entry: VAddr) -> VAddr:
-    return self.base_virtual_addr + elf_entry
+    if elf_entry != 0.uintptr():
+        return self.base_virtual_addr + elf_entry
+    return self.base_virtual_addr + self.entry_virtual_addr
 
 def Module_GetModuleInfo(self: Module&) -> OrbisKernelModuleInfo:
     return self.info
@@ -184,18 +212,29 @@ def Module_Start(self: mutable Module&, args: u64, argp: void&?, param: void&?) 
     _ = param
     if not self.is_valid:
         return -1
+    self.last_start_preinit_count <- 0
+    if self.dynamic_info.preinit_array_virtual_addr != 0 and self.dynamic_info.preinit_array_size >= 8:
+        self.last_start_preinit_count <- self.dynamic_info.preinit_array_size / 8
+    self.last_start_entry_addr <- 0.uintptr()
+    if self.dynamic_info.init_virtual_addr != 0:
+        self.last_start_entry_addr <- self.base_virtual_addr + self.dynamic_info.init_virtual_addr.uintptr()
+    else:
+        self.last_start_entry_addr <- Module_GetEntryAddress(self, 0.uintptr())
+    self.last_start_init_count <- 0
+    if self.dynamic_info.init_array_virtual_addr != 0 and self.dynamic_info.init_array_size >= 8:
+        self.last_start_init_count <- self.dynamic_info.init_array_size / 8
     return 0
 
-def Module_LoadModuleToMemory(self: mutable Module&, max_tls_index: mutable u32&) -> void:
+def Module_LoadModuleToMemory(self: mutable Module&, memory: mutable MemoryManager&, max_tls_index: mutable u32&) -> void:
     max_tls_index <- max_tls_index + 1
     self.tls.modid <- max_tls_index
     if self.is_shared_lib:
         return
-    if Module_LoadElfFromHostFile(self.ref[mutable Module&]):
+    if Module_LoadElfFromHostFile(self.ref[mutable Module&], memory):
         return
     _ = Module_LoadBootElfDynamicImports(self.ref[mutable Module&])
 
-def Module_LoadElfFromHostFile(self: mutable Module&) -> bool:
+def Module_LoadElfFromHostFile(self: mutable Module&, memory: mutable MemoryManager&) -> bool:
     if static_strlen(self.host_file) == 0:
         return false
     if not Module_IsLikelyHostFile(self.host_file):
@@ -206,7 +245,8 @@ def Module_LoadElfFromHostFile(self: mutable Module&) -> bool:
         return false
     if not Elf_IsElfFile(elf.ref[Elf&]):
         return false
-    loaded_dynamic: bool = Module_LoadElfSegments(self.ref[mutable Module&], elf.ref[mutable Elf&])
+    self.entry_virtual_addr <- Elf_GetElfEntry(elf.ref[Elf&]).uintptr()
+    loaded_dynamic: bool = Module_LoadElfSegments(self.ref[mutable Module&], elf.ref[mutable Elf&], memory)
     if not loaded_dynamic:
         return false
     Module_LoadDynamicInfo(self.ref[mutable Module&])
@@ -227,13 +267,23 @@ def Module_IsLikelyHostFile(path: static u8&) -> bool:
         return true
     return false
 
-def Module_LoadElfSegments(self: mutable Module&, elf: mutable Elf&) -> bool:
+def Module_LoadElfSegments(self: mutable Module&, elf: mutable Elf&, memory: mutable MemoryManager&) -> bool:
     loaded_dynamic: mutable bool = false
     Module_PrepareLoadImage(self.ref[mutable Module&], elf)
+    if self.aligned_base_size > 0:
+        out_addr: mutable VAddr = self.base_virtual_addr
+        _ = MemoryManager_MapMemory(memory, out_addr.ref[mutable VAddr&], self.base_virtual_addr, self.aligned_base_size + MODULE_TRAMPOLINE_SIZE, MemoryProt_NoAccess, MemoryMapFlags_NoFlags, VMAType_Reserved, self.name, false, 0.uintptr(), MODULE_BLOCK_ALIGN)
+        self.base_virtual_addr <- out_addr
+        self.trampoline_virtual_addr <- self.base_virtual_addr + self.aligned_base_size.uintptr()
+        tramp_addr: mutable VAddr = self.trampoline_virtual_addr
+        _ = MemoryManager_MapMemory(memory, tramp_addr.ref[mutable VAddr&], self.trampoline_virtual_addr, MODULE_TRAMPOLINE_SIZE, MemoryProt_CpuRead | MemoryProt_CpuWrite | MemoryProt_CpuExec, MemoryMapFlags_Fixed, VMAType_Code, self.name, false, 0.uintptr(), MODULE_BLOCK_ALIGN)
     for i in 0..<elf.elf_header_value.e_phnum.usize():
         phdr: elf_program_header& = Elf_GetProgramHeader(elf, i)
         if phdr.p_type == PT_LOAD and phdr.p_memsz > 0:
-            _ = Module_LoadImageSegment(self.ref[mutable Module&], elf, phdr)
+            Module_MapImageSegment(self.ref[mutable Module&], memory, phdr)
+            _ = Module_LoadImageSegment(self.ref[mutable Module&], elf, memory, phdr)
+        if phdr.p_type == PT_SCE_RELRO and phdr.p_memsz > 0:
+            Module_MapImageSegment(self.ref[mutable Module&], memory, phdr)
         if phdr.p_type == PT_DYNAMIC and phdr.p_filesz > 0:
             loaded_dynamic <- Elf_LoadSegmentBytes(elf, self.dynamic_segment.ref[mutable darray[u8]&], phdr.p_offset, phdr.p_filesz.usize())
         if phdr.p_type == PT_SCE_DYNLIBDATA and phdr.p_filesz > 0:
@@ -250,24 +300,59 @@ def Module_LoadElfSegments(self: mutable Module&, elf: mutable Elf&) -> bool:
             self.eh_frame_hdr_size <- phdr.p_memsz.u32()
     return loaded_dynamic
 
+def Module_AlignUp(value: u64, alignment: u64) -> u64:
+    if alignment == 0:
+        return value
+    return ((value + alignment - 1) / alignment) * alignment
+
+def Module_GetAlignedProgramHeaderSize(phdr: elf_program_header&) -> u64:
+    return Module_AlignUp(phdr.p_memsz, phdr.p_align)
+
+def Module_PflagsToMemoryProt(flags: u32) -> MemoryProt:
+    prot: mutable MemoryProt = MemoryProt_NoAccess
+    if (flags & PF_READ) != 0:
+        prot <- prot | MemoryProt_CpuRead
+    if (flags & PF_WRITE) != 0:
+        prot <- prot | MemoryProt_CpuWrite
+    if (flags & PF_EXEC) != 0:
+        prot <- prot | MemoryProt_CpuExec
+    return prot
+
+def Module_MapImageSegment(self: mutable Module&, memory: mutable MemoryManager&, phdr: elf_program_header&) -> void:
+    segment_vaddr: VAddr = self.base_virtual_addr + phdr.p_vaddr.uintptr()
+    segment_size: u64 = Module_GetAlignedProgramHeaderSize(phdr)
+    segment_addr: mutable VAddr = segment_vaddr
+    vma_type: mutable VMAType = VMAType_Flexible
+    if phdr.p_type == PT_LOAD and (phdr.p_flags & PF_EXEC) != 0:
+        vma_type <- VMAType_Code
+    _ = MemoryManager_MapMemory(memory, segment_addr.ref[mutable VAddr&], segment_vaddr, segment_size, Module_PflagsToMemoryProt(phdr.p_flags), MemoryMapFlags_Fixed, vma_type, self.name, false, 0.uintptr(), phdr.p_align)
+    self.mapped_segment_count <- self.mapped_segment_count + 1
+    self.info.num_segments <- self.mapped_segment_count
+
 def Module_PrepareLoadImage(self: mutable Module&, elf: mutable Elf&) -> void:
     min_vaddr: mutable u64 = 0
     max_vaddr: mutable u64 = 0
+    base_size: mutable u64 = 0
     for i in 0..<elf.elf_header_value.e_phnum.usize():
         phdr: elf_program_header& = Elf_GetProgramHeader(elf, i)
-        if phdr.p_type == PT_LOAD and phdr.p_memsz > 0:
+        if (phdr.p_type == PT_LOAD or phdr.p_type == PT_SCE_RELRO) and phdr.p_memsz > 0:
             if min_vaddr == 0 or phdr.p_vaddr < min_vaddr:
                 min_vaddr <- phdr.p_vaddr
             segment_end: u64 = phdr.p_vaddr + phdr.p_memsz
             if segment_end > max_vaddr:
                 max_vaddr <- segment_end
+            aligned_end: u64 = phdr.p_vaddr + Module_GetAlignedProgramHeaderSize(phdr)
+            if aligned_end > base_size:
+                base_size <- aligned_end
     self.image_virtual_base <- min_vaddr
     self.image_virtual_size <- 0
+    self.base_size <- base_size
+    self.aligned_base_size <- Module_AlignUp(base_size, MODULE_BLOCK_ALIGN)
     if max_vaddr > min_vaddr:
         self.image_virtual_size <- max_vaddr - min_vaddr
         Module_ResizeBytes(self.image.ref[mutable darray[u8]&], self.image_virtual_size.usize())
 
-def Module_LoadImageSegment(self: mutable Module&, elf: mutable Elf&, phdr: elf_program_header&) -> bool:
+def Module_LoadImageSegment(self: mutable Module&, elf: mutable Elf&, memory: mutable MemoryManager&, phdr: elf_program_header&) -> bool:
     if self.image_virtual_size == 0:
         return false
     if phdr.p_vaddr < self.image_virtual_base:
@@ -281,6 +366,7 @@ def Module_LoadImageSegment(self: mutable Module&, elf: mutable Elf&, phdr: elf_
         return false
     for i in 0..<segment.count:
         self.image[(offset.usize() + i)] <- segment[i]
+        _ = MemoryManager_WriteU8(memory, self.base_virtual_addr + phdr.p_vaddr.uintptr() + i.uintptr(), segment[i])
     return true
 
 def Module_ResizeBytes(out: mutable darray[u8]&, size: usize) -> void:
@@ -473,6 +559,18 @@ def Module_LoadDynamicInfo(self: mutable Module&) -> void:
             self.dynamic_info.init_virtual_addr <- dyn.d_un
         if dyn.d_tag == DT_FINI:
             self.dynamic_info.fini_virtual_addr <- dyn.d_un
+        if dyn.d_tag == DT_PREINIT_ARRAY:
+            self.dynamic_info.preinit_array_virtual_addr <- dyn.d_un
+        if dyn.d_tag == DT_PREINIT_ARRAYSZ:
+            self.dynamic_info.preinit_array_size <- dyn.d_un
+        if dyn.d_tag == DT_INIT_ARRAY:
+            self.dynamic_info.init_array_virtual_addr <- dyn.d_un
+        if dyn.d_tag == DT_INIT_ARRAYSZ:
+            self.dynamic_info.init_array_size <- dyn.d_un
+        if dyn.d_tag == DT_FINI_ARRAY:
+            self.dynamic_info.fini_array_virtual_addr <- dyn.d_un
+        if dyn.d_tag == DT_FINI_ARRAYSZ:
+            self.dynamic_info.fini_array_size <- dyn.d_un
         if dyn.d_tag == DT_SCE_ORIGINAL_FILENAME:
             self.dynamic_info.filename <- Module_ReadDynString(self, (self.dynamic_info.str_table_offset + dyn.d_un).u32())
         if dyn.d_tag == DT_SCE_NEEDED_MODULE:

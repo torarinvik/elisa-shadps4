@@ -10,6 +10,50 @@ def RealSelfLoader_Check(cond: bool, message: static u8&) -> void:
     if not cond:
         panic(message)
 
+def RealSelfLoader_CheckMappedImageMirror(module: Module&) -> bool:
+    if module.image.count == 0:
+        return false
+    max_scan: mutable usize = module.image.count
+    if max_scan > 4096:
+        max_scan <- 4096
+    i: mutable usize = 0
+    found: mutable bool = false
+    while i < max_scan and not found:
+        guest_byte: u8 = MemoryManager_ReadU8(Memory_Instance(), module.base_virtual_addr + module.image_virtual_base.uintptr() + i.uintptr())
+        if guest_byte == module.image[i]:
+            found <- true
+        i <- i + 1
+    return found
+
+def RealSelfLoader_CheckMappedRelocationMirror(module: Module&) -> bool:
+    entry_size: u64 = Module_GetRelaEntrySize(module)
+    if entry_size == 0:
+        return false
+    found: mutable bool = false
+    i: mutable usize = 0
+    rela_count: usize = Module_GetRelaRelocationCount(module)
+    while i < rela_count and not found:
+        offset: u64 = module.dynamic_info.rela_table_offset + (i.u64() * entry_size)
+        rel: elf_relocation = Module_ReadRelocationAt(module, offset.usize())
+        address: VAddr = module.base_virtual_addr + rel.rel_offset.uintptr()
+        image_value: u64 = Module_ReadImageU64(module, address.u64())
+        memory_value: u64 = MemoryManager_ReadU64(Memory_Instance(), address)
+        if image_value != 0 and image_value == memory_value:
+            found <- true
+        i <- i + 1
+    j: mutable usize = 0
+    jmp_count: usize = Module_GetJmpRelocationCount(module)
+    while j < jmp_count and not found:
+        offset: u64 = module.dynamic_info.jmp_relocation_offset + (j.u64() * entry_size)
+        rel: elf_relocation = Module_ReadRelocationAt(module, offset.usize())
+        address: VAddr = module.base_virtual_addr + rel.rel_offset.uintptr()
+        image_value: u64 = Module_ReadImageU64(module, address.u64())
+        memory_value: u64 = MemoryManager_ReadU64(Memory_Instance(), address)
+        if image_value != 0 and image_value == memory_value:
+            found <- true
+        j <- j + 1
+    return found
+
 @test
 def real_self_loader_parses_dynamic_imports_and_relocations() -> void:
     can Memory.Allocate, Abort.Panic:
@@ -25,6 +69,17 @@ def real_self_loader_parses_dynamic_imports_and_relocations() -> void:
         RealSelfLoader_Check(module.dynamic_info.symbol_table_total_size > 0, "expected SCE symbol table metadata")
         RealSelfLoader_Check(Module_GetRelaRelocationCount(module) + Module_GetJmpRelocationCount(module) > 0, "expected SCE relocation metadata")
         RealSelfLoader_Check(module.image.count > 0, "expected PT_LOAD image bytes")
+        RealSelfLoader_Check(module.base_size > 0, "expected calculated module base size")
+        RealSelfLoader_Check(module.aligned_base_size >= module.base_size, "expected aligned module base size")
+        RealSelfLoader_Check(module.entry_virtual_addr > 0.uintptr(), "expected ELF entry virtual address")
+        RealSelfLoader_Check(Module_GetEntryAddress(module, 0.uintptr()) == module.base_virtual_addr + module.entry_virtual_addr, "expected entry address to include module base")
+        RealSelfLoader_Check(module.mapped_segment_count > 0, "expected mapped PT_LOAD segments")
+        RealSelfLoader_Check(Memory_Instance().vma_areas.count > module.mapped_segment_count.usize(), "expected module reservation and trampoline mappings")
+        RealSelfLoader_Check(Memory_Instance().mapped_bytes.count >= module.mapped_segment_count.usize(), "expected mapped byte backing for module segments")
+        RealSelfLoader_Check(RealSelfLoader_CheckMappedImageMirror(module), "expected loaded image bytes to mirror into guest memory backing")
+        found: mutable Module&? = Linker_FindByAddress(linker, module.base_virtual_addr)
+        RealSelfLoader_Check(found != null, "expected linker address lookup to find mapped module")
         Linker_RelocateAllImports(linker)
         relocated: Module = linker.modules[index.usize()]
         RealSelfLoader_Check(relocated.applied_relocation_count > 0, "expected at least one relocation write into the loaded image")
+        RealSelfLoader_Check(RealSelfLoader_CheckMappedRelocationMirror(relocated), "expected relocation writes to mirror into guest memory backing")

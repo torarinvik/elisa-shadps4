@@ -4,6 +4,7 @@
 include "../common/types.elisa"
 include "./module.elisa"
 include "./loader/elf.elisa"
+include "./memory.elisa"
 
 struct SymbolRecord:
     name: mutable static u8&
@@ -61,6 +62,7 @@ struct Linker:
     last_unresolved_import_count: mutable usize
     last_started_module_index: mutable s32
     last_start_result: mutable s32
+    last_entry_addr: mutable VAddr
     hle_libs_initialized: mutable bool
     hle_registered_symbol_count: mutable usize
 
@@ -78,6 +80,7 @@ global mutable linker_singleton: Linker = Linker(
     0,
     -1,
     0,
+    0.uintptr(),
     false,
     0
 )
@@ -97,6 +100,7 @@ def Linker_New() -> Linker:
         0,
         -1,
         0,
+        0.uintptr(),
         false,
         0
     )
@@ -171,9 +175,11 @@ def Linker_ApplyRelocationEntry(self: mutable Linker&, module: mutable Module&, 
     rel_type: u32 = (rel.rel_info & 0xffffffff.u64()).u32()
     symbol_index: u32 = (rel.rel_info >> 32.u64()).u32()
     rel_virtual_addr: u64 = module.base_virtual_addr.u64() + rel.rel_offset
+    memory: mutable MemoryManager& = Memory_Instance()
     if rel_type == R_X86_64_RELATIVE:
         value: u64 = module.base_virtual_addr.u64() + rel.rel_addend.u64()
         if Module_WriteImageU64(module.ref[mutable Module&], rel_virtual_addr, value):
+            _ = MemoryManager_WriteU64(memory, rel_virtual_addr.uintptr(), value)
             module.applied_relocation_count <- module.applied_relocation_count + 1
             return true
         return false
@@ -187,6 +193,7 @@ def Linker_ApplyRelocationEntry(self: mutable Linker&, module: mutable Module&, 
             if (symbol_info >> 4) == STB_LOCAL:
                 value: u64 = module.base_virtual_addr.u64() + symbol_value + addend.u64()
                 if Module_WriteImageU64(module.ref[mutable Module&], rel_virtual_addr, value):
+                    _ = MemoryManager_WriteU64(memory, rel_virtual_addr.uintptr(), value)
                     module.applied_relocation_count <- module.applied_relocation_count + 1
                     return true
         symbol_name: static u8& = Module_GetSymbolNameByIndex(module.ref[mutable Module&], symbol_index)
@@ -200,12 +207,14 @@ def Linker_ApplyRelocationEntry(self: mutable Linker&, module: mutable Module&, 
         if resolved:
             value: u64 = resolved_addr + addend.u64()
             if Module_WriteImageU64(module.ref[mutable Module&], rel_virtual_addr, value):
+                _ = MemoryManager_WriteU64(memory, rel_virtual_addr.uintptr(), value)
                 module.applied_relocation_count <- module.applied_relocation_count + 1
                 module.patched_import_relocation_count <- module.patched_import_relocation_count + 1
                 return true
         return false
     if rel_type == R_X86_64_DTPMOD64:
         if Module_WriteImageU64(module.ref[mutable Module&], rel_virtual_addr, module.tls.modid.u64()):
+            _ = MemoryManager_WriteU64(memory, rel_virtual_addr.uintptr(), module.tls.modid.u64())
             module.applied_relocation_count <- module.applied_relocation_count + 1
             return true
     return false
@@ -252,11 +261,12 @@ def Linker_LoadModule(self: mutable Linker&, elf_name: static u8&, is_dynamic: b
     return Linker_LoadModuleFromHost(self.ref[mutable Linker&], elf_name, elf_name, is_dynamic)
 
 def Linker_LoadModuleFromHost(self: mutable Linker&, guest_name: static u8&, host_name: static u8&, is_dynamic: bool) -> s32:
-    base: VAddr = (0x5000000000.u64() + (self.modules.count * 0x200000).u64()).uintptr()
+    base: VAddr = (MODULE_LOAD_BASE + (self.modules.count * 0x2000000).u64()).uintptr()
     module_name: static u8& = guest_name
     module: Module = Module_New(guest_name, module_name, base, is_dynamic)
     Module_SetHostFile(module.ref[mutable Module&], host_name)
-    Module_LoadModuleToMemory(module.ref[mutable Module&], self.max_tls_index.ref[mutable u32&])
+    memory: mutable MemoryManager& = Memory_Instance()
+    Module_LoadModuleToMemory(module.ref[mutable Module&], memory, self.max_tls_index.ref[mutable u32&])
     if not is_dynamic:
         self.num_static_modules <- self.num_static_modules + 1
     arena: Arena = zeroed
@@ -283,7 +293,7 @@ def Linker_LoadAndStartModule(self: mutable Linker&, path: static u8&, args: u64
 def Linker_FindByAddress(self: mutable Linker&, address: VAddr) -> mutable Module&?:
     for i in 0..<self.modules.count:
         mod: Module = self.modules[i]
-        if mod.base_virtual_addr <= address and address < mod.base_virtual_addr + 0x100000.uintptr():
+        if mod.base_virtual_addr <= address and address < mod.base_virtual_addr + mod.aligned_base_size.uintptr():
             return self.modules[i].ref[mutable Module&]
     return null
 
@@ -307,13 +317,24 @@ def Linker_Execute(self: mutable Linker&, args: darray[static u8&]) -> s32:
     if self.modules.count == 0:
         self.last_started_module_index <- -1
         self.last_start_result <- -1
+        self.last_entry_addr <- 0.uintptr()
         return -1
-    index: s32 = (self.modules.count - 1).s32()
+    index: mutable s32 = 0
+    module: mutable Module& = self.modules[index.usize()].ref[mutable Module&]
+    self.static_tls_size <- module.tls.image_size.usize()
+    module.tls.offset <- module.tls.image_size
+    if not self.relocated_all_imports:
+        Linker_RelocateAllImports(self.ref[mutable Linker&])
+    memory: mutable MemoryManager& = Memory_Instance()
+    MemoryManager_SetupMemoryRegions(memory, ORBIS_KERNEL_FLEXIBLE_MEMORY_SIZE, true, true)
+    index <- (self.modules.count - 1).s32()
     mod_ref: mutable Module&? = Linker_GetModule(self.ref[mutable Linker&], index)
     if mod_ref == null:
         self.last_started_module_index <- -1
         self.last_start_result <- -1
+        self.last_entry_addr <- 0.uintptr()
         return -1
+    self.last_entry_addr <- Module_GetEntryAddress(mod_ref, 0.uintptr())
     result: s32 = Module_Start(mod_ref, args.count.u64(), null, null)
     self.last_started_module_index <- index
     self.last_start_result <- result
