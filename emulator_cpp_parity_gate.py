@@ -5,6 +5,7 @@ import argparse
 import importlib.util
 import json
 import os
+import platform
 import re
 import subprocess
 import sys
@@ -55,16 +56,43 @@ def compiler_test(target: str, *, slow: bool = False, category: str = "runtime")
     )
 
 
+def compiler_test_source(source: str, *, slow: bool = False, category: str = "runtime") -> Step:
+    return Step(
+        name=f"elisacore run {source}",
+        cmd=["go", "run", "./src", f"../elisa-shad-ps4-from-scratch/{source}"],
+        cwd=COMPILER_DIR,
+        category=category,
+        slow=slow,
+        timeout_seconds=300 if slow else 120,
+    )
+
+
+def host_audio_backends_present() -> bool:
+    if sys.platform != "darwin":
+        return False
+    sdl_candidates = [
+        Path("/opt/homebrew/lib/libSDL3.dylib"),
+        Path("/opt/homebrew/opt/sdl3/lib/libSDL3.0.dylib"),
+        Path("/usr/local/lib/libSDL3.dylib"),
+    ]
+    openal_candidates = [
+        Path("/System/Library/Frameworks/OpenAL.framework/OpenAL"),
+        Path("/System/Library/Frameworks/OpenAL.framework/Versions/A/OpenAL"),
+    ]
+    return any(path.exists() for path in sdl_candidates) and any(path.exists() for path in openal_candidates)
+
+
 def all_steps() -> list[Step]:
     guest_exec_warning_cmd = ["clang", "-Wall", "-Wextra", "-Werror", "-c", "native/guest_exec_runtime.c", "-o", str(TMP_DIR / "guest_exec_runtime.o")]
     if sys.platform == "darwin":
         guest_exec_warning_cmd.insert(1, "-DMAP_ANONYMOUS=MAP_ANON")
-    return [
+    steps = [
         Step("project.json syntax", [sys.executable, "-m", "json.tool", str(PROJECT_PATH)], category="validation"),
         Step("parity ledger", [sys.executable, "parity_ledger_check.py", "--summary"], category="ledger"),
         Step("parity ABI guard", [sys.executable, "parity_abi_check.py", "--summary"], category="ledger"),
         Step("parity workqueue summary", [sys.executable, "parity_workqueue.py", "--fail-missing"], category="ledger"),
         Step("bridge syntax", [sys.executable, "check_elisa_bridges.py"], category="bridge"),
+        compiler_test("core-libraries-audio-parity-tests", category="audio"),
         Step(
             "native guest_exec_runtime warnings",
             guest_exec_warning_cmd,
@@ -85,6 +113,9 @@ def all_steps() -> list[Step]:
         compiler_test("core-libraries-avplayer", slow=True, category="audio-input-system"),
         compiler_test("core-libraries-pad-tests", slow=True, category="audio-input-system"),
     ]
+    if host_audio_backends_present():
+        steps.append(compiler_test_source("core_libraries_audioout_isolated.elisa", slow=True, category="audio"))
+    return steps
 
 
 def run_step(step: Step, verbose: bool) -> Result:
@@ -151,8 +182,7 @@ def to_int(value: str | None) -> int:
 def gather_artifact_rows(results: list[Result]) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     for r in results:
-        if r.step.name == "elisacore test emulator-real-game-boot-smoke":
-            rows.extend(parse_artifact_kv(r.output.splitlines()))
+        rows.extend(parse_artifact_kv(r.output.splitlines()))
     return rows
 
 
@@ -166,11 +196,21 @@ def parse_cusa_metrics(results: list[Result]) -> dict[str, int | str]:
         "aerolib_fallback_imports": 0,
         "unresolved_imports": 0,
         "malformed_imports": 0,
+        "audio_sdl_available": 0,
+        "audio_openal_available": 0,
+        "audio_output_opened": 0,
+        "audio_input_opened": 0,
         "relocation_count": 0,
         "execution_stage": 0,
         "boundary_status": 0,
         "last_hle_module": "",
         "last_hle_symbol": "",
+        "guest_exec_started": 0,
+        "guest_exec_entry_reached": 0,
+        "guest_exec_first_boundary_reached": 0,
+        "guest_exec_boundary_reason": 0,
+        "guest_exec_last_pc": 0,
+        "guest_exec_last_signal": 0,
         "video_stage_opened": 0,
         "video_stage_buffers_registered": 0,
         "video_stage_flip_submitted": 0,
@@ -194,6 +234,10 @@ def parse_cusa_metrics(results: list[Result]) -> dict[str, int | str]:
         summary["aerolib_fallback_imports"] = max(int(summary["aerolib_fallback_imports"]), to_int(row.get("aerolib_fallback_imports") or row.get("aerolib_fallback")))
         summary["unresolved_imports"] = max(int(summary["unresolved_imports"]), to_int(row.get("unresolved_imports")))
         summary["malformed_imports"] = max(int(summary["malformed_imports"]), to_int(row.get("malformed_imports")))
+        summary["audio_sdl_available"] = max(int(summary["audio_sdl_available"]), to_int(row.get("audio_sdl_available")))
+        summary["audio_openal_available"] = max(int(summary["audio_openal_available"]), to_int(row.get("audio_openal_available")))
+        summary["audio_output_opened"] = max(int(summary["audio_output_opened"]), to_int(row.get("audio_output_opened")))
+        summary["audio_input_opened"] = max(int(summary["audio_input_opened"]), to_int(row.get("audio_input_opened")))
         summary["relocation_count"] = max(int(summary["relocation_count"]), to_int(row.get("relocated_imports")))
         summary["execution_stage"] = max(int(summary["execution_stage"]), to_int(row.get("execution_stage")))
         summary["boundary_status"] = max(int(summary["boundary_status"]), to_int(row.get("boundary_status")))
@@ -201,6 +245,18 @@ def parse_cusa_metrics(results: list[Result]) -> dict[str, int | str]:
             summary["last_hle_module"] = row.get("last_hle_module", "")
         if row.get("last_hle_symbol"):
             summary["last_hle_symbol"] = row.get("last_hle_symbol", "")
+        if row.get("guest_exec_started") is not None:
+            summary["guest_exec_started"] = max(int(summary["guest_exec_started"]), to_int(row.get("guest_exec_started")))
+        if row.get("guest_exec_entry_reached") is not None:
+            summary["guest_exec_entry_reached"] = max(int(summary["guest_exec_entry_reached"]), to_int(row.get("guest_exec_entry_reached")))
+        if row.get("guest_exec_first_boundary_reached") is not None:
+            summary["guest_exec_first_boundary_reached"] = max(int(summary["guest_exec_first_boundary_reached"]), to_int(row.get("guest_exec_first_boundary_reached")))
+        if row.get("guest_exec_boundary_reason") is not None:
+            summary["guest_exec_boundary_reason"] = to_int(row.get("guest_exec_boundary_reason"))
+        if row.get("guest_exec_last_pc") is not None:
+            summary["guest_exec_last_pc"] = max(int(summary["guest_exec_last_pc"]), to_int(row.get("guest_exec_last_pc")))
+        if row.get("guest_exec_last_signal") is not None:
+            summary["guest_exec_last_signal"] = max(int(summary["guest_exec_last_signal"]), to_int(row.get("guest_exec_last_signal")))
         if row_has_kv(row, "VIDEO_STAGE_opened"):
             summary["video_stage_opened"] = 1
         if row_has_kv(row, "VIDEO_STAGE_buffers_registered"):
@@ -218,6 +274,16 @@ def parse_cusa_metrics(results: list[Result]) -> dict[str, int | str]:
         if row_has_kv(row, "shader_translate_path_native"):
             summary["shader_translate_path_native"] = 1
     return summary
+
+
+def parse_audio_skip_reason(results: list[Result]) -> str:
+    prefix = "AUDIO_RUNTIME_SKIP"
+    for r in results:
+        for line in r.output.splitlines():
+            text = line.strip()
+            if text.startswith(prefix):
+                return text.removeprefix(prefix).strip()
+    return ""
 
 
 def subsystem_guess(library: str, module: str, nid: str) -> str:
@@ -290,6 +356,8 @@ def cusa_stage_summary(results: list[Result], cusa: dict[str, int | str]) -> dic
     exec_stage = stage_name(int(cusa["execution_stage"]))
     boundary = "PASS" if int(cusa["boundary_status"]) != 0 else "PENDING"
     frame_gate = (
+        int(cusa["boundary_status"]) != 0
+        and
         int(cusa["execution_stage"]) >= 4
         and int(cusa["video_stage_opened"]) == 1
         and int(cusa["video_stage_buffers_registered"]) == 1
@@ -300,6 +368,17 @@ def cusa_stage_summary(results: list[Result], cusa: dict[str, int | str]) -> dic
         and (int(cusa["shader_translate_path_bridge"]) == 1 or int(cusa["shader_translate_path_native"]) == 1)
     )
     frame = "PASS" if frame_gate else "PENDING"
+    frame_ladder = "none"
+    if int(cusa["video_stage_opened"]) == 1:
+        frame_ladder = "opened"
+    if int(cusa["video_stage_buffers_registered"]) == 1:
+        frame_ladder = "opened -> buffers_registered"
+    if int(cusa["video_stage_flip_submitted"]) == 1:
+        frame_ladder = f"{frame_ladder} -> flip_submitted"
+    if int(cusa["video_stage_flip_completed"]) == 1:
+        frame_ladder = f"{frame_ladder} -> flip_completed"
+    if int(cusa["video_stage_first_frame_candidate"]) == 1:
+        frame_ladder = f"{frame_ladder} -> first_frame_candidate"
     return {
         "load": load,
         "link": link,
@@ -307,7 +386,19 @@ def cusa_stage_summary(results: list[Result], cusa: dict[str, int | str]) -> dic
         "execute": exec_stage,
         "boundary": boundary,
         "frame": frame,
+        "frame_ladder": frame_ladder,
     }
+
+
+def host_exec_note() -> str:
+    machine = platform.machine().lower()
+    if sys.platform == "darwin" and machine in {"arm64", "aarch64"}:
+        return "arm64 macOS remains probe-only unless a translation path exists"
+    if sys.platform == "win32":
+        return "Windows remains unsupported until the trampoline path exists"
+    if machine in {"x86_64", "amd64"}:
+        return "x86_64 hosts can attempt guarded guest execution"
+    return f"host guest execution support is probe-only on {platform.system()} {platform.machine()}"
 
 
 def load_workqueue_rows() -> list[dict[str, str]]:
@@ -362,7 +453,7 @@ def failing_scenario_ids(results: list[Result]) -> list[str]:
     return ids
 
 
-def validate_rules(results: list[Result], cusa: dict[str, int | str], fallback_rows: list[dict[str, str | int]]) -> list[str]:
+def validate_rules(results: list[Result], cusa: dict[str, int | str], fallback_rows: list[dict[str, str | int]], require_first_boundary: bool) -> list[str]:
     errors: list[str] = []
 
     workqueue = load_workqueue_rows()
@@ -372,6 +463,11 @@ def validate_rules(results: list[Result], cusa: dict[str, int | str], fallback_r
 
     if int(cusa.get("unresolved_imports", 0)) > 0:
         errors.append(f"No unresolved imports in CUSA gate violated: unresolved={cusa['unresolved_imports']}")
+    if require_first_boundary:
+        boundary_status = int(cusa.get("boundary_status", 0))
+        first_boundary_reached = int(cusa.get("guest_exec_first_boundary_reached", 0))
+        if boundary_status not in (1, -2) and first_boundary_reached == 0:
+            errors.append("First-boundary probe requested but CUSA07399 did not reach the first guarded boundary")
 
     ledger_raw = load_json(LEDGER_PATH)
     if isinstance(ledger_raw, dict):
@@ -440,13 +536,13 @@ def score_summary(results: list[Result], cusa: dict[str, int | str], errors: lis
     return passed, total
 
 
-def summarize_progress(results: list[Result]) -> tuple[str, dict[str, list[dict[str, str | int]]], dict[str, int | str], list[str]]:
+def summarize_progress(results: list[Result], require_first_boundary: bool = False) -> tuple[str, dict[str, list[dict[str, str | int]]], dict[str, int | str], list[str]]:
     lines: list[str] = []
     ledger_counts = count_ledger_statuses()
     cusa = parse_cusa_metrics(results)
     fallback_rows = fallback_symbols(results)
     queues = build_fallback_queues(fallback_rows)
-    rules = validate_rules(results, cusa, fallback_rows)
+    rules = validate_rules(results, cusa, fallback_rows, require_first_boundary)
     stages = cusa_stage_summary(results, cusa)
 
     passed_score, total_score = score_summary(results, cusa, rules)
@@ -478,6 +574,14 @@ def summarize_progress(results: list[Result]) -> tuple[str, dict[str, list[dict[
     lines.append(f"- execute stage: {stages['execute']}")
     lines.append(f"- first boundary: {stages['boundary']}")
     lines.append(f"- first frame: {stages['frame']}")
+    lines.append(f"- first frame ladder: {stages['frame_ladder']}")
+    lines.append(f"- host note: {host_exec_note()}")
+    lines.append(f"- guest exec started: {cusa['guest_exec_started']}")
+    lines.append(f"- guest exec entry reached: {cusa['guest_exec_entry_reached']}")
+    lines.append(f"- guest exec first boundary reached: {cusa['guest_exec_first_boundary_reached']}")
+    lines.append(f"- guest exec boundary reason: {cusa['guest_exec_boundary_reason']}")
+    lines.append(f"- guest exec last pc: 0x{int(cusa['guest_exec_last_pc']):x}")
+    lines.append(f"- guest exec last signal: {cusa['guest_exec_last_signal']}")
     lines.append("- first frame gate signals:")
     lines.append(f"  - shader_translate_attempted={cusa['shader_translate_attempted']}")
     lines.append(f"  - shader_path_bridge={cusa['shader_translate_path_bridge']} shader_path_native={cusa['shader_translate_path_native']}")
@@ -495,6 +599,13 @@ def summarize_progress(results: list[Result]) -> tuple[str, dict[str, list[dict[
     lines.append(f"- AeroLib fallback count: {cusa['aerolib_fallback_imports']}")
     lines.append(f"- unresolved count: {cusa['unresolved_imports']}")
     lines.append(f"- malformed count: {cusa['malformed_imports']}")
+    lines.append(f"- audio SDL available: {cusa['audio_sdl_available']}")
+    lines.append(f"- audio OpenAL available: {cusa['audio_openal_available']}")
+    lines.append(f"- audio output opened: {cusa['audio_output_opened']}")
+    lines.append(f"- audio input opened: {cusa['audio_input_opened']}")
+    audio_skip_reason = parse_audio_skip_reason(results)
+    if audio_skip_reason:
+        lines.append(f"- audio runtime skip reason: {audio_skip_reason}")
     lines.append(f"- current execution stage: {cusa['execution_stage']} ({stage_name(int(cusa['execution_stage']))})")
     lines.append(f"- last HLE call: module={cusa['last_hle_module']} symbol={cusa['last_hle_symbol']}")
     lines.append(f"- current video/audio/input stage: graphics={len(queues['graphics_fallbacks'])} audio-input-service={len(queues['audio_input_service_fallbacks'])}")
@@ -589,6 +700,7 @@ def main() -> int:
     parser.add_argument("--fail-fast", action="store_true", help="Stop at first failed step.")
     parser.add_argument("--write-report", type=Path, help="Write report path.")
     parser.add_argument("--no-milestones", action="store_true", help="Do not append milestones.")
+    parser.add_argument("--require-first-boundary", action="store_true", help="Fail when CUSA07399 does not reach the first guarded guest boundary.")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose command output.")
     args = parser.parse_args()
 
@@ -620,7 +732,7 @@ def main() -> int:
             if args.fail_fast:
                 break
 
-    progress, queues, cusa, rules = summarize_progress(results)
+    progress, queues, cusa, rules = summarize_progress(results, args.require_first_boundary)
     passed = sum(1 for r in results if r.passed)
     failed = len(results) - passed
 

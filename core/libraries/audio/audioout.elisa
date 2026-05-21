@@ -594,145 +594,172 @@ def AudioOut_ShutdownBackends() -> void:
     OpenALManager_Shutdown()
     audioout_inited <- false
 
-def audioout_openal_init_port(pid: s32) -> bool:
-    src: mutable u32 = 0u32
-    alGenSources(1, src)
-    if alGetError() != 0:
-        return false
-    audioout_openal_source_ids[pid] <- src
-
-    base: usize = (pid as usize) * 6usize
-    i: mutable usize = 0usize
-    while i < 6usize:
-        buf: mutable u32 = 0u32
-        alGenBuffers(1, buf)
-        if alGetError() != 0:
-            if audioout_openal_source_ids[pid] != 0u32:
-                alDeleteSources(1, audioout_openal_source_ids[pid])
-                audioout_openal_source_ids[pid] <- 0u32
-            j: mutable usize = 0usize
-            while j < i:
-                existing: mutable u32 = audioout_openal_buf_ids[base + j]
-                if existing != 0u32:
-                    alDeleteBuffers(1, audioout_openal_buf_ids[base + j])
-                    audioout_openal_buf_ids[base + j] <- 0u32
-                j <- j + 1usize
-            return false
-        audioout_openal_buf_ids[base + i] <- buf
-        i <- i + 1usize
-    audioout_openal_next_buf[pid] <- 0
-    alSourcef(audioout_openal_source_ids[pid], AL_GAIN, 1.0f32)
-    return true
-
-def audioout_openal_close_port(pid: s32) -> void:
-    src: mutable u32 = audioout_openal_source_ids[pid]
-    if src != 0u32:
-        alSourceStop(src)
-        alDeleteSources(1, audioout_openal_source_ids[pid])
-        audioout_openal_source_ids[pid] <- 0u32
-    base: usize = (pid as usize) * 6usize
-    i: mutable usize = 0usize
-    while i < 6usize:
-        b: mutable u32 = audioout_openal_buf_ids[base + i]
-        if b != 0u32:
-            alDeleteBuffers(1, audioout_openal_buf_ids[base + i])
-            audioout_openal_buf_ids[base + i] <- 0u32
-        i <- i + 1usize
-    audioout_openal_next_buf[pid] <- 0
-
-def audioout_openal_queue(pid: s32, data: void&, size_bytes: s32, sample_rate: s32, format: s32) -> bool:
-    src: mutable u32 = audioout_openal_source_ids[pid]
-    if src == 0u32:
-        return false
-
-    processed: mutable s32 = 0
-    alGetSourcei(src, AL_BUFFERS_PROCESSED, processed)
-    while processed > 0:
-        ubuf: mutable u32 = 0u32
-        alSourceUnqueueBuffers(src, 1, ubuf)
-        processed <- processed - 1
-
-    # Keep source queue bounded across host underrun/stall cycles.
-    queued: mutable s32 = 0
-    alGetSourcei(src, AL_BUFFERS_QUEUED, queued)
-    while queued >= 6:
-        drop_buf: mutable u32 = 0u32
-        alSourceUnqueueBuffers(src, 1, drop_buf)
-        if alGetError() != 0:
-            break
-        queued <- queued - 1
-
-    idx: mutable s32 = audioout_openal_next_buf[pid]
-    if idx < 0 or idx >= 6:
-        idx <- 0
-
-    bid: mutable u32 = audioout_openal_buf_ids[(pid as usize) * 6usize + (idx as usize)]
-    if bid == 0u32:
-        return false
-
-    alBufferData(bid, format, data, size_bytes, sample_rate)
-    if alGetError() != 0:
-        return false
-
-    alSourceQueueBuffers(src, 1, audioout_openal_buf_ids[(pid as usize) * 6usize + (idx as usize)])
-    if alGetError() != 0:
-        return false
-
-    audioout_openal_next_buf[pid] <- (idx + 1) % 6
-
-    state: mutable s32 = 0
-    alGetSourcei(src, AL_SOURCE_STATE, state)
-    if state == AL_STOPPED or state != AL_PLAYING:
-        alSourcePlay(src)
+static if PLATFORM_APPLE:
+    def audioout_openal_init_port(pid: s32) -> bool:
+        src: mutable u32 = 0u32
+        alGenSources(1, src)
         if alGetError() != 0:
             return false
-    return true
+        audioout_openal_source_ids[pid] <- src
 
-def audioout_openal_select_format(pid: s32) -> s32:
-    fmt: u32 = audioout_data_format[pid]
-    if fmt == 0u32:
-        return AL_FORMAT_MONO16
-    if fmt == 1u32:
-        return AL_FORMAT_STEREO16
-    if fmt == 3u32:
-        return AL_FORMAT_MONO_FLOAT32
-    if fmt == 4u32:
-        return AL_FORMAT_STEREO_FLOAT32
-    if fmt == 2u32 or fmt == 6u32:
-        e16_71: s32 = alGetEnumValue("AL_FORMAT_71CHN16")
-        if e16_71 != 0 and alGetError() == 0:
-            return e16_71
-        return AL_FORMAT_STEREO16
-    if fmt == 5u32 or fmt == 7u32:
-        ef_71: s32 = alGetEnumValue("AL_FORMAT_71CHN32")
-        if ef_71 != 0 and alGetError() == 0:
-            return ef_71
-        return AL_FORMAT_STEREO_FLOAT32
-    return 0
-
-def audioout_openal_prepare_data(pid: s32, input_ptr: void&, format: s32, size_bytes: mutable s32&) -> void&:
-    frames: usize = audioout_frames[pid] as usize
-    df: u32 = audioout_data_format[pid]
-    if (df == 2u32 or df == 6u32) and format == AL_FORMAT_STEREO16:
-        src: s16& = input_ptr as s16&
-        base: usize = (pid as usize) * 4096usize
+        base: usize = (pid as usize) * 6usize
         i: mutable usize = 0usize
-        while i < frames:
-            audioout_openal_s16_stereo_tmp[base + (i * 2usize)] <- src[i * 8usize]
-            audioout_openal_s16_stereo_tmp[base + (i * 2usize) + 1usize] <- src[(i * 8usize) + 1usize]
+        while i < 6usize:
+            buf: mutable u32 = 0u32
+            alGenBuffers(1, buf)
+            if alGetError() != 0:
+                if audioout_openal_source_ids[pid] != 0u32:
+                    alDeleteSources(1, audioout_openal_source_ids[pid])
+                    audioout_openal_source_ids[pid] <- 0u32
+                j: mutable usize = 0usize
+                while j < i:
+                    existing: mutable u32 = audioout_openal_buf_ids[base + j]
+                    if existing != 0u32:
+                        alDeleteBuffers(1, audioout_openal_buf_ids[base + j])
+                        audioout_openal_buf_ids[base + j] <- 0u32
+                    j <- j + 1usize
+                return false
+            audioout_openal_buf_ids[base + i] <- buf
             i <- i + 1usize
-        bytes4_u32: u32 = (frames * 4usize) as u32
-        size_bytes <- bytes4_u32 as s32
-        return audioout_openal_s16_stereo_tmp[base] as mutable void&
-    if (df == 5u32 or df == 7u32) and format == AL_FORMAT_STEREO_FLOAT32:
-        srcf: f32& = input_ptr as f32&
-        basef: usize = (pid as usize) * 4096usize
-        j: mutable usize = 0usize
-        while j < frames:
-            audioout_openal_f32_stereo_tmp[basef + (j * 2usize)] <- srcf[j * 8usize]
-            audioout_openal_f32_stereo_tmp[basef + (j * 2usize) + 1usize] <- srcf[(j * 8usize) + 1usize]
-            j <- j + 1usize
-        bytes8_u32: u32 = (frames * 8usize) as u32
-        size_bytes <- bytes8_u32 as s32
-        return audioout_openal_f32_stereo_tmp[basef] as mutable void&
-    return input_ptr
+        audioout_openal_next_buf[pid] <- 0
+        alSourcef(audioout_openal_source_ids[pid], AL_GAIN, 1.0f32)
+        return true
+
+    def audioout_openal_close_port(pid: s32) -> void:
+        src: mutable u32 = audioout_openal_source_ids[pid]
+        if src != 0u32:
+            alSourceStop(src)
+            alDeleteSources(1, audioout_openal_source_ids[pid])
+            audioout_openal_source_ids[pid] <- 0u32
+        base: usize = (pid as usize) * 6usize
+        i: mutable usize = 0usize
+        while i < 6usize:
+            b: mutable u32 = audioout_openal_buf_ids[base + i]
+            if b != 0u32:
+                alDeleteBuffers(1, audioout_openal_buf_ids[base + i])
+                audioout_openal_buf_ids[base + i] <- 0u32
+            i <- i + 1usize
+        audioout_openal_next_buf[pid] <- 0
+
+    def audioout_openal_queue(pid: s32, data: void&, size_bytes: s32, sample_rate: s32, format: s32) -> bool:
+        src: mutable u32 = audioout_openal_source_ids[pid]
+        if src == 0u32:
+            return false
+
+        processed: mutable s32 = 0
+        alGetSourcei(src, AL_BUFFERS_PROCESSED, processed)
+        while processed > 0:
+            ubuf: mutable u32 = 0u32
+            alSourceUnqueueBuffers(src, 1, ubuf)
+            processed <- processed - 1
+
+        # Keep source queue bounded across host underrun/stall cycles.
+        queued: mutable s32 = 0
+        alGetSourcei(src, AL_BUFFERS_QUEUED, queued)
+        while queued >= 6:
+            drop_buf: mutable u32 = 0u32
+            alSourceUnqueueBuffers(src, 1, drop_buf)
+            if alGetError() != 0:
+                break
+            queued <- queued - 1
+
+        idx: mutable s32 = audioout_openal_next_buf[pid]
+        if idx < 0 or idx >= 6:
+            idx <- 0
+
+        bid: mutable u32 = audioout_openal_buf_ids[(pid as usize) * 6usize + (idx as usize)]
+        if bid == 0u32:
+            return false
+
+        alBufferData(bid, format, data, size_bytes, sample_rate)
+        if alGetError() != 0:
+            return false
+
+        alSourceQueueBuffers(src, 1, audioout_openal_buf_ids[(pid as usize) * 6usize + (idx as usize)])
+        if alGetError() != 0:
+            return false
+
+        audioout_openal_next_buf[pid] <- (idx + 1) % 6
+
+        state: mutable s32 = 0
+        alGetSourcei(src, AL_SOURCE_STATE, state)
+        if state == AL_STOPPED or state != AL_PLAYING:
+            alSourcePlay(src)
+            if alGetError() != 0:
+                return false
+        return true
+
+    def audioout_openal_select_format(pid: s32) -> s32:
+        fmt: u32 = audioout_data_format[pid]
+        if fmt == 0u32:
+            return AL_FORMAT_MONO16
+        if fmt == 1u32:
+            return AL_FORMAT_STEREO16
+        if fmt == 3u32:
+            return AL_FORMAT_MONO_FLOAT32
+        if fmt == 4u32:
+            return AL_FORMAT_STEREO_FLOAT32
+        if fmt == 2u32 or fmt == 6u32:
+            e16_71: s32 = alGetEnumValue("AL_FORMAT_71CHN16")
+            if e16_71 != 0 and alGetError() == 0:
+                return e16_71
+            return AL_FORMAT_STEREO16
+        if fmt == 5u32 or fmt == 7u32:
+            ef_71: s32 = alGetEnumValue("AL_FORMAT_71CHN32")
+            if ef_71 != 0 and alGetError() == 0:
+                return ef_71
+            return AL_FORMAT_STEREO_FLOAT32
+        return 0
+
+    def audioout_openal_prepare_data(pid: s32, input_ptr: void&, format: s32, size_bytes: mutable s32&) -> void&:
+        frames: usize = audioout_frames[pid] as usize
+        df: u32 = audioout_data_format[pid]
+        if (df == 2u32 or df == 6u32) and format == AL_FORMAT_STEREO16:
+            src: s16& = input_ptr as s16&
+            base: usize = (pid as usize) * 4096usize
+            i: mutable usize = 0usize
+            while i < frames:
+                audioout_openal_s16_stereo_tmp[base + (i * 2usize)] <- src[i * 8usize]
+                audioout_openal_s16_stereo_tmp[base + (i * 2usize) + 1usize] <- src[(i * 8usize) + 1usize]
+                i <- i + 1usize
+            bytes4_u32: u32 = (frames * 4usize) as u32
+            size_bytes <- bytes4_u32 as s32
+            return audioout_openal_s16_stereo_tmp[base] as mutable void&
+        if (df == 5u32 or df == 7u32) and format == AL_FORMAT_STEREO_FLOAT32:
+            srcf: f32& = input_ptr as f32&
+            basef: usize = (pid as usize) * 4096usize
+            j: mutable usize = 0usize
+            while j < frames:
+                audioout_openal_f32_stereo_tmp[basef + (j * 2usize)] <- srcf[j * 8usize]
+                audioout_openal_f32_stereo_tmp[basef + (j * 2usize) + 1usize] <- srcf[(j * 8usize) + 1usize]
+                j <- j + 1usize
+            bytes8_u32: u32 = (frames * 8usize) as u32
+            size_bytes <- bytes8_u32 as s32
+            return audioout_openal_f32_stereo_tmp[basef] as mutable void&
+        return input_ptr
+static else:
+    def audioout_openal_init_port(pid: s32) -> bool:
+        _ = pid
+        return false
+
+    def audioout_openal_close_port(pid: s32) -> void:
+        _ = pid
+        return
+
+    def audioout_openal_queue(pid: s32, data: void&, size_bytes: s32, sample_rate: s32, format: s32) -> bool:
+        _ = pid
+        _ = data
+        _ = size_bytes
+        _ = sample_rate
+        _ = format
+        return false
+
+    def audioout_openal_select_format(pid: s32) -> s32:
+        _ = pid
+        return 0
+
+    def audioout_openal_prepare_data(pid: s32, input_ptr: void&, format: s32, size_bytes: mutable s32&) -> void&:
+        _ = pid
+        _ = format
+        _ = size_bytes
+        return input_ptr
