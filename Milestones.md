@@ -42,6 +42,14 @@ go run ./src test emulator-real-game-boot-smoke --project ../elisa-shad-ps4-from
 
 Result: `2 test(s) selected; passed=2 skipped=0 failed=0`.
 
+
+## 2026-05-21: Loader Module-Info And PRX Symbol Lookup Hardened
+
+- `Module_GetModuleInfoEx` now reports C++-style base-adjusted init/fini and EH-frame addresses instead of raw dynamic offsets.
+- `sceKernelGetModuleInfo*`, `sceKernelGetModuleInfoForUnwind`, and module-list APIs now reflect the live Elisa linker module table for real loaded SELF/PRX modules.
+- `sceKernelDlsym` now resolves real parsed PRX exports instead of always returning `ESRCH`.
+- The real SELF loader test now gates module-info fields, unwind info, module list handles, and real `libc.prx` export lookup through `sceKernelDlsym`.
+
 ## 2026-05-21: Real SELF/PRX Loader Path Is Executable-Tested
 
 - The Elisa SELF/ELF loader now parses dynamic data, import symbols, relocation records, and module metadata from real binaries.

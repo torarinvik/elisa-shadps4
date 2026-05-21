@@ -107,6 +107,16 @@ def real_self_loader_parses_dynamic_imports_and_relocations() -> void:
         relocated: Module = linker.modules[index.usize()]
         RealSelfLoader_Check(relocated.applied_relocation_count > 0, "expected at least one relocation write into the loaded image")
         RealSelfLoader_Check(RealSelfLoader_CheckMappedRelocationMirror(relocated), "expected relocation writes to mirror into guest memory backing")
+        ex_info: OrbisKernelModuleInfoEx = Module_GetModuleInfoEx(relocated)
+        RealSelfLoader_Check(ex_info.st_size == 0x1A8.u64(), "expected C++ module info ex ABI size")
+        RealSelfLoader_Check(streq(ex_info.name, relocated.name) == 1, "expected module info ex name")
+        RealSelfLoader_Check(ex_info.tls_index == relocated.tls.modid, "expected module info ex TLS index")
+        RealSelfLoader_Check(ex_info.tls_init_addr == relocated.tls.image_virtual_addr, "expected module info ex TLS init address")
+        RealSelfLoader_Check(ex_info.init_proc_addr == relocated.base_virtual_addr + relocated.dynamic_info.init_virtual_addr.uintptr(), "expected init proc address to include module base")
+        RealSelfLoader_Check(ex_info.fini_proc_addr == relocated.base_virtual_addr + relocated.dynamic_info.fini_virtual_addr.uintptr(), "expected fini proc address to include module base")
+        RealSelfLoader_Check(ex_info.eh_frame_hdr_addr == relocated.base_virtual_addr + relocated.eh_frame_hdr_addr, "expected eh frame header address to include module base")
+        RealSelfLoader_Check(ex_info.eh_frame_addr == relocated.base_virtual_addr + relocated.eh_frame_addr, "expected eh frame address to include module base")
+        RealSelfLoader_Check(ex_info.segment_count == relocated.info.num_segments, "expected module info ex segment count")
 
 @test
 def real_self_loader_loads_guest_prx_through_dynamic_module_path() -> void:
@@ -136,6 +146,14 @@ def real_self_loader_loads_guest_prx_through_dynamic_module_path() -> void:
         RealSelfLoader_Check(Module_GetImportSymbolCount(module) > 0, "expected real PRX imports")
         RealSelfLoader_Check(Module_GetResolvedImportSymbolCount(module) == Module_GetImportSymbolCount(module), "expected real PRX imports to resolve before start")
         RealSelfLoader_Check(module.applied_relocation_count > 0usize, "expected real PRX relocations before start")
+        exported_nid: mutable static u8& = ""
+        RealSelfLoader_Check(RealSelfLoader_FindAnyDefinedNid(module, exported_nid.ref[mutable static u8&]), "expected real PRX to expose at least one defined symbol")
+        exported_addr: mutable u64 = 0u64
+        RealSelfLoader_Check(Module_FindDefinedSymbolAddress(module.ref[mutable Module&], exported_nid, exported_addr.ref[mutable u64&]), "expected PRX defined symbol address lookup")
+        dlsym_addr: mutable void&? = null
+        RealSelfLoader_Check(sceKernelDlsym(handle.int(), exported_nid.cast[u8&?], dlsym_addr.ref[mutable void&?].cast[void&?]) == ORBIS_OK, "expected sceKernelDlsym to resolve a real PRX export")
+        RealSelfLoader_Check(dlsym_addr == exported_addr.cast[void&?], "expected dlsym address to match parsed PRX export")
+        RealSelfLoader_Check(sceKernelDlsym(handle.int(), "MissingSymbolForLoaderTest".cast[u8&?], dlsym_addr.ref[mutable void&?].cast[void&?]) == ORBIS_KERNEL_ERROR_ESRCH, "expected dlsym missing symbol failure")
 
 @test
 def real_self_loader_import_symbol_parsing_and_resolution_kinds() -> void:
@@ -182,3 +200,48 @@ def real_self_loader_import_symbol_parsing_and_resolution_kinds() -> void:
 
         index: s32 = Linker_LoadModuleFromHost(linker, "/app0/eboot.bin", REAL_SELF_TEST_EBOOT, false)
         RealSelfLoader_Check(index >= 0, "expected real eboot for PRX-export test")
+
+@test
+def real_self_loader_kernel_module_info_apis_reflect_linker_state() -> void:
+    can Memory.Allocate, Abort.Panic:
+        Linker_Reset()
+        linker: mutable Linker& = Linker_GetInstance()
+        index: s32 = Linker_LoadModuleFromHost(linker, "/app0/eboot.bin", REAL_SELF_TEST_EBOOT, false)
+        RealSelfLoader_Check(index >= 0, "expected real eboot module index for module-info APIs")
+        module: Module = linker.modules[index.usize()]
+
+        basic: mutable OrbisKernelModuleInfo = Module_GetModuleInfo(module)
+        basic.st_size <- 0x160.u64()
+        RealSelfLoader_Check(sceKernelGetModuleInfo(index.int(), basic.ref[mutable OrbisKernelModuleInfo&].cast[void&?]) == ORBIS_OK, "expected sceKernelGetModuleInfo success")
+        RealSelfLoader_Check(streq(basic.name, module.name) == 1, "expected basic module info name")
+        RealSelfLoader_Check(basic.num_segments == module.info.num_segments, "expected basic module info segment count")
+
+        bad_basic: mutable OrbisKernelModuleInfo = Module_GetModuleInfo(module)
+        bad_basic.st_size <- 0u64
+        RealSelfLoader_Check(sceKernelGetModuleInfo(index.int(), bad_basic.ref[mutable OrbisKernelModuleInfo&].cast[void&?]) == ORBIS_KERNEL_ERROR_EINVAL, "expected basic module info size validation")
+        RealSelfLoader_Check(sceKernelGetModuleInfo(-77, basic.ref[mutable OrbisKernelModuleInfo&].cast[void&?]) == ORBIS_KERNEL_ERROR_ESRCH, "expected invalid handle module info failure")
+        RealSelfLoader_Check(sceKernelGetModuleInfo(index.int(), null) == ORBIS_KERNEL_ERROR_EFAULT, "expected null basic module info failure")
+
+        ex: mutable OrbisKernelModuleInfoEx = Module_GetModuleInfoEx(module)
+        ex.st_size <- 0x1A8.u64()
+        RealSelfLoader_Check(sceKernelGetModuleInfoInternal(index.int(), ex.ref[mutable OrbisKernelModuleInfoEx&].cast[void&?]) == ORBIS_OK, "expected internal module info success")
+        RealSelfLoader_Check(ex.init_proc_addr == module.base_virtual_addr + module.dynamic_info.init_virtual_addr.uintptr(), "expected internal module info init address")
+        RealSelfLoader_Check(ex.eh_frame_hdr_addr == module.base_virtual_addr + module.eh_frame_hdr_addr, "expected internal module info eh header address")
+
+        from_addr: mutable OrbisKernelModuleInfoEx = zeroed
+        RealSelfLoader_Check(sceKernelGetModuleInfoFromAddr(module.base_virtual_addr.u64(), 0, from_addr.ref[mutable OrbisKernelModuleInfoEx&].cast[void&?]) == ORBIS_OK, "expected module info from mapped address")
+        RealSelfLoader_Check(streq(from_addr.name, module.name) == 1, "expected from-address module name")
+        RealSelfLoader_Check(sceKernelGetModuleInfoFromAddr(module.base_virtual_addr.u64(), 3, from_addr.ref[mutable OrbisKernelModuleInfoEx&].cast[void&?]) == ORBIS_KERNEL_ERROR_EINVAL, "expected from-address flags validation")
+        RealSelfLoader_Check(from_addr.st_size == 0u64, "expected invalid flags to clear module info ex")
+
+        unwind: mutable OrbisModuleInfoForUnwind = zeroed
+        unwind.st_size <- size_of(OrbisModuleInfoForUnwind).u64()
+        RealSelfLoader_Check(sceKernelGetModuleInfoForUnwind(module.base_virtual_addr.u64(), 0, unwind.ref[mutable OrbisModuleInfoForUnwind&].cast[void&?]) == ORBIS_OK, "expected unwind module info success")
+        RealSelfLoader_Check(streq(unwind.name, module.name) == 1, "expected unwind module name")
+        RealSelfLoader_Check(unwind.eh_frame_hdr_addr == module.base_virtual_addr + module.eh_frame_hdr_addr, "expected unwind eh header address")
+        RealSelfLoader_Check(unwind.seg0_addr == module.base_virtual_addr, "expected unwind first segment address")
+        handles: mutable s32[4] = zeroed
+        count: mutable u64 = 0u64
+        RealSelfLoader_Check(sceKernelGetModuleList(handles[0].ref[mutable s32&].cast[void&?], 4u64, count.ref[mutable u64&].cast[void&?]) == ORBIS_OK, "expected module list success")
+        RealSelfLoader_Check(count == linker.modules.count.u64(), "expected module list count")
+        RealSelfLoader_Check(handles[0] == index, "expected module list first handle")

@@ -53,8 +53,8 @@ CUSA07399 stage:
   - VIDEO_STAGE_first_frame_candidate=0
 CUSA07399 artifact metrics:
 - CUSA module count: 4
-- imports total: 1150
-- native HLE count: 839
+- imports total: 1151
+- native HLE count: 840
 - PRX export count: 311
 - AeroLib fallback count: 0
 - unresolved count: 0
@@ -98,9 +98,9 @@ Failing scenario ids:
 - none
 
 ## Fallback Delta
-- fallback count before: 7
+- fallback count before: 0
 - fallback count after: 0
-- fallback symbols newly resolved: 7
+- fallback symbols newly resolved: 0
 
 ## Steps
 - PASS: project.json syntax

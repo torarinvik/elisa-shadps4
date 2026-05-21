@@ -1,8 +1,8 @@
 # CUSA07399 Fallback Workqueue
 
 Current AeroLib fallback count: 0
-Previous AeroLib fallback count: 7
-Resolved since last report: 7
+Previous AeroLib fallback count: 0
+Resolved since last report: 0
 
 ## Top Fallback Symbols
 

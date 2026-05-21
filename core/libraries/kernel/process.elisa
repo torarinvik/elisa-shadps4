@@ -11,6 +11,43 @@ include "../../linker.elisa"
 struct KernelModuleInfoHeader:
     st_size: mutable u64
 
+@fixed_layout
+struct OrbisModuleInfoForUnwind:
+    st_size: mutable u64
+    name: mutable static u8&
+    eh_frame_hdr_addr: mutable VAddr
+    eh_frame_addr: mutable VAddr
+    eh_frame_size: mutable u64
+    seg0_addr: mutable VAddr
+    seg0_size: mutable u64
+
+def Kernel_ClearModuleInfoEx(info: mutable OrbisKernelModuleInfoEx&) -> void:
+    info.st_size <- 0u64
+    info.name <- ""
+    info.id <- 0
+    info.tls_index <- 0u32
+    info.tls_init_addr <- 0.uintptr()
+    info.tls_init_size <- 0u32
+    info.tls_size <- 0u32
+    info.tls_offset <- 0u32
+    info.tls_align <- 0u32
+    info.init_proc_addr <- 0.uintptr()
+    info.fini_proc_addr <- 0.uintptr()
+    info.eh_frame_hdr_addr <- 0.uintptr()
+    info.eh_frame_addr <- 0.uintptr()
+    info.eh_frame_hdr_size <- 0u32
+    info.eh_frame_size <- 0u32
+    info.segment_count <- 0u32
+
+def Kernel_ClearModuleInfoForUnwind(info: mutable OrbisModuleInfoForUnwind&) -> void:
+    info.st_size <- 0u64
+    info.name <- ""
+    info.eh_frame_hdr_addr <- 0.uintptr()
+    info.eh_frame_addr <- 0.uintptr()
+    info.eh_frame_size <- 0u64
+    info.seg0_addr <- 0.uintptr()
+    info.seg0_size <- 0u64
+
 def sceKernelIsInSandbox() -> int:
     return 1
 
@@ -55,56 +92,140 @@ def sceKernelLoadStartModule(moduleFileName: u8&?, args: u64, argp: void&?, flag
     return handle
 
 def sceKernelDlsym(handle: int, symbol: u8&?, addrp: void&?) -> int:
-    _ = handle
-    _ = symbol
     addr: mutable void&?&? = addrp as mutable void&?&?
     if addr == null:
         return ORBIS_KERNEL_ERROR_EFAULT
-    addr <- null
-    return ORBIS_KERNEL_ERROR_ESRCH
+    linker: mutable Linker& = Linker_GetInstance()
+    module: mutable Module&? = Linker_GetModule(linker, handle.s32())
+    if module == null:
+        return ORBIS_KERNEL_ERROR_ESRCH
+    if symbol == null:
+        addr[0] <- null
+        return ORBIS_KERNEL_ERROR_ESRCH
+    resolved_addr: mutable u64 = 0u64
+    if not Module_FindDefinedSymbolAddress(module, symbol.ref[static u8&], resolved_addr.ref[mutable u64&]):
+        addr[0] <- null
+        return ORBIS_KERNEL_ERROR_ESRCH
+    addr[0] <- resolved_addr.cast[void&?]
+    return ORBIS_OK
 
 def sceKernelGetModuleInfoForUnwind(addr: u64, flags: int, info: void&?) -> int:
-    _ = addr
     if flags >= 3:
+        unwind_info: mutable OrbisModuleInfoForUnwind&? = info as mutable OrbisModuleInfoForUnwind&?
+        if unwind_info != null:
+            Kernel_ClearModuleInfoForUnwind(unwind_info)
         return ORBIS_KERNEL_ERROR_EINVAL
     if info == null:
         return ORBIS_KERNEL_ERROR_EFAULT
-    return ORBIS_KERNEL_ERROR_ESRCH
+    unwind_info: mutable OrbisModuleInfoForUnwind&? = info as mutable OrbisModuleInfoForUnwind&?
+    if unwind_info == null or unwind_info.st_size < size_of(OrbisModuleInfoForUnwind).u64():
+        return ORBIS_KERNEL_ERROR_EINVAL
+    linker: mutable Linker& = Linker_GetInstance()
+    module: mutable Module&? = Linker_FindByAddress(linker, addr.uintptr())
+    if module == null:
+        return ORBIS_KERNEL_ERROR_ESRCH
+    mod_info: OrbisKernelModuleInfoEx = Module_GetModuleInfoEx(module)
+    Kernel_ClearModuleInfoForUnwind(unwind_info)
+    unwind_info.name <- mod_info.name
+    unwind_info.eh_frame_hdr_addr <- mod_info.eh_frame_hdr_addr
+    unwind_info.eh_frame_addr <- mod_info.eh_frame_addr
+    unwind_info.eh_frame_size <- mod_info.eh_frame_size.u64()
+    unwind_info.seg0_addr <- module.base_virtual_addr
+    unwind_info.seg0_size <- module.base_size
+    return ORBIS_OK
 
 def sceKernelGetModuleInfoFromAddr(addr: u64, flags: int, info: void&?) -> int:
-    _ = addr
     if flags >= 3:
+        ex_info: mutable OrbisKernelModuleInfoEx&? = info as mutable OrbisKernelModuleInfoEx&?
+        if ex_info != null:
+            Kernel_ClearModuleInfoEx(ex_info)
         return ORBIS_KERNEL_ERROR_EINVAL
     if info == null:
         return ORBIS_KERNEL_ERROR_EFAULT
-    return ORBIS_KERNEL_ERROR_ESRCH
+    ex_info: mutable OrbisKernelModuleInfoEx&? = info as mutable OrbisKernelModuleInfoEx&?
+    if ex_info == null:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    linker: mutable Linker& = Linker_GetInstance()
+    module: mutable Module&? = Linker_FindByAddress(linker, addr.uintptr())
+    if module == null:
+        return ORBIS_KERNEL_ERROR_ESRCH
+    ex_info[0] <- Module_GetModuleInfoEx(module)
+    return ORBIS_OK
 
 def sceKernelGetModuleInfo(handle: int, info: void&?) -> int:
-    _ = handle
     if info == null:
         return ORBIS_KERNEL_ERROR_EFAULT
-    hdr: KernelModuleInfoHeader&? = info as KernelModuleInfoHeader&?
-    if hdr == null or hdr.st_size == 0u64:
+    module_info: mutable OrbisKernelModuleInfo&? = info as mutable OrbisKernelModuleInfo&?
+    if module_info == null or module_info.st_size != 0x160.u64():
         return ORBIS_KERNEL_ERROR_EINVAL
-    return ORBIS_KERNEL_ERROR_ESRCH
+    linker: mutable Linker& = Linker_GetInstance()
+    module: mutable Module&? = Linker_GetModule(linker, handle.s32())
+    if module == null:
+        return ORBIS_KERNEL_ERROR_ESRCH
+    module_info[0] <- Module_GetModuleInfo(module)
+    return ORBIS_OK
 
 def sceKernelGetModuleInfo2(handle: int, info: void&?) -> int:
-    return sceKernelGetModuleInfo(handle, info)
+    if info == null:
+        return ORBIS_KERNEL_ERROR_EFAULT
+    module_info: mutable OrbisKernelModuleInfo&? = info as mutable OrbisKernelModuleInfo&?
+    if module_info == null or module_info.st_size != 0x160.u64():
+        return ORBIS_KERNEL_ERROR_EINVAL
+    linker: mutable Linker& = Linker_GetInstance()
+    module: mutable Module&? = Linker_GetModule(linker, handle.s32())
+    if module == null:
+        return ORBIS_KERNEL_ERROR_ESRCH
+    if Module_IsSharedLib(module):
+        return ORBIS_KERNEL_ERROR_EPERM
+    module_info[0] <- Module_GetModuleInfo(module)
+    return ORBIS_OK
 
 def sceKernelGetModuleInfoInternal(handle: int, info: void&?) -> int:
-    return sceKernelGetModuleInfo(handle, info)
+    if info == null:
+        return ORBIS_KERNEL_ERROR_EFAULT
+    ex_info: mutable OrbisKernelModuleInfoEx&? = info as mutable OrbisKernelModuleInfoEx&?
+    if ex_info == null or ex_info.st_size != 0x1A8.u64():
+        return ORBIS_KERNEL_ERROR_EINVAL
+    linker: mutable Linker& = Linker_GetInstance()
+    module: mutable Module&? = Linker_GetModule(linker, handle.s32())
+    if module == null:
+        return ORBIS_KERNEL_ERROR_ESRCH
+    ex_info[0] <- Module_GetModuleInfoEx(module)
+    return ORBIS_OK
 
 def sceKernelGetModuleList(handles: void&?, num_array: u64, out_count: void&?) -> int:
-    _ = handles
-    _ = num_array
+    handle_array: mutable s32&? = handles as mutable s32&?
     count: mutable u64&? = out_count as mutable u64&?
-    if handles == null or count == null:
+    if handle_array == null or count == null:
         return ORBIS_KERNEL_ERROR_EFAULT
-    count[0] <- 0u64
+    linker: mutable Linker& = Linker_GetInstance()
+    written: mutable u64 = 0u64
+    while written < num_array and written < linker.modules.count.u64():
+        handle_array[written.usize()] <- written.s32()
+        written <- written + 1u64
+    if written == num_array and written < linker.modules.count.u64():
+        return ORBIS_KERNEL_ERROR_ENOMEM
+    count[0] <- written
     return ORBIS_OK
 
 def sceKernelGetModuleList2(handles: void&?, num_array: u64, out_count: void&?) -> int:
-    return sceKernelGetModuleList(handles, num_array, out_count)
+    handle_array: mutable s32&? = handles as mutable s32&?
+    count: mutable u64&? = out_count as mutable u64&?
+    if handle_array == null or count == null:
+        return ORBIS_KERNEL_ERROR_EFAULT
+    linker: mutable Linker& = Linker_GetInstance()
+    id: mutable u64 = 0u64
+    written: mutable u64 = 0u64
+    while id < linker.modules.count.u64():
+        module: Module = linker.modules[id.usize()]
+        if not Module_IsSharedLib(module):
+            if written >= num_array:
+                return ORBIS_KERNEL_ERROR_ENOMEM
+            handle_array[written.usize()] <- id.s32()
+            written <- written + 1u64
+        id <- id + 1u64
+    count[0] <- written
+    return ORBIS_OK
 
 def posix_getuid() -> u32:
     return 1u32
