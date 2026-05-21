@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ class Step:
     category: str = "gate"
     slow: bool = False
     optional: bool = False
+    timeout_seconds: int | None = None
 
 
 @dataclass
@@ -43,6 +45,7 @@ def compiler_test(target: str, *, slow: bool = False, category: str = "runtime")
         cwd=COMPILER_DIR,
         category=category,
         slow=slow,
+        timeout_seconds=300 if slow else 120,
     )
 
 
@@ -112,14 +115,22 @@ def all_steps() -> list[Step]:
 def run_step(step: Step, verbose: bool) -> Result:
     if verbose:
         print(f"+ ({step.cwd}) {' '.join(step.cmd)}")
-    proc = subprocess.run(
-        step.cmd,
-        cwd=step.cwd,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-    )
-    return Result(step=step, returncode=proc.returncode, output=proc.stdout or "")
+    try:
+        proc = subprocess.run(
+            step.cmd,
+            cwd=step.cwd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=step.timeout_seconds,
+        )
+        return Result(step=step, returncode=proc.returncode, output=proc.stdout or "")
+    except subprocess.TimeoutExpired as exc:
+        output = exc.stdout or ""
+        if isinstance(output, bytes):
+            output = output.decode(errors="replace")
+        message = f"\nTIMEOUT after {step.timeout_seconds}s: {' '.join(step.cmd)}"
+        return Result(step=step, returncode=124, output=str(output) + message)
 
 
 def tail(text: str, lines: int = 20) -> str:
@@ -201,7 +212,12 @@ def summarize_progress(results: list[Result]) -> str:
         lines.append("- load/link/handoff: PASS")
         if passed("elisacore test emulator-guest-exec-runtime-tests"):
             lines.append("- execute-fixture: PASS")
-            lines.append("- execute-game/frame: not yet promoted into this gate")
+            machine = platform.machine().lower()
+            if machine in {"x86_64", "amd64"}:
+                lines.append("- execute-game: ARMED_PROBE_ONLY")
+            else:
+                lines.append(f"- execute-game: UNSUPPORTED_HOST ({machine})")
+            lines.append("- frame: not yet promoted into this gate")
         else:
             lines.append("- execute-fixture: FAIL or not run")
             lines.append("- execute-game/frame: not yet promoted into this gate")

@@ -40,6 +40,17 @@ def RealGameBoot_CheckMappedImageMirror(module: Module&) -> bool:
         i <- i + 1
     return found
 
+def RealGameBoot_EmitArtifacts(linker: Linker&, guarded_status: s32) -> void:
+    GuestExec_EmitCusaArtifactStage()
+    GuestExec_EmitCusaArtifactSummary(linker.modules.count.u64(), linker.last_unresolved_import_count.u64(), linker.last_relocated_import_count.u64(), linker.hle_registered_symbol_count.u64(), linker.modules[0].last_start_entry_addr.u64(), guest_exec_last_main_entry_addr.u64(), guarded_status, GuestExec_LastSignal(), GuestExec_LastFaultAddress().u64())
+    i: mutable usize = 0
+    limit: mutable usize = linker.modules.count
+    if limit > 8:
+        limit <- 8
+    while i < limit:
+        GuestExec_EmitCusaArtifactModule(linker.modules[i].file, linker.modules[i].host_file, 1 if linker.modules[i].is_shared_lib else 0, linker.modules[i].applied_relocation_count.u64(), Module_GetImportSymbolCount(linker.modules[i]).u64(), Module_GetResolvedImportSymbolCount(linker.modules[i]).u64())
+        i <- i + 1
+
 @test
 def emulator_real_game_boot_smoke_loads_cusa07399_eboot() -> void:
     can Memory.Allocate, Abort.Panic:
@@ -119,3 +130,32 @@ def emulator_real_game_boot_smoke_probes_native_guest_exec_handoff() -> void:
         RealGameBoot_Check(linker.last_entry_addr > 0.uintptr(), "expected linker entry to be recorded")
         RealGameBoot_Check(linker.modules[0].last_start_entry_addr > 0.uintptr(), "expected main module start entry to be recorded")
         RealGameBoot_Check(guest_exec_last_main_entry_addr == linker.modules[0].last_start_entry_addr, "expected main probe entry to match module start entry")
+        stage_status: s32 = GuestExec_ClassifyGameExecutionStage()
+        if GuestExec_IsSupported():
+            RealGameBoot_Check(stage_status == 2, "expected supported host probe to arm game execution stage")
+        else:
+            RealGameBoot_Check(stage_status == -2, "expected unsupported host game execution classification")
+
+@test
+def emulator_real_game_boot_smoke_guarded_game_entry_reports_host_status() -> void:
+    can Memory.Allocate, Abort.Panic:
+        RealGameBoot_ResetRuntime()
+
+        arena: Arena = zeroed
+        result: mutable int = -1
+        in arena:
+            args: mutable darray[static u8&] = ["shadps4", "--native-guest-exec-probe", REAL_GAME_BOOT_ROOT, "--", "-RealBootSmoke"]
+            result <- Main_Run(args)
+        RealGameBoot_Check(result == 0, "expected guarded guest exec launch setup success")
+
+        linker: mutable Linker& = Linker_GetInstance()
+        entry: VAddr = linker.modules[0].last_start_entry_addr
+        RealGameBoot_Check(entry > 0.uintptr(), "expected main entry before guarded run")
+
+        status: s32 = GuestExec_RunMainEntryGuarded(entry, 0, null, 25.u32())
+        if GuestExec_IsSupported():
+            RealGameBoot_Check(status != -2, "expected supported host to attempt guarded game entry")
+        else:
+            RealGameBoot_Check(status == -2, "expected unsupported host guarded game entry status")
+        RealGameBoot_Check(guest_exec_last_game_execution_status == status, "expected guarded status to be recorded")
+        RealGameBoot_EmitArtifacts(linker, status)

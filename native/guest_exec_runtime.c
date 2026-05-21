@@ -4,13 +4,17 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#include <setjmp.h>
+#include <stdio.h>
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #else
 #include <errno.h>
+#include <signal.h>
 #include <sys/mman.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -23,6 +27,52 @@ typedef struct ElisaGuestEntryParams {
 
 typedef void (*ElisaGuestExitFunc)(int32_t);
 typedef uint64_t (*ElisaGuestExecTestFunc)(uint64_t, uint64_t);
+
+static int32_t elisa_guest_exec_last_status = 0;
+static int32_t elisa_guest_exec_last_signal = 0;
+static uintptr_t elisa_guest_exec_last_fault_address = 0;
+
+#if !defined(_WIN32)
+static sigjmp_buf elisa_guest_exec_jmp;
+static volatile sig_atomic_t elisa_guest_exec_guard_active = 0;
+static struct sigaction elisa_guest_exec_old_segv;
+static struct sigaction elisa_guest_exec_old_bus;
+static struct sigaction elisa_guest_exec_old_ill;
+static struct sigaction elisa_guest_exec_old_fpe;
+
+static void elisa_guest_exec_signal_handler(int sig, siginfo_t* info, void* uctx) {
+    (void)uctx;
+    elisa_guest_exec_last_status = -sig;
+    elisa_guest_exec_last_signal = sig;
+    elisa_guest_exec_last_fault_address = info != NULL ? (uintptr_t)info->si_addr : 0;
+    if (elisa_guest_exec_guard_active) {
+        siglongjmp(elisa_guest_exec_jmp, 1);
+    }
+}
+
+static void __attribute__((unused)) elisa_guest_exec_install_guards(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_sigaction = elisa_guest_exec_signal_handler;
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, &elisa_guest_exec_old_segv);
+    sigaction(SIGBUS, &sa, &elisa_guest_exec_old_bus);
+    sigaction(SIGILL, &sa, &elisa_guest_exec_old_ill);
+    sigaction(SIGFPE, &sa, &elisa_guest_exec_old_fpe);
+}
+
+static void __attribute__((unused)) elisa_guest_exec_restore_guards(void) {
+    sigaction(SIGSEGV, &elisa_guest_exec_old_segv, NULL);
+    sigaction(SIGBUS, &elisa_guest_exec_old_bus, NULL);
+    sigaction(SIGILL, &elisa_guest_exec_old_ill, NULL);
+    sigaction(SIGFPE, &elisa_guest_exec_old_fpe, NULL);
+}
+#endif
+
+static void __attribute__((noreturn, unused)) elisa_guest_exec_child_exit(int32_t code) {
+    _exit(code & 0x7f);
+}
 
 static void __attribute__((unused)) elisa_guest_exec_default_exit(int32_t code) {
     (void)code;
@@ -41,6 +91,24 @@ int32_t ElisaGuestExec_IsSupported(void) {
 #else
     return 0;
 #endif
+}
+
+int32_t ElisaGuestExec_LastStatus(void) {
+    return elisa_guest_exec_last_status;
+}
+
+int32_t ElisaGuestExec_LastSignal(void) {
+    return elisa_guest_exec_last_signal;
+}
+
+uintptr_t ElisaGuestExec_LastFaultAddress(void) {
+    return elisa_guest_exec_last_fault_address;
+}
+
+void ElisaGuestExec_ResetCrashState(void) {
+    elisa_guest_exec_last_status = 0;
+    elisa_guest_exec_last_signal = 0;
+    elisa_guest_exec_last_fault_address = 0;
 }
 
 int32_t ElisaGuestExec_MapRegion(uintptr_t address, uint64_t size, uint32_t prot) {
@@ -123,16 +191,44 @@ int32_t ElisaGuestExec_WriteU64(uintptr_t address, uint64_t value) {
 
 uint64_t ElisaGuestExec_RunSyntheticFunction(uintptr_t entry_addr, uint64_t arg0, uint64_t arg1) {
     if (entry_addr == 0) {
+        elisa_guest_exec_last_status = -1;
         return UINT64_MAX;
     }
 #if defined(__x86_64__) || defined(_M_X64)
+    ElisaGuestExec_ResetCrashState();
+#if defined(_WIN32)
     ElisaGuestExecTestFunc fn = (ElisaGuestExecTestFunc)entry_addr;
-    return fn(arg0, arg1);
+    uint64_t result = fn(arg0, arg1);
+    elisa_guest_exec_last_status = 1;
+    return result;
+#else
+    elisa_guest_exec_install_guards();
+    elisa_guest_exec_guard_active = 1;
+    if (sigsetjmp(elisa_guest_exec_jmp, 1) != 0) {
+        elisa_guest_exec_guard_active = 0;
+        elisa_guest_exec_restore_guards();
+        return UINT64_MAX - 2u;
+    }
+    ElisaGuestExecTestFunc fn = (ElisaGuestExecTestFunc)entry_addr;
+    uint64_t result = fn(arg0, arg1);
+    elisa_guest_exec_guard_active = 0;
+    elisa_guest_exec_restore_guards();
+    elisa_guest_exec_last_status = 1;
+    return result;
+#endif
 #else
     (void)arg0;
     (void)arg1;
+    elisa_guest_exec_last_status = -2;
     return UINT64_MAX - 1u;
 #endif
+}
+
+uint64_t ElisaGuestExec_SyntheticCrash(uint64_t arg0, uint64_t arg1) {
+    (void)arg0;
+    (void)arg1;
+    volatile uint64_t* ptr = (volatile uint64_t*)0;
+    return *ptr;
 }
 
 uint64_t ElisaGuestExec_SyntheticAdd(uint64_t arg0, uint64_t arg1) {
@@ -141,6 +237,10 @@ uint64_t ElisaGuestExec_SyntheticAdd(uint64_t arg0, uint64_t arg1) {
 
 uintptr_t ElisaGuestExec_GetSyntheticAddAddress(void) {
     return (uintptr_t)&ElisaGuestExec_SyntheticAdd;
+}
+
+uintptr_t ElisaGuestExec_GetSyntheticCrashAddress(void) {
+    return (uintptr_t)&ElisaGuestExec_SyntheticCrash;
 }
 
 #if defined(__x86_64__) || defined(_M_X64)
@@ -177,3 +277,92 @@ int32_t ElisaGuestExec_RunMainEntry(ElisaGuestEntryParams* params, ElisaGuestExi
     return -2;
 }
 #endif
+
+int32_t ElisaGuestExec_RunMainEntryGuarded(ElisaGuestEntryParams* params, uint32_t timeout_ms) {
+    if (params == NULL || params->entry_addr == 0) {
+        ElisaGuestExec_ResetCrashState();
+        elisa_guest_exec_last_status = -1;
+        return -1;
+    }
+#if defined(__x86_64__) && !defined(_WIN32)
+    ElisaGuestExec_ResetCrashState();
+    pid_t child = fork();
+    if (child < 0) {
+        elisa_guest_exec_last_status = -4;
+        return -4;
+    }
+    if (child == 0) {
+        ElisaGuestExec_RunMainEntry(params, elisa_guest_exec_child_exit);
+    }
+
+    uint32_t waited_ms = 0;
+    int status = 0;
+    for (;;) {
+        pid_t result = waitpid(child, &status, WNOHANG);
+        if (result == child) {
+            if (WIFSIGNALED(status)) {
+                int sig = WTERMSIG(status);
+                elisa_guest_exec_last_status = -sig;
+                elisa_guest_exec_last_signal = sig;
+                return elisa_guest_exec_last_status;
+            }
+            if (WIFEXITED(status)) {
+                elisa_guest_exec_last_status = WEXITSTATUS(status);
+                return elisa_guest_exec_last_status;
+            }
+            elisa_guest_exec_last_status = -5;
+            return -5;
+        }
+        if (result < 0) {
+            elisa_guest_exec_last_status = -6;
+            return -6;
+        }
+        if (timeout_ms != 0 && waited_ms >= timeout_ms) {
+            kill(child, SIGKILL);
+            (void)waitpid(child, &status, 0);
+            elisa_guest_exec_last_status = -3;
+            elisa_guest_exec_last_signal = SIGKILL;
+            return -3;
+        }
+        usleep(1000);
+        waited_ms += 1;
+    }
+#else
+    (void)timeout_ms;
+    ElisaGuestExec_ResetCrashState();
+    elisa_guest_exec_last_status = -2;
+    return -2;
+#endif
+}
+
+void ElisaGuestExec_EmitCusaArtifactStage(void) {
+    fprintf(stderr, "CUSA07399_ARTIFACT stage=load link=pass handoff=pass\n");
+}
+
+void ElisaGuestExec_EmitCusaArtifactSummary(uint64_t module_count, uint64_t unresolved_imports,
+                                            uint64_t relocated_imports, uint64_t hle_symbols,
+                                            uint64_t entry, uint64_t main_entry,
+                                            int32_t guarded_status, int32_t last_signal,
+                                            uint64_t fault_address) {
+    fprintf(stderr,
+            "CUSA07399_ARTIFACT module_count=%llu unresolved_imports=%llu "
+            "relocated_imports=%llu hle_symbols=%llu\n",
+            (unsigned long long)module_count, (unsigned long long)unresolved_imports,
+            (unsigned long long)relocated_imports, (unsigned long long)hle_symbols);
+    fprintf(stderr,
+            "CUSA07399_ARTIFACT entry=0x%llx main_entry=0x%llx guarded_status=%d "
+            "last_signal=%d fault=0x%llx\n",
+            (unsigned long long)entry, (unsigned long long)main_entry, guarded_status,
+            last_signal, (unsigned long long)fault_address);
+}
+
+void ElisaGuestExec_EmitCusaArtifactModule(const char* module, const char* host, int32_t shared,
+                                           uint64_t relocations, uint64_t imports,
+                                           uint64_t resolved) {
+    fprintf(stderr,
+            "CUSA07399_ARTIFACT module=%s host=%s shared=%d relocations=%llu "
+            "imports=%llu resolved=%llu\n",
+            module != NULL ? module : "", host != NULL ? host : "", shared,
+            (unsigned long long)relocations, (unsigned long long)imports,
+            (unsigned long long)resolved);
+}

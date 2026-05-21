@@ -1,6 +1,8 @@
 include "../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
 include "./core/libraries/avplayer/avplayer_harness.elisa"
 
+const AVPLAYER_LOCAL_MP4_FIXTURE: static u8& = "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/shadPS4/Games/CUSA05716/movies/Scene_39b_est_shot.mp4"
+
 global mutable g_avp_open_calls: i32 = 0
 global mutable g_avp_close_calls: i32 = 0
 global mutable g_avp_size_calls: i32 = 0
@@ -50,6 +52,96 @@ def avp_file_size(obj: void&?) -> u64:
     _ = obj
     g_avp_size_calls <- g_avp_size_calls + 1
     return 16u64
+
+def avp_find_stream_by_type(handle: i32, wanted_type: u32) -> i32:
+    count: i32 = avplayer_ffmpeg_stream_count(handle)
+    if count <= 0:
+        return -1
+    i: mutable i32 = 0
+    found: mutable i32 = -1
+    while i < count and found < 0:
+        typ: mutable u32 = 0
+        duration: mutable u64 = 0
+        start_time: mutable u64 = 0
+        video_width: mutable u32 = 0
+        video_height: mutable u32 = 0
+        audio_channels: mutable u32 = 0
+        audio_sample_rate: mutable u32 = 0
+        if avplayer_ffmpeg_get_stream_info(handle, i.u32(), typ, duration, start_time, video_width, video_height, audio_channels, audio_sample_rate) == 0:
+            if typ == wanted_type:
+                found <- i
+            else:
+                codec_type: mutable i32 = -1
+                raw_width: mutable i32 = 0
+                raw_height: mutable i32 = 0
+                raw_channels: mutable i32 = 0
+                raw_sample_rate: mutable i32 = 0
+                if avplayer_ffmpeg_get_stream_codecpar_shape(handle, i.u32(), codec_type, raw_width, raw_height, raw_channels, raw_sample_rate) == 0:
+                    if wanted_type == AVPLAYER_STREAM_TYPE_VIDEO and raw_width > 0 and raw_height > 0:
+                        found <- i
+                    elif wanted_type == AVPLAYER_STREAM_TYPE_AUDIO and (raw_channels > 0 or raw_sample_rate > 0):
+                        found <- i
+        i <- i + 1
+    return found
+
+def avp_decode_one_fixture_stream_index(stream_index: i32, payload_is_video: bool) -> bool:
+    handle: i32 = avplayer_ffmpeg_open(AVPLAYER_LOCAL_MP4_FIXTURE.cast[i8&?])
+    if handle < 0:
+        return false
+
+    if stream_index < 0:
+        avplayer_ffmpeg_close(handle)
+        return false
+
+    decoder: mutable void&? = avplayer_ffmpeg_find_decoder_for_stream(handle, stream_index.u32())
+    if decoder == null:
+        avplayer_ffmpeg_close(handle)
+        return false
+
+    codec_ctx: mutable void&? = avcodec_alloc_context3(decoder)
+    if codec_ctx == null:
+        avplayer_ffmpeg_close(handle)
+        return false
+
+    if avplayer_ffmpeg_copy_stream_params_to_codec_ctx(handle, stream_index.u32(), codec_ctx) < 0:
+        avffmpeg_free_codec_context(codec_ctx)
+        avplayer_ffmpeg_close(handle)
+        return false
+
+    options: mutable void&? = null
+    if avcodec_open2(codec_ctx, decoder, options.ref[mutable void&?&]) < 0:
+        avffmpeg_free_codec_context(codec_ctx)
+        avplayer_ffmpeg_close(handle)
+        return false
+
+    _ = avplayer_ffmpeg_start(handle)
+    ts: mutable u64 = 0
+    audio_samples: mutable u32 = 0
+    audio_sample_rate: mutable u32 = 0
+    audio_channels: mutable u32 = 0
+    video_width: mutable u32 = 0
+    video_height: mutable u32 = 0
+    video_pitch: mutable u32 = 0
+    aspect_num: mutable u32 = 0
+    aspect_den: mutable u32 = 0
+    rc: i32 = avplayer_ffmpeg_decode_next_ts_copy(handle, stream_index.u32(), codec_ctx, ts, audio_samples, audio_sample_rate, audio_channels, video_width, video_height, video_pitch, aspect_num, aspect_den, null, 0, payload_is_video)
+
+    avffmpeg_free_codec_context(codec_ctx)
+    avplayer_ffmpeg_close(handle)
+
+    if rc != 0:
+        return false
+    if payload_is_video:
+        return video_width > 0 and video_height > 0
+    return audio_samples > 0 and audio_sample_rate > 0
+
+def avp_decode_one_fixture_stream(wanted_type: u32, payload_is_video: bool) -> bool:
+    handle: i32 = avplayer_ffmpeg_open(AVPLAYER_LOCAL_MP4_FIXTURE.cast[i8&?])
+    if handle < 0:
+        return false
+    stream_index: i32 = avp_find_stream_by_type(handle, wanted_type)
+    avplayer_ffmpeg_close(handle)
+    return avp_decode_one_fixture_stream_index(stream_index, payload_is_video)
 
 @test
 def avplayer_file_replacement_open_close_contract() -> void:
@@ -157,3 +249,61 @@ def avplayer_file_replacement_replacing_source_closes_previous_fd() -> void:
         assert g_avp_close_calls == 1
         assert sceAvPlayerClose(handle) == ORBIS_OK
         assert g_avp_close_calls == 2
+
+@test
+def avplayer_ffmpeg_handle_table_contracts() -> void:
+    can Abort.Panic:
+        i: mutable int = 0
+        while i < AVPLAYER_FFMPEG_MAX_HANDLES:
+            avffmpeg_contexts[i] <- null
+            avffmpeg_started[i] <- true
+            avffmpeg_paused[i] <- true
+            avffmpeg_next_ts_audio[i] <- 99
+            avffmpeg_next_ts_video[i] <- 99
+            i <- i + 1
+
+        assert avplayer_ffmpeg_store_context(null) == -1
+
+        first_ctx: void&? = 1.cast[void&?]
+        second_ctx: void&? = 2.cast[void&?]
+        assert avplayer_ffmpeg_store_context(first_ctx) == 1
+        assert avffmpeg_contexts[0] == first_ctx
+        assert avffmpeg_started[0] == false
+        assert avffmpeg_paused[0] == false
+        assert avffmpeg_next_ts_audio[0] == 0
+        assert avffmpeg_next_ts_video[0] == 0
+
+        i <- 1
+        while i < AVPLAYER_FFMPEG_MAX_HANDLES:
+            avffmpeg_contexts[i] <- (i + 10).cast[void&?]
+            i <- i + 1
+        assert avplayer_ffmpeg_store_context(second_ctx) == -1
+
+        i <- 0
+        while i < AVPLAYER_FFMPEG_MAX_HANDLES:
+            avffmpeg_contexts[i] <- null
+            i <- i + 1
+
+@test
+def avplayer_ffmpeg_local_mp4_decodes_video_when_fixture_exists() -> void:
+    can Console.Write, Abort.Panic:
+        probe: i32 = avplayer_ffmpeg_open(AVPLAYER_LOCAL_MP4_FIXTURE.cast[i8&?])
+        if probe < 0:
+            return
+        stream_count: i32 = avplayer_ffmpeg_stream_count(probe)
+        avplayer_ffmpeg_close(probe)
+        assert stream_count > 0
+
+        assert avp_decode_one_fixture_stream(AVPLAYER_STREAM_TYPE_VIDEO, true)
+
+@test
+def avplayer_ffmpeg_local_mp4_decodes_audio_when_fixture_exists() -> void:
+    can Console.Write, Abort.Panic:
+        probe: i32 = avplayer_ffmpeg_open(AVPLAYER_LOCAL_MP4_FIXTURE.cast[i8&?])
+        if probe < 0:
+            return
+        stream_count: i32 = avplayer_ffmpeg_stream_count(probe)
+        avplayer_ffmpeg_close(probe)
+        assert stream_count > 0
+
+        assert avp_decode_one_fixture_stream(AVPLAYER_STREAM_TYPE_AUDIO, false)

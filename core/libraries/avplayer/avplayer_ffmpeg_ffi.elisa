@@ -14,6 +14,8 @@ const AVMEDIA_TYPE_AUDIO: i32 = 1
 const AVMEDIA_TYPE_SUBTITLE: i32 = 3
 const AV_PIX_FMT_NV12: i32 = 23
 const AV_SAMPLE_FMT_S16: i32 = 1
+const AVERROR_EAGAIN_LINUX: i32 = -11
+const AVERROR_EAGAIN_DARWIN: i32 = -35
 
 @c_bind_prefix("libavformat/avformat.h", "AVFormatContext")
 struct AVFormatContextPublicPrefix layout c:
@@ -120,6 +122,28 @@ struct AVFramePublicPrefix layout c:
     opaque: mutable void&?
     repeat_pict: mutable i32
     sample_rate: mutable i32
+    buf: mutable void&?[8]
+    extended_buf: mutable void&?
+    nb_extended_buf: mutable i32
+    side_data: mutable void&?
+    nb_side_data: mutable i32
+    flags: mutable i32
+    color_range: mutable i32
+    color_primaries: mutable i32
+    color_trc: mutable i32
+    colorspace: mutable i32
+    chroma_location: mutable i32
+    best_effort_timestamp: mutable i64
+    metadata: mutable void&?
+    decode_error_flags: mutable i32
+    hw_frames_ctx: mutable void&?
+    opaque_ref: mutable void&?
+    crop_top: mutable usize
+    crop_bottom: mutable usize
+    crop_left: mutable usize
+    crop_right: mutable usize
+    private_ref: mutable void&?
+    ch_layout: mutable AVChannelLayoutPublicPrefix
 
 @c_abi(c)
 extern avformat_open_input(ps: mutable void&?&, url: i8&?, fmt: void&?, options: void&?) -> i32
@@ -209,7 +233,48 @@ extern swr_convert_frame(ctx: void&?, out_frame: mutable void&?, in_frame: void&
 extern swr_free(ctx: mutable void&?&) -> void
 
 @c_abi(c)
+extern av_channel_layout_default(ch_layout: mutable void&, nb_channels: i32) -> void
+
+@c_abi(c)
+extern av_channel_layout_copy(dst: mutable void&, src: void&) -> i32
+
+@c_abi(c)
 extern memcpy(dest: mutable void&, src: void&, n: usize) -> mutable void&
+
+def avffmpeg_free_packet(pkt: void&?):
+    if pkt == null:
+        return
+    box: mutable void&?[1] = zeroed
+    box[0] <- pkt
+    av_packet_free(box[0].ref[mutable void&?&])
+
+def avffmpeg_free_frame(frame: void&?):
+    if frame == null:
+        return
+    box: mutable void&?[1] = zeroed
+    box[0] <- frame
+    av_frame_free(box[0].ref[mutable void&?&])
+
+def avffmpeg_free_codec_context(codec_ctx: void&?):
+    if codec_ctx == null:
+        return
+    box: mutable void&?[1] = zeroed
+    box[0] <- codec_ctx
+    avcodec_free_context(box[0].ref[mutable void&?&])
+
+def avffmpeg_close_input(ctx: void&?):
+    if ctx == null:
+        return
+    box: mutable void&?[1] = zeroed
+    box[0] <- ctx
+    avformat_close_input(box[0].ref[mutable void&?&])
+
+def avffmpeg_free_swr(ctx: void&?):
+    if ctx == null:
+        return
+    box: mutable void&?[1] = zeroed
+    box[0] <- ctx
+    swr_free(box[0].ref[mutable void&?&])
 
 global mutable avffmpeg_contexts: void&?[AVPLAYER_FFMPEG_MAX_HANDLES] = zeroed
 global mutable avffmpeg_started: bool[AVPLAYER_FFMPEG_MAX_HANDLES] = zeroed
@@ -235,17 +300,9 @@ def avplayer_ffmpeg_context(handle: i32) -> void&?:
         return null
     return avffmpeg_contexts[avffmpeg_slot(handle)]
 
-def avplayer_ffmpeg_open(path: i8&?) -> i32:
-    if path == null:
+def avplayer_ffmpeg_store_context(ctx: void&?) -> i32:
+    if ctx == null:
         return -1
-
-    ctx: void&? = null
-    if avformat_open_input(ctx.ref[mutable void&?&], path, null, null) < 0:
-        return -1
-    if avformat_find_stream_info(ctx, null) < 0:
-        avformat_close_input(ctx.ref[mutable void&?&])
-        return -1
-
     i: mutable int = 0
     while i < AVPLAYER_FFMPEG_MAX_HANDLES:
         if avffmpeg_contexts[i] == null:
@@ -254,18 +311,40 @@ def avplayer_ffmpeg_open(path: i8&?) -> i32:
             avffmpeg_paused[i] <- false
             avffmpeg_next_ts_audio[i] <- 0
             avffmpeg_next_ts_video[i] <- 0
+            j: mutable int = 0
+            while j < AVPLAYER_FFMPEG_MAX_STREAMS.int():
+                stream_slot: int = i * AVPLAYER_FFMPEG_MAX_STREAMS.int() + j
+                avffmpeg_last_stream_ts[stream_slot] <- 0
+                avffmpeg_stream_eof_drained[stream_slot] <- false
+                j <- j + 1
             return (i + 1).i32()
         i <- i + 1
-
-    avformat_close_input(ctx.ref[mutable void&?&])
     return -1
+
+def avplayer_ffmpeg_open(path: i8&?) -> i32:
+    if path == null:
+        return -1
+
+    ctx_box: mutable void&?[1] = zeroed
+    if avformat_open_input(ctx_box[0].ref[mutable void&?&], path, null, null) < 0:
+        return -1
+    ctx: void&? = ctx_box[0]
+    if avformat_find_stream_info(ctx, null) < 0:
+        avffmpeg_close_input(ctx)
+        return -1
+
+    handle: i32 = avplayer_ffmpeg_store_context(ctx)
+    if handle <= 0:
+        avffmpeg_close_input(ctx)
+        return -1
+    return handle
 
 def avplayer_ffmpeg_close(handle: i32) -> void:
     if not avffmpeg_valid_handle(handle):
         return
     slot: int = avffmpeg_slot(handle)
     ctx: void&? = avffmpeg_contexts[slot]
-    avformat_close_input(ctx.ref[mutable void&?&])
+    avffmpeg_close_input(ctx)
     avffmpeg_contexts[slot] <- null
     avffmpeg_started[slot] <- false
     avffmpeg_paused[slot] <- false
@@ -347,7 +426,7 @@ def avplayer_ffmpeg_packet_timestamp(handle: i32, pkt: AVPacketPublicPrefix&, ou
     raw_stream: void&? = stream_ptrs[pkt.stream_index]
     if raw_stream == null:
         return false
-    stream: AVStreamPublicPrefix& = raw_stream.ref[AVStreamPublicPrefix&]
+    stream: AVStreamPublicPrefix& = raw_stream.cast[AVStreamPublicPrefix&]
     ts: mutable i64 = pkt.pts
     if ts < 0:
         ts <- pkt.dts
@@ -370,15 +449,15 @@ def avplayer_ffmpeg_get_audio_ts(handle: i32, out_ts: mutable u64&) -> i32:
         return -1
     rc: i32 = av_read_frame(avffmpeg_contexts[slot], pkt)
     if rc < 0:
-        av_packet_free(pkt.ref[mutable void&?&])
+        avffmpeg_free_packet(pkt)
         return -1
-    p: AVPacketPublicPrefix& = pkt.ref[AVPacketPublicPrefix&]
+    p: AVPacketPublicPrefix& = pkt.cast[AVPacketPublicPrefix&]
     if avplayer_ffmpeg_packet_timestamp(handle, p, out_ts):
         avffmpeg_next_ts_audio[slot] <- out_ts
     else:
         avffmpeg_next_ts_audio[slot] <- avffmpeg_next_ts_audio[slot] + 33
         out_ts <- avffmpeg_next_ts_audio[slot]
-    av_packet_free(pkt.ref[mutable void&?&])
+    avffmpeg_free_packet(pkt)
     return 0
 
 def avplayer_ffmpeg_get_video_ts(handle: i32, out_ts: mutable u64&) -> i32:
@@ -392,15 +471,15 @@ def avplayer_ffmpeg_get_video_ts(handle: i32, out_ts: mutable u64&) -> i32:
         return -1
     rc: i32 = av_read_frame(avffmpeg_contexts[slot], pkt)
     if rc < 0:
-        av_packet_free(pkt.ref[mutable void&?&])
+        avffmpeg_free_packet(pkt)
         return -1
-    p: AVPacketPublicPrefix& = pkt.ref[AVPacketPublicPrefix&]
+    p: AVPacketPublicPrefix& = pkt.cast[AVPacketPublicPrefix&]
     if avplayer_ffmpeg_packet_timestamp(handle, p, out_ts):
         avffmpeg_next_ts_video[slot] <- out_ts
     else:
         avffmpeg_next_ts_video[slot] <- avffmpeg_next_ts_video[slot] + 33
         out_ts <- avffmpeg_next_ts_video[slot]
-    av_packet_free(pkt.ref[mutable void&?&])
+    avffmpeg_free_packet(pkt)
     return 0
 
 def avplayer_ffmpeg_read_stream_packet_ts(handle: i32, stream_index: u32, out_ts: mutable u64&) -> i32:
@@ -420,19 +499,19 @@ def avplayer_ffmpeg_read_stream_packet_ts(handle: i32, stream_index: u32, out_ts
         tries <- tries + 1
         rc: i32 = av_read_frame(avffmpeg_contexts[slot], pkt)
         if rc < 0:
-            av_packet_free(pkt.ref[mutable void&?&])
+            avffmpeg_free_packet(pkt)
             return -2
-        p: AVPacketPublicPrefix& = pkt.ref[AVPacketPublicPrefix&]
+        p: AVPacketPublicPrefix& = pkt.cast[AVPacketPublicPrefix&]
         if p.stream_index == stream_index.i32():
             if avplayer_ffmpeg_packet_timestamp(handle, p, out_ts):
                 av_packet_unref(pkt)
-                av_packet_free(pkt.ref[mutable void&?&])
+                avffmpeg_free_packet(pkt)
                 return 0
             av_packet_unref(pkt)
-            av_packet_free(pkt.ref[mutable void&?&])
+            avffmpeg_free_packet(pkt)
             return -1
         av_packet_unref(pkt)
-    av_packet_free(pkt.ref[mutable void&?&])
+    avffmpeg_free_packet(pkt)
     return -1
 
 def avplayer_ffmpeg_get_stream_info(handle: i32, stream_index: u32, out_type: mutable u32&, out_duration: mutable u64&, out_start_time: mutable u64&, out_video_width: mutable u32&, out_video_height: mutable u32&, out_audio_channels: mutable u32&, out_audio_sample_rate: mutable u32&) -> i32:
@@ -456,10 +535,10 @@ def avplayer_ffmpeg_get_stream_info(handle: i32, stream_index: u32, out_type: mu
     raw_stream: void&? = stream_ptrs[stream_index.int()]
     if raw_stream == null:
         return -1
-    stream: AVStreamPublicPrefix& = raw_stream.ref[AVStreamPublicPrefix&]
+    stream: AVStreamPublicPrefix& = raw_stream.cast[AVStreamPublicPrefix&]
     if stream.codecpar == null:
         return -1
-    codecpar: AVCodecParametersPublicPrefix& = stream.codecpar.ref[AVCodecParametersPublicPrefix&]
+    codecpar: AVCodecParametersPublicPrefix = stream.codecpar[0]
     out_start_time <- stream.start_time.u64()
     out_duration <- stream.duration.u64()
 
@@ -480,6 +559,34 @@ def avplayer_ffmpeg_get_stream_info(handle: i32, stream_index: u32, out_type: mu
 
     return 0
 
+def avplayer_ffmpeg_get_stream_codecpar_shape(handle: i32, stream_index: u32, out_codec_type: mutable i32&, out_width: mutable i32&, out_height: mutable i32&, out_channels: mutable i32&, out_sample_rate: mutable i32&) -> i32:
+    out_codec_type <- -1
+    out_width <- 0
+    out_height <- 0
+    out_channels <- 0
+    out_sample_rate <- 0
+    if not avffmpeg_valid_handle(handle):
+        return -1
+    ctx: AVFormatContextPublicPrefix&? = avffmpeg_contexts[avffmpeg_slot(handle)].cast[AVFormatContextPublicPrefix&?]
+    if ctx == null or ctx[0].streams == null or stream_index >= ctx[0].nb_streams:
+        return -1
+    stream_ptrs: void&?&? = ctx[0].streams.cast[void&?&?]
+    if stream_ptrs == null:
+        return -1
+    raw_stream: void&? = stream_ptrs[stream_index.int()]
+    if raw_stream == null:
+        return -1
+    stream: AVStreamPublicPrefix& = raw_stream.cast[AVStreamPublicPrefix&]
+    if stream.codecpar == null:
+        return -1
+    codecpar: AVCodecParametersPublicPrefix = stream.codecpar[0]
+    out_codec_type <- codecpar.codec_type
+    out_width <- codecpar.width
+    out_height <- codecpar.height
+    out_channels <- codecpar.ch_layout.nb_channels
+    out_sample_rate <- codecpar.sample_rate
+    return 0
+
 def avplayer_ffmpeg_get_stream_language(handle: i32, stream_index: u32) -> i8&?:
     if not avffmpeg_valid_handle(handle):
         return null
@@ -492,7 +599,7 @@ def avplayer_ffmpeg_get_stream_language(handle: i32, stream_index: u32) -> i8&?:
     raw_stream: void&? = stream_ptrs[stream_index.int()]
     if raw_stream == null:
         return null
-    stream: AVStreamPublicPrefix& = raw_stream.ref[AVStreamPublicPrefix&]
+    stream: AVStreamPublicPrefix& = raw_stream.cast[AVStreamPublicPrefix&]
     if stream.metadata == null:
         return null
     language_key: i8&? = "language".cast[i8&?]
@@ -516,10 +623,10 @@ def avplayer_ffmpeg_get_stream_color_range(handle: i32, stream_index: u32) -> i3
     raw_stream: void&? = stream_ptrs[stream_index.int()]
     if raw_stream == null:
         return -1
-    stream: AVStreamPublicPrefix& = raw_stream.ref[AVStreamPublicPrefix&]
+    stream: AVStreamPublicPrefix& = raw_stream.cast[AVStreamPublicPrefix&]
     if stream.codecpar == null:
         return -1
-    params: AVCodecParametersPublicPrefix& = stream.codecpar.ref[AVCodecParametersPublicPrefix&]
+    params: AVCodecParametersPublicPrefix = stream.codecpar[0]
     return params.color_range
 
 def avplayer_ffmpeg_find_decoder_for_stream(handle: i32, stream_index: u32) -> void&?:
@@ -534,10 +641,10 @@ def avplayer_ffmpeg_find_decoder_for_stream(handle: i32, stream_index: u32) -> v
     raw_stream: void&? = stream_ptrs[stream_index.int()]
     if raw_stream == null:
         return null
-    stream: AVStreamPublicPrefix& = raw_stream.ref[AVStreamPublicPrefix&]
+    stream: AVStreamPublicPrefix& = raw_stream.cast[AVStreamPublicPrefix&]
     if stream.codecpar == null:
         return null
-    params: AVCodecParametersPublicPrefix& = stream.codecpar.ref[AVCodecParametersPublicPrefix&]
+    params: AVCodecParametersPublicPrefix = stream.codecpar[0]
     return avcodec_find_decoder(params.codec_id)
 
 def avplayer_ffmpeg_copy_stream_params_to_codec_ctx(handle: i32, stream_index: u32, codec_ctx: void&?) -> i32:
@@ -552,7 +659,7 @@ def avplayer_ffmpeg_copy_stream_params_to_codec_ctx(handle: i32, stream_index: u
     raw_stream: void&? = stream_ptrs[stream_index.int()]
     if raw_stream == null:
         return -1
-    stream: AVStreamPublicPrefix& = raw_stream.ref[AVStreamPublicPrefix&]
+    stream: AVStreamPublicPrefix& = raw_stream.cast[AVStreamPublicPrefix&]
     if stream.codecpar == null:
         return -1
     return avcodec_parameters_to_context(codec_ctx, stream.codecpar.cast[void&?])
@@ -602,7 +709,7 @@ def avffmpeg_copy_decoded_payload(decoded: AVFramePublicPrefix&, payload: mutabl
 def avffmpeg_convert_video_to_nv12(frame: mutable void&?) -> mutable void&?:
     if frame == null:
         return null
-    src: AVFramePublicPrefix& = frame.ref[AVFramePublicPrefix&]
+    src: AVFramePublicPrefix& = frame.cast[AVFramePublicPrefix&]
     if src.format == AV_PIX_FMT_NV12:
         return frame
     if src.width <= 0 or src.height <= 0:
@@ -610,17 +717,17 @@ def avffmpeg_convert_video_to_nv12(frame: mutable void&?) -> mutable void&?:
     dst_frame: mutable void&? = av_frame_alloc()
     if dst_frame == null:
         return frame
-    dst: AVFramePublicPrefix& = dst_frame.ref[AVFramePublicPrefix&]
+    dst: mutable AVFramePublicPrefix& = dst_frame.cast[mutable AVFramePublicPrefix&]
     dst.format <- AV_PIX_FMT_NV12
     dst.width <- src.width
     dst.height <- src.height
     dst.sample_aspect_ratio <- src.sample_aspect_ratio
     if av_frame_get_buffer(dst_frame, 0) < 0:
-        av_frame_free(dst_frame.ref[mutable void&?&])
+        avffmpeg_free_frame(dst_frame)
         return frame
     sws_ctx: void&? = sws_getContext(src.width, src.height, src.format, dst.width, dst.height, AV_PIX_FMT_NV12, 2, null, null, null)
     if sws_ctx == null:
-        av_frame_free(dst_frame.ref[mutable void&?&])
+        avffmpeg_free_frame(dst_frame)
         return frame
     src_data_ptr: void&? = src.data.ref[void&?]
     dst_data_ptr: void&? = dst.data.ref[void&?]
@@ -631,35 +738,49 @@ def avffmpeg_convert_video_to_nv12(frame: mutable void&?) -> mutable void&?:
 def avffmpeg_convert_audio_to_s16(frame: mutable void&?) -> mutable void&?:
     if frame == null:
         return null
-    src: AVFramePublicPrefix& = frame.ref[AVFramePublicPrefix&]
+    src: AVFramePublicPrefix& = frame.cast[AVFramePublicPrefix&]
     if src.format == AV_SAMPLE_FMT_S16:
+        return frame
+    if src.nb_samples <= 0 or src.sample_rate <= 0:
         return frame
     dst_frame: mutable void&? = av_frame_alloc()
     if dst_frame == null:
         return frame
-    dst: AVFramePublicPrefix& = dst_frame.ref[AVFramePublicPrefix&]
+    dst: mutable AVFramePublicPrefix& = dst_frame.cast[mutable AVFramePublicPrefix&]
     dst.format <- AV_SAMPLE_FMT_S16
     dst.nb_samples <- src.nb_samples
     dst.sample_rate <- src.sample_rate
+    if src.ch_layout.nb_channels > 0:
+        if av_channel_layout_copy(dst.ch_layout.ref[mutable void&], src.ch_layout.ref[void&]) < 0:
+            avffmpeg_free_frame(dst_frame)
+            return frame
+    else:
+        av_channel_layout_default(dst.ch_layout.ref[mutable void&], 2)
     if av_frame_get_buffer(dst_frame, 0) < 0:
-        av_frame_free(dst_frame.ref[mutable void&?&])
+        avffmpeg_free_frame(dst_frame)
         return frame
-    swr_ctx: void&? = null
-    if swr_alloc_set_opts2(swr_ctx.ref[mutable void&?&], src.ref[void&], AV_SAMPLE_FMT_S16, src.sample_rate, src.ref[void&], src.format, src.sample_rate, 0, null) < 0:
-        av_frame_free(dst_frame.ref[mutable void&?&])
+    swr_ctx_box: mutable void&?[1] = zeroed
+    swr_alloc_rc: mutable i32 = 0
+    if src.ch_layout.nb_channels > 0:
+        swr_alloc_rc <- swr_alloc_set_opts2(swr_ctx_box[0].ref[mutable void&?&], dst.ch_layout.ref[void&], AV_SAMPLE_FMT_S16, src.sample_rate, src.ch_layout.ref[void&], src.format, src.sample_rate, 0, null)
+    else:
+        swr_alloc_rc <- swr_alloc_set_opts2(swr_ctx_box[0].ref[mutable void&?&], dst.ch_layout.ref[void&], AV_SAMPLE_FMT_S16, src.sample_rate, dst.ch_layout.ref[void&], src.format, src.sample_rate, 0, null)
+    if swr_alloc_rc < 0:
+        avffmpeg_free_frame(dst_frame)
         return frame
+    swr_ctx: void&? = swr_ctx_box[0]
     if swr_ctx == null:
-        av_frame_free(dst_frame.ref[mutable void&?&])
+        avffmpeg_free_frame(dst_frame)
         return frame
     if swr_init(swr_ctx) < 0:
-        swr_free(swr_ctx.ref[mutable void&?&])
-        av_frame_free(dst_frame.ref[mutable void&?&])
+        avffmpeg_free_swr(swr_ctx)
+        avffmpeg_free_frame(dst_frame)
         return frame
     if swr_convert_frame(swr_ctx, dst_frame, frame) < 0:
-        swr_free(swr_ctx.ref[mutable void&?&])
-        av_frame_free(dst_frame.ref[mutable void&?&])
+        avffmpeg_free_swr(swr_ctx)
+        avffmpeg_free_frame(dst_frame)
         return frame
-    swr_free(swr_ctx.ref[mutable void&?&])
+    avffmpeg_free_swr(swr_ctx)
     return dst_frame
 
 def avplayer_ffmpeg_decode_next_ts_copy(handle: i32, stream_index: u32, codec_ctx: void&?, out_ts: mutable u64&, out_audio_samples: mutable u32&, out_audio_sample_rate: mutable u32&, out_audio_channels: mutable u32&, out_video_width: mutable u32&, out_video_height: mutable u32&, out_video_pitch: mutable u32&, out_video_aspect_num: mutable u32&, out_video_aspect_den: mutable u32&, payload: mutable u8&?, payload_size: u32, payload_is_video: bool) -> i32:
@@ -682,7 +803,7 @@ def avplayer_ffmpeg_decode_next_ts_copy(handle: i32, stream_index: u32, codec_ct
     raw_stream: void&? = stream_ptrs[stream_index.int()]
     if raw_stream == null:
         return -1
-    stream: AVStreamPublicPrefix& = raw_stream.ref[AVStreamPublicPrefix&]
+    stream: AVStreamPublicPrefix& = raw_stream.cast[AVStreamPublicPrefix&]
     stream_slot: int = avffmpeg_stream_slot(handle, stream_index)
 
     pkt: mutable void&? = av_packet_alloc()
@@ -690,31 +811,26 @@ def avplayer_ffmpeg_decode_next_ts_copy(handle: i32, stream_index: u32, codec_ct
         return -1
     frame: mutable void&? = av_frame_alloc()
     if frame == null:
-        av_packet_free(pkt.ref[mutable void&?&])
+        avffmpeg_free_packet(pkt)
         return -1
 
     tries: mutable int = 0
-    while tries < 128:
+    while tries < 4096:
         tries <- tries + 1
         rc: i32 = av_read_frame(avffmpeg_contexts[avffmpeg_slot(handle)], pkt)
         if rc < 0:
             if avffmpeg_stream_eof_drained[stream_slot]:
-                av_frame_free(frame.ref[mutable void&?&])
-                av_packet_free(pkt.ref[mutable void&?&])
+                avffmpeg_free_frame(frame)
+                avffmpeg_free_packet(pkt)
                 return -2
             send_flush_rc: i32 = avcodec_send_packet(codec_ctx, null)
-            if send_flush_rc < 0 and send_flush_rc != -11:
-                av_frame_free(frame.ref[mutable void&?&])
-                av_packet_free(pkt.ref[mutable void&?&])
+            if send_flush_rc < 0 and send_flush_rc != AVERROR_EAGAIN_LINUX and send_flush_rc != AVERROR_EAGAIN_DARWIN:
+                avffmpeg_free_frame(frame)
+                avffmpeg_free_packet(pkt)
                 return -1
             drain_rc: i32 = avcodec_receive_frame(codec_ctx, frame)
             if drain_rc == 0:
-                copy_frame: mutable void&? = frame
-                if payload_is_video:
-                    copy_frame <- avffmpeg_convert_video_to_nv12(frame)
-                else:
-                    copy_frame <- avffmpeg_convert_audio_to_s16(frame)
-                decoded: AVFramePublicPrefix& = copy_frame.ref[AVFramePublicPrefix&]
+                decoded: AVFramePublicPrefix& = frame.cast[AVFramePublicPrefix&]
                 if decoded.nb_samples > 0:
                     out_audio_samples <- decoded.nb_samples.u32()
                 if decoded.sample_rate > 0:
@@ -733,34 +849,27 @@ def avplayer_ffmpeg_decode_next_ts_copy(handle: i32, stream_index: u32, codec_ct
                 avffmpeg_last_stream_ts[stream_slot] <- next_ts
                 out_ts <- next_ts
                 av_frame_unref(frame)
-                if copy_frame != frame:
-                    av_frame_free(copy_frame.ref[mutable void&?&])
-                av_frame_free(frame.ref[mutable void&?&])
-                av_packet_free(pkt.ref[mutable void&?&])
+                avffmpeg_free_frame(frame)
+                avffmpeg_free_packet(pkt)
                 return 0
             avffmpeg_stream_eof_drained[stream_slot] <- true
-            av_frame_free(frame.ref[mutable void&?&])
-            av_packet_free(pkt.ref[mutable void&?&])
+            avffmpeg_free_frame(frame)
+            avffmpeg_free_packet(pkt)
             return -2
-        p: AVPacketPublicPrefix& = pkt.ref[AVPacketPublicPrefix&]
+        p: AVPacketPublicPrefix& = pkt.cast[AVPacketPublicPrefix&]
         if p.stream_index != stream_index.i32():
             av_packet_unref(pkt)
         else:
             send_rc: i32 = avcodec_send_packet(codec_ctx, pkt)
             local_dts: i64 = p.dts
             av_packet_unref(pkt)
-            if send_rc < 0 and send_rc != -11:
-                av_frame_free(frame.ref[mutable void&?&])
-                av_packet_free(pkt.ref[mutable void&?&])
+            if send_rc < 0 and send_rc != AVERROR_EAGAIN_LINUX and send_rc != AVERROR_EAGAIN_DARWIN:
+                avffmpeg_free_frame(frame)
+                avffmpeg_free_packet(pkt)
                 return -1
             recv_rc: i32 = avcodec_receive_frame(codec_ctx, frame)
             if recv_rc == 0:
-                copy_frame: mutable void&? = frame
-                if payload_is_video:
-                    copy_frame <- avffmpeg_convert_video_to_nv12(frame)
-                else:
-                    copy_frame <- avffmpeg_convert_audio_to_s16(frame)
-                decoded: AVFramePublicPrefix& = copy_frame.ref[AVFramePublicPrefix&]
+                decoded: AVFramePublicPrefix& = frame.cast[AVFramePublicPrefix&]
                 if decoded.nb_samples > 0:
                     out_audio_samples <- decoded.nb_samples.u32()
                 if decoded.sample_rate > 0:
@@ -786,16 +895,14 @@ def avplayer_ffmpeg_decode_next_ts_copy(handle: i32, stream_index: u32, codec_ct
                     out_ts <- pkt_dts_u64 * 1000
                 avffmpeg_last_stream_ts[stream_slot] <- out_ts
                 av_frame_unref(frame)
-                if copy_frame != frame:
-                    av_frame_free(copy_frame.ref[mutable void&?&])
-                av_frame_free(frame.ref[mutable void&?&])
-                av_packet_free(pkt.ref[mutable void&?&])
+                avffmpeg_free_frame(frame)
+                avffmpeg_free_packet(pkt)
                 return 0
-            if recv_rc < 0 and recv_rc != -11:
-                av_frame_free(frame.ref[mutable void&?&])
-                av_packet_free(pkt.ref[mutable void&?&])
+            if recv_rc < 0 and recv_rc != AVERROR_EAGAIN_LINUX and recv_rc != AVERROR_EAGAIN_DARWIN:
+                avffmpeg_free_frame(frame)
+                avffmpeg_free_packet(pkt)
                 return -1
 
-    av_frame_free(frame.ref[mutable void&?&])
-    av_packet_free(pkt.ref[mutable void&?&])
+    avffmpeg_free_frame(frame)
+    avffmpeg_free_packet(pkt)
     return -1

@@ -147,3 +147,34 @@ Verified command:
 cd "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/elisa-shad-ps4-from-scratch"
 ./emulator-cpp-parity --quick
 ```
+
+## 2026-05-21: Guest-Exec Crash Guard Added
+
+- Added guarded synthetic guest execution with signal/fault capture in `native/guest_exec_runtime.c`.
+- Elisa now exposes guest-exec last status, last signal, and last fault address through `core/guest_exec.elisa`.
+- Added a deliberate synthetic crash test proving guarded execution recovers instead of killing the test process.
+- CUSA07399 probe now classifies the real game execution stage as armed on supported x86_64 hosts or `UNSUPPORTED_HOST` on arm64 hosts.
+- Latest quick parity gate passed: `passed=27 failed=0 selected=27`.
+- Local staged status: `load/link/handoff=PASS`, `execute-fixture=PASS`, `execute-game=UNSUPPORTED_HOST (arm64)`, `frame=not promoted`.
+
+Verified command:
+
+```sh
+cd "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/elisa-shad-ps4-from-scratch"
+./emulator-cpp-parity --quick
+```
+
+## 2026-05-21: Guarded Real Game Entry Runner Added
+
+- Added `ElisaGuestExec_RunMainEntryGuarded`, a separate guarded game-entry runner that preserves the existing noreturn handoff path.
+- On x86_64 POSIX hosts, guarded game entry forks a child, enters the guest entry, enforces a timeout, and reports parent-side exit/signal/timeout status.
+- On unsupported hosts, including local arm64 macOS, guarded game entry returns `-2` deterministically.
+- CUSA07399 smoke now has three staged tests: load/link/handoff, probe handoff, and guarded game-entry host-status classification.
+- Latest quick parity gate passed: `passed=27 failed=0 selected=27`.
+
+Verified command:
+
+```sh
+cd "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/elisa-shad-ps4-from-scratch"
+./emulator-cpp-parity --quick
+```

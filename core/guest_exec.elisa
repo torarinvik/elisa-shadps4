@@ -27,11 +27,38 @@ extern c_GuestExec_WriteU64(address: uintptr, value: u64) -> s32
 @link_name(ElisaGuestExec_RunMainEntry)
 extern c_GuestExec_RunMainEntry(params: mutable GuestEntryParams&, exit_func: void&?) -> void
 
+@link_name(ElisaGuestExec_RunMainEntryGuarded)
+extern c_GuestExec_RunMainEntryGuarded(params: mutable GuestEntryParams&, timeout_ms: u32) -> s32
+
 @link_name(ElisaGuestExec_RunSyntheticFunction)
 extern c_GuestExec_RunSyntheticFunction(entry_addr: uintptr, arg0: u64, arg1: u64) -> u64
 
 @link_name(ElisaGuestExec_GetSyntheticAddAddress)
 extern c_GuestExec_GetSyntheticAddAddress() -> uintptr
+
+@link_name(ElisaGuestExec_GetSyntheticCrashAddress)
+extern c_GuestExec_GetSyntheticCrashAddress() -> uintptr
+
+@link_name(ElisaGuestExec_LastStatus)
+extern c_GuestExec_LastStatus() -> s32
+
+@link_name(ElisaGuestExec_LastSignal)
+extern c_GuestExec_LastSignal() -> s32
+
+@link_name(ElisaGuestExec_LastFaultAddress)
+extern c_GuestExec_LastFaultAddress() -> uintptr
+
+@link_name(ElisaGuestExec_ResetCrashState)
+extern c_GuestExec_ResetCrashState() -> void
+
+@link_name(ElisaGuestExec_EmitCusaArtifactStage)
+extern c_GuestExec_EmitCusaArtifactStage() -> void
+
+@link_name(ElisaGuestExec_EmitCusaArtifactSummary)
+extern c_GuestExec_EmitCusaArtifactSummary(module_count: u64, unresolved_imports: u64, relocated_imports: u64, hle_symbols: u64, entry: u64, main_entry: u64, guarded_status: s32, last_signal: s32, fault_address: u64) -> void
+
+@link_name(ElisaGuestExec_EmitCusaArtifactModule)
+extern c_GuestExec_EmitCusaArtifactModule(module: static u8&?, host: static u8&?, shared: s32, relocations: u64, imports: u64, resolved: u64) -> void
 
 global mutable guest_exec_enabled: bool = false
 global mutable guest_exec_probe_mode: bool = false
@@ -41,6 +68,7 @@ global mutable guest_exec_last_argc: int = 0
 global mutable guest_exec_run_count: usize = 0
 global mutable guest_exec_last_main_entry_addr: VAddr = 0.uintptr()
 global mutable guest_exec_main_run_count: usize = 0
+global mutable guest_exec_last_game_execution_status: s32 = 0
 
 def GuestExec_IsSupported() -> bool:
     return c_GuestExec_IsSupported() == 1
@@ -54,6 +82,8 @@ def GuestExec_ResetState() -> void:
     guest_exec_run_count <- 0
     guest_exec_last_main_entry_addr <- 0.uintptr()
     guest_exec_main_run_count <- 0
+    guest_exec_last_game_execution_status <- 0
+    c_GuestExec_ResetCrashState()
 
 def GuestExec_Enable(enabled: bool) -> void:
     guest_exec_enabled <- enabled
@@ -121,10 +151,59 @@ def GuestExec_RunModuleEntry(entry_addr: VAddr, argc: int, argv: void&?, is_main
 def GuestExec_RunMainEntry(entry_addr: VAddr, argc: int, argv: void&?) -> void:
     GuestExec_RunModuleEntry(entry_addr, argc, argv, true)
 
+def GuestExec_RunMainEntryGuarded(entry_addr: VAddr, argc: int, argv: void&?, timeout_ms: u32) -> s32:
+    if entry_addr == 0.uintptr():
+        guest_exec_last_game_execution_status <- -1
+        return -1
+    if not GuestExec_IsSupported():
+        guest_exec_last_game_execution_status <- -2
+        return -2
+    params: mutable GuestEntryParams = GuestEntryParams(argc, 0, entry_addr, argv)
+    status: s32 = c_GuestExec_RunMainEntryGuarded(params.ref[mutable GuestEntryParams&], timeout_ms)
+    guest_exec_last_game_execution_status <- status
+    return status
+
 def GuestExec_GetSyntheticAddAddress() -> VAddr:
     return c_GuestExec_GetSyntheticAddAddress()
+
+def GuestExec_GetSyntheticCrashAddress() -> VAddr:
+    return c_GuestExec_GetSyntheticCrashAddress()
 
 def GuestExec_RunSyntheticFunction(entry_addr: VAddr, arg0: u64, arg1: u64) -> u64:
     if not GuestExec_IsSupported() or entry_addr == 0.uintptr():
         return 0xFFFFFFFFFFFFFFFF.u64()
     return c_GuestExec_RunSyntheticFunction(entry_addr, arg0, arg1)
+
+def GuestExec_LastStatus() -> s32:
+    return c_GuestExec_LastStatus()
+
+def GuestExec_LastSignal() -> s32:
+    return c_GuestExec_LastSignal()
+
+def GuestExec_LastFaultAddress() -> VAddr:
+    return c_GuestExec_LastFaultAddress()
+
+def GuestExec_ResetCrashState() -> void:
+    c_GuestExec_ResetCrashState()
+
+def GuestExec_ClassifyGameExecutionStage() -> s32:
+    if guest_exec_main_run_count == 0:
+        guest_exec_last_game_execution_status <- 0
+        return 0
+    if not GuestExec_IsSupported():
+        guest_exec_last_game_execution_status <- -2
+        return -2
+    if guest_exec_probe_mode:
+        guest_exec_last_game_execution_status <- 2
+        return 2
+    guest_exec_last_game_execution_status <- GuestExec_LastStatus()
+    return guest_exec_last_game_execution_status
+
+def GuestExec_EmitCusaArtifactStage() -> void:
+    c_GuestExec_EmitCusaArtifactStage()
+
+def GuestExec_EmitCusaArtifactSummary(module_count: u64, unresolved_imports: u64, relocated_imports: u64, hle_symbols: u64, entry: u64, main_entry: u64, guarded_status: s32, last_signal: s32, fault_address: u64) -> void:
+    c_GuestExec_EmitCusaArtifactSummary(module_count, unresolved_imports, relocated_imports, hle_symbols, entry, main_entry, guarded_status, last_signal, fault_address)
+
+def GuestExec_EmitCusaArtifactModule(module: static u8&?, host: static u8&?, shared: s32, relocations: u64, imports: u64, resolved: u64) -> void:
+    c_GuestExec_EmitCusaArtifactModule(module, host, shared, relocations, imports, resolved)

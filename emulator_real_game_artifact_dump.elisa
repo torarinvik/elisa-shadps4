@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "./common/types.elisa"
+include "./core/emulator_settings.elisa"
+include "./core/emulator_state.elisa"
+include "./core/guest_exec.elisa"
+include "./core/linker.elisa"
+include "./core/user_settings.elisa"
+include "./emulator.elisa"
+include "./main.elisa"
+
+const REAL_GAME_ARTIFACT_ROOT: static u8& = "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/shadPS4/Games/CUSA07399"
+
+def RealGameArtifact_ResetRuntime() -> void:
+    Emulator_Reset()
+    Linker_Reset()
+    EmulatorState_ResetInstance()
+    settings: mutable EmulatorSettingsImpl& = EmulatorSettings_GetInstance()
+    EmulatorSettings_SetDefaultValues(settings)
+    UserSettings_Reset()
+
+def RealGameArtifact_Emit(linker: Linker&, guarded_status: s32) -> void:
+    GuestExec_EmitCusaArtifactStage()
+    GuestExec_EmitCusaArtifactSummary(linker.modules.count.u64(), linker.last_unresolved_import_count.u64(), linker.last_relocated_import_count.u64(), linker.hle_registered_symbol_count.u64(), linker.modules[0].last_start_entry_addr.u64(), guest_exec_last_main_entry_addr.u64(), guarded_status, GuestExec_LastSignal(), GuestExec_LastFaultAddress().u64())
+    i: mutable usize = 0
+    limit: mutable usize = linker.modules.count
+    if limit > 16:
+        limit <- 16
+    while i < limit:
+        GuestExec_EmitCusaArtifactModule(linker.modules[i].file, linker.modules[i].host_file, 1 if linker.modules[i].is_shared_lib else 0, linker.modules[i].applied_relocation_count.u64(), Module_GetImportSymbolCount(linker.modules[i]).u64(), Module_GetResolvedImportSymbolCount(linker.modules[i]).u64())
+        i <- i + 1
+
+def main() -> int:
+    can Memory.Allocate, Abort.Panic:
+        RealGameArtifact_ResetRuntime()
+        arena: Arena = Arena(null, null, 0)
+        result: mutable int = -1
+        in arena:
+            args: mutable darray[static u8&] = ["shadps4", "--native-guest-exec-probe", REAL_GAME_ARTIFACT_ROOT, "--", "-RealBootSmoke"]
+            result <- Main_Run(args)
+        if result != 0:
+            return result
+        linker: mutable Linker& = Linker_GetInstance()
+        if linker.modules.count == 0:
+            return 2
+        entry: VAddr = linker.modules[0].last_start_entry_addr
+        guarded_status: s32 = GuestExec_RunMainEntryGuarded(entry, 0, null, 25.u32())
+        RealGameArtifact_Emit(linker, guarded_status)
+    return 0
