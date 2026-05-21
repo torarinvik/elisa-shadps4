@@ -1,9 +1,9 @@
 # Emulator C++ Parity Gate
 
-Passed: 8
-Failed: 3
+Passed: 11
+Failed: 0
 
-Summary score: 9/16
+Summary score: 13/16
 Per-subsystem counts:
 - External-C-ABI: 11
 - Native-Elisa: 237
@@ -15,8 +15,8 @@ Parity gate counts (native/bridge/fallback/unresolved):
 - unresolved: 0
 CUSA07399 stage:
 - execution stage raw: 0
-- load: FAIL
-- link: FAIL
+- load: PASS
+- link: PASS
 - handoff: PASS
 - execute stage: none
 - first boundary: PENDING
@@ -34,9 +34,7 @@ CUSA07399 artifact metrics:
 Top 25 fallback symbols:
 - none
 Top blockers:
-- Gate step failed: elisacore test emulator-core-boot-smoke
-- Gate step failed: elisacore test real-self-loader-tests
-- Gate step failed: elisacore test emulator-real-game-boot-smoke
+- none
 
 ## Agent Work Queues
 ### kernel_fallbacks
@@ -56,7 +54,7 @@ Top blockers:
 - PASS: bridge syntax
 - PASS: native guest_exec_runtime warnings
 - PASS: native kernel_threads_runtime warnings
-- FAIL: elisacore test emulator-core-boot-smoke
-- FAIL: elisacore test real-self-loader-tests
-- FAIL: elisacore test emulator-real-game-boot-smoke
+- PASS: elisacore test emulator-core-boot-smoke
+- PASS: elisacore test real-self-loader-tests
+- PASS: elisacore test emulator-real-game-boot-smoke
 - PASS: elisacore test emulator-guest-exec-runtime-tests

@@ -7,6 +7,8 @@ include "./loader/elf.elisa"
 include "./memory.elisa"
 include "./guest_exec.elisa"
 
+extern malloc(size: usize) -> mutable heap void&?
+
 const SCE_DBG_MAX_NAME_LENGTH: usize = 256
 const SCE_DBG_MAX_SEGMENTS: usize = 4
 const SCE_DBG_NUM_FINGERPRINT: usize = 20
@@ -482,29 +484,25 @@ def Module_SymbolNameAndNidAt(self: Module&, offset: u32, out_name: mutable stat
             i <- i + 1
     if hash_index == 0:
         return false
-    owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
-    out: mutable darray[u8] = []
-    in owner:
-        i: mutable usize = 0
-        while i < hash_index:
-            out.push(symbol_name[i])
-            i <- i + 1
-        out.push(0)
-    out_nid <- out[0].ref[u8&].cast[static u8&]
+    out_nid <- Module_CopySlice(symbol_name, 0, hash_index)
     return static_strlen(out_nid) > 0
 
 def Module_CopySlice(input: static u8&, start: usize, end_exclusive: usize) -> static u8&:
     if end_exclusive <= start:
         return ""
-    owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
-    out: mutable darray[u8] = []
-    in owner:
-        i: mutable usize = start
-        while i < end_exclusive:
-            out.push(input[i])
-            i <- i + 1
-        out.push(0)
-    return out[0].ref[u8&].cast[static u8&]
+    len: usize = end_exclusive - start
+    raw: mutable heap void&? = null
+    can Memory.Allocate:
+        raw <- malloc(len + 1)
+    if raw == null:
+        return ""
+    out: mutable heap u8& = raw.cast[mutable heap u8&]
+    i: mutable usize = 0
+    while i < len:
+        out[i] <- input[start + i]
+        i <- i + 1
+    out[len] <- 0
+    return out.cast[static u8&]
 
 def Module_ParseImportSymbol(raw_symbol: static u8&, out_nid: mutable static u8&, out_library: mutable static u8&, out_module: mutable static u8&) -> bool:
     out_nid <- ""
