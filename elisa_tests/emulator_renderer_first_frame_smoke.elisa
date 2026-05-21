@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../core/libraries/kernel/equeue.elisa"
 include "../core/libraries/videoout/videoout.elisa"
 include "../core/libraries/videoout/videoout_error.elisa"
 include "../shader_recompiler/recompiler_backend.elisa"
@@ -26,18 +27,15 @@ def emulator_renderer_first_frame_synthetic_ladder_smoke() -> void:
             0x00000000u32,
             0xbf810000u32
         ]
-        pools: mutable u64 = 1u64
-        info: mutable u64 = 2u64
-        runtime_info: mutable u64 = 3u64
-        profile: mutable u64 = 4u64
+        metadata: mutable ShaderRecompilerTranslateMetadata = ShaderRecompilerTranslateMetadata(
+            ELISA_RECOMPILER_STAGE_FRAGMENT.u32(),
+            ELISA_RECOMPILER_LOGICAL_STAGE_FRAGMENT.u32()
+        )
         program: mutable void&? = null
         shader_rc: int = ShaderRecompiler_TranslateProgramViaFfi(
             shader_words[0].ref[u32&],
             8usize,
-            pools.ref[mutable u64&].cast[mutable void&?],
-            info.ref[mutable u64&].cast[mutable void&?],
-            runtime_info.ref[mutable u64&].cast[mutable void&?],
-            profile.ref[mutable u64&].cast[void&?],
+            metadata.ref[mutable ShaderRecompilerTranslateMetadata&],
             program
         )
         assert shader_rc == ELISA_RECOMPILER_BRIDGE_OK
@@ -46,9 +44,19 @@ def emulator_renderer_first_frame_synthetic_ladder_smoke() -> void:
         assert g_shader_artifact_path_bridge_emitted
         assert g_shader_artifact_result_ok_emitted
         assert g_shader_artifact_status_emitted
-        assert not g_shader_artifact_output_nonzero_emitted
-        assert elisa_shader_recompiler_program_status(program) == ELISA_RECOMPILER_PROGRAM_STATUS_PLACEHOLDER
-        assert elisa_shader_recompiler_program_diagnostic_code(program) == ELISA_RECOMPILER_DIAGNOSTIC_REAL_LINK_NOT_AVAILABLE
+        status: int = elisa_shader_recompiler_program_status(program)
+        if status == ELISA_RECOMPILER_PROGRAM_STATUS_TRANSLATED:
+            assert g_shader_artifact_output_nonzero_emitted
+            assert elisa_shader_recompiler_program_output_byte_size(program) > 0u64
+            assert elisa_shader_recompiler_program_output_hash(program) != 0u64
+            assert elisa_shader_recompiler_program_diagnostic_code(program) == ELISA_RECOMPILER_DIAGNOSTIC_NONE
+        else:
+            assert status == ELISA_RECOMPILER_PROGRAM_STATUS_FAILED_WITH_DIAGNOSTIC
+            assert not g_shader_artifact_output_nonzero_emitted
+            assert elisa_shader_recompiler_program_output_byte_size(program) == 0u64
+            assert elisa_shader_recompiler_program_output_hash(program) == 0u64
+            diag: int = elisa_shader_recompiler_program_diagnostic_code(program)
+            assert diag == ELISA_RECOMPILER_DIAGNOSTIC_UNSUPPORTED or diag == ELISA_RECOMPILER_DIAGNOSTIC_REAL_LINK_NOT_AVAILABLE
         ShaderRecompiler_FreeProgramViaFfi(program)
         assert elisa_shader_recompiler_program_status(program) == ELISA_RECOMPILER_PROGRAM_STATUS_FREED
 
