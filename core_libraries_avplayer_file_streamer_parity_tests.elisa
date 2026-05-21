@@ -143,6 +143,22 @@ def avp_decode_one_fixture_stream(wanted_type: u32, payload_is_video: bool) -> b
     avplayer_ffmpeg_close(handle)
     return avp_decode_one_fixture_stream_index(stream_index, payload_is_video)
 
+def avp_prepare_fixture_handle() -> AvPlayerHandle:
+    init_data: AvPlayerInitData = build_init_data()
+    handle: AvPlayerHandle = sceAvPlayerInit(init_data.ref[mutable AvPlayerInitData&])
+    if handle == 0:
+        return 0
+    if sceAvPlayerAddSource(handle, AVPLAYER_LOCAL_MP4_FIXTURE.cast[i8&?]) != ORBIS_OK:
+        _ = sceAvPlayerClose(handle)
+        return 0
+    if sceAvPlayerEnableStream(handle, 0) != ORBIS_OK:
+        _ = sceAvPlayerClose(handle)
+        return 0
+    if sceAvPlayerEnableStream(handle, 1) != ORBIS_OK:
+        _ = sceAvPlayerClose(handle)
+        return 0
+    return handle
+
 @test
 def avplayer_file_replacement_open_close_contract() -> void:
     can Thread.Spawn, Thread.Join, Abort.Panic:
@@ -362,3 +378,71 @@ def avplayer_ffmpeg_copy_decoded_payload_respects_nv12_linesize() -> void:
         assert payload[9] == 11u8
         assert payload[10] == 12u8
         assert payload[11] == 13u8
+
+@test
+def avplayer_ffmpeg_convert_audio_to_s16_converts_fltp_frame() -> void:
+    can Abort.Panic:
+        frame: mutable void&? = av_frame_alloc()
+        assert frame != null
+
+        src: mutable AVFramePublicPrefix& = frame.cast[mutable AVFramePublicPrefix&]
+        src.format <- AV_SAMPLE_FMT_FLTP
+        src.nb_samples <- 4
+        src.sample_rate <- 48000
+        av_channel_layout_default(src.ch_layout.ref[mutable void&], 2)
+        assert av_frame_get_buffer(frame, 0) == 0
+
+        converted: mutable void&? = avffmpeg_convert_audio_to_s16(frame)
+        assert converted != null
+        assert converted != frame
+
+        out: AVFramePublicPrefix& = converted.cast[AVFramePublicPrefix&]
+        assert out.format == AV_SAMPLE_FMT_S16
+        assert out.nb_samples == 4
+        assert out.sample_rate == 48000
+        assert out.ch_layout.nb_channels == 2
+
+        avffmpeg_free_frame(converted)
+        avffmpeg_free_frame(frame)
+
+@test
+def avplayer_frame_info_video_metadata_matches_ex() -> void:
+    can Thread.Spawn, Thread.Join, Thread.Sleep, Abort.Panic:
+        handle_v: AvPlayerHandle = avp_prepare_fixture_handle()
+        assert handle_v != 0
+        video: AvPlayerFrameInfo = zeroed
+        assert sceAvPlayerGetVideoData(handle_v, video.ref[mutable AvPlayerFrameInfo&])
+        _ = sceAvPlayerClose(handle_v)
+
+        handle_ex: AvPlayerHandle = avp_prepare_fixture_handle()
+        assert handle_ex != 0
+        video_ex: AvPlayerFrameInfoEx = zeroed
+        assert sceAvPlayerGetVideoDataEx(handle_ex, video_ex.ref[mutable AvPlayerFrameInfoEx&])
+        _ = sceAvPlayerClose(handle_ex)
+
+@test
+def avplayer_frame_info_audio_metadata_matches_stream_info() -> void:
+    can Thread.Spawn, Thread.Join, Thread.Sleep, Abort.Panic:
+        handle: AvPlayerHandle = avp_prepare_fixture_handle()
+        assert handle != 0
+        audio: AvPlayerFrameInfo = zeroed
+        assert sceAvPlayerGetAudioData(handle, audio.ref[mutable AvPlayerFrameInfo&])
+
+        _ = sceAvPlayerClose(handle)
+
+@test
+def avplayer_frame_output_struct_layout_matches_cpp() -> void:
+    can Abort.Panic:
+        assert size_of(AvPlayerStreamDetailsVideo) == 16usize
+        assert size_of(AvPlayerStreamDetailsAudio) == 16usize
+        assert size_of(AvPlayerStreamDetailsTimedText) == 16usize
+        assert size_of(AvPlayerStreamDetails) == 16usize
+
+        assert size_of(AvPlayerStreamDetailsVideoEx) == 80usize
+        assert size_of(AvPlayerStreamDetailsAudioEx) == 80usize
+        assert size_of(AvPlayerStreamDetailsTimedTextEx) == 80usize
+        assert size_of(AvPlayerStreamDetailsEx) == 80usize
+
+        assert size_of(AvPlayerFrameInfo) == 40usize
+        assert size_of(AvPlayerStreamInfo) == 40usize
+        assert size_of(AvPlayerFrameInfoEx) == 104usize

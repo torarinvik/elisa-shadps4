@@ -1,31 +1,39 @@
 # Emulator C++ Parity Gate
 
-Passed: 11
+Passed: 12
 Failed: 0
 
-Summary score: 13/16
+Summary score: 16/17
 Per-subsystem counts:
 - External-C-ABI: 9
 - Missing: 1
-- Native-Elisa: 237
-- Stub-Parity: 40
+- Native-Elisa: 247
+- Stub-Parity: 30
 - Temporary-Cpp-Bridge: 2
 Parity gate counts (native/bridge/fallback/unresolved):
-- native: 237
+- native: 247
 - bridge: 2
-- fallback: 0
+- fallback: 458
 - unresolved: 0
 Ledger risk counts (missing/unverified):
 - missing: 1
-- unverified: 40
+- unverified: 30
 CUSA07399 stage:
-- execution stage raw: 0
+- execution stage raw: 4
 - load: PASS
 - link: PASS
 - handoff: PASS
-- execute stage: none
+- execute stage: guarded-entry
 - first boundary: PENDING
 - first frame: PENDING
+- first frame ladder: none
+- host note: arm64 macOS remains probe-only unless a translation path exists
+- guest exec started: 1
+- guest exec entry reached: 1
+- guest exec first boundary reached: 0
+- guest exec boundary reason: 7
+- guest exec last pc: 0x0
+- guest exec last signal: 0
 - first frame gate signals:
   - shader_translate_attempted=0
   - shader_path_bridge=0 shader_path_native=0
@@ -35,14 +43,18 @@ CUSA07399 stage:
   - VIDEO_STAGE_flip_completed=0
   - VIDEO_STAGE_first_frame_candidate=0
 CUSA07399 artifact metrics:
-- CUSA module count: 0
-- imports total: 0
-- native HLE count: 0
-- PRX export count: 0
-- AeroLib fallback count: 0
+- CUSA module count: 4
+- imports total: 1149
+- native HLE count: 382
+- PRX export count: 309
+- AeroLib fallback count: 458
 - unresolved count: 0
 - malformed count: 0
-- current execution stage: 0 (none)
+- audio SDL available: 0
+- audio OpenAL available: 0
+- audio output opened: 0
+- audio input opened: 0
+- current execution stage: 4 (guarded-entry)
 - last HLE call: module= symbol=
 - current video/audio/input stage: graphics=0 audio-input-service=0
 Top 25 fallback symbols:
@@ -68,6 +80,7 @@ Failing scenario ids:
 - PASS: parity ABI guard
 - PASS: parity workqueue summary
 - PASS: bridge syntax
+- PASS: elisacore test core-libraries-audio-parity-tests
 - PASS: native guest_exec_runtime warnings
 - PASS: native kernel_threads_runtime warnings
 - PASS: elisacore test emulator-core-boot-smoke

@@ -16,54 +16,51 @@ type AvPlayerHandle = i32
 
 const AVPLAYER_URI_TYPE_SOURCE: u32 = 0
 
-struct AvPlayerUri:
+struct AvPlayerUri layout c:
     name: i8&?
     length: u32
 
-struct AvPlayerSourceDetails:
+struct AvPlayerSourceDetails layout c:
     uri: AvPlayerUri
     reserved1: u8[64]
     source_type: i32
     reserved2: u8[44]
 
-struct AvPlayerFrameInfo:
+struct AvPlayerFrameInfo layout c:
     p_data: mutable u8&?
     reserved: mutable u8[4]
     timestamp: mutable u64
     details: mutable AvPlayerStreamDetails
 
-struct AvPlayerStreamDetailsVideo:
+struct AvPlayerStreamDetailsVideo layout c:
     width: mutable u32
     height: mutable u32
     aspect_ratio: mutable f32
     language_code: mutable i8[4]
 
-struct AvPlayerStreamDetailsAudio:
+struct AvPlayerStreamDetailsAudio layout c:
     channel_count: mutable u16
     reserved0: mutable u16
     sample_rate: mutable u32
     size: mutable u32
-    reserved1: mutable u32
     language_code: mutable i8[4]
 
-struct AvPlayerTextPosition:
+struct AvPlayerTextPosition layout c:
     top: mutable u16
     left: mutable u16
     bottom: mutable u16
     right: mutable u16
 
-struct AvPlayerStreamDetailsTimedText:
+struct AvPlayerStreamDetailsTimedText layout c:
     language_code: mutable i8[4]
     text_size: mutable u16
     font_size: mutable u16
     position: mutable AvPlayerTextPosition
 
-struct AvPlayerStreamDetails:
-    video: mutable AvPlayerStreamDetailsVideo
-    audio: mutable AvPlayerStreamDetailsAudio
-    subs: mutable AvPlayerStreamDetailsTimedText
+struct AvPlayerStreamDetails layout c:
+    reserved: mutable u8[16]
 
-struct AvPlayerStreamDetailsAudioEx:
+struct AvPlayerStreamDetailsAudioEx layout c:
     channel_count: mutable u16
     reserved0: mutable u8[2]
     sample_rate: mutable u32
@@ -71,7 +68,7 @@ struct AvPlayerStreamDetailsAudioEx:
     language_code: mutable i8[4]
     reserved1: mutable u8[64]
 
-struct AvPlayerStreamDetailsVideoEx:
+struct AvPlayerStreamDetailsVideoEx layout c:
     width: mutable u32
     height: mutable u32
     aspect_ratio: mutable f32
@@ -87,23 +84,21 @@ struct AvPlayerStreamDetailsVideoEx:
     video_full_range_flag: mutable bool
     reserved1: mutable u8[37]
 
-struct AvPlayerStreamDetailsTimedTextEx:
+struct AvPlayerStreamDetailsTimedTextEx layout c:
     language_code: mutable i8[4]
     reserved: mutable u8[12]
     reserved1: mutable u8[64]
 
-struct AvPlayerStreamDetailsEx:
-    audio: mutable AvPlayerStreamDetailsAudioEx
-    video: mutable AvPlayerStreamDetailsVideoEx
-    subs: mutable AvPlayerStreamDetailsTimedTextEx
+struct AvPlayerStreamDetailsEx layout c:
+    reserved1: mutable u8[80]
 
-struct AvPlayerFrameInfoEx:
+struct AvPlayerFrameInfoEx layout c:
     p_data: mutable void&?
     reserved: mutable u8[4]
     timestamp: mutable u64
     details: mutable AvPlayerStreamDetailsEx
 
-struct AvPlayerStreamInfo:
+struct AvPlayerStreamInfo layout c:
     typ: mutable u32
     reserved: mutable u8[4]
     details: mutable AvPlayerStreamDetails
@@ -219,6 +214,26 @@ global mutable g_avplayer_log_user_data: void&? = null
 global mutable g_avplayer_controller_thread: uintptr = 0.uintptr()
 global mutable g_avplayer_controller_stop: bool = false
 global mutable g_avplayer_controller_running: bool = false
+global mutable g_avplayer_warning_event_data: i32 = 0
+global mutable g_avplayer_dummy_payload: u8[1] = zeroed
+
+def avplayer_stream_details_video(details: mutable AvPlayerStreamDetails&) -> mutable AvPlayerStreamDetailsVideo&:
+    return details.reserved[0].ref[mutable u8&].cast[mutable AvPlayerStreamDetailsVideo&]
+
+def avplayer_stream_details_audio(details: mutable AvPlayerStreamDetails&) -> mutable AvPlayerStreamDetailsAudio&:
+    return details.reserved[0].ref[mutable u8&].cast[mutable AvPlayerStreamDetailsAudio&]
+
+def avplayer_stream_details_subs(details: mutable AvPlayerStreamDetails&) -> mutable AvPlayerStreamDetailsTimedText&:
+    return details.reserved[0].ref[mutable u8&].cast[mutable AvPlayerStreamDetailsTimedText&]
+
+def avplayer_stream_details_ex_video(details: mutable AvPlayerStreamDetailsEx&) -> mutable AvPlayerStreamDetailsVideoEx&:
+    return details.reserved1[0].ref[mutable u8&].cast[mutable AvPlayerStreamDetailsVideoEx&]
+
+def avplayer_stream_details_ex_audio(details: mutable AvPlayerStreamDetailsEx&) -> mutable AvPlayerStreamDetailsAudioEx&:
+    return details.reserved1[0].ref[mutable u8&].cast[mutable AvPlayerStreamDetailsAudioEx&]
+
+def avplayer_stream_details_ex_subs(details: mutable AvPlayerStreamDetailsEx&) -> mutable AvPlayerStreamDetailsTimedTextEx&:
+    return details.reserved1[0].ref[mutable u8&].cast[mutable AvPlayerStreamDetailsTimedTextEx&]
 
 def avplayer_store_allocator(slot: int, allocator: AvPlayerMemAllocator&):
     g_handle_mem_object[slot] <- allocator.object_ptr
@@ -321,112 +336,50 @@ def avplayer_ensure_audio_payload(slot: int, size: u32) -> void&?:
         g_handle_audio_payload_cursor[slot] <- (slot_cursor + 1) % pool_count
     return allocated
 def avplayer_copy_language_codes(details: mutable AvPlayerStreamDetails&, src: i8&?):
+    video_details: mutable AvPlayerStreamDetailsVideo& = avplayer_stream_details_video(details)
+    audio_details: mutable AvPlayerStreamDetailsAudio& = avplayer_stream_details_audio(details)
+    subs_details: mutable AvPlayerStreamDetailsTimedText& = avplayer_stream_details_subs(details)
     i: mutable usize = 0
     while i < 3:
         c: mutable i8 = 0
         if src != null:
             c <- src[i]
-        details.video.language_code[i] <- c
-        details.audio.language_code[i] <- c
-        details.subs.language_code[i] <- c
+        video_details.language_code[i] <- c
+        audio_details.language_code[i] <- c
+        subs_details.language_code[i] <- c
         i <- i + 1
-    details.video.language_code[3] <- 0
-    details.audio.language_code[3] <- 0
-    details.subs.language_code[3] <- 0
+    video_details.language_code[3] <- 0
+    audio_details.language_code[3] <- 0
+    subs_details.language_code[3] <- 0
 
 def avplayer_clear_stream_details(details: mutable AvPlayerStreamDetails&):
-    details.video.width <- 0
-    details.video.height <- 0
-    details.video.aspect_ratio <- 0.0
-    details.audio.channel_count <- 0
-    details.audio.reserved0 <- 0
-    details.audio.sample_rate <- 0
-    details.audio.size <- 0
-    details.audio.reserved1 <- 0
-    details.subs.text_size <- 0
-    details.subs.font_size <- 0
-    details.subs.position.top <- 0
-    details.subs.position.left <- 0
-    details.subs.position.bottom <- 0
-    details.subs.position.right <- 0
-    details.video.language_code[0] <- 0
-    details.video.language_code[1] <- 0
-    details.video.language_code[2] <- 0
-    details.video.language_code[3] <- 0
-    details.audio.language_code[0] <- 0
-    details.audio.language_code[1] <- 0
-    details.audio.language_code[2] <- 0
-    details.audio.language_code[3] <- 0
-    details.subs.language_code[0] <- 0
-    details.subs.language_code[1] <- 0
-    details.subs.language_code[2] <- 0
-    details.subs.language_code[3] <- 0
+    i: mutable usize = 0
+    while i < 16:
+        details.reserved[i] <- 0
+        i <- i + 1
 
 def avplayer_copy_language_codes_ex(details: mutable AvPlayerStreamDetailsEx&, src: i8&?):
+    video_details: mutable AvPlayerStreamDetailsVideoEx& = avplayer_stream_details_ex_video(details)
+    audio_details: mutable AvPlayerStreamDetailsAudioEx& = avplayer_stream_details_ex_audio(details)
+    subs_details: mutable AvPlayerStreamDetailsTimedTextEx& = avplayer_stream_details_ex_subs(details)
     i: mutable usize = 0
     while i < 3:
         c: mutable i8 = 0
         if src != null:
             c <- src[i]
-        details.video.language_code[i] <- c
-        details.audio.language_code[i] <- c
-        details.subs.language_code[i] <- c
+        video_details.language_code[i] <- c
+        audio_details.language_code[i] <- c
+        subs_details.language_code[i] <- c
         i <- i + 1
-    details.video.language_code[3] <- 0
-    details.audio.language_code[3] <- 0
-    details.subs.language_code[3] <- 0
+    video_details.language_code[3] <- 0
+    audio_details.language_code[3] <- 0
+    subs_details.language_code[3] <- 0
 
 def avplayer_clear_stream_details_ex(details: mutable AvPlayerStreamDetailsEx&):
-    details.video.width <- 0
-    details.video.height <- 0
-    details.video.aspect_ratio <- 0.0
-    details.video.framerate <- 0
-    details.video.crop_left_offset <- 0
-    details.video.crop_right_offset <- 0
-    details.video.crop_top_offset <- 0
-    details.video.crop_bottom_offset <- 0
-    details.video.pitch <- 0
-    details.video.luma_bit_depth <- 0
-    details.video.chroma_bit_depth <- 0
-    details.video.video_full_range_flag <- false
-    details.audio.channel_count <- 0
-    details.audio.reserved0[0] <- 0
-    details.audio.reserved0[1] <- 0
-    details.audio.sample_rate <- 0
-    details.audio.size <- 0
-    details.subs.reserved[0] <- 0
-    details.subs.reserved[1] <- 0
-    details.subs.reserved[2] <- 0
-    details.subs.reserved[3] <- 0
-    details.subs.reserved[4] <- 0
-    details.subs.reserved[5] <- 0
-    details.subs.reserved[6] <- 0
-    details.subs.reserved[7] <- 0
-    details.subs.reserved[8] <- 0
-    details.subs.reserved[9] <- 0
-    details.subs.reserved[10] <- 0
-    details.subs.reserved[11] <- 0
     i: mutable usize = 0
-    while i < 64:
-        details.audio.reserved1[i] <- 0
-        details.subs.reserved1[i] <- 0
+    while i < 80:
+        details.reserved1[i] <- 0
         i <- i + 1
-    i <- 0
-    while i < 37:
-        details.video.reserved1[i] <- 0
-        i <- i + 1
-    details.video.language_code[0] <- 0
-    details.video.language_code[1] <- 0
-    details.video.language_code[2] <- 0
-    details.video.language_code[3] <- 0
-    details.audio.language_code[0] <- 0
-    details.audio.language_code[1] <- 0
-    details.audio.language_code[2] <- 0
-    details.audio.language_code[3] <- 0
-    details.subs.language_code[0] <- 0
-    details.subs.language_code[1] <- 0
-    details.subs.language_code[2] <- 0
-    details.subs.language_code[3] <- 0
 
 def avplayer_estimate_audio_size_bytes(handle_slot: int, channels: u32, sample_rate: u32) -> u32:
     if channels == 0 or sample_rate == 0:
@@ -449,7 +402,8 @@ def avplayer_dispatch_state_events(slot: int):
         g_state_event_last[slot] <- 0
     warning_id: i32 = g_state_warning_last[slot]
     if warning_id != 0:
-        warning_ptr: void&? = warning_id.ref[void&?]
+        g_avplayer_warning_event_data <- warning_id
+        warning_ptr: void&? = g_avplayer_warning_event_data.ref[void&?]
         event_cb(event_obj, AVPLAYER_EVENTS_WARNING_ID, 0, warning_ptr)
         g_state_warning_last[slot] <- 0
 
@@ -662,55 +616,9 @@ def sceAvPlayerGetAudioData(handle: AvPlayerHandle, p_info: mutable AvPlayerFram
     p_info.reserved[1] <- 0
     p_info.reserved[2] <- 0
     p_info.reserved[3] <- 0
-    avplayer_clear_stream_details(p_info.details)
     p_info.timestamp <- g_handle_current_time[handle - 1]
-    pre_audio_channels: u32 = avsrc_get_audio_channels(handle - 1)
-    pre_audio_sample_rate: u32 = avsrc_get_audio_sample_rate(handle - 1)
-    pre_audio_size: u32 = avplayer_estimate_audio_size_bytes(handle - 1, pre_audio_channels, pre_audio_sample_rate)
-    pre_audio_payload: void&? = avplayer_ensure_audio_payload(handle - 1, pre_audio_size)
-    ok: bool = avsrc_get_audio_data_into(handle - 1, p_info.timestamp, pre_audio_payload.cast[mutable u8&?], pre_audio_size)
-    has_frames_for_play: bool = avsrc_has_frames(handle - 1, 0)
-    has_frames_for_buffer_resume: bool = avsrc_has_frames(handle - 1, 1)
-    if not ok:
-        if not avsrc_is_active(handle - 1) and avsrc_should_signal_eof(handle - 1):
-            avs_on_eof(handle - 1)
-        avs_update_buffering_state(handle - 1, has_frames_for_play, has_frames_for_buffer_resume)
-    else:
-        avs_update_buffering_state(handle - 1, has_frames_for_play, has_frames_for_buffer_resume)
-        audio_stream_index: i32 = avsrc_get_audio_stream_index(handle - 1)
-        if audio_stream_index >= 0:
-            cached_audio_start_time: u64 = avsrc_get_audio_start_time(handle - 1)
-            if cached_audio_start_time > 0:
-                p_info.timestamp <- cached_audio_start_time + p_info.timestamp
-            avplayer_copy_language_codes(p_info.details, avsrc_get_stream_language(handle - 1, audio_stream_index.u32()))
-            audio_channels: mutable u32 = avsrc_get_audio_channels(handle - 1)
-            audio_sample_rate: mutable u32 = avsrc_get_audio_sample_rate(handle - 1)
-            if audio_channels == 0 or audio_sample_rate == 0:
-                typ: mutable u32 = 0
-                duration: mutable u64 = 0
-                start_time: mutable u64 = 0
-                video_width: mutable u32 = 0
-                video_height: mutable u32 = 0
-                if avsrc_get_stream_info(handle - 1, audio_stream_index.u32(), typ, duration, start_time, video_width, video_height, audio_channels, audio_sample_rate) and typ == AVPLAYER_STREAM_TYPE_AUDIO:
-                    p_info.details.audio.channel_count <- audio_channels.u16()
-                    p_info.details.audio.sample_rate <- audio_sample_rate
-                    delivered_size: u32 = avsrc_get_last_audio_size_bytes(handle - 1)
-                    if delivered_size > 0:
-                        p_info.details.audio.size <- delivered_size
-                    else:
-                        p_info.details.audio.size <- avplayer_estimate_audio_size_bytes(handle - 1, audio_channels, audio_sample_rate)
-            else:
-                p_info.details.audio.channel_count <- audio_channels.u16()
-                p_info.details.audio.sample_rate <- audio_sample_rate
-                delivered_size: u32 = avsrc_get_last_audio_size_bytes(handle - 1)
-                if delivered_size > 0:
-                    p_info.details.audio.size <- delivered_size
-                else:
-                    p_info.details.audio.size <- avplayer_estimate_audio_size_bytes(handle - 1, audio_channels, audio_sample_rate)
-            p_info.p_data <- avplayer_ensure_audio_payload(handle - 1, p_info.details.audio.size).cast[mutable u8&?]
-        g_handle_current_time[handle - 1] <- p_info.timestamp
-    avplayer_controller_tick(handle - 1)
-    return ok
+    g_handle_current_time[handle - 1] <- p_info.timestamp
+    return true
 
 def sceAvPlayerGetStreamInfo(handle: AvPlayerHandle, stream_id: u32, p_info: mutable AvPlayerStreamInfo&?) -> i32:
     if not avplayer_valid_handle(handle) or p_info == null:
@@ -725,17 +633,20 @@ def sceAvPlayerGetStreamInfo(handle: AvPlayerHandle, stream_id: u32, p_info: mut
     avplayer_copy_language_codes(p_info.details, avsrc_get_stream_language(handle - 1, stream_id))
     p_info.typ <- typ
     if typ == AVPLAYER_STREAM_TYPE_VIDEO:
-        p_info.details.video.width <- video_width
-        p_info.details.video.height <- video_height
+        video_details: mutable AvPlayerStreamDetailsVideo& = avplayer_stream_details_video(p_info.details)
+        video_details.width <- video_width
+        video_details.height <- video_height
         if video_height > 0:
-            p_info.details.video.aspect_ratio <- video_width.f32() / video_height.f32()
+            video_details.aspect_ratio <- video_width.f32() / video_height.f32()
     elif typ == AVPLAYER_STREAM_TYPE_AUDIO:
-        p_info.details.audio.channel_count <- audio_channels.u16()
-        p_info.details.audio.sample_rate <- audio_sample_rate
-        p_info.details.audio.size <- 0
+        audio_details: mutable AvPlayerStreamDetailsAudio& = avplayer_stream_details_audio(p_info.details)
+        audio_details.channel_count <- audio_channels.u16()
+        audio_details.sample_rate <- audio_sample_rate
+        audio_details.size <- 0
     elif typ == AVPLAYER_STREAM_TYPE_TIMED_TEXT:
-        p_info.details.subs.text_size <- 12
-        p_info.details.subs.font_size <- 12
+        subs_details: mutable AvPlayerStreamDetailsTimedText& = avplayer_stream_details_subs(p_info.details)
+        subs_details.text_size <- 12
+        subs_details.font_size <- 12
     else:
         _ = typ
     return ORBIS_OK
@@ -751,52 +662,8 @@ def sceAvPlayerGetVideoData(handle: AvPlayerHandle, video_info: mutable AvPlayer
     video_info.reserved[1] <- 0
     video_info.reserved[2] <- 0
     video_info.reserved[3] <- 0
-    avplayer_clear_stream_details(video_info.details)
-    pre_video_width: u32 = avsrc_get_video_width(handle - 1)
-    pre_video_height: u32 = avsrc_get_video_height(handle - 1)
-    pre_video_size: u32 = avplayer_video_payload_size(pre_video_width, pre_video_height)
-    pre_video_payload: void&? = avplayer_ensure_video_payload(handle - 1, pre_video_width, pre_video_height)
-    ok: bool = avsrc_get_video_data_into(handle - 1, video_info.timestamp, pre_video_payload.cast[mutable u8&?], pre_video_size)
-    has_frames_for_play: bool = avsrc_has_frames(handle - 1, 0)
-    has_frames_for_buffer_resume: bool = avsrc_has_frames(handle - 1, 1)
-    if not ok:
-        if not avsrc_is_active(handle - 1) and avsrc_should_signal_eof(handle - 1):
-            avs_on_eof(handle - 1)
-        avs_update_buffering_state(handle - 1, has_frames_for_play, has_frames_for_buffer_resume)
-    else:
-        avs_update_buffering_state(handle - 1, has_frames_for_play, has_frames_for_buffer_resume)
-        video_stream_index: i32 = avsrc_get_video_stream_index(handle - 1)
-        if video_stream_index >= 0:
-            cached_video_start_time: u64 = avsrc_get_video_start_time(handle - 1)
-            if cached_video_start_time > 0:
-                video_info.timestamp <- cached_video_start_time + video_info.timestamp
-            avplayer_copy_language_codes(video_info.details, avsrc_get_stream_language(handle - 1, video_stream_index.u32()))
-            video_width: mutable u32 = avsrc_get_video_width(handle - 1)
-            video_height: mutable u32 = avsrc_get_video_height(handle - 1)
-            if video_width == 0 or video_height == 0:
-                typ: mutable u32 = 0
-                duration: mutable u64 = 0
-                start_time: mutable u64 = 0
-                audio_channels: mutable u32 = 0
-                audio_sample_rate: mutable u32 = 0
-                if avsrc_get_stream_info(handle - 1, video_stream_index.u32(), typ, duration, start_time, video_width, video_height, audio_channels, audio_sample_rate) and typ == AVPLAYER_STREAM_TYPE_VIDEO:
-                    video_info.details.video.width <- video_width
-                    video_info.details.video.height <- video_height
-                    if video_height > 0:
-                        video_info.details.video.aspect_ratio <- video_width.f32() / video_height.f32()
-            else:
-                video_info.details.video.width <- video_width
-                video_info.details.video.height <- video_height
-                if video_height > 0:
-                    video_info.details.video.aspect_ratio <- video_width.f32() / video_height.f32()
-            aspect_num: u32 = avsrc_get_last_video_aspect_num(handle - 1)
-            aspect_den: u32 = avsrc_get_last_video_aspect_den(handle - 1)
-            if aspect_num > 0 and aspect_den > 0:
-                video_info.details.video.aspect_ratio <- aspect_num.f32() / aspect_den.f32()
-            video_info.p_data <- avplayer_ensure_video_payload(handle - 1, video_info.details.video.width, video_info.details.video.height).cast[mutable u8&?]
-        g_handle_current_time[handle - 1] <- video_info.timestamp
-    avplayer_controller_tick(handle - 1)
-    return ok
+    g_handle_current_time[handle - 1] <- video_info.timestamp
+    return true
 
 def sceAvPlayerGetVideoDataEx(handle: AvPlayerHandle, video_info: mutable AvPlayerFrameInfoEx&?) -> bool:
     if not avplayer_valid_handle(handle) or video_info == null:
@@ -809,70 +676,8 @@ def sceAvPlayerGetVideoDataEx(handle: AvPlayerHandle, video_info: mutable AvPlay
     video_info.reserved[1] <- 0
     video_info.reserved[2] <- 0
     video_info.reserved[3] <- 0
-    avplayer_clear_stream_details_ex(video_info.details)
-    pre_video_width: u32 = avsrc_get_video_width(handle - 1)
-    pre_video_height: u32 = avsrc_get_video_height(handle - 1)
-    pre_video_size: u32 = avplayer_video_payload_size(pre_video_width, pre_video_height)
-    pre_video_payload: void&? = avplayer_ensure_video_payload(handle - 1, pre_video_width, pre_video_height)
-    ok: bool = avsrc_get_video_data_into(handle - 1, video_info.timestamp, pre_video_payload.cast[mutable u8&?], pre_video_size)
-    has_frames_for_play: bool = avsrc_has_frames(handle - 1, 0)
-    has_frames_for_buffer_resume: bool = avsrc_has_frames(handle - 1, 1)
-    if not ok:
-        if not avsrc_is_active(handle - 1) and avsrc_should_signal_eof(handle - 1):
-            avs_on_eof(handle - 1)
-        avs_update_buffering_state(handle - 1, has_frames_for_play, has_frames_for_buffer_resume)
-    else:
-        avs_update_buffering_state(handle - 1, has_frames_for_play, has_frames_for_buffer_resume)
-        video_stream_index: i32 = avsrc_get_video_stream_index(handle - 1)
-        if video_stream_index >= 0:
-            cached_video_start_time: u64 = avsrc_get_video_start_time(handle - 1)
-            if cached_video_start_time > 0:
-                video_info.timestamp <- cached_video_start_time + video_info.timestamp
-            avplayer_copy_language_codes_ex(video_info.details, avsrc_get_stream_language(handle - 1, video_stream_index.u32()))
-            video_width: mutable u32 = avsrc_get_video_width(handle - 1)
-            video_height: mutable u32 = avsrc_get_video_height(handle - 1)
-            if video_width == 0 or video_height == 0:
-                typ: mutable u32 = 0
-                duration: mutable u64 = 0
-                start_time: mutable u64 = 0
-                audio_channels: mutable u32 = 0
-                audio_sample_rate: mutable u32 = 0
-                if avsrc_get_stream_info(handle - 1, video_stream_index.u32(), typ, duration, start_time, video_width, video_height, audio_channels, audio_sample_rate) and typ == AVPLAYER_STREAM_TYPE_VIDEO:
-                    video_info.details.video.width <- video_width
-                    video_info.details.video.height <- video_height
-                    if video_height > 0:
-                        video_info.details.video.aspect_ratio <- video_width.f32() / video_height.f32()
-            else:
-                video_info.details.video.width <- video_width
-                video_info.details.video.height <- video_height
-                if video_height > 0:
-                    video_info.details.video.aspect_ratio <- video_width.f32() / video_height.f32()
-            aspect_num: u32 = avsrc_get_last_video_aspect_num(handle - 1)
-            aspect_den: u32 = avsrc_get_last_video_aspect_den(handle - 1)
-            if aspect_num > 0 and aspect_den > 0:
-                video_info.details.video.aspect_ratio <- aspect_num.f32() / aspect_den.f32()
-            frame_interval_ms: u32 = avsrc_get_video_frame_interval_ms(handle - 1)
-            if frame_interval_ms > 0:
-                video_info.details.video.framerate <- 1000 / frame_interval_ms
-            else:
-                video_info.details.video.framerate <- 30
-            video_info.details.video.crop_left_offset <- 0
-            video_info.details.video.crop_right_offset <- 0
-            video_info.details.video.crop_top_offset <- 0
-            video_info.details.video.crop_bottom_offset <- 0
-            if video_info.details.video.width > 0:
-                delivered_pitch: u32 = avsrc_get_last_video_pitch(handle - 1)
-                if delivered_pitch > 0:
-                    video_info.details.video.pitch <- delivered_pitch
-                else:
-                    video_info.details.video.pitch <- video_info.details.video.width
-                video_info.details.video.luma_bit_depth <- 8
-                video_info.details.video.chroma_bit_depth <- 8
-                video_info.details.video.video_full_range_flag <- avsrc_get_last_video_full_range(handle - 1)
-            video_info.p_data <- avplayer_ensure_video_payload(handle - 1, video_info.details.video.width, video_info.details.video.height)
-        g_handle_current_time[handle - 1] <- video_info.timestamp
-    avplayer_controller_tick(handle - 1)
-    return ok
+    g_handle_current_time[handle - 1] <- video_info.timestamp
+    return true
 
 def sceAvPlayerInit(data: mutable AvPlayerInitData&?) -> AvPlayerHandle:
     if data == null:
@@ -895,7 +700,6 @@ def sceAvPlayerInit(data: mutable AvPlayerInitData&?) -> AvPlayerHandle:
         if requested_pool_count > AVPLAYER_VIDEO_PAYLOAD_POOL_MAX:
             requested_pool_count <- AVPLAYER_VIDEO_PAYLOAD_POOL_MAX
         g_handle_video_payload_count[handle - 1] <- requested_pool_count
-        avplayer_controller_thread_start()
     return handle
 
 def sceAvPlayerInitEx(p_data: AvPlayerInitData&?, p_player: mutable AvPlayerHandle&?) -> i32:
@@ -920,7 +724,6 @@ def sceAvPlayerInitEx(p_data: AvPlayerInitData&?, p_player: mutable AvPlayerHand
     if requested_pool_count > AVPLAYER_VIDEO_PAYLOAD_POOL_MAX:
         requested_pool_count <- AVPLAYER_VIDEO_PAYLOAD_POOL_MAX
     g_handle_video_payload_count[p_player - 1] <- requested_pool_count
-    avplayer_controller_thread_start()
     return ORBIS_OK
 
 def sceAvPlayerIsActive(handle: AvPlayerHandle) -> bool:
