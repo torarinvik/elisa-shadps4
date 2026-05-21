@@ -65,8 +65,8 @@
 | `sceAppMessagingSetEventFlag` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceAppMessagingTryGetEventFlag` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceAppMessagingTryReceiveMsg` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
-| `sceCommonDialogInitialize` | `MATCHED` | `STATEFUL` | `STATEFUL` | core_libraries_system_pure_tests.elisa |
-| `sceCommonDialogIsUsed` | `MATCHED` | `STATEFUL` | `STATEFUL` | core_libraries_system_pure_tests.elisa |
+| `sceCommonDialogInitialize` | `MATCHED` | `STATEFUL` | `STATEFUL` | elisa_tests/core_libraries_system_pure_tests.elisa |
+| `sceCommonDialogIsUsed` | `MATCHED` | `STATEFUL` | `STATEFUL` | elisa_tests/core_libraries_system_pure_tests.elisa |
 | `sceLncUtilAcquireCpuBudgetOfExtraAudioDevices` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceLncUtilAcquireCpuBudgetOfImeForBigApp` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceLncUtilAcquireCpuBudgetOfInGameStore` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
@@ -146,16 +146,16 @@
 | `sceLncUtilUnregisterCdlgSharedMemoryName` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceLncUtilUnregisterDaemon` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceLncUtilUnregisterShellUI` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
-| `sceMsgDialogClose` | `MATCHED` | `STATEFUL` | `STATEFUL` | core_libraries_system_pure_tests.elisa |
-| `sceMsgDialogGetResult` | `MATCHED` | `STATEFUL` | `STATEFUL` | core_libraries_system_pure_tests.elisa |
-| `sceMsgDialogGetStatus` | `MATCHED` | `STATEFUL` | `STATEFUL` | core_libraries_system_pure_tests.elisa |
-| `sceMsgDialogInitialize` | `MATCHED` | `STATEFUL` | `STATEFUL` | core_libraries_system_pure_tests.elisa |
-| `sceMsgDialogOpen` | `MATCHED` | `STATEFUL` | `STATEFUL` | core_libraries_system_pure_tests.elisa |
-| `sceMsgDialogProgressBarInc` | `MATCHED` | `STATEFUL` | `STATEFUL` | core_libraries_system_pure_tests.elisa |
-| `sceMsgDialogProgressBarSetMsg` | `MATCHED` | `STATEFUL` | `ERROR_GUARDED` | core_libraries_system_pure_tests.elisa |
-| `sceMsgDialogProgressBarSetValue` | `MATCHED` | `STATEFUL` | `STATEFUL` | core_libraries_system_pure_tests.elisa |
-| `sceMsgDialogTerminate` | `MATCHED` | `STATEFUL` | `STATEFUL` | core_libraries_system_pure_tests.elisa |
-| `sceMsgDialogUpdateStatus` | `MATCHED` | `STATEFUL` | `STATEFUL` | core_libraries_system_pure_tests.elisa |
+| `sceMsgDialogClose` | `MATCHED` | `STATEFUL` | `STATEFUL` | elisa_tests/core_libraries_system_pure_tests.elisa |
+| `sceMsgDialogGetResult` | `MATCHED` | `STATEFUL` | `STATEFUL` | elisa_tests/core_libraries_system_pure_tests.elisa |
+| `sceMsgDialogGetStatus` | `MATCHED` | `STATEFUL` | `STATEFUL` | elisa_tests/core_libraries_system_pure_tests.elisa |
+| `sceMsgDialogInitialize` | `MATCHED` | `STATEFUL` | `STATEFUL` | elisa_tests/core_libraries_system_pure_tests.elisa |
+| `sceMsgDialogOpen` | `MATCHED` | `STATEFUL` | `STATEFUL` | elisa_tests/core_libraries_system_pure_tests.elisa |
+| `sceMsgDialogProgressBarInc` | `MATCHED` | `STATEFUL` | `STATEFUL` | elisa_tests/core_libraries_system_pure_tests.elisa |
+| `sceMsgDialogProgressBarSetMsg` | `MATCHED` | `STATEFUL` | `ERROR_GUARDED` | elisa_tests/core_libraries_system_pure_tests.elisa |
+| `sceMsgDialogProgressBarSetValue` | `MATCHED` | `STATEFUL` | `STATEFUL` | elisa_tests/core_libraries_system_pure_tests.elisa |
+| `sceMsgDialogTerminate` | `MATCHED` | `STATEFUL` | `STATEFUL` | elisa_tests/core_libraries_system_pure_tests.elisa |
+| `sceMsgDialogUpdateStatus` | `MATCHED` | `STATEFUL` | `STATEFUL` | elisa_tests/core_libraries_system_pure_tests.elisa |
 | `sceShellCoreUtilAccessibilityZoomLock` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceShellCoreUtilAccessibilityZoomUnlock` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceShellCoreUtilAcquireBgmCpuBudget` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
@@ -421,7 +421,7 @@
 | `sceSystemServiceGetAppStatus` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceSystemServiceGetAppType` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceSystemServiceGetDbgExecutablePath` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
-| `sceSystemServiceGetDisplaySafeAreaInfo` | `MATCHED` | `ERROR_GUARDED` | `HOST_BACKED` | core_libraries_system_pure_tests.elisa |
+| `sceSystemServiceGetDisplaySafeAreaInfo` | `MATCHED` | `ERROR_GUARDED` | `HOST_BACKED` | elisa_tests/core_libraries_system_pure_tests.elisa |
 | `sceSystemServiceGetEventForDaemon` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceSystemServiceGetGpuLoadEmulationMode` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceSystemServiceGetHdrToneMapLuminance` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
@@ -435,10 +435,10 @@
 | `sceSystemServiceGetPlatformPrivacyDefinitionVersion` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceSystemServiceGetPlatformPrivacySetting` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceSystemServiceGetRenderingMode` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
-| `sceSystemServiceGetStatus` | `MATCHED` | `STATEFUL` | `HOST_BACKED` | core_libraries_system_pure_tests.elisa, core_libraries_system_ffi_bridge_tests.elisa |
+| `sceSystemServiceGetStatus` | `MATCHED` | `STATEFUL` | `HOST_BACKED` | elisa_tests/core_libraries_system_pure_tests.elisa, elisa_tests/core_libraries_system_ffi_bridge_tests.elisa |
 | `sceSystemServiceGetTitleWorkaroundInfo` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceSystemServiceGetVersionNumberOfCameraCalibrationData` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
-| `sceSystemServiceHideSplashScreen` | `MATCHED` | `STATEFUL` | `STATEFUL` | core_libraries_system_pure_tests.elisa |
+| `sceSystemServiceHideSplashScreen` | `MATCHED` | `STATEFUL` | `STATEFUL` | elisa_tests/core_libraries_system_pure_tests.elisa |
 | `sceSystemServiceInitializeForShellCore` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceSystemServiceInvokeAppLaunchLink` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceSystemServiceIsAppSuspended` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
@@ -459,17 +459,17 @@
 | `sceSystemServiceLaunchUdsApp` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceSystemServiceLaunchWebApp` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceSystemServiceLaunchWebBrowser` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
-| `sceSystemServiceLoadExec` | `MATCHED` | `HOST_BACKED` | `HOST_BACKED` | core_libraries_system_pure_tests.elisa, core_libraries_system_ffi_bridge_tests.elisa |
+| `sceSystemServiceLoadExec` | `MATCHED` | `HOST_BACKED` | `HOST_BACKED` | elisa_tests/core_libraries_system_pure_tests.elisa, elisa_tests/core_libraries_system_ffi_bridge_tests.elisa |
 | `sceSystemServiceLoadExecVideoServiceWebApp` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceSystemServiceNavigateToAnotherApp` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceSystemServiceNavigateToGoBack` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceSystemServiceNavigateToGoBackWithValue` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceSystemServiceNavigateToGoHome` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
-| `sceSystemServiceParamGetInt` | `MATCHED` | `ERROR_GUARDED` | `STATEFUL` | core_libraries_system_pure_tests.elisa |
+| `sceSystemServiceParamGetInt` | `MATCHED` | `ERROR_GUARDED` | `STATEFUL` | elisa_tests/core_libraries_system_pure_tests.elisa |
 | `sceSystemServiceParamGetString` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceSystemServicePowerTick` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceSystemServiceRaiseExceptionLocalProcess` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
-| `sceSystemServiceReceiveEvent` | `MATCHED` | `STATEFUL` | `HOST_BACKED` | core_libraries_system_pure_tests.elisa, core_libraries_system_ffi_bridge_tests.elisa |
+| `sceSystemServiceReceiveEvent` | `MATCHED` | `STATEFUL` | `HOST_BACKED` | elisa_tests/core_libraries_system_pure_tests.elisa, elisa_tests/core_libraries_system_ffi_bridge_tests.elisa |
 | `sceSystemServiceReenableMusicPlayer` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceSystemServiceReenablePartyVoice` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceSystemServiceReenableVoiceRecognition` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
@@ -540,7 +540,7 @@
 | `sceUserServiceGetDefaultNewUserGroupName` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceUserServiceGetDeletedUserInfo` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceUserServiceGetDiscPlayerFlag` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
-| `sceUserServiceGetEvent` | `MATCHED` | `STATEFUL` | `HOST_BACKED` | core_libraries_system_pure_tests.elisa, core_libraries_system_ffi_bridge_tests.elisa |
+| `sceUserServiceGetEvent` | `MATCHED` | `STATEFUL` | `HOST_BACKED` | elisa_tests/core_libraries_system_pure_tests.elisa, elisa_tests/core_libraries_system_ffi_bridge_tests.elisa |
 | `sceUserServiceGetEventCalendarType` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceUserServiceGetEventFilterTeamEvent` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceUserServiceGetEventSortEvent` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
@@ -617,7 +617,7 @@
 | `sceUserServiceGetImePointerMode` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceUserServiceGetImePredictiveTextEnabled` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceUserServiceGetImeRunCount` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
-| `sceUserServiceGetInitialUser` | `MATCHED` | `ERROR_GUARDED` | `HOST_BACKED` | core_libraries_system_pure_tests.elisa, core_libraries_system_ffi_bridge_tests.elisa |
+| `sceUserServiceGetInitialUser` | `MATCHED` | `ERROR_GUARDED` | `HOST_BACKED` | elisa_tests/core_libraries_system_pure_tests.elisa, elisa_tests/core_libraries_system_ffi_bridge_tests.elisa |
 | `sceUserServiceGetIsFakePlus` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceUserServiceGetIsQuickSignup` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceUserServiceGetIsRemotePlayAllowed` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
@@ -629,7 +629,7 @@
 | `sceUserServiceGetLastLoginOrder` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceUserServiceGetLightBarBaseBrightness` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceUserServiceGetLoginFlag` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
-| `sceUserServiceGetLoginUserIdList` | `MATCHED` | `ERROR_GUARDED` | `HOST_BACKED` | core_libraries_system_pure_tests.elisa, core_libraries_system_ffi_bridge_tests.elisa |
+| `sceUserServiceGetLoginUserIdList` | `MATCHED` | `ERROR_GUARDED` | `HOST_BACKED` | elisa_tests/core_libraries_system_pure_tests.elisa, elisa_tests/core_libraries_system_ffi_bridge_tests.elisa |
 | `sceUserServiceGetMicLevel` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceUserServiceGetMouseHandType` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceUserServiceGetMousePointerSpeed` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
@@ -722,11 +722,11 @@
 | `sceUserServiceGetTopMenuNotificationFlag` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceUserServiceGetTopMenuTutorialFlag` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceUserServiceGetTraditionalChineseInputType` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
-| `sceUserServiceGetUserColor` | `MATCHED` | `ERROR_GUARDED` | `HOST_BACKED` | core_libraries_system_pure_tests.elisa, core_libraries_system_ffi_bridge_tests.elisa |
+| `sceUserServiceGetUserColor` | `MATCHED` | `ERROR_GUARDED` | `HOST_BACKED` | elisa_tests/core_libraries_system_pure_tests.elisa, elisa_tests/core_libraries_system_ffi_bridge_tests.elisa |
 | `sceUserServiceGetUserGroupName` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceUserServiceGetUserGroupNameList` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceUserServiceGetUserGroupNum` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
-| `sceUserServiceGetUserName` | `MATCHED` | `ERROR_GUARDED` | `HOST_BACKED` | core_libraries_system_pure_tests.elisa, core_libraries_system_ffi_bridge_tests.elisa |
+| `sceUserServiceGetUserName` | `MATCHED` | `ERROR_GUARDED` | `HOST_BACKED` | elisa_tests/core_libraries_system_pure_tests.elisa, elisa_tests/core_libraries_system_ffi_bridge_tests.elisa |
 | `sceUserServiceGetUserStatus` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceUserServiceGetVibrationEnabled` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceUserServiceGetVoiceRecognitionLastUsedOsk` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
@@ -735,7 +735,7 @@
 | `sceUserServiceGetVolumeForGenericUSB` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceUserServiceGetVolumeForMorpheusSidetone` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceUserServiceGetVolumeForSidetone` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
-| `sceUserServiceInitialize` | `MATCHED` | `OTHER` | `OTHER` | core_libraries_system_pure_tests.elisa |
+| `sceUserServiceInitialize` | `MATCHED` | `OTHER` | `OTHER` | elisa_tests/core_libraries_system_pure_tests.elisa |
 | `sceUserServiceInitialize2` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceUserServiceInitializeForShellCore` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |
 | `sceUserServiceIsGuestUser` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | - |

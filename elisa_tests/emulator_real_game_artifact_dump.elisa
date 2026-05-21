@@ -1,0 +1,97 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../common/types.elisa"
+include "../core/emulator_settings.elisa"
+include "../core/emulator_state.elisa"
+include "../core/guest_exec.elisa"
+include "../core/linker.elisa"
+include "../core/user_settings.elisa"
+include "../emulator.elisa"
+include "../main.elisa"
+
+const REAL_GAME_ARTIFACT_ROOT: static u8& = "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/shadPS4/Games/CUSA07399"
+
+def RealGameArtifact_ResetRuntime() -> void:
+    Emulator_Reset()
+    Linker_Reset()
+    EmulatorState_ResetInstance()
+    settings: mutable EmulatorSettingsImpl& = EmulatorSettings_GetInstance()
+    EmulatorSettings_SetDefaultValues(settings)
+    UserSettings_Reset()
+
+def RealGameArtifact_Emit(linker: Linker&, guarded_status: s32) -> void:
+    GuestExec_EmitCusaArtifactStage()
+    GuestExec_EmitCusaArtifactSummary(linker.modules.count.u64(), linker.last_total_import_count.u64(), linker.last_unresolved_import_count.u64(), linker.last_relocated_import_count.u64(), linker.last_native_hle_resolved_count.u64(), linker.last_prx_export_resolved_count.u64(), linker.last_aerolib_fallback_resolved_count.u64(), linker.hle_registered_symbol_count.u64(), linker.modules[0].last_start_entry_addr.u64(), guest_exec_last_main_entry_addr.u64(), guarded_status, GuestExec_LastSignal(), GuestExec_LastFaultAddress().u64())
+    GuestExec_EmitCusaArtifactLastHle(GuestExec_LastHleModule(), GuestExec_LastHleSymbol())
+    GuestExec_EmitCusaArtifactKV("guest_exec_started", 1 if guest_exec_run_count > 0usize else 0)
+    GuestExec_EmitCusaArtifactKV("guest_exec_entry_reached", 1 if guest_exec_last_entry_addr != 0.uintptr() else 0)
+    GuestExec_EmitCusaArtifactKV("guest_exec_first_boundary_reached", 1 if GuestExec_HasReachedFirstBoundary() else 0)
+    GuestExec_EmitCusaArtifactKV("guest_exec_boundary_reason", GuestExec_FirstBoundaryReason().u64())
+    GuestExec_EmitCusaArtifactStringKV("guest_exec_boundary_reason_name", GuestExec_FirstBoundaryReasonName())
+    GuestExec_EmitCusaArtifactStringKV("guest_exec_host_arch", GuestExec_HostArchitecture())
+    GuestExec_EmitCusaArtifactStringKV("guest_exec_host_mode", GuestExec_HostMode())
+    GuestExec_EmitCusaArtifactKV("guest_exec_supported_native_execution", 1 if GuestExec_SupportedNativeExecution() else 0)
+    GuestExec_EmitCusaArtifactKV("guest_exec_probe_only", 1 if GuestExec_IsProbeOnly() else 0)
+    GuestExec_EmitCusaArtifactKV("guest_exec_last_pc", GuestExec_LastGuestPC().u64())
+    GuestExec_EmitCusaArtifactKV("guest_exec_last_signal", GuestExec_LastSignal().u64())
+    GuestExec_EmitCusaArtifactStringKV("guest_exec_last_module", GuestExec_LastModule())
+    GuestExec_EmitCusaArtifactStringKV("guest_exec_last_symbol", GuestExec_LastSymbol())
+    i: mutable usize = 0
+    limit: mutable usize = linker.modules.count
+    if limit > 16:
+        limit <- 16
+    while i < limit:
+        native_hle: mutable u64 = 0
+        prx_export: mutable u64 = 0
+        aerolib_fallback: mutable u64 = 0
+        malformed: mutable u64 = 0
+        unresolved: mutable u64 = 0
+        for import_index in 0..<linker.modules[i].import_symbols.count:
+            import_ref: ImportSymbolRecord = linker.modules[i].import_symbols[import_index]
+            if import_ref.resolution_kind == IMPORT_RESOLUTION_NATIVE_HLE:
+                native_hle <- native_hle + 1
+            elif import_ref.resolution_kind == IMPORT_RESOLUTION_PRX_EXPORT:
+                prx_export <- prx_export + 1
+            elif import_ref.resolution_kind == IMPORT_RESOLUTION_AEROLIB_FALLBACK:
+                aerolib_fallback <- aerolib_fallback + 1
+            elif import_ref.resolution_kind == IMPORT_RESOLUTION_MALFORMED:
+                malformed <- malformed + 1
+            elif not import_ref.resolved:
+                unresolved <- unresolved + 1
+        GuestExec_EmitCusaArtifactModule(linker.modules[i].file, linker.modules[i].host_file, 1 if linker.modules[i].is_shared_lib else 0, linker.modules[i].applied_relocation_count.u64(), Module_GetImportSymbolCount(linker.modules[i]).u64(), Module_GetResolvedImportSymbolCount(linker.modules[i]).u64(), native_hle, prx_export, aerolib_fallback, malformed, unresolved)
+        GuestExec_EmitCusaArtifactKV("module_exec_segments", linker.modules[i].executable_segment_count.u64())
+        GuestExec_EmitCusaArtifactKV("module_exec_mismatch", linker.modules[i].executable_segment_permission_mismatch_count.u64())
+        GuestExec_EmitCusaArtifactKV("module_patched_import_relocations", linker.modules[i].patched_import_relocation_count.u64())
+        i <- i + 1
+    for module_index in 0..<linker.modules.count:
+        for import_index in 0..<linker.modules[module_index].import_symbols.count:
+            import_ref: ImportSymbolRecord = linker.modules[module_index].import_symbols[import_index]
+            if import_ref.resolution_kind == IMPORT_RESOLUTION_AEROLIB_FALLBACK:
+                subsystem: mutable static u8& = "kernel"
+                if static_strlen(import_ref.library) > 0:
+                    if Linker_StringHasPrefix(import_ref.library, "libScePad"):
+                        subsystem <- "audio_input_service"
+                    elif Linker_StringHasPrefix(import_ref.library, "libSceGnm") or Linker_StringHasPrefix(import_ref.library, "libSceVideo") or Linker_StringHasPrefix(import_ref.library, "libSceFont"):
+                        subsystem <- "graphics"
+                    elif Linker_StringHasPrefix(import_ref.library, "libSceAudio") or Linker_StringHasPrefix(import_ref.library, "libSceAjm") or Linker_StringHasPrefix(import_ref.library, "libSceCommonDialog"):
+                        subsystem <- "audio_input_service"
+                GuestExec_EmitCusaArtifactImport(import_ref.source_module_path, import_ref.nid, import_ref.library, import_ref.module, subsystem, import_ref.resolution_kind.u64())
+
+def main() -> int:
+    can Memory.Allocate, Abort.Panic:
+        RealGameArtifact_ResetRuntime()
+        arena: Arena = zeroed
+        result: mutable int = -1
+        in arena:
+            args: mutable darray[static u8&] = ["shadps4", "--native-guest-exec-probe", REAL_GAME_ARTIFACT_ROOT, "--", "-RealBootSmoke"]
+            result <- Main_Run(args)
+        if result != 0:
+            return result
+        linker: mutable Linker& = Linker_GetInstance()
+        if linker.modules.count == 0:
+            return 2
+        entry: VAddr = linker.modules[0].last_start_entry_addr
+        guarded_status: s32 = GuestExec_RunMainEntryGuarded(entry, 0, null, 25.u32())
+        RealGameArtifact_Emit(linker, guarded_status)
+    return 0

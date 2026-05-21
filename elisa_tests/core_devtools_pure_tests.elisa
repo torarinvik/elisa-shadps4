@@ -1,0 +1,299 @@
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../common/string_util.elisa"
+include "../core/devtools/options.elisa"
+include "../core/devtools/layer_extra.elisa"
+include "../core/devtools/gcn/gcn.elisa"
+include "../core/devtools/widget/common.elisa"
+include "../core/devtools/widget/imgui_abi.elisa"
+include "../core/devtools/widget/imgui_memory_editor.elisa"
+include "../core/devtools/widget/text_editor.elisa"
+include "../core/devtools/widget/reg_popup.elisa"
+include "../core/devtools/widget/reg_view.elisa"
+include "../core/devtools/widget/cmd_list.elisa"
+include "../core/devtools/widget/frame_dump.elisa"
+include "../core/devtools/widget/frame_graph.elisa"
+include "../core/devtools/widget/memory_map.elisa"
+include "../core/devtools/widget/module_list.elisa"
+include "../core/devtools/widget/shader_list.elisa"
+
+@test
+def devtools_gcn_opcode_names_match_cpp_switch() -> void:
+    can Abort.Panic:
+        assert Devtools_Gcn_GetOpCodeName(IT_NOP) == "IT_NOP"
+        assert Devtools_Gcn_GetOpCodeName(IT_DRAW_INDEX_2) == "IT_DRAW_INDEX_2"
+        assert Devtools_Gcn_GetOpCodeName(IT_DMA_DATA__CI__VI) == "IT_DMA_DATA"
+        assert Devtools_Gcn_GetOpCodeName(0xFF) == "<STUB (TMP)>"
+        assert Devtools_Gcn_GetOpCodeName(0xDEAD) == "<UNK>"
+
+@test
+def devtools_gcn_register_names_match_cpp_switches() -> void:
+    can Abort.Panic:
+        assert Devtools_Gcn_GetShaderRegName(mmSPI_SHADER_PGM_LO_VS) == "mmSPI_SHADER_PGM_LO_VS"
+        assert Devtools_Gcn_GetShaderRegName(mmCOMPUTE_USER_DATA_15) == "mmCOMPUTE_USER_DATA_15"
+        assert Devtools_Gcn_GetShaderRegName(0xDEAD) == "<UNK>"
+        assert Devtools_Gcn_GetContextRegName(mmDB_SHADER_CONTROL) == "mmDB_SHADER_CONTROL"
+        assert Devtools_Gcn_GetContextRegName(mmPA_SU_POLY_OFFSET_CLAMP) == "mmPA_SU_POLY_OFFSET_CLAMP"
+        assert Devtools_Gcn_GetContextRegName(0xDEAD) == "<UNK>"
+
+@test
+def devtools_widget_draw_call_classification_matches_cpp_switch() -> void:
+    can Abort.Panic:
+        header: Devtools_Widget_PM4Header = Devtools_Widget_PM4HeaderFromU32(0xc0010000)
+        assert header.type == 3
+        assert header.count == 1
+        assert Devtools_Widget_PM4HeaderToU32(header) == 0xc0010000
+        assert Devtools_Widget_IsDrawCall(PM4ItOpcode_DrawIndex2)
+        assert Devtools_Widget_IsDrawCall(PM4ItOpcode_DrawIndexOffset2)
+        assert Devtools_Widget_IsDrawCall(PM4ItOpcode_DrawIndexAuto)
+        assert Devtools_Widget_IsDrawCall(PM4ItOpcode_DrawIndirect)
+        assert Devtools_Widget_IsDrawCall(PM4ItOpcode_DrawIndexIndirect)
+        assert Devtools_Widget_IsDrawCall(PM4ItOpcode_DispatchDirect)
+        assert Devtools_Widget_IsDrawCall(PM4ItOpcode_DispatchIndirect)
+        assert not Devtools_Widget_IsDrawCall(PM4ItOpcode_Nop)
+
+@test
+def devtools_options_parse_and_serialize_config_lines() -> void:
+    can Abort.Panic, Memory.Allocate:
+        Devtools_LoadOptionsConfig("disassembler_cli_isa=my-isa {src}")
+        Devtools_LoadOptionsConfig("disassembler_cli_spv=my-spv {src}")
+        Devtools_LoadOptionsConfig("frame_dump_render_on_collapse=1")
+        options: DevtoolsOptions = Devtools_GetOptions()
+        assert string_slice_eq(options.disassembler_cli_isa, 0, runtime_strlen("my-isa {src}"), "my-isa {src}") == 1
+        assert string_slice_eq(options.disassembler_cli_spv, 0, runtime_strlen("my-spv {src}"), "my-spv {src}") == 1
+        assert options.frame_dump_render_on_collapse
+        serialized: static u8& = Devtools_SerializeOptionsConfig()
+        assert Devtools_StringStartsWith(serialized, "disassembler_cli_isa=my-isa {src}\n")
+
+@test
+def devtools_widget_memory_and_frame_helpers_match_cpp_defaults() -> void:
+    can Abort.Panic, Memory.Allocate:
+        editor: mutable Devtools_Widget_MemoryEditor = Devtools_Widget_MemoryEditor_New()
+        assert editor.Open
+        assert editor.Cols == 16
+        assert editor.OptShowAscii
+        assert Devtools_Widget_MemoryEditor_CalcAddrDigits(editor, 0x1000, 0) == 3
+        sizes: Devtools_Widget_MemoryEditorSizes = Devtools_Widget_MemoryEditor_CalcSizes(editor, 0x1000, 0)
+        assert sizes.AddrDigitsCount == 3
+        assert sizes.PosAsciiEnd > sizes.PosAsciiStart
+        Devtools_Widget_MemoryEditor_GotoAddrAndHighlight(editor, 4, 7)
+        assert editor.GotoAddr == 4
+        assert editor.HighlightMax == 7
+        assert Devtools_Widget_MemoryEditor_ParseHexByte("7f") == 127
+        assert Devtools_Widget_MemoryEditor_ParseHexByte("GG") == -1
+        bytes: mutable array[u8, 4] = [0x41, 0x00, 0xff, 0x7f]
+        editor.Cols <- 4
+        assert streq(Devtools_Widget_MemoryEditor_FormatAddress(0x2a, 4, true), "002A") == 1
+        assert streq(Devtools_Widget_MemoryEditor_RowHex(editor, bytes[0].ref[u8&], 4, 0), "41 00 FF 7F") == 1
+        assert streq(Devtools_Widget_MemoryEditor_RowAscii(editor, bytes[0].ref[u8&], 4, 0), "A...") == 1
+        editor.OptShowHexII <- true
+        assert streq(Devtools_Widget_MemoryEditor_RowHex(editor, bytes[0].ref[u8&], 4, 0), ".A    ## 7F") == 1
+        assert Devtools_Widget_MemoryEditor_DataTypeGetSize(9) == 8
+        assert streq(Devtools_Widget_MemoryEditor_DataTypeGetDesc(8), "Float") == 1
+        entry: Devtools_Widget_MemoryMapEntry = Devtools_Widget_MemoryMapEntry(0x1000, 0x1400, Devtools_Widget_MemoryProtCpuRead | Devtools_Widget_MemoryProtCpuExec, "code")
+        assert Devtools_Widget_MemoryMapEntry_Size(entry) == 0x400
+        assert Devtools_Widget_MemoryMapEntry_IsExecutable(entry)
+        assert streq(Devtools_Widget_MemoryMapEntry_ProtLabel(entry), "R-X") == 1
+
+        graph: mutable Devtools_Widget_FrameGraph = Devtools_Widget_FrameGraph_New()
+        Devtools_Widget_FrameGraph_AddFrame(graph, 1025, 0.016)
+        assert Devtools_Widget_FrameGraph_GetFrame(graph, 1).num == 1025
+        Devtools_Widget_FrameGraph_UpdateStats(graph, 20.0)
+        assert graph.frameRate == 50.0
+        assert Devtools_Widget_FrameGraph_DtFactor(60, 1.0 / 60.0) >= 0.99
+        assert Devtools_Widget_FrameGraph_BarWidth(0.5) == 3.0
+        high_height: f32 = Devtools_Widget_FrameGraph_BarHeight(0.25)
+        assert high_height > 0.0
+        assert high_height <= Devtools_Widget_FrameGraphHeight
+        assert Devtools_Widget_FrameGraph_ColorBand(1.0) == Devtools_Widget_FrameGraphColorBand.Blue
+        assert Devtools_Widget_FrameGraph_ColorBand(0.75) == Devtools_Widget_FrameGraphColorBand.GreenYellow
+        assert Devtools_Widget_FrameGraph_ColorBand(0.25) == Devtools_Widget_FrameGraphColorBand.YellowRed
+        assert streq(Devtools_Widget_SmallIntToStr(-1), "NA") == 1
+        assert streq(Devtools_Widget_SmallIntToStr(5), "05") == 1
+        assert streq(Devtools_Widget_SmallIntToStr(42), "42") == 1
+        assert streq(Devtools_Widget_QueueTypeLabel(Devtools_Widget_QueueTypeDcb), "dcb") == 1
+        assert streq(Devtools_Widget_QueueTypeLabel(Devtools_Widget_QueueTypeAcb), "acb") == 1
+
+        dump_view: mutable Devtools_Widget_FrameDumpViewer = Devtools_Widget_FrameDumpViewer_New()
+        Devtools_Widget_FrameDumpViewer_AddQueue(dump_view, Devtools_Widget_QueueTypeCcb, 1, 0, true)
+        Devtools_Widget_FrameDumpViewer_AddQueue(dump_view, Devtools_Widget_QueueTypeDcb, 0, 0, true)
+        Devtools_Widget_FrameDumpViewer_AddQueue(dump_view, Devtools_Widget_QueueTypeAcb, 1, 2, true)
+        assert dump_view.has_queue_type[Devtools_Widget_QueueTypeCcb.usize()]
+        assert dump_view.selected_cmd == 1
+        dump_view.selected_queue_type <- Devtools_Widget_QueueTypeCcb
+        dump_view.selected_submit_num <- -1
+        dump_view.selected_queue_num2 <- -1
+        assert Devtools_Widget_FrameDumpViewer_TrySelect(dump_view)
+        assert dump_view.selected_cmd == 0
+        assert dump_view.selected_submit_num == 1
+        assert streq(Devtools_Widget_FrameDumpViewer_SelectedQueueNum2Label(dump_view), "Buffer num") == 1
+        assert Devtools_Widget_FrameDumpViewer_SetQueueType(dump_view, Devtools_Widget_QueueTypeAcb)
+        assert streq(Devtools_Widget_FrameDumpViewer_SelectedQueueNum2Label(dump_view), "Queue num") == 1
+        submits: array[bool, 32] = Devtools_Widget_FrameDumpViewer_AvailableSubmits(dump_view)
+        assert submits[1]
+        assert Devtools_Widget_FrameDumpViewer_SelectSubmitNum(dump_view, 1)
+        queues2: array[bool, 32] = Devtools_Widget_FrameDumpViewer_AvailableQueueNum2(dump_view)
+        assert queues2[2]
+        assert Devtools_Widget_FrameDumpViewer_SelectQueueNum2(dump_view, 2)
+        assert dump_view.selected_queue_num2 == 2
+
+@test
+def devtools_widget_text_and_shader_helpers_keep_editor_state() -> void:
+    can Abort.Panic, Memory.Allocate:
+        editor: mutable Devtools_Widget_TextEditor = Devtools_Widget_TextEditor_New()
+        Devtools_Widget_TextEditor_SetText(editor, "a\nb")
+        assert Devtools_Widget_TextEditor_GetTotalLines(editor) == 2
+        Devtools_Widget_TextEditor_SetCursorPosition(editor, Devtools_Widget_Coordinates(1, 1))
+        Devtools_Widget_TextEditor_InsertText(editor, "\nc")
+        assert Devtools_Widget_TextEditor_GetTotalLines(editor) == 3
+        Devtools_Widget_TextEditor_SelectAll(editor)
+        assert Devtools_Widget_TextEditor_HasSelection(editor)
+        Devtools_Widget_TextEditor_SetSelection(editor, Devtools_Widget_Coordinates(0, 1), Devtools_Widget_Coordinates(1, 1))
+        assert streq(Devtools_Widget_TextEditor_GetSelectedText(editor), "\nb") == 1
+        Devtools_Widget_TextEditor_SetCursorPosition(editor, Devtools_Widget_Coordinates(1, 0))
+        assert streq(Devtools_Widget_TextEditor_GetCurrentLineText(editor), "b") == 1
+        Devtools_Widget_TextEditor_DeleteSelection(editor)
+        assert streq(Devtools_Widget_TextEditor_GetText(editor), "a\nc") == 1
+        Devtools_Widget_TextEditor_SetCursorPosition(editor, Devtools_Widget_Coordinates(0, 1))
+        Devtools_Widget_TextEditor_InsertText(editor, "X")
+        assert streq(Devtools_Widget_TextEditor_GetText(editor), "aX\nc") == 1
+        Devtools_Widget_TextEditor_Backspace(editor)
+        assert streq(Devtools_Widget_TextEditor_GetText(editor), "a\nc") == 1
+        Devtools_Widget_TextEditor_MoveEnd(editor, false)
+        Devtools_Widget_TextEditor_Delete(editor)
+        assert streq(Devtools_Widget_TextEditor_GetText(editor), "ac") == 1
+        Devtools_Widget_TextEditor_MoveHome(editor, false)
+        Devtools_Widget_TextEditor_MoveRight(editor, 1, true)
+        assert streq(Devtools_Widget_TextEditor_GetSelectedText(editor), "a") == 1
+        Devtools_Widget_TextEditor_SetTabSize(editor, 99)
+        assert editor.tab_size == 32
+        Devtools_Widget_TextEditor_MoveBottom(editor, false)
+        assert editor.cursor_position.mColumn == 2
+        Devtools_Widget_TextEditor_MoveTop(editor, false)
+        assert editor.cursor_position.mLine == 0
+        assert editor.cursor_position.mColumn == 0
+        Devtools_Widget_TextEditor_SetText(editor, "alpha beta\ngamma")
+        Devtools_Widget_TextEditor_SetCursorPosition(editor, Devtools_Widget_Coordinates(0, 8))
+        Devtools_Widget_TextEditor_MoveLeftWord(editor, false)
+        assert editor.cursor_position.mColumn == 6
+        Devtools_Widget_TextEditor_MoveRightWord(editor, false)
+        assert editor.cursor_position.mColumn == 10
+        Devtools_Widget_TextEditor_SetCursorPosition(editor, Devtools_Widget_Coordinates(0, 7))
+        Devtools_Widget_TextEditor_SelectWordUnderCursor(editor)
+        assert streq(Devtools_Widget_TextEditor_GetSelectedText(editor), "beta") == 1
+
+        selection: mutable Devtools_Widget_ShaderSelection = Devtools_Widget_ShaderSelection_New(7)
+        Devtools_Widget_ShaderSelection_ReloadShader(selection, "OpCapability Shader", "void main() {}")
+        assert selection.index == 7
+        assert selection.open
+        assert streq(selection.isa_editor.language_name, "SPIR-V") == 1
+        assert selection.loaded_data
+        selection.is_patched <- true
+        Devtools_Widget_ShaderSelection_ApplyPatchedState(selection, "isa_a", "spv_a", "patch_bin_a", "patch_src_a")
+        assert streq(selection.isa_editor.text, "patch_bin_a") == 1
+        assert streq(selection.glsl_editor.text, "patch_src_a") == 1
+        assert not selection.glsl_editor.read_only
+        selection.is_patched <- false
+        Devtools_Widget_ShaderSelection_ApplyPatchedState(selection, "isa_b", "spv_b", "patch_bin_b", "")
+        assert streq(selection.isa_editor.text, "isa_b") == 1
+        assert streq(selection.glsl_editor.text, "spv_b") == 1
+        assert selection.glsl_editor.read_only
+        shader_list: mutable Devtools_Widget_ShaderList = zeroed
+        Devtools_Widget_ShaderList_OpenShader(shader_list, 7)
+        Devtools_Widget_ShaderList_OpenShader(shader_list, 7)
+        assert shader_list.open_shaders.count == 1
+        Devtools_Widget_ShaderList_OpenShader(shader_list, 9)
+        assert Devtools_Widget_ShaderList_FindOpenShader(shader_list, 9) == 1
+        shader_list.open_shaders[0].open <- false
+        removed_count: usize = Devtools_Widget_ShaderList_PruneClosedShaders(shader_list)
+        assert removed_count == 1
+        assert shader_list.open_shaders.count == 1
+        assert shader_list.open_shaders[0].index == 9
+
+        popup: mutable Devtools_Widget_RegPopup = Devtools_Widget_RegPopup_New()
+        Devtools_Widget_RegPopup_SetColorData(popup, "Batch 3", 0x12340000, 2)
+        assert popup.type == Devtools_Widget_RegPopupDataType.Color
+        assert popup.open
+        assert streq(popup.title, "Batch 3/CB #2") == 1
+        assert Devtools_StringStartsWith(popup.window_name, "Batch 3/CB #2###reg_popup_")
+        assert Devtools_Widget_RegPopupColorRowCount == 24
+        assert streq(Devtools_Widget_RegPopup_ColorRowLabel(0), "BASE_ADDR") == 1
+        assert streq(Devtools_Widget_RegPopup_ColorRowLabel(6), "Color0Info") == 1
+        assert streq(Devtools_Widget_RegPopup_ColorRowLabel(23), "NumFormat()") == 1
+        assert Devtools_Widget_ColorBufferSnapshot_Address(popup.color) == 0x12340000
+        popup.color.info_format <- 10
+        popup.color.slice_tile_max <- 1
+        popup.color.attrib_num_fragments_log2 <- 1
+        assert Devtools_Widget_AmdGpu_NumBitsPerBlock(10) == 32
+        assert Devtools_Widget_ColorBufferSnapshot_GetColorSliceSize(popup.color) == 1024
+        popup.color.info_format <- 14
+        assert Devtools_Widget_AmdGpu_NumBitsPerBlock(14) == 128
+        assert Devtools_Widget_ColorBufferSnapshot_GetColorSliceSize(popup.color) == 4096
+        popup.color.info_format <- 35
+        assert Devtools_Widget_AmdGpu_NumBitsPerBlock(35) == 64
+        assert Devtools_Widget_ColorBufferSnapshot_GetColorSliceSize(popup.color) == 2048
+        Devtools_Widget_RegPopup_SetDepthData(popup, "Batch 3", 0x56780000)
+        assert popup.type == Devtools_Widget_RegPopupDataType.Depth
+        assert streq(popup.title, "Batch 3/Depth") == 1
+        assert Devtools_Widget_RegPopupDepthBufferRowCount == 25
+        assert Devtools_Widget_RegPopupDepthControlRowCount == 10
+        assert streq(Devtools_Widget_RegPopup_DepthBufferRowLabel(20), "DepthAddress()") == 1
+        assert streq(Devtools_Widget_RegPopup_DepthControlRowLabel(9), "DISABLE_COLOR_WRITES_ON_DEPTH_PASS") == 1
+        assert Devtools_Widget_DepthBufferSnapshot_DepthAddress(popup.depth_buffer) == 0x56780000
+
+        reg_view: mutable Devtools_Widget_RegView = Devtools_Widget_RegView_New()
+        Devtools_Widget_RegView_SetData(reg_view, "Frame", 11)
+        assert reg_view.open
+        assert reg_view.batch_id == 11
+        assert streq(reg_view.title, "Frame/Batch 11") == 1
+        assert Devtools_StringStartsWith(reg_view.window_name, "Frame/Batch 11###reg_dump_")
+        assert Devtools_StringStartsWith(reg_view.user_data_window_name, "User data###reg_dump_")
+        assert streq(Devtools_Widget_RegView_StageName(0), "vs") == 1
+        assert streq(Devtools_Widget_RegView_StageName(5), "ls") == 1
+        assert streq(Devtools_Widget_RegView_StageName(-2), "cs") == 1
+        assert Devtools_Widget_RegView_FirstEnabledShader(0) == 0
+        assert Devtools_Widget_RegView_IsShaderStageEnabled(0, 0)
+        assert Devtools_Widget_RegView_IsShaderStageEnabled(0, 1)
+        assert not Devtools_Widget_RegView_IsShaderStageEnabled(0, 2)
+        Devtools_Widget_RegView_SetGraphicsStageMask(reg_view, 0x20)
+        assert Devtools_Widget_RegView_IsShaderStageEnabled(reg_view.stage_enable_mask, 2)
+        Devtools_Widget_RegView_SelectShader(reg_view, 2)
+        assert reg_view.selected_shader == 2
+        Devtools_Widget_RegView_SetGraphicsStageMask(reg_view, 0x4)
+        assert reg_view.selected_shader == -1
+        Devtools_Widget_RegView_SelectShader(reg_view, 2)
+        assert reg_view.selected_shader == -1
+        Devtools_Widget_RegView_SetComputeData(reg_view, "Frame", 12)
+        assert reg_view.selected_shader == -2
+        assert reg_view.last_selected_cb == -1
+        assert reg_view.is_compute
+        assert streq(Devtools_Widget_RegView_CurrentShaderName(reg_view), "cs") == 1
+
+@test
+def devtools_widget_module_and_cmd_config_helpers_are_elisa_owned() -> void:
+    can Abort.Panic, Memory.Allocate:
+        assert streq(Devtools_Widget_NormalizePrxName("libSceFoo"), "libSceFoo.prx") == 1
+        assert Devtools_Widget_IsSystemModulePath("/sys/libSceFoo.prx", "/sys")
+        before: usize = Devtools_Widget_ModuleCount()
+        Devtools_Widget_AddModuleName("libSceFoo", false)
+        assert Devtools_Widget_ModuleCount() == before + 1
+        assert Devtools_Widget_ModuleAt(before).is_sys_module
+
+        Devtools_Widget_CmdList_LoadConfig("group_batches=0")
+        Devtools_Widget_CmdList_LoadConfig("show_markers=1")
+        assert not Devtools_Widget_CmdListGroupBatches
+        assert Devtools_Widget_CmdListShowMarkers
+        serialized: static u8& = Devtools_Widget_CmdList_SerializeConfig()
+        assert Devtools_StringStartsWith(serialized, "group_batches=0\n")
+        assert Devtools_Widget_CmdList_GetNextAddress(0x1000.uintptr(), 2, 3) == 0x1030.uintptr()
+
+        viewer: mutable Devtools_Widget_CmdListViewer = Devtools_Widget_CmdList_New(0x1000.uintptr(), "test")
+        batch: Devtools_Widget_BatchInfo = Devtools_Widget_BatchInfo(1, "marker", 0, 4, 0x1000, PM4ItOpcode_DrawIndex2, false)
+        Devtools_Widget_CmdList_AddBatch(viewer, batch)
+        assert viewer.events.count == 1
+        assert streq(Devtools_Widget_CmdList_EventTypeLabel(viewer.events[0]), "draw") == 1
+        assert streq(Devtools_Widget_CmdList_QueueName(3), "ASC") == 1
+        assert streq(Devtools_Widget_CmdList_QueueName(254), "ASC") == 1
+        assert streq(Devtools_Widget_CmdList_QueueName(255), "GFX") == 1
+        assert not Devtools_Widget_CmdList_IsStateBatch(batch)
+        state_batch: Devtools_Widget_BatchInfo = Devtools_Widget_BatchInfo(2, "", 16, 24, 0, 0xff, false)
+        assert Devtools_Widget_CmdList_IsStateBatch(state_batch)

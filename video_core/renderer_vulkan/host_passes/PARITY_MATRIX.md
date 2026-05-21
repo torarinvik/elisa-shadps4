@@ -26,7 +26,7 @@ Status values:
 
 ## Validation gates
 
-- `go run ./src ../elisa-shad-ps4-from-scratch/video_core_renderer_vulkan_host_passes_pure_tests.elisa`
+- `go run ./src ../elisa-shad-ps4-from-scratch/elisa_tests/video_core_renderer_vulkan_host_passes_pure_tests.elisa`
 
 ## Deferred
 

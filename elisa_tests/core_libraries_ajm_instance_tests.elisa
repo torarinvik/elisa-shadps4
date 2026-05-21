@@ -1,0 +1,65 @@
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../core/libraries/ajm/ajm_instance.elisa"
+
+def reset_ajm_instance_state() -> void:
+    ajm_next_context_id <- 1
+    idx: mutable usize = 0
+    while idx < AJM_MAX_CONTEXTS:
+        ajm_contexts[idx].active <- false
+        ajm_contexts[idx].next_instance_slot <- 1
+        c: mutable usize = 0
+        while c < AjmCodecType_Max.usize():
+            ajm_contexts[idx].registered[c] <- false
+            c += 1
+        s: mutable usize = 0
+        while s < AJM_MAX_INSTANCES_PER_CONTEXT:
+            ajm_contexts[idx].instance_active[s] <- false
+            s += 1
+        idx += 1
+
+@test
+def ajm_instance_lifecycle_reuses_freed_slot() -> void:
+    can Abort.Panic:
+        reset_ajm_instance_state()
+        ctx: mutable u32 = 0
+        assert sceAjmInitialize(0, ctx.ref[mutable u32&]) == ORBIS_OK
+        assert sceAjmModuleRegister(ctx, AjmCodecType_Mp3Dec, 0) == ORBIS_OK
+        flags: AjmInstanceFlags = AjmInstanceFlags(1)
+
+        i0: mutable u32 = 0
+        i1: mutable u32 = 0
+        assert sceAjmInstanceCreate(ctx, AjmCodecType_Mp3Dec, flags, i0.ref[mutable u32&]) == ORBIS_OK
+        assert sceAjmInstanceCreate(ctx, AjmCodecType_Mp3Dec, flags, i1.ref[mutable u32&]) == ORBIS_OK
+        assert i0 != i1
+
+        assert sceAjmInstanceDestroy(ctx, i0) == ORBIS_OK
+        i2: mutable u32 = 0
+        assert sceAjmInstanceCreate(ctx, AjmCodecType_Mp3Dec, flags, i2.ref[mutable u32&]) == ORBIS_OK
+        assert i2 == i0
+
+@test
+def ajm_stub_parity_returns_orbis_ok() -> void:
+    can Abort.Panic:
+        reset_ajm_instance_state()
+        ctx: mutable u32 = 0
+        assert sceAjmInitialize(0, ctx.ref[mutable u32&]) == ORBIS_OK
+        assert sceAjmFinalize() == ORBIS_OK
+        assert sceAjmModuleUnregister() == ORBIS_OK
+        assert sceAjmMemoryRegister(ctx, null, 0) == ORBIS_OK
+        assert sceAjmMemoryUnregister(ctx, null) == ORBIS_OK
+        assert sceAjmInstanceExtend() == ORBIS_OK
+        assert sceAjmInstanceSwitch() == ORBIS_OK
+
+@test
+def ajm_instance_destroy_rejects_wrong_context() -> void:
+    can Abort.Panic:
+        reset_ajm_instance_state()
+        c0: mutable u32 = 0
+        c1: mutable u32 = 0
+        assert sceAjmInitialize(0, c0.ref[mutable u32&]) == ORBIS_OK
+        assert sceAjmInitialize(0, c1.ref[mutable u32&]) == ORBIS_OK
+        assert sceAjmModuleRegister(c0, AjmCodecType_Mp3Dec, 0) == ORBIS_OK
+        flags: AjmInstanceFlags = AjmInstanceFlags(1)
+        inst: mutable u32 = 0
+        assert sceAjmInstanceCreate(c0, AjmCodecType_Mp3Dec, flags, inst.ref[mutable u32&]) == ORBIS_OK
+        assert sceAjmInstanceDestroy(c1, inst) == ORBIS_AJM_ERROR_INVALID_PARAMETER

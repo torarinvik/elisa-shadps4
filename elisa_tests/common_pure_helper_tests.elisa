@@ -1,0 +1,323 @@
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../common/arch.elisa"
+include "../common/alignment.elisa"
+include "../common/div_ceil.elisa"
+include "../common/bit_field.elisa"
+include "../common/hash.elisa"
+include "../common/endian.elisa"
+include "../common/number_utils.elisa"
+include "../common/serdes.elisa"
+include "../common/string_util.elisa"
+include "../common/path_util.elisa"
+include "../common/io_file.elisa"
+include "../common/key_manager.elisa"
+include "../common/uint128.elisa"
+include "../common/memory_patcher.elisa"
+include "../common/bit_array.elisa"
+include "../common/sha1.elisa"
+include "../common/discord_rpc_handler.elisa"
+include "../common/config.elisa"
+
+@test
+def common_hash_combine_matches_cpp_constants() -> void:
+    can Abort.Panic:
+        assert HashCombine64(0x1234.u64(), 0x5678.u64()) == 0x9f5b0360.u64()
+        assert HashCombine32(0x1234.u32(), 0x5678.u32()) == 0x9e3c738a.u32()
+
+@test
+def common_alignment_helpers_match_cpp_masks() -> void:
+    can Abort.Panic:
+        assert IsAligned(0, 0)
+        assert not IsAligned(16, 0)
+        assert IsAligned(0x4000, 0x4000)
+        assert not IsAligned(0x4001, 0x4000)
+        assert Is16KBAligned(0x8000)
+        assert Is64KBAligned(0x10000)
+        assert Is2MBAligned(0x200000)
+
+@test
+def common_bit_field_unsigned_and_signed_extract() -> void:
+    can Abort.Panic:
+        field: mutable BitField = BitField(0, 3, 5)
+        BitField_set(field.ref[mutable BitField&], 17)
+        assert field.storage == 0x88.u64()
+        assert BitField_get(field.ref[BitField&]) == 17
+
+        signed_field: mutable BitField = BitField(0, 3, 5)
+        BitField_set_signed(signed_field.ref[mutable BitField&], -3)
+        assert signed_field.storage == 0xe8.u64()
+        assert BitField_get_signed(signed_field.ref[BitField&]) == -3
+
+@test
+def common_string_helpers_are_elisa_owned() -> void:
+    can Abort.Panic:
+        assert ascii_tolower('A') == 'a'
+        assert ascii_tolower('z') == 'z'
+        lowered: mutable static u8& = ""
+        can Memory.Allocate:
+            lowered <- ToLower("AbC123")
+        assert lowered[0] == 'a'
+        assert lowered[1] == 'b'
+        assert lowered[2] == 'c'
+        assert lowered[3] == '1'
+        assert runtime_strlen(lowered) == 6
+
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        part: mutable static u8& = ""
+        can Memory.Allocate:
+            part <- string_substr_in(owner, "alpha", 1, 3)
+        assert runtime_strlen(part) == 3
+        assert part[0] == 'l'
+        assert part[1] == 'p'
+        assert part[2] == 'h'
+
+@test
+def common_uint128_helpers_are_elisa_owned() -> void:
+    can Abort.Panic:
+        product: U128Product = Multiply64Into128(0xffffffffffffffff, 2)
+        assert product.low == 0xfffffffffffffffe
+        assert product.high == 1
+        assert MultiplyHigh(0xffffffffffffffff, 0xffffffffffffffff) == 0xfffffffffffffffe
+        assert MultiplyAndDivide64(100, 30, 7) == 428
+
+        divided: Div128Result = Divide128On32(U128Product(10, 1), 3)
+        assert divided.quotient == 0x5555555555555558
+        assert divided.remainder == 2
+
+@test
+def common_serdes_byte_roundtrip_is_elisa_owned() -> void:
+    can Abort.Panic:
+        writer: mutable Writer = Writer_new()
+        input: u32 = 0x12345678
+        can Memory.Allocate:
+            Writer_write(writer.ref[mutable Writer&], input.ref[u32&])
+        assert writer.archive.data.count == 4
+
+        reader: mutable Reader = Reader_new(writer.archive.data)
+        output: mutable u32 = 0
+        Reader_read(reader.ref[mutable Reader&], output.ref[mutable u32&])
+        assert output == input
+
+@test
+def common_memory_patcher_hex_helpers_are_elisa_owned() -> void:
+    can Abort.Panic:
+        hex: mutable static u8& = ""
+        can Memory.Allocate:
+            hex <- toHex(0xab.u64(), 2)
+        assert hex[0] == '0'
+        assert hex[1] == '0'
+        assert hex[2] == 'a'
+        assert hex[3] == 'b'
+        assert patcher_parse_u64("ff", 16) == 255
+        assert patcher_parse_u64("77", 8) == 63
+
+        utf8: mutable static u8& = ""
+        can Memory.Allocate:
+            utf8 <- patcher_utf8_to_hex("Az")
+        assert utf8[0] == '4'
+        assert utf8[1] == '1'
+        assert utf8[2] == '7'
+        assert utf8[3] == 'a'
+        assert utf8[4] == '0'
+        assert utf8[5] == '0'
+
+@test
+def common_memory_patcher_float_bits_are_elisa_owned() -> void:
+    can Abort.Panic:
+        assert patcher_parse_f32_bits("1.0") == 0x0000803f
+        assert patcher_parse_f32_bits("-2.5") == 0x000020c0
+        assert patcher_parse_f64_bits("1.0") == 0x000000000000f03f
+        assert patcher_parse_f64_bits("1.25e1") == 0x0000000000002940
+
+@test
+def common_memory_patcher_pattern_scan_is_elisa_owned() -> void:
+    can Abort.Panic:
+        bytes: mutable u8[8]
+        bytes[0] <- 0x10
+        bytes[1] <- 0x20
+        bytes[2] <- 0x30
+        bytes[3] <- 0x40
+        bytes[4] <- 0x50
+        bytes[5] <- 0x60
+        bytes[6] <- 0x70
+        bytes[7] <- 0x80
+        g_eboot_address <- bytes[0].ref[u8&].uintptr()
+        g_eboot_image_size <- 8
+        assert PatternScan("30 40 50") == bytes[2].ref[u8&].uintptr()
+        assert PatternScan("30 ? 50") == bytes[2].ref[u8&].uintptr()
+        assert PatternScan("aa bb") == 0.uintptr()
+
+@test
+def common_memory_patcher_apply_patch_is_elisa_owned() -> void:
+    can Abort.Panic:
+        bytes: mutable u8[8]
+        for i in 0..<8:
+            bytes[i] <- 0
+        g_eboot_address <- bytes[0].ref[u8&].uintptr()
+        g_eboot_image_size <- 8
+        direct: PatchInfo = PatchInfo("*", "direct", "2", "aabbcc", "", "", true, false, PatchMask.None, 0)
+        patcher_apply_patch(direct)
+        assert bytes[2] == 0xaa
+        assert bytes[3] == 0xbb
+        assert bytes[4] == 0xcc
+
+        endian: PatchInfo = PatchInfo("*", "endian", "0", "01020304", "", "", true, true, PatchMask.None, 0)
+        patcher_apply_patch(endian)
+        assert bytes[0] == 0x04
+        assert bytes[1] == 0x03
+        assert bytes[2] == 0x02
+        assert bytes[3] == 0x01
+
+@test
+def common_key_manager_json_helpers_are_elisa_owned() -> void:
+    can Abort.Panic:
+        bytes: mutable darray[u8] = []
+        can Memory.Allocate:
+            owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+            in owner:
+                bytes.push(0x0a)
+                bytes.push(0x10)
+                bytes.push(0xff)
+        assert bytes.count == 3
+        assert bytes[0] == 0x0a
+        assert bytes[1] == 0x10
+        assert bytes[2] == 0xff
+        manager: mutable KeyManager = KeyManager_new()
+        manager.keys.TrophyKeySet.ReleaseTrophyKey <- bytes
+        assert manager.keys.TrophyKeySet.ReleaseTrophyKey.count == 3
+
+        out: mutable static u8& = ""
+        can Memory.Allocate:
+            out <- key_manager_to_json(manager.ref[KeyManager&])
+        assert runtime_strlen(out) > 40
+
+@test
+def common_bit_array_count_uses_intrinsic_path() -> void:
+    can Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        bits: mutable BitArray = zeroed
+        can Memory.Allocate:
+            bits <- BitArray_new(owner, 128)
+        BitArray_set(bits.ref[mutable BitArray&], 1)
+        BitArray_set(bits.ref[mutable BitArray&], 64)
+        BitArray_set(bits.ref[mutable BitArray&], 127)
+        assert BitArray_count_true(bits.ref[BitArray&]) == 3
+
+@test
+def common_sha1_is_elisa_owned() -> void:
+    can Abort.Panic:
+        ctx: mutable SHA1Context = SHA1Context_new()
+        input: static u8& = "abc"
+        SHA1_Update(ctx.ref[mutable SHA1Context&], input[0].ref[u8&], 3)
+        digest: SHA1Digest = SHA1_Final(ctx.ref[mutable SHA1Context&])
+        assert digest.bytes[0] == 0xa9
+        assert digest.bytes[1] == 0x99
+        assert digest.bytes[2] == 0x3e
+        assert digest.bytes[3] == 0x36
+        assert digest.bytes[4] == 0x47
+        assert digest.bytes[5] == 0x06
+        assert digest.bytes[6] == 0x81
+        assert digest.bytes[7] == 0x6a
+        assert digest.bytes[8] == 0xba
+        assert digest.bytes[9] == 0x3e
+        assert digest.bytes[10] == 0x25
+        assert digest.bytes[11] == 0x71
+        assert digest.bytes[12] == 0x78
+        assert digest.bytes[13] == 0x50
+        assert digest.bytes[14] == 0xc2
+        assert digest.bytes[15] == 0x6c
+        assert digest.bytes[16] == 0x9c
+        assert digest.bytes[17] == 0xd0
+        assert digest.bytes[18] == 0xd8
+        assert digest.bytes[19] == 0x9d
+
+@test
+def common_number_utils_no_bitcast_shims() -> void:
+    can Abort.Panic:
+        assert U8ToUnorm(255) > 0.999
+        assert S8ToSnorm(127) > 0.999
+
+@test
+def common_number_utils_half_conversion_is_elisa_owned() -> void:
+    can Abort.Panic:
+        assert Uf16ToF32(0x3c00.u16()) > 0.999 and Uf16ToF32(0x3c00.u16()) < 1.001
+
+@test
+def common_number_utils_half_sign_is_elisa_owned() -> void:
+    can Abort.Panic:
+        assert Uf16ToF32(0xc000.u16()) < -1.999 and Uf16ToF32(0xc000.u16()) > -2.001
+
+@test
+def common_number_utils_uf10_uf11_are_elisa_owned() -> void:
+    can Abort.Panic:
+        assert Uf11ToF32(0x03c0) > 0.999 and Uf11ToF32(0x03c0) < 1.001
+        assert Uf10ToF32(0x01e0) > 0.999 and Uf10ToF32(0x01e0) < 1.001
+
+@test
+def common_discord_store_image_url_is_elisa_owned() -> void:
+    can Abort.Panic:
+        url: mutable static u8& = ""
+        can Memory.Allocate:
+            url <- make_playstation_store_image_url("CUSA00000")
+        assert runtime_strlen(url) == 101
+        assert url[0] == 'h'
+        assert url[83] == 'C'
+        assert url[91] == '0'
+        assert url[92] == '_'
+        assert url[100] == 'e'
+
+@test
+def common_path_string_helpers_are_elisa_owned() -> void:
+    can Abort.Panic:
+        assert fs_path_empty("")
+        assert fs_path_len("alpha") == 5
+        joined: mutable static u8& = ""
+        can Memory.Allocate:
+            joined <- fs_join("/tmp", "game")
+        assert runtime_strlen(joined) == 9
+        assert joined[4] == '/'
+        assert joined[5] == 'g'
+
+        filename: mutable static u8& = ""
+        can Memory.Allocate:
+            filename <- fs_filename("/tmp/CUSA00000/")
+        assert runtime_strlen(filename) == 9
+        assert filename[0] == 'C'
+        assert filename[8] == '0'
+
+@test
+def common_key_manager_alloc_is_elisa_owned() -> void:
+    can Abort.Panic:
+        ptr: mutable heap KeyManager&? = null
+        can Memory.Allocate:
+            ptr <- alloc_key_manager()
+        assert ptr != null
+        if ptr != null:
+            manager: mutable heap KeyManager& = ptr
+            assert not KeyManager_HasKeys(manager)
+
+@test
+def common_config_accessors_are_elisa_owned() -> void:
+    can Abort.Panic:
+        can Memory.Allocate:
+            setVolumeSlider(73)
+            setIsFullscreen(true)
+            setWindowWidth(1600)
+            setTrophyNotificationDuration(4.5)
+            setUserName("tester")
+        assert getVolumeSlider() == 73
+        assert getIsFullscreen()
+        assert getWindowWidth() == 1600
+        assert getTrophyNotificationDuration() > 4.49
+        assert getUserName() == "tester"
+
+@test
+def common_config_toml_value_mapping_is_elisa_owned() -> void:
+    can Abort.Panic:
+        can Memory.Allocate:
+            config_apply_toml_value("General.VolumeSlider", "55", false)
+            config_apply_toml_value("GPU.NullGpu", "true", false)
+            config_apply_toml_value("GPU.VblankFreq", "120", false)
+        assert getVolumeSlider() == 55
+        assert nullGpu()
+        assert vblankFreq() == 120

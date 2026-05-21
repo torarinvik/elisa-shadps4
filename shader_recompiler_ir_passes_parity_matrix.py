@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parent
 CPP_DIR = ROOT / "shader_recompiler/ir/passes"
 ELISA_DIR = ROOT / "shader_recompiler/ir/passes"
 HEADER = CPP_DIR / "ir_passes.h"
-TEST_FILES = [ROOT / "shader_recompiler_ir_passes_pure_tests.elisa"]
+TEST_FILES = [ROOT / "elisa_tests/shader_recompiler_ir_passes_pure_tests.elisa"]
 JSON_OUT = ROOT / "shader_recompiler_ir_passes_parity_matrix.json"
 MD_OUT = ROOT / "shader_recompiler_ir_passes_parity_matrix.md"
 

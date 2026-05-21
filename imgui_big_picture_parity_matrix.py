@@ -23,8 +23,8 @@ ELISA_FILES = [
     ROOT / "imgui/big_picture/imgui_big_picture_ffi_bridge.elisa",
 ]
 TEST_FILES = [
-    ROOT / "imgui_big_picture_pure_tests.elisa",
-    ROOT / "imgui_big_picture_ffi_bridge_tests.elisa",
+    ROOT / "elisa_tests/imgui_big_picture_pure_tests.elisa",
+    ROOT / "elisa_tests/imgui_big_picture_ffi_bridge_tests.elisa",
 ]
 JSON_OUT = ROOT / "imgui_big_picture_parity_matrix.json"
 MD_OUT = ROOT / "imgui_big_picture_parity_matrix.md"

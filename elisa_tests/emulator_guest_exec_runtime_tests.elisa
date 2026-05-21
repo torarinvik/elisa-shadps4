@@ -1,0 +1,156 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../common/types.elisa"
+include "../core/guest_exec.elisa"
+
+@test
+def emulator_guest_exec_synthetic_function_executes_and_returns() -> void:
+    can Abort.Panic:
+        if not GuestExec_IsSupported():
+            return
+        entry: VAddr = GuestExec_GetSyntheticAddAddress()
+        if entry == 0.uintptr():
+            panic("expected synthetic function address")
+        result: u64 = GuestExec_RunSyntheticFunction(entry, 40.u64(), 2.u64())
+        if result != 0x125E.u64():
+            panic("expected synthetic function result")
+
+@test
+def emulator_guest_exec_synthetic_mapped_trampoline_executes_and_returns() -> void:
+    can Abort.Panic:
+        GuestExec_ResetState()
+        if not GuestExec_IsSupported():
+            if not GuestExec_IsProbeOnly():
+                panic("expected unsupported host to report probe-only mode")
+            if GuestExec_SupportedNativeExecution():
+                panic("expected unsupported host native execution to be false")
+            return
+        GuestExec_Enable(true)
+        mapped_entry: VAddr = GuestExec_AllocateRegion(4096.u64(), 3.u32())
+        if mapped_entry == 0.uintptr():
+            panic("expected executable test page allocation")
+        code: mutable u8[6] = [0xB8u8, 0x2Au8, 0x00u8, 0x00u8, 0x00u8, 0xC3u8]
+        if not GuestExec_WriteBytes(mapped_entry, code[0].ref[void&], 6.u64()):
+            panic("expected machine code write")
+        if not GuestExec_ProtectRegion(mapped_entry, 4096.u64(), 5.u32()):
+            panic("expected executable protection")
+        result: u64 = GuestExec_RunSyntheticFunction(mapped_entry, 0.u64(), 0.u64())
+        if result != 42.u64():
+            panic("expected mapped trampoline to return 42")
+        if GuestExec_LastStatus() != 1:
+            panic("expected successful trampoline status")
+
+@test
+def emulator_guest_exec_synthetic_function_rejects_null_entry() -> void:
+    can Abort.Panic:
+        result: u64 = GuestExec_RunSyntheticFunction(0.uintptr(), 1.u64(), 2.u64())
+        if result != 0xFFFFFFFFFFFFFFFF.u64():
+            panic("expected null synthetic function rejection")
+
+@test
+def emulator_guest_exec_guard_captures_synthetic_crash() -> void:
+    can Abort.Panic:
+        if not GuestExec_IsSupported():
+            return
+        GuestExec_ResetCrashState()
+        crash_entry: VAddr = GuestExec_GetSyntheticCrashAddress()
+        if crash_entry == 0.uintptr():
+            panic("expected synthetic crash function address")
+        result: u64 = GuestExec_RunSyntheticFunction(crash_entry, 1.u64(), 2.u64())
+        if result != 0xFFFFFFFFFFFFFFFD.u64():
+            panic("expected guarded synthetic crash sentinel")
+        if GuestExec_LastStatus() >= 0:
+            panic("expected crash status")
+        if GuestExec_LastSignal() == 0:
+            panic("expected crash signal")
+
+@test
+def emulator_guest_exec_guarded_main_reports_unsupported_on_non_x64_hosts() -> void:
+    can Abort.Panic:
+        GuestExec_ResetState()
+        if GuestExec_IsSupported():
+            return
+        status: s32 = GuestExec_RunMainEntryGuarded(GuestExec_GetSyntheticAddAddress(), 0, null, 1.u32())
+        if status != -2:
+            panic("expected guarded main unsupported status")
+        if GuestExec_ClassifyFirstBoundary() != GUEST_EXEC_BOUNDARY_UNSUPPORTED_HOST:
+            panic("expected unsupported host first-boundary classification")
+        if GuestExec_FirstBoundaryReason() != GUEST_EXEC_BOUNDARY_REASON_UNSUPPORTED_HOST:
+            panic("expected unsupported host first-boundary reason")
+        if GuestExec_ExecutionStage() != GUEST_EXEC_STAGE_GUARDED_ENTRY:
+            panic("expected unsupported host to report guarded-entry stage")
+
+@test
+def emulator_guest_exec_guarded_main_null_entry_fails_safely() -> void:
+    can Abort.Panic:
+        GuestExec_ResetState()
+        status: s32 = GuestExec_RunMainEntryGuarded(0.uintptr(), 0, null, 10.u32())
+        if status != -1:
+            panic("expected null entry to return -1")
+
+@test
+def emulator_guest_exec_first_boundary_classifies_missing_handoff() -> void:
+    can Abort.Panic:
+        GuestExec_ResetState()
+        stage: s32 = GuestExec_ClassifyFirstBoundary()
+        if stage != GUEST_EXEC_BOUNDARY_NOT_REACHED:
+            panic("expected missing handoff classification")
+
+@test
+def emulator_guest_exec_first_boundary_classifies_probe_or_unsupported() -> void:
+    can Abort.Panic:
+        GuestExec_ResetState()
+        GuestExec_Enable(true)
+        GuestExec_SetProbeMode(true)
+        GuestExec_RunMainEntry(0x1234000.uintptr(), 0, null)
+        stage: s32 = GuestExec_ClassifyFirstBoundary()
+        if GuestExec_IsSupported():
+            if stage != GUEST_EXEC_BOUNDARY_ARMED_PROBE_ONLY:
+                panic("expected armed probe boundary classification")
+            if GuestExec_FirstBoundaryReason() != GUEST_EXEC_BOUNDARY_REASON_PROBE_ONLY:
+                panic("expected probe-only boundary reason")
+        else:
+            if stage != GUEST_EXEC_BOUNDARY_UNSUPPORTED_HOST:
+                panic("expected unsupported host boundary classification")
+            if GuestExec_FirstBoundaryReason() != GUEST_EXEC_BOUNDARY_REASON_UNSUPPORTED_HOST:
+                panic("expected unsupported-host boundary reason")
+
+@test
+def emulator_guest_exec_first_boundary_classifies_real_hle_boundary() -> void:
+    can Abort.Panic:
+        GuestExec_ResetState()
+        GuestExec_RecordHandoff(0x1234000.uintptr(), 0, true)
+        GuestExec_RecordFirstBoundary(GUEST_EXEC_BOUNDARY_REASON_NATIVE_HLE)
+        stage: s32 = GuestExec_ClassifyFirstBoundary()
+        if GuestExec_IsSupported():
+            if stage != GUEST_EXEC_BOUNDARY_FIRST_HLE_IMPORT:
+                panic("expected first HLE import boundary classification")
+            if GuestExec_FirstBoundaryReason() != GUEST_EXEC_BOUNDARY_REASON_NATIVE_HLE:
+                panic("expected native HLE boundary reason")
+            if GuestExec_ExecutionStage() != GUEST_EXEC_STAGE_FIRST_BOUNDARY:
+                panic("expected first-boundary execution stage")
+        else:
+            if stage != GUEST_EXEC_BOUNDARY_UNSUPPORTED_HOST:
+                panic("expected unsupported host boundary classification")
+
+@test
+def emulator_guest_exec_pre_boundary_fault_reports_crash_captured_stage() -> void:
+    can Abort.Panic:
+        if not GuestExec_IsSupported():
+            return
+        GuestExec_ResetState()
+        crash_entry: VAddr = GuestExec_GetSyntheticCrashAddress()
+        if crash_entry == 0.uintptr():
+            panic("expected synthetic crash function address")
+        status: s32 = GuestExec_RunMainEntryGuarded(crash_entry, 0, null, 10.u32())
+        if status >= 0:
+            panic("expected guarded crash status")
+        if GuestExec_LastSignal() == 0:
+            panic("expected crash signal")
+        if GuestExec_ClassifyFirstBoundary() != GUEST_EXEC_BOUNDARY_PRE_BOUNDARY_FAULT:
+            panic("expected pre-boundary fault classification")
+        if GuestExec_FirstBoundaryReason() != GUEST_EXEC_BOUNDARY_REASON_HOST_CRASH:
+            panic("expected host crash first-boundary reason")
+        if GuestExec_ExecutionStage() != GUEST_EXEC_STAGE_CRASH_CAPTURED:
+            panic("expected crash-captured execution stage")

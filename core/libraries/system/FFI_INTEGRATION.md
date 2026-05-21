@@ -6,7 +6,7 @@ Optional FFI bridges are available for runtime-backed parity:
 - `systemservice_ffi_bridge.elisa`
 
 These files are not auto-included by default. This keeps pure-Elisa builds and
-`core_libraries_system_pure_tests.elisa` deterministic and link-safe.
+`elisa_tests/core_libraries_system_pure_tests.elisa` deterministic and link-safe.
 
 ## Host Symbols
 

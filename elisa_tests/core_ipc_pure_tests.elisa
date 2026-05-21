@@ -1,0 +1,142 @@
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../common/arch.elisa"
+include "../common/types.elisa"
+include "../common/thread.elisa"
+include "../common/string_util.elisa"
+include "../core/emulator_state.elisa"
+include "../core/ipc/ipc_runtime.elisa"
+include "../core/ipc/ipc_hooks.elisa"
+include "../core/ipc/ipc.elisa"
+
+@test
+def ipc_init_sets_enabled_and_emits_capabilities() -> void:
+    can Abort.Panic, Memory.Allocate, Atomics.Store, Console.Format:
+        EmulatorState_ResetInstance()
+        state: mutable IpcState = IpcState_new()
+        lines: darray[static u8&] = IPC_Init(state, true)
+        assert IPC_IsEnabled(state)
+        assert lines.count == 4
+        assert string_slice_eq(lines[0], 0, runtime_strlen(";#IPC_ENABLED"), ";#IPC_ENABLED") == 1
+        assert string_slice_eq(lines[3], 0, runtime_strlen(";#IPC_END"), ";#IPC_END") == 1
+
+        emu: mutable EmulatorState& = EmulatorState_GetInstance()
+        assert not EmulatorState_IsAutoPatchesLoadEnabled(emu)
+
+@test
+def ipc_run_start_update_state() -> void:
+    can Abort.Panic, Memory.Allocate, Atomics.Store:
+        state: mutable IpcState = IpcState_new()
+        _ = IPC_ProcessCommand(state, "RUN", [])
+        _ = IPC_ProcessCommand(state, "START", [])
+        assert state.run_ready
+        assert IPC_WaitForStart(state)
+
+@test
+def ipc_send_restart_formats_protocol_lines() -> void:
+    can Abort.Panic, Memory.Allocate, Console.Format:
+        args: mutable darray[static u8&] = []
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            args.push("game.elf")
+            args.push("--safe")
+        lines: darray[static u8&] = IPC_SendRestart(args)
+        assert lines.count == 4
+        assert string_slice_eq(lines[0], 0, runtime_strlen(";RESTART"), ";RESTART") == 1
+        assert string_slice_eq(lines[1], 0, runtime_strlen(";2"), ";2") == 1
+        assert string_slice_eq(lines[2], 0, runtime_strlen(";game.elf"), ";game.elf") == 1
+        assert string_slice_eq(lines[3], 0, runtime_strlen(";--safe"), ";--safe") == 1
+
+@test
+def ipc_unknown_command_reports_error_line() -> void:
+    can Abort.Panic, Memory.Allocate, Atomics.Store:
+        state: mutable IpcState = IpcState_new()
+        msg: static u8& = IPC_ProcessCommand(state, "MYSTERY_CMD", [])
+        assert runtime_strlen(msg) > 0
+        assert string_slice_eq(msg, 0, runtime_strlen(";UNKNOWN CMD: "), ";UNKNOWN CMD: ") == 1
+
+@test
+def ipc_init_from_env_uses_true_flag() -> void:
+    can Abort.Panic, Memory.Allocate:
+        state_false: mutable IpcState = IpcState_new()
+        lines_false: darray[static u8&] = IPC_InitFromEnv(state_false, "false")
+        assert not IPC_IsEnabled(state_false)
+        assert lines_false.count == 0
+
+        state_true: mutable IpcState = IpcState_new()
+        lines_true: darray[static u8&] = IPC_InitFromEnv(state_true, "true")
+        assert IPC_IsEnabled(state_true)
+        assert lines_true.count == 4
+
+@test
+def ipc_run_wait_times_out_after_5_seconds_when_run_missing() -> void:
+    can Abort.Panic, Memory.Allocate:
+        state: mutable IpcState = IpcState_new()
+        _ = IPC_Init(state, true)
+        IPC_BeginRunWait(state, 1000, 5000)
+        assert IPC_UpdateRunWait(state, 5999)
+        assert not IPC_ShouldClose(state)
+        assert not IPC_UpdateRunWait(state, 6000)
+        assert IPC_ShouldClose(state)
+        assert string_slice_eq(IPC_CloseReason(state), 0, runtime_strlen("IPC: Failed to acquire run semaphore, closing process."), "IPC: Failed to acquire run semaphore, closing process.") == 1
+
+@test
+def ipc_run_wait_passes_when_run_arrives() -> void:
+    can Abort.Panic, Memory.Allocate, Atomics.Store:
+        state: mutable IpcState = IpcState_new()
+        _ = IPC_Init(state, true)
+        IPC_BeginRunWait(state, 0, 5000)
+        _ = IPC_ProcessCommand(state, "RUN", [])
+        assert IPC_CanRun(state)
+        assert IPC_UpdateRunWait(state, 99999)
+        assert not IPC_ShouldClose(state)
+
+@test
+def ipc_process_lines_handles_multiple_commands_with_arity() -> void:
+    can Abort.Panic, Memory.Allocate, Atomics.Store:
+        state: mutable IpcState = IpcState_new()
+        lines: mutable darray[static u8&] = []
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            lines.push("RUN")
+            lines.push("START")
+            lines.push("SET_FSR")
+            lines.push("1")
+            lines.push("SET_RCAS_ATTENUATION")
+            lines.push("700")
+        outputs: darray[static u8&] = IPC_ProcessLines(state, lines)
+        assert outputs.count == 0
+        assert state.run_ready
+        assert state.start_ready
+
+@test
+def ipc_parse_u64_supports_prefixed_bases() -> void:
+    assert IPC_ParseU64("42") == 42
+    assert IPC_ParseU64("0x2A") == 42
+    assert IPC_ParseU64("052") == 42
+    assert IPC_ParseU64("0b101010") == 42
+
+@test
+def ipc_process_lines_escaped_parts_follow_cpp_line_buffer_behavior() -> void:
+    can Abort.Panic, Memory.Allocate, Atomics.Store:
+        state: mutable IpcState = IpcState_new()
+        lines: mutable darray[static u8&] = []
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            lines.push("RUN\\")
+            lines.push("RUN")
+            lines.push("START\\")
+            lines.push("START")
+        outputs: darray[static u8&] = IPC_ProcessLines(state, lines)
+        assert outputs.count == 0
+        assert state.run_ready
+        assert state.start_ready
+
+@test
+def ipc_process_stream_frame_emits_close_reason_on_timeout() -> void:
+    can Abort.Panic, Memory.Allocate, Atomics.Store:
+        state: mutable IpcState = IpcState_new()
+        _ = IPC_Init(state, true)
+        IPC_BeginRunWait(state, 0, 5)
+        out: darray[static u8&] = IPC_ProcessStreamFrame(state, 5, [])
+        assert out.count == 1
+        assert string_slice_eq(out[0], 0, runtime_strlen("IPC: Failed to acquire run semaphore, closing process."), "IPC: Failed to acquire run semaphore, closing process.") == 1

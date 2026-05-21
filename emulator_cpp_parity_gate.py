@@ -119,7 +119,7 @@ def all_steps() -> list[Step]:
         compiler_test("core-libraries-pad-tests", slow=True, category="audio-input-system"),
     ]
     if host_audio_backends_present():
-        steps.append(compiler_test_source("core_libraries_audioout_isolated.elisa", slow=True, category="audio"))
+        steps.append(compiler_test_source("elisa_tests/core_libraries_audioout_isolated.elisa", slow=True, category="audio"))
     return steps
 
 

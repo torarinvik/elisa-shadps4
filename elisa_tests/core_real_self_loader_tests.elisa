@@ -1,0 +1,184 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../common/types.elisa"
+include "../core/hle_libs.elisa"
+
+const REAL_SELF_TEST_EBOOT: static u8& = "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/shadPS4/Games/CUSA05716/eboot.bin"
+const REAL_SELF_TEST_APP0_ROOT: static u8& = "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/shadPS4/Games/CUSA05716"
+const REAL_SELF_TEST_LIBC_PRX: static u8& = "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/shadPS4/Games/CUSA05716/sce_module/libc.prx"
+
+def RealSelfLoader_Check(cond: bool, message: static u8&) -> void:
+    if not cond:
+        panic(message)
+
+def RealSelfLoader_CheckMappedImageMirror(module: Module&) -> bool:
+    if module.image.count == 0:
+        return false
+    max_scan: mutable usize = module.image.count
+    if max_scan > 4096:
+        max_scan <- 4096
+    i: mutable usize = 0
+    found: mutable bool = false
+    while i < max_scan and not found:
+        guest_byte: u8 = MemoryManager_ReadU8(Memory_Instance(), module.base_virtual_addr + module.image_virtual_base.uintptr() + i.uintptr())
+        if guest_byte == module.image[i]:
+            found <- true
+        i <- i + 1
+    return found
+
+def RealSelfLoader_CheckMappedRelocationMirror(module: Module&) -> bool:
+    entry_size: u64 = Module_GetRelaEntrySize(module)
+    if entry_size == 0:
+        return false
+    found: mutable bool = false
+    i: mutable usize = 0
+    rela_count: usize = Module_GetRelaRelocationCount(module)
+    while i < rela_count and not found:
+        offset: u64 = module.dynamic_info.rela_table_offset + (i.u64() * entry_size)
+        rel: elf_relocation = Module_ReadRelocationAt(module, offset.usize())
+        address: VAddr = module.base_virtual_addr + rel.rel_offset.uintptr()
+        image_value: u64 = Module_ReadImageU64(module, address.u64())
+        memory_value: u64 = MemoryManager_ReadU64(Memory_Instance(), address)
+        if image_value != 0 and image_value == memory_value:
+            found <- true
+        i <- i + 1
+    j: mutable usize = 0
+    jmp_count: usize = Module_GetJmpRelocationCount(module)
+    while j < jmp_count and not found:
+        offset: u64 = module.dynamic_info.jmp_relocation_offset + (j.u64() * entry_size)
+        rel: elf_relocation = Module_ReadRelocationAt(module, offset.usize())
+        address: VAddr = module.base_virtual_addr + rel.rel_offset.uintptr()
+        image_value: u64 = Module_ReadImageU64(module, address.u64())
+        memory_value: u64 = MemoryManager_ReadU64(Memory_Instance(), address)
+        if image_value != 0 and image_value == memory_value:
+            found <- true
+        j <- j + 1
+    return found
+
+def RealSelfLoader_FindAnyDefinedNid(module: Module&, out_nid: mutable static u8&) -> bool:
+    out_nid <- ""
+    if module.dynamic_info.symbol_table_offset == 0 or module.dynamic_info.symbol_table_total_size == 0:
+        return false
+    entry_size: mutable u64 = module.dynamic_info.symbol_table_entries_size
+    if entry_size == 0:
+        entry_size <- size_of(elf_symbol).u64()
+    symbol_count: usize = (module.dynamic_info.symbol_table_total_size / entry_size).usize()
+    i: mutable usize = 0
+    while i < symbol_count:
+        info: mutable u8 = 0
+        value: mutable u64 = 0
+        if Module_GetSymbolInfoByIndex(module, i.u32(), info.ref[mutable u8&], value.ref[mutable u64&]):
+            name: static u8& = Module_GetSymbolNameByIndex(module.ref[mutable Module&], i.u32())
+            if static_strlen(name) > 0:
+                addr: mutable u64 = 0
+                if Module_FindDefinedSymbolAddress(module.ref[mutable Module&], name, addr.ref[mutable u64&]) and addr > 0:
+                    out_nid <- name
+                    return true
+        i <- i + 1
+    return false
+
+@test
+def real_self_loader_parses_dynamic_imports_and_relocations() -> void:
+    can Memory.Allocate, Abort.Panic:
+        Linker_Reset()
+        linker: mutable Linker& = Linker_GetInstance()
+        index: s32 = Linker_LoadModuleFromHost(linker, "/app0/eboot.bin", REAL_SELF_TEST_EBOOT, false)
+        RealSelfLoader_Check(index >= 0, "expected real eboot module index")
+        RealSelfLoader_Check(linker.modules.count == 1, "expected one loaded real module")
+        module: Module = linker.modules[index.usize()]
+        RealSelfLoader_Check(streq(module.host_file, REAL_SELF_TEST_EBOOT) == 1, "expected host eboot path to be preserved")
+        RealSelfLoader_Check(Module_GetImportSymbolCount(module) > 0, "expected real eboot imports")
+        RealSelfLoader_Check(module.dynamic_info.str_table_size > 0, "expected SCE string table metadata")
+        RealSelfLoader_Check(module.dynamic_info.symbol_table_total_size > 0, "expected SCE symbol table metadata")
+        RealSelfLoader_Check(Module_GetRelaRelocationCount(module) + Module_GetJmpRelocationCount(module) > 0, "expected SCE relocation metadata")
+        RealSelfLoader_Check(module.image.count > 0, "expected PT_LOAD image bytes")
+        RealSelfLoader_Check(module.base_size > 0, "expected calculated module base size")
+        RealSelfLoader_Check(module.aligned_base_size >= module.base_size, "expected aligned module base size")
+        RealSelfLoader_Check(module.entry_virtual_addr > 0.uintptr(), "expected ELF entry virtual address")
+        RealSelfLoader_Check(Module_GetEntryAddress(module, 0.uintptr()) == module.base_virtual_addr + module.entry_virtual_addr, "expected entry address to include module base")
+        RealSelfLoader_Check(module.mapped_segment_count > 0, "expected mapped PT_LOAD segments")
+        RealSelfLoader_Check(Memory_Instance().vma_areas.count > module.mapped_segment_count.usize(), "expected module reservation and trampoline mappings")
+        RealSelfLoader_Check(Memory_Instance().mapped_bytes.count >= module.mapped_segment_count.usize(), "expected mapped byte backing for module segments")
+        RealSelfLoader_Check(RealSelfLoader_CheckMappedImageMirror(module), "expected loaded image bytes to mirror into guest memory backing")
+        found: mutable Module&? = Linker_FindByAddress(linker, module.base_virtual_addr)
+        RealSelfLoader_Check(found != null, "expected linker address lookup to find mapped module")
+        Linker_RelocateAllImports(linker)
+        relocated: Module = linker.modules[index.usize()]
+        RealSelfLoader_Check(relocated.applied_relocation_count > 0, "expected at least one relocation write into the loaded image")
+        RealSelfLoader_Check(RealSelfLoader_CheckMappedRelocationMirror(relocated), "expected relocation writes to mirror into guest memory backing")
+
+@test
+def real_self_loader_loads_guest_prx_through_dynamic_module_path() -> void:
+    can Memory.Allocate, Abort.Panic:
+        Linker_Reset()
+        linker: mutable Linker& = Linker_GetInstance()
+        HLELibs_InitForLinker(linker)
+        Linker_SetApp0HostRoot(linker, REAL_SELF_TEST_APP0_ROOT)
+        start_result: mutable int = -99
+        handle: s32 = Linker_LoadAndStartGuestModule(linker, "/app0/sce_module/libc.prx", 0u64, null, start_result.ref[mutable int&])
+        RealSelfLoader_Check(handle >= 0, "expected real libc.prx dynamic module handle")
+        RealSelfLoader_Check(start_result == 0, "expected real libc.prx start result")
+        RealSelfLoader_Check(linker.modules.count == 1, "expected one dynamically loaded PRX")
+        RealSelfLoader_Check(linker.last_loaded_dynamic_host_path != null, "expected resolved host path for real PRX")
+        RealSelfLoader_Check(streq(linker.last_loaded_dynamic_host_path, REAL_SELF_TEST_LIBC_PRX) == 1, "expected real PRX host path")
+        RealSelfLoader_Check(linker.last_started_module_index == handle, "expected real PRX start index")
+        module: Module = linker.modules[handle.usize()]
+        RealSelfLoader_Check(streq(module.file, "/app0/sce_module/libc.prx") == 1, "expected guest PRX path to remain module identity")
+        RealSelfLoader_Check(streq(module.host_file, REAL_SELF_TEST_LIBC_PRX) == 1, "expected real PRX host file to be preserved")
+        RealSelfLoader_Check(module.is_shared_lib, "expected dynamic PRX to be marked shared")
+        RealSelfLoader_Check(module.is_valid, "expected real PRX module to be valid")
+        RealSelfLoader_Check(module.dynamic_segment.count > 0, "expected real PRX dynamic segment")
+        RealSelfLoader_Check(module.dynamic_data.count > 0, "expected real PRX dynamic data")
+        RealSelfLoader_Check(module.image.count > 0, "expected real PRX image bytes")
+        RealSelfLoader_Check(module.mapped_segment_count > 0, "expected real PRX mapped segments")
+        RealSelfLoader_Check(module.dynamic_info.str_table_size > 0, "expected real PRX string table metadata")
+        RealSelfLoader_Check(Module_GetImportSymbolCount(module) > 0, "expected real PRX imports")
+        RealSelfLoader_Check(Module_GetResolvedImportSymbolCount(module) == Module_GetImportSymbolCount(module), "expected real PRX imports to resolve before start")
+        RealSelfLoader_Check(module.applied_relocation_count > 0usize, "expected real PRX relocations before start")
+
+@test
+def real_self_loader_import_symbol_parsing_and_resolution_kinds() -> void:
+    can Memory.Allocate, Abort.Panic:
+        Linker_Reset()
+        linker: mutable Linker& = Linker_GetInstance()
+        HLELibs_InitForLinker(linker)
+        scratch_module: mutable Module = Module_New("/app0/eboot.bin", "/app0/eboot.bin", MODULE_LOAD_BASE.uintptr(), false)
+
+        parsed_nid: mutable static u8& = ""
+        parsed_lib: mutable static u8& = ""
+        parsed_mod: mutable static u8& = ""
+        RealSelfLoader_Check(Module_ParseImportSymbol("D4yla3vx4tY#libkernel#libkernel", parsed_nid.ref[mutable static u8&], parsed_lib.ref[mutable static u8&], parsed_mod.ref[mutable static u8&]), "expected full nid#lib#module parse success")
+        RealSelfLoader_Check(streq(parsed_nid, "D4yla3vx4tY") == 1, "expected parsed nid")
+        RealSelfLoader_Check(streq(parsed_lib, "libkernel") == 1, "expected parsed library")
+        RealSelfLoader_Check(streq(parsed_mod, "libkernel") == 1, "expected parsed module")
+
+        parsed_nid <- ""
+        parsed_lib <- ""
+        parsed_mod <- ""
+        RealSelfLoader_Check(Module_ParseImportSymbol("D4yla3vx4tY", parsed_nid.ref[mutable static u8&], parsed_lib.ref[mutable static u8&], parsed_mod.ref[mutable static u8&]), "expected nid-only parse success")
+        RealSelfLoader_Check(streq(parsed_nid, "D4yla3vx4tY") == 1, "expected nid-only preserved")
+        RealSelfLoader_Check(static_strlen(parsed_lib) == 0 and static_strlen(parsed_mod) == 0, "expected empty lib/module for nid-only")
+
+        resolved_addr: mutable u64 = 0
+        resolved_kind: mutable u8 = IMPORT_RESOLUTION_UNRESOLVED
+        RealSelfLoader_Check(Linker_Resolve(linker, "D4yla3vx4tY", scratch_module.ref[mutable Module&], resolved_addr.ref[mutable u64&], resolved_kind.ref[mutable u8&]), "expected HLE nid resolve")
+        RealSelfLoader_Check(resolved_kind == IMPORT_RESOLUTION_NATIVE_HLE, "expected HLE kind by nid")
+
+        resolved_addr <- 0
+        resolved_kind <- IMPORT_RESOLUTION_UNRESOLVED
+        RealSelfLoader_Check(Linker_Resolve(linker, "D4yla3vx4tY#libkernel#libkernel", scratch_module.ref[mutable Module&], resolved_addr.ref[mutable u64&], resolved_kind.ref[mutable u8&]), "expected HLE full-symbol resolve")
+        RealSelfLoader_Check(resolved_kind == IMPORT_RESOLUTION_NATIVE_HLE, "expected HLE kind by full symbol")
+
+        resolved_addr <- 0
+        resolved_kind <- IMPORT_RESOLUTION_UNRESOLVED
+        RealSelfLoader_Check(not Linker_Resolve(linker, "", scratch_module.ref[mutable Module&], resolved_addr.ref[mutable u64&], resolved_kind.ref[mutable u8&]), "expected empty symbol unresolved")
+        RealSelfLoader_Check(resolved_kind == IMPORT_RESOLUTION_MALFORMED, "expected malformed kind for empty symbol")
+
+        resolved_addr <- 0
+        resolved_kind <- IMPORT_RESOLUTION_UNRESOLVED
+        RealSelfLoader_Check(Linker_Resolve(linker, "ZZZUnknownNid123", scratch_module.ref[mutable Module&], resolved_addr.ref[mutable u64&], resolved_kind.ref[mutable u8&]), "expected unknown symbol fallback resolve")
+        RealSelfLoader_Check(resolved_kind == IMPORT_RESOLUTION_AEROLIB_FALLBACK, "expected fallback kind for unknown symbol")
+
+        index: s32 = Linker_LoadModuleFromHost(linker, "/app0/eboot.bin", REAL_SELF_TEST_EBOOT, false)
+        RealSelfLoader_Check(index >= 0, "expected real eboot for PRX-export test")

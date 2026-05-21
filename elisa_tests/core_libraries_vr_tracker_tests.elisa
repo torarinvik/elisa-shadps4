@@ -1,0 +1,70 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../core/libraries/vr_tracker/vr_tracker.elisa"
+
+@test
+def vr_tracker_query_memory_validation_and_defaults() -> void:
+    can Abort.Panic:
+        p: mutable OrbisVrTrackerQueryMemoryParam
+        r: mutable OrbisVrTrackerQueryMemoryResult
+        p.calibration_settings.hmd_position <- ORBIS_VR_TRACKER_CALIBRATION_MANUAL
+        p.calibration_settings.pad_position <- ORBIS_VR_TRACKER_CALIBRATION_MANUAL
+        p.calibration_settings.move_position <- ORBIS_VR_TRACKER_CALIBRATION_MANUAL
+        p.calibration_settings.gun_position <- ORBIS_VR_TRACKER_CALIBRATION_MANUAL
+
+        assert sceVrTrackerQueryMemory(null, r.ref[mutable OrbisVrTrackerQueryMemoryResult&]) == ORBIS_VR_TRACKER_ERROR_ARGUMENT_INVALID
+        assert sceVrTrackerQueryMemory(p.ref[OrbisVrTrackerQueryMemoryParam&], null) == ORBIS_VR_TRACKER_ERROR_ARGUMENT_INVALID
+
+        p.size <- size_of(OrbisVrTrackerQueryMemoryParam).u32()
+        p.profile <- ORBIS_VR_TRACKER_PROFILE_000
+        assert sceVrTrackerQueryMemory(p.ref[OrbisVrTrackerQueryMemoryParam&], r.ref[mutable OrbisVrTrackerQueryMemoryResult&]) == ORBIS_OK
+        assert r.direct_memory_onion_size == ORBIS_VR_TRACKER_BASE_ONION_SIZE
+
+        p.calibration_settings.move_position <- ORBIS_VR_TRACKER_CALIBRATION_AUTO
+        assert sceVrTrackerQueryMemory(p.ref[OrbisVrTrackerQueryMemoryParam&], r.ref[mutable OrbisVrTrackerQueryMemoryResult&]) == ORBIS_OK
+        assert r.direct_memory_onion_size == ORBIS_VR_TRACKER_BASE_ONION_SIZE * 2u32
+
+@test
+def vr_tracker_init_register_time_and_term_flow() -> void:
+    can Abort.Panic:
+        assert sceVrTrackerTerm() == ORBIS_VR_TRACKER_ERROR_NOT_INIT
+
+        init: mutable OrbisVrTrackerInitParam
+        init.size <- size_of(OrbisVrTrackerInitParam).u32()
+        init.profile <- ORBIS_VR_TRACKER_PROFILE_000
+        init.direct_memory_onion <- 1u64.cast[void&?]
+        init.direct_memory_onion_size <- ORBIS_VR_TRACKER_BASE_ONION_SIZE
+        init.direct_memory_onion_alignment <- ORBIS_VR_TRACKER_MEMORY_ALIGNMENT
+        init.direct_memory_garlic <- 1u64.cast[void&?]
+        init.direct_memory_garlic_size <- ORBIS_VR_TRACKER_GARLIC_SIZE
+        init.direct_memory_garlic_alignment <- ORBIS_VR_TRACKER_MEMORY_ALIGNMENT
+        init.work_memory <- 1u64.cast[void&?]
+        init.work_memory_size <- ORBIS_VR_TRACKER_WORK_SIZE
+        init.work_memory_alignment <- ORBIS_VR_TRACKER_MEMORY_ALIGNMENT
+        init.gpu_pipe_id <- 0
+        init.gpu_queue_id <- 0
+
+        assert sceVrTrackerInit(init.ref[OrbisVrTrackerInitParam&]) == ORBIS_OK
+        assert sceVrTrackerInit(init.ref[OrbisVrTrackerInitParam&]) == ORBIS_VR_TRACKER_ERROR_ALREADY_INITIALIZED
+
+        t0: mutable u64 = 0u64
+        t1: mutable u64 = 0u64
+        assert sceVrTrackerGetTime(t0.ref[mutable u64&]) == ORBIS_OK
+        assert sceVrTrackerGetTime(t1.ref[mutable u64&]) == ORBIS_OK
+        assert t1 == t0 + 1u64
+
+        assert sceVrTrackerRegisterDevice(ORBIS_VR_TRACKER_DEVICE_DUALSHOCK4, 42) == ORBIS_OK
+        assert sceVrTrackerRegisterDevice(ORBIS_VR_TRACKER_DEVICE_DUALSHOCK4, 43) == ORBIS_VR_TRACKER_ERROR_DEVICE_ALREADY_REGISTERED
+
+        rec: mutable OrbisVrTrackerRecalibrateParam
+        rec.size <- size_of(OrbisVrTrackerRecalibrateParam).u32()
+        rec.device_type <- ORBIS_VR_TRACKER_DEVICE_DUALSHOCK4
+        assert sceVrTrackerRecalibrate(rec.ref[OrbisVrTrackerRecalibrateParam&]) == ORBIS_OK
+
+        assert sceVrTrackerUnregisterDevice(42) == ORBIS_OK
+        assert sceVrTrackerUnregisterDevice(42) == ORBIS_VR_TRACKER_ERROR_ARGUMENT_INVALID
+
+        assert sceVrTrackerTerm() == ORBIS_OK
+        assert sceVrTrackerGetTime(t0.ref[mutable u64&]) == ORBIS_VR_TRACKER_ERROR_NOT_INIT

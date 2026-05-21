@@ -36,6 +36,6 @@ Status values:
 - None currently identified in `core/file_sys` parity suites and emit gates.
 
 ## Validation gates
-- `go run ./src ../elisa-shad-ps4-from-scratch/core_file_sys_pure_tests.elisa`
-- `go run ./src ../elisa-shad-ps4-from-scratch/core_file_sys_devices_pure_tests.elisa`
+- `go run ./src ../elisa-shad-ps4-from-scratch/elisa_tests/core_file_sys_pure_tests.elisa`
+- `go run ./src ../elisa-shad-ps4-from-scratch/elisa_tests/core_file_sys_devices_pure_tests.elisa`
 - `go run ./src -emit llvm ../elisa-shad-ps4-from-scratch/core_port.elisa`

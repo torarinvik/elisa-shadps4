@@ -1,0 +1,222 @@
+include "../core/libraries/audio/audio_port.elisa"
+include "../core/libraries/audio/audioout_error.elisa"
+include "../core/libraries/audio/audioin_error.elisa"
+include "../core/libraries/audio/audio_ffi.elisa"
+include "../core/libraries/audio/audioout_nids.elisa"
+include "../core/libraries/audio/audioin_nids.elisa"
+include "../core/libraries/audio/audioout.elisa"
+include "../core/libraries/audio/audioin.elisa"
+
+extern memcpy(dest: mutable void&, src: void&, n: usize) -> mutable void&
+extern memset(dest: mutable void&, val: int, n: usize) -> mutable void&
+extern puts(text: u8&) -> int effects[Console.Write]
+
+def assert(condition: bool) -> void:
+    can Abort.Panic:
+        if not condition:
+            panic("assert failed")
+
+global mutable audio_sdl_available: bool = false
+global mutable audio_openal_available: bool = false
+global mutable audio_output_opened: bool = false
+global mutable audio_input_opened: bool = false
+
+def audio_emit_backend_status() -> void:
+    can Console.Write:
+        _ = puts("CUSA07399_ARTIFACT audio_sdl_available=1" if audio_sdl_available else "CUSA07399_ARTIFACT audio_sdl_available=0")
+        _ = puts("CUSA07399_ARTIFACT audio_openal_available=1" if audio_openal_available else "CUSA07399_ARTIFACT audio_openal_available=0")
+        _ = puts("CUSA07399_ARTIFACT audio_output_opened=1" if audio_output_opened else "CUSA07399_ARTIFACT audio_output_opened=0")
+        _ = puts("CUSA07399_ARTIFACT audio_input_opened=1" if audio_input_opened else "CUSA07399_ARTIFACT audio_input_opened=0")
+
+def audio_try_probe_sdl() -> bool:
+    if audio_sdl_available:
+        return true
+    if AudioFFI_InitSDL() != ORBIS_OK:
+        return false
+    audio_sdl_available <- true
+    return true
+
+def audio_try_probe_openal() -> bool:
+    if audio_openal_available:
+        return true
+    if not AudioFFI_ProbeOpenAL():
+        return false
+    audio_openal_available <- true
+    return true
+
+def audio_skip_backend_sdl() -> void:
+    can Console.Write:
+        _ = puts("AUDIO_RUNTIME_SKIP backend unavailable: SDL3")
+
+def audio_skip_backend_openal() -> void:
+    can Console.Write:
+        _ = puts("AUDIO_RUNTIME_SKIP backend unavailable: OpenAL")
+
+@test
+def audioout_open_validation_order_and_errors() -> void:
+    can Abort.Panic:
+        assert sceAudioOutOpen(0, 0, 0, 256u32, 48000u32, 1u32) == ORBIS_AUDIO_OUT_ERROR_NOT_INIT
+        assert sceAudioOutInit() == ORBIS_OK
+        assert sceAudioOutInit() == ORBIS_AUDIO_OUT_ERROR_ALREADY_INIT
+        assert sceAudioOutOpen(0, 0, 0, 0u32, 48000u32, 1u32) == ORBIS_AUDIO_OUT_ERROR_INVALID_SIZE
+        assert sceAudioOutOpen(0, 0, 0, 256u32, 44100u32, 1u32) == ORBIS_AUDIO_OUT_ERROR_INVALID_SAMPLE_FREQ
+        assert sceAudioOutOpen(0, 99, 0, 256u32, 48000u32, 1u32) == ORBIS_AUDIO_OUT_ERROR_INVALID_PORT_TYPE
+        AudioOut_ShutdownBackends()
+
+@test
+def audioout_handle_and_batch_validation() -> void:
+    can Abort.Panic:
+        assert sceAudioOutInit() == ORBIS_OK
+        if not audio_try_probe_sdl():
+            audio_skip_backend_sdl()
+            audio_emit_backend_status()
+            return
+        h: s32 = sceAudioOutOpen(0, 0, 0, 256u32, 48000u32, 1u32)
+        assert h > 0
+        bad: s32 = 0x10000000
+        assert sceAudioOutClose(bad) == ORBIS_AUDIO_OUT_ERROR_INVALID_PORT
+        assert sceAudioOutGetLastOutputTime(h, null) == ORBIS_AUDIO_OUT_ERROR_INVALID_POINTER
+        params: mutable u8[32]
+        _ = memset(params[0].ref[mutable u8&] as mutable void&, 0, 32usize)
+        _ = memcpy(params[0].ref[mutable u8&] as mutable void&, h.ref[s32&] as void&, 4usize)
+        assert sceAudioOutOutputs(params[0].ref[mutable u8&] as void&, 1u32) >= 0
+        audio_output_opened <- true
+        audio_emit_backend_status()
+        assert sceAudioOutClose(h) == ORBIS_OK
+        AudioOut_ShutdownBackends()
+
+@test
+def audioout_outputs_param_decode_preserves_buffer_pointer_array() -> void:
+    can Abort.Panic:
+        assert sceAudioOutInit() == ORBIS_OK
+        if not audio_try_probe_sdl():
+            audio_skip_backend_sdl()
+            audio_emit_backend_status()
+            return
+        h0: s32 = sceAudioOutOpen(0, 0, 0, 256u32, 48000u32, 1u32)
+        h1: s32 = sceAudioOutOpen(0, 0, 0, 256u32, 48000u32, 1u32)
+        assert h0 > 0
+        assert h1 > 0
+
+        b0: mutable u8[1024]
+        b1: mutable u8[1024]
+        _ = memset(b0[0].ref[mutable u8&] as mutable void&, 0, 1024usize)
+        _ = memset(b1[0].ref[mutable u8&] as mutable void&, 0, 1024usize)
+
+        params: mutable u8[32]
+        _ = memset(params[0].ref[mutable u8&] as mutable void&, 0, 32usize)
+        _ = memcpy((params[0].ref[mutable u8&] + 0usize) as mutable void&, h0.ref[s32&] as void&, 4usize)
+        p0: void& = b0[0].ref[mutable u8&] as void&
+        _ = memcpy((params[0].ref[mutable u8&] + 8usize) as mutable void&, p0.ref[void&] as void&, 8usize)
+        _ = memcpy((params[0].ref[mutable u8&] + 16usize) as mutable void&, h1.ref[s32&] as void&, 4usize)
+        p1: void& = b1[0].ref[mutable u8&] as void&
+        _ = memcpy((params[0].ref[mutable u8&] + 24usize) as mutable void&, p1.ref[void&] as void&, 8usize)
+
+        t0_before: mutable u64 = 0u64
+        t1_before: mutable u64 = 0u64
+        assert sceAudioOutGetLastOutputTime(h0, t0_before.ref[mutable u64&]) == ORBIS_OK
+        assert sceAudioOutGetLastOutputTime(h1, t1_before.ref[mutable u64&]) == ORBIS_OK
+
+        assert sceAudioOutOutputs(params[0].ref[mutable u8&] as void&, 2u32) == 256
+
+        t0_after: mutable u64 = 0u64
+        t1_after: mutable u64 = 0u64
+        assert sceAudioOutGetLastOutputTime(h0, t0_after.ref[mutable u64&]) == ORBIS_OK
+        assert sceAudioOutGetLastOutputTime(h1, t1_after.ref[mutable u64&]) == ORBIS_OK
+        assert t0_after == t0_before + 1u64
+        assert t1_after == t1_before + 1u64
+        audio_output_opened <- true
+        audio_emit_backend_status()
+
+        assert sceAudioOutClose(h0) == ORBIS_OK
+        assert sceAudioOutClose(h1) == ORBIS_OK
+        AudioOut_ShutdownBackends()
+
+@test
+def audioin_open_input_silentstate_cycle() -> void:
+    can Abort.Panic:
+        assert sceAudioInInit() == ORBIS_OK
+        if not audio_try_probe_sdl():
+            audio_skip_backend_sdl()
+            audio_emit_backend_status()
+            return
+        hi: s32 = sceAudioInOpen(0, 0u32, 0u32, 256u32, 16000u32, 0u32)
+        assert hi > 0
+        assert sceAudioInInput(hi, null) == ORBIS_AUDIO_IN_ERROR_INVALID_POINTER
+        buf: mutable u8[1024]
+        _ = memset(buf[0].ref[mutable u8&] as mutable void&, 0, 1024usize)
+        r: s32 = sceAudioInInput(hi, buf[0].ref[mutable u8&])
+        assert r >= 0
+        s: s32 = sceAudioInGetSilentState(hi)
+        assert s == 0 or s == ORBIS_AUDIO_IN_SILENT_STATE_DEVICE_NONE
+        audio_input_opened <- true
+        audio_emit_backend_status()
+        assert sceAudioInClose(hi) == ORBIS_OK
+        AudioIn_ShutdownBackends()
+
+@test
+def audioin_silent_state_reports_absent_device() -> void:
+    can Abort.Panic:
+        assert sceAudioInInit() == ORBIS_OK
+        if not audio_try_probe_sdl():
+            audio_skip_backend_sdl()
+            audio_emit_backend_status()
+            return
+        hi: s32 = sceAudioInOpen(0, 0u32, 0u32, 256u32, 16000u32, 0u32)
+        assert hi > 0
+        pid: s32 = audioin_get_port_id(hi)
+        assert pid >= 0
+        audioin_backend_open[pid] <- false
+        audio_input_opened <- true
+        audio_emit_backend_status()
+        assert sceAudioInGetSilentState(hi) == ORBIS_AUDIO_IN_SILENT_STATE_DEVICE_NONE
+        assert sceAudioInClose(hi) == ORBIS_OK
+        AudioIn_ShutdownBackends()
+
+@test
+def audioout_openal_queue_restart_smoke() -> void:
+    can Abort.Panic:
+        if not audio_try_probe_openal():
+            audio_skip_backend_openal()
+            audio_emit_backend_status()
+            return
+        if sceAudioOutSelectBackendOpenAL(true) != ORBIS_OK:
+            audio_skip_backend_openal()
+            audio_emit_backend_status()
+            return
+        if sceAudioOutInit() != ORBIS_OK:
+            audio_skip_backend_openal()
+            audio_emit_backend_status()
+            AudioOut_ShutdownBackends()
+            return
+        h: s32 = sceAudioOutOpen(0, 0, 0, 256u32, 48000u32, 1u32)
+        if h <= 0:
+            audio_skip_backend_openal()
+            audio_emit_backend_status()
+            AudioOut_ShutdownBackends()
+            return
+
+        frame_bytes: usize = 256usize * 4usize
+        audio: mutable u8[1024]
+        _ = memset(audio[0].ref[mutable u8&] as mutable void&, 0, frame_bytes)
+
+        rc0: s32 = sceAudioOutOutput(h, audio[0].ref[mutable u8&])
+        rc1: s32 = sceAudioOutOutput(h, audio[0].ref[mutable u8&])
+        assert rc0 >= 0
+        assert rc1 >= 0
+        audio_output_opened <- true
+        audio_emit_backend_status()
+
+        assert sceAudioOutClose(h) == ORBIS_OK
+        AudioOut_ShutdownBackends()
+
+@test
+def audio_nid_tables_match_cpp_counts() -> void:
+    can Abort.Panic:
+        assert AUDIOOUT_NIDS_COUNT == 71usize
+        assert AUDIOIN_NIDS_COUNT == 42usize
+        first_out: AudioOutNidEntry = AudioOut_NidEntryAt(0usize)
+        assert first_out.nid == "cx2dYFbzIAg"
+        first_in: AudioInNidEntry = AudioIn_NidEntryAt(0usize)
+        assert first_in.nid == "IQtWgnrw6v8"
+        audio_emit_backend_status()

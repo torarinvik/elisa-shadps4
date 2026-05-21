@@ -21,8 +21,8 @@ ELISA_FILES = [
     ROOT / "core/libraries/system/userservice.elisa",
 ]
 TEST_FILES = [
-    ROOT / "core_libraries_system_pure_tests.elisa",
-    ROOT / "core_libraries_system_ffi_bridge_tests.elisa",
+    ROOT / "elisa_tests/core_libraries_system_pure_tests.elisa",
+    ROOT / "elisa_tests/core_libraries_system_ffi_bridge_tests.elisa",
 ]
 JSON_OUT = ROOT / "system_parity_matrix.json"
 MD_OUT = ROOT / "system_parity_matrix.md"

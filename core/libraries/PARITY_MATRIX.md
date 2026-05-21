@@ -70,22 +70,22 @@ Status values:
 - None currently identified in covered core/libraries parity suites and emit gates.
 
 ## Validation gates
-- `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_port_pure_tests.elisa`
-- `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_audio_parity_tests.elisa`
-- `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_audio3d_parity_tests.elisa`
-- `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_ajm_instance_tests.elisa`
-- `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_ajm_batch_tests.elisa`
-- `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_ajm_aac_tests.elisa`
-- `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_usbd_parity_tests.elisa`
-- `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_move_pure_tests.elisa`
-- `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_ngs2_pure_tests.elisa`
-- `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_random_pure_tests.elisa`
-- `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_razor_cpu_pure_tests.elisa`
-- `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_rtc_pure_tests.elisa`
-- `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_videodec_pure_tests.elisa`
+- `go run ./src ../elisa-shad-ps4-from-scratch/elisa_tests/core_libraries_port_pure_tests.elisa`
+- `go run ./src ../elisa-shad-ps4-from-scratch/elisa_tests/core_libraries_audio_parity_tests.elisa`
+- `go run ./src ../elisa-shad-ps4-from-scratch/elisa_tests/core_libraries_audio3d_parity_tests.elisa`
+- `go run ./src ../elisa-shad-ps4-from-scratch/elisa_tests/core_libraries_ajm_instance_tests.elisa`
+- `go run ./src ../elisa-shad-ps4-from-scratch/elisa_tests/core_libraries_ajm_batch_tests.elisa`
+- `go run ./src ../elisa-shad-ps4-from-scratch/elisa_tests/core_libraries_ajm_aac_tests.elisa`
+- `go run ./src ../elisa-shad-ps4-from-scratch/elisa_tests/core_libraries_usbd_parity_tests.elisa`
+- `go run ./src ../elisa-shad-ps4-from-scratch/elisa_tests/core_libraries_move_pure_tests.elisa`
+- `go run ./src ../elisa-shad-ps4-from-scratch/elisa_tests/core_libraries_ngs2_pure_tests.elisa`
+- `go run ./src ../elisa-shad-ps4-from-scratch/elisa_tests/core_libraries_random_pure_tests.elisa`
+- `go run ./src ../elisa-shad-ps4-from-scratch/elisa_tests/core_libraries_razor_cpu_pure_tests.elisa`
+- `go run ./src ../elisa-shad-ps4-from-scratch/elisa_tests/core_libraries_rtc_pure_tests.elisa`
+- `go run ./src ../elisa-shad-ps4-from-scratch/elisa_tests/core_libraries_videodec_pure_tests.elisa`
 - `go run ./src test tests --project ../elisa-shad-ps4-from-scratch/core/libraries/videodec/native_bridge_project`
 - `go run ./src test videodec-native-link-smoke --project ../elisa-shad-ps4-from-scratch`
-- `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_share_play_pure_tests.elisa`
-- `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_signin_dialog_pure_tests.elisa`
-- `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_system_pure_tests.elisa`
-- `go run ./src ../elisa-shad-ps4-from-scratch/core_libraries_system_ffi_bridge_tests.elisa`
+- `go run ./src ../elisa-shad-ps4-from-scratch/elisa_tests/core_libraries_share_play_pure_tests.elisa`
+- `go run ./src ../elisa-shad-ps4-from-scratch/elisa_tests/core_libraries_signin_dialog_pure_tests.elisa`
+- `go run ./src ../elisa-shad-ps4-from-scratch/elisa_tests/core_libraries_system_pure_tests.elisa`
+- `go run ./src ../elisa-shad-ps4-from-scratch/elisa_tests/core_libraries_system_ffi_bridge_tests.elisa`

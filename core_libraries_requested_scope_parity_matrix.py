@@ -57,15 +57,15 @@ BRIDGE_FILES = [
 ]
 
 TEST_FILES = [
-    ROOT / "core_libraries_ime_dialog_parity_tests.elisa",
-    ROOT / "core_libraries_share_play_pure_tests.elisa",
-    ROOT / "core_libraries_signin_dialog_pure_tests.elisa",
-    ROOT / "core_libraries_videoout_ffi_bridge_tests.elisa",
-    ROOT / "core_libraries_avplayer_common_tests.elisa",
-    ROOT / "core_libraries_avplayer_file_streamer_parity_tests.elisa",
-    ROOT / "core_libraries_ajm_instance_statistics_tests.elisa",
-    ROOT / "core_libraries_save_data_parity_tests.elisa",
-    ROOT / "core_libraries_sysmodule_tests.elisa",
+    ROOT / "elisa_tests/core_libraries_ime_dialog_parity_tests.elisa",
+    ROOT / "elisa_tests/core_libraries_share_play_pure_tests.elisa",
+    ROOT / "elisa_tests/core_libraries_signin_dialog_pure_tests.elisa",
+    ROOT / "elisa_tests/core_libraries_videoout_ffi_bridge_tests.elisa",
+    ROOT / "elisa_tests/core_libraries_avplayer_common_tests.elisa",
+    ROOT / "elisa_tests/core_libraries_avplayer_file_streamer_parity_tests.elisa",
+    ROOT / "elisa_tests/core_libraries_ajm_instance_statistics_tests.elisa",
+    ROOT / "elisa_tests/core_libraries_save_data_parity_tests.elisa",
+    ROOT / "elisa_tests/core_libraries_sysmodule_tests.elisa",
     ROOT / "core/libraries/sysmodule/sysmodule_native_bridge_tests.elisa",
 ]
 

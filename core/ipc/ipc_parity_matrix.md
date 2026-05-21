@@ -1,7 +1,7 @@
 # IPC C++ -> Elisa Parity Matrix
 
 Source baseline: `core/ipc/ipc.cpp` + `core/ipc/ipc.h`
-Scope: `core/ipc` only (`ipc.elisa`, `ipc_runtime.elisa`, `ipc_hooks.elisa`, `core_ipc_pure_tests.elisa`)
+Scope: `core/ipc` only (`ipc.elisa`, `ipc_runtime.elisa`, `ipc_hooks.elisa`, `elisa_tests/core_ipc_pure_tests.elisa`)
 
 ## State Fields and Defaults
 
@@ -74,14 +74,14 @@ Scope: `core/ipc` only (`ipc.elisa`, `ipc_runtime.elisa`, `ipc_hooks.elisa`, `co
 ## Closure Gate
 
 Parity for `core/ipc` is considered closed when:
-- `core_ipc_pure_tests.elisa` passes.
+- `elisa_tests/core_ipc_pure_tests.elisa` passes.
 - IPC compiles without IPC-specific errors.
 - Matrix contains no `missing`/`divergent` rows.
 
 ## Gate Result
 
 - Date: 2026-05-19
-- Test gate: `../compiler/elisacore-compiler -emit test core_ipc_pure_tests.elisa` passed (`11/11`).
+- Test gate: `../compiler/elisacore-compiler -emit test elisa_tests/core_ipc_pure_tests.elisa` passed (`11/11`).
 - Compile status (IPC scope): no IPC-specific errors in the IPC test compilation path.
 - Matrix status: no `missing` or `divergent` rows.
 - Remaining `partial` rows are runtime primitive/modeling differences (`jthread` ownership and native blocking semaphore primitive) that do not change IPC command/protocol behavior parity.

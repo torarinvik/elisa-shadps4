@@ -52,8 +52,8 @@ Status legend:
   - `core/libraries/usbd/emulated/dimensions.elisa`
   - `core/ipc/ipc_hooks.elisa`
 - Required test suites:
-  - `core_libraries_usbd_parity_tests.elisa`
-  - `core_libraries_port_pure_tests.elisa`
+  - `elisa_tests/core_libraries_usbd_parity_tests.elisa`
+  - `elisa_tests/core_libraries_port_pure_tests.elisa`
 - Acceptance statement:
   - All rows above are `Exact` or `Exact (C++ stub)`, with direct test references.
 

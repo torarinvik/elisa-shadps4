@@ -44,8 +44,8 @@ ELISA_FILES = [
 ]
 
 TEST_FILES = [
-    "shader_recompiler_backend_spirv_tests.elisa",
-    "shader_recompiler_recompiler_tests.elisa",
+    "elisa_tests/shader_recompiler_backend_spirv_tests.elisa",
+    "elisa_tests/shader_recompiler_recompiler_tests.elisa",
 ]
 
 JSON_OUT = ROOT / "shader_recompiler_backend_spirv_parity_matrix.json"

@@ -1,0 +1,209 @@
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../core/libraries/usbd/emulated/skylander.elisa"
+include "../core/libraries/usbd/emulated/infinity.elisa"
+include "../core/libraries/usbd/emulated/dimensions.elisa"
+include "../core/libraries/usbd/usbd.elisa"
+
+def usbd_reset_skylander() -> void:
+    g_sky_init <- false
+    _ = UsbdSkylanderEmu_Init()
+
+def usbd_reset_infinity() -> void:
+    g_inf_init <- false
+    _ = UsbdInfinityEmu_Init()
+
+def usbd_reset_dimensions() -> void:
+    g_dim_init <- false
+    _ = UsbdDimensionsEmu_Init()
+
+def usbd_assert_all_zero32(buf: u8[32]) -> void:
+    i: mutable usize = 0
+    while i < 32:
+        assert buf[i] == 0u8
+        i <- i + 1
+
+@test
+def usbd_skylander_activation_and_interrupt_contract() -> void:
+    can Abort.Panic:
+        usbd_reset_skylander()
+        req: mutable u8[32] = zeroed
+        req[0] <- 'A'.u8()
+        req[1] <- 1u8
+        assert UsbdSkylanderEmu_ControlTransfer(req[0].ref[u8&], 2u16) == 10
+
+        out: mutable u8[32] = zeroed
+        assert UsbdSkylanderEmu_InterruptIn(out[0].ref[mutable u8&]) == 32
+        assert out[0] == 0x41u8
+        assert out[1] == 1u8
+        assert out[2] == 0xffu8
+        assert out[3] == 0x77u8
+
+@test
+def usbd_infinity_seed_challenge_and_stub_contract() -> void:
+    can Abort.Panic:
+        usbd_reset_infinity()
+        cmd: mutable u8[32] = zeroed
+        out: mutable u8[32] = zeroed
+
+        cmd[2] <- 0x81u8
+        cmd[3] <- 0x05u8
+        _ = UsbdInfinityEmu_CommandOut(cmd[0].ref[u8&])
+        _ = UsbdInfinityEmu_InterruptIn(out[0].ref[mutable u8&])
+        assert out[0] == 0xaau8
+        assert out[1] == 0x01u8
+        assert out[2] == 0x05u8
+        assert out[3] == ((out[0].int() + out[1].int() + out[2].int()) & 0xff).u8()
+
+        cmd <- zeroed
+        out <- zeroed
+        cmd[2] <- 0xb5u8
+        cmd[3] <- 0x07u8
+        _ = UsbdInfinityEmu_CommandOut(cmd[0].ref[u8&])
+        _ = UsbdInfinityEmu_InterruptIn(out[0].ref[mutable u8&])
+        assert out[0] == 0xaau8
+        assert out[1] == 0x01u8
+        assert out[2] == 0x07u8
+
+@test
+def usbd_skylander_command_vector_contract() -> void:
+    can Abort.Panic:
+        usbd_reset_skylander()
+        cmds: u8[10] = ['A'.u8(), 'C'.u8(), 'J'.u8(), 'L'.u8(), 'M'.u8(), 'Q'.u8(), 'R'.u8(), 'S'.u8(), 'V'.u8(), 'W'.u8()]
+        i: mutable usize = 0
+        while i < cmds.len:
+            req: mutable u8[32] = zeroed
+            req[0] <- cmds[i]
+            req[1] <- (i + 1).u8()
+            _ = UsbdSkylanderEmu_ControlTransfer(req[0].ref[u8&], 2u16)
+            out: mutable u8[32] = zeroed
+            assert UsbdSkylanderEmu_InterruptIn(out[0].ref[mutable u8&]) == 32
+            assert out[0] == cmds[i]
+            assert out[1] == (i + 1).u8()
+            i <- i + 1
+
+@test
+def usbd_skylander_default_interrupt_status_packet() -> void:
+    can Abort.Panic:
+        usbd_reset_skylander()
+        out: mutable u8[32] = zeroed
+        assert UsbdSkylanderEmu_InterruptIn(out[0].ref[mutable u8&]) == 32
+        assert out[0] == 0x53u8
+
+@test
+def usbd_skylander_persistence_roundtrip() -> void:
+    can Abort.Panic:
+        usbd_reset_skylander()
+        tmp: str = "usbd_skylander_roundtrip.bin"
+        fig: mutable u8[0x40 * 0x10] = zeroed
+        fig[0] <- 0x11u8
+        fig[1] <- 0x22u8
+        assert io.write_all_bytes(tmp, fig[0].ref[u8&], fig.len) == io.OK
+        UsbdSkylanderEmu_LoadFigure(tmp.bytes(0), 0u8)
+        UsbdSkylanderEmu_RemoveFigure(0u8)
+        disk: darray[u8] = io.read_all_bytes(tmp)
+        assert disk.len == fig.len
+        assert disk[0] == 0x11u8
+        assert disk[1] == 0x22u8
+
+@test
+def usbd_dimensions_unimplemented_bucket_returns_zero_packet() -> void:
+    can Abort.Panic:
+        usbd_reset_dimensions()
+        cmd: mutable u8[32] = zeroed
+        out: mutable u8[32] = zeroed
+        cmd[2] <- 0xd0u8
+        cmd[3] <- 0x22u8
+        assert UsbdDimensionsEmu_CommandOut(cmd[0].ref[u8&]) == 32
+        assert UsbdDimensionsEmu_InterruptIn(out[0].ref[mutable u8&]) == 32
+        usbd_assert_all_zero32(out)
+
+@test
+def usbd_dimensions_stub_bucket_vector_contract() -> void:
+    can Abort.Panic:
+        usbd_reset_dimensions()
+        cmds: u8[5] = [0xd0u8, 0xe1u8, 0xe5u8, 0xffu8, 0x7eu8]
+        i: mutable usize = 0
+        while i < cmds.len:
+            cmd: mutable u8[32] = zeroed
+            out: mutable u8[32] = zeroed
+            cmd[2] <- cmds[i]
+            cmd[3] <- 0x33u8
+            _ = UsbdDimensionsEmu_CommandOut(cmd[0].ref[u8&])
+            _ = UsbdDimensionsEmu_InterruptIn(out[0].ref[mutable u8&])
+            usbd_assert_all_zero32(out)
+            i <- i + 1
+
+@test
+def usbd_dimensions_move_event_ordering_contract() -> void:
+    can Abort.Panic:
+        usbd_reset_dimensions()
+        UsbdDimensionsEmu_LoadFigure("", 0u8, 0u8)
+        UsbdDimensionsEmu_LoadFigure("", 1u8, 1u8)
+        drain: mutable u8[32] = zeroed
+        _ = UsbdDimensionsEmu_InterruptIn(drain[0].ref[mutable u8&])
+        _ = UsbdDimensionsEmu_InterruptIn(drain[0].ref[mutable u8&])
+
+        UsbdDimensionsEmu_MoveFigure(0u8, 0u8, 2u8, 1u8)
+        first: mutable u8[32] = zeroed
+        second: mutable u8[32] = zeroed
+        _ = UsbdDimensionsEmu_InterruptIn(first[0].ref[mutable u8&])
+        _ = UsbdDimensionsEmu_InterruptIn(second[0].ref[mutable u8&])
+
+        # Destination remove then moved figure add.
+        assert first[0] == 0x56u8
+        assert first[5] == 0x01u8
+        assert second[0] == 0x56u8
+        assert second[5] == 0x00u8
+        assert second[2] == 2u8
+        assert second[4] == 2u8
+
+@test
+def usbd_dimensions_temp_remove_and_cancel_contract() -> void:
+    can Abort.Panic:
+        usbd_reset_dimensions()
+        UsbdDimensionsEmu_LoadFigure("", 0u8, 3u8)
+        drain: mutable u8[32] = zeroed
+        _ = UsbdDimensionsEmu_InterruptIn(drain[0].ref[mutable u8&])
+        UsbdDimensionsEmu_TempRemoveFigure(3u8)
+        UsbdDimensionsEmu_CancelRemoveFigure(3u8)
+        ev1: mutable u8[32] = zeroed
+        ev2: mutable u8[32] = zeroed
+        _ = UsbdDimensionsEmu_InterruptIn(ev1[0].ref[mutable u8&])
+        _ = UsbdDimensionsEmu_InterruptIn(ev2[0].ref[mutable u8&])
+        assert ev1[0] == 0x56u8
+        assert ev2[0] == 0x56u8
+        assert ev2[5] == 0x00u8
+
+@test
+def usbd_wrapper_control_and_interrupt_routing_contract() -> void:
+    can Abort.Panic:
+        # Skylander control path.
+        _ = sceUsbdOpenDeviceWithVidPid(0x1430u16, 0x0150u16)
+        ctrl: mutable u8[32] = zeroed
+        ctrl[0] <- 'A'.u8()
+        ctrl[1] <- 9u8
+        assert sceUsbdControlTransfer(null, 0x21u8, 0x09u8, 0u16, 0u16, ctrl[0].ref[mutable u8&], 2, 0u32) == 10
+
+        # Dimensions interrupt out/in routing + actual length.
+        _ = sceUsbdOpenDeviceWithVidPid(0x0e6fu16, 0x0241u16)
+        cmd: mutable u8[32] = zeroed
+        cmd[2] <- 0xb0u8
+        cmd[3] <- 0x44u8
+        actual: s32 = 0
+        assert sceUsbdInterruptTransfer(null, 0x01u8, cmd[0].ref[mutable u8&], 32, actual.ref[mutable s32&], 0u32) == ORBIS_OK
+        assert actual == 32
+        out: mutable u8[32] = zeroed
+        assert sceUsbdInterruptTransfer(null, 0x81u8, out[0].ref[mutable u8&], 32, actual.ref[mutable s32&], 0u32) == ORBIS_OK
+        assert actual == 32
+
+@test
+def usbd_wrapper_backend_selection_and_interrupt_actual_length() -> void:
+    can Abort.Panic:
+        _ = sceUsbdOpenDeviceWithVidPid(0x0e6fu16, 0x0241u16)
+        assert g_usbd_backend_mode == USBD_BACKEND_DIMENSIONS
+        data: mutable u8[32] = zeroed
+        data[2] <- 0xb0u8
+        data[3] <- 0x01u8
+        actual: s32 = 0
+        assert sceUsbdInterruptTransfer(null, 0x01u8, data[0].ref[mutable u8&], 32, actual.ref[mutable s32&], 0u32) == ORBIS_OK
+        assert actual == 32

@@ -1,0 +1,135 @@
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../common/arch.elisa"
+include "../common/io_file.elisa"
+include "../common/path_util.elisa"
+include "../core/file_sys/bridge.elisa"
+include "../core/file_sys/devices/devices.elisa"
+include "../core/file_sys/directories/directories.elisa"
+include "../core/file_sys/file.elisa"
+include "../core/file_sys/fs.elisa"
+
+@test
+def file_sys_mount_points_use_longest_prefix_and_readonly() -> void:
+    can Memory.Allocate, Abort.Panic:
+        mnt: mutable MntPoints = MntPoints_new()
+        MntPoints_Mount(mnt, "/host/root", "/app0", false)
+        MntPoints_Mount(mnt, "/host/patch", "/app0/patch", true)
+        is_ro: mutable bool = false
+        host: static u8& = MntPoints_GetHostPath(mnt, "/app0/patch/data.bin", is_ro.ref[mutable bool&])
+        assert string_slice_eq(host, 0, runtime_strlen("/host/patch/data.bin"), "/host/patch/data.bin") == 1
+        assert is_ro
+
+@test
+def file_sys_handle_table_reuses_released_handles() -> void:
+    can Memory.Allocate, Abort.Panic:
+        table: mutable HandleTable = HandleTable_new()
+        a: s32 = HandleTable_CreateHandle(table)
+        b: s32 = HandleTable_CreateHandle(table)
+        assert a == 0
+        assert b == 1
+        HandleTable_DeleteHandle(table, a)
+        c: s32 = HandleTable_CreateHandle(table)
+        assert c == 0
+
+@test
+def file_sys_file_handle_lseek_validates_inputs() -> void:
+    fh: mutable FileHandle = FileHandle_new()
+    assert FileHandle_Lseek(fh, 0, 0) == ORBIS_KERNEL_ERROR_EBADF.i64()
+    fh.opened <- true
+    fh.size <- 100
+    assert FileHandle_Lseek(fh, -1, 0) == ORBIS_KERNEL_ERROR_EINVAL.i64()
+    assert FileHandle_Lseek(fh, 10, 0) == 10
+    assert FileHandle_Lseek(fh, 5, 1) == 15
+    assert FileHandle_Lseek(fh, -5, 2) == 95
+    assert FileHandle_Lseek(fh, 0, 9) == ORBIS_KERNEL_ERROR_EINVAL.i64()
+
+@test
+def file_sys_dirent_serialization_aligns_and_terminates_name() -> void:
+    can Memory.Allocate, Abort.Panic:
+        base: mutable BaseDirectory = BaseDirectory_new()
+        entries: mutable array[ElisaFsDirEntry, 1] = zeroed
+        entries[0].name <- "hello.txt"
+        entries[0].is_file <- 1
+        entries[0].dtype <- ELISA_DTYPE_FILE
+        entries[0].fileno <- 123
+        BaseDirectory_RebuildCacheFromEntries(base, entries[0].ref[ElisaFsDirEntry&], 1)
+        assert base.dirent_cache_bin.count >= ORBIS_DIRENT_BASE_SIZE + runtime_strlen("hello.txt") + 1
+        assert base.dirent_cache_bin[base.dirent_cache_bin.count - 1] == 0
+        assert base.dirent_cache_bin.count % ORBIS_DIRENT_ALIGN == 0
+
+@test
+def file_sys_devices_use_character_stats_and_enotdir_for_getdents() -> void:
+    random_dev: mutable RandomDevice = RandomDevice_Create(3)
+    rng_dev: mutable RngDevice = RngDevice_Create(4)
+    stat1: mutable OrbisKernelStat = zeroed
+    stat2: mutable OrbisKernelStat = zeroed
+    assert RandomDevice_fstat(random_dev, stat1.ref[mutable OrbisKernelStat&]) == ORBIS_OK.i32()
+    assert RngDevice_fstat(rng_dev, stat2.ref[mutable OrbisKernelStat&]) == ORBIS_OK.i32()
+    assert stat1.st_mode == DEVICE_CHAR_MODE
+    assert stat2.st_mode == DEVICE_CHAR_MODE
+    assert stat1.st_blksize == 4096
+    assert stat2.st_blksize == 4096
+    assert Device_StubGetdents("x", null, 0, null) == ORBIS_KERNEL_ERROR_ENOTDIR.i64()
+
+@test
+def file_sys_file_handle_open_read_write_smoke() -> void:
+    can Abort.Panic, Memory.Allocate:
+        path: static u8& = "/tmp/elisa_file_sys_smoke.bin"
+        seed: mutable array[u8, 4] = [1, 2, 3, 4]
+        io: mutable IOFile = IOFile_opened(path, FileAccessMode.Create, FileType.BinaryFile, FileShareFlag.ShareReadWrite)
+        assert IOFile_IsOpen(io)
+        assert IOFile_WriteSpan(io, seed[0].ref[u8&], 4) == 4
+        IOFile_Close(io)
+
+        fh: mutable FileHandle = FileHandle_new()
+        assert FileHandle_Open(fh, path, 2) == ORBIS_OK.i32()
+        read_buf: mutable array[u8, 4] = zeroed
+        assert FileHandle_Read(fh, read_buf[0].ref[mutable void&], 4) == 4
+        assert read_buf[0] == 1 and read_buf[1] == 2 and read_buf[2] == 3 and read_buf[3] == 4
+        assert FileHandle_Lseek(fh, 0, 0) == 0
+        write_buf: mutable array[u8, 2] = [9, 8]
+        assert FileHandle_Write(fh, write_buf[0].ref[void&], 2) == 2
+        FileHandle_Flush(fh)
+        FileHandle_Unlink(fh)
+
+@test
+def file_sys_mount_overlay_selects_mod_patch_base_and_explicit_types() -> void:
+    can Abort.Panic, Memory.Allocate:
+        root: static u8& = "/tmp/elisa_mount_overlay_case"
+        base: static u8& = concat2(root, "/base")
+        patch: static u8& = concat2(base, "-patch")
+        mods: static u8& = concat2(base, "-mods")
+        fs_create_directory(root)
+        fs_create_directory(base)
+        fs_create_directory(patch)
+        fs_create_directory(mods)
+        mnt: mutable MntPoints = MntPoints_new()
+        MntPoints_Mount(mnt, base, "/app0", false)
+        io_close(io_open(concat2(base, "/x.bin"), FileAccessMode.Create, FileType.BinaryFile, FileShareFlag.ShareReadWrite).cast[void&])
+        io_close(io_open(concat2(patch, "/x.bin"), FileAccessMode.Create, FileType.BinaryFile, FileShareFlag.ShareReadWrite).cast[void&])
+        io_close(io_open(concat2(mods, "/x.bin"), FileAccessMode.Create, FileType.BinaryFile, FileShareFlag.ShareReadWrite).cast[void&])
+        dflt: static u8& = MntPoints_GetHostPath(mnt, "/app0/x.bin", null, HostPathType.Default)
+        only_patch: static u8& = MntPoints_GetHostPath(mnt, "/app0/x.bin", null, HostPathType.Patch)
+        only_base: static u8& = MntPoints_GetHostPath(mnt, "/app0/x.bin", null, HostPathType.Base)
+        assert streq(dflt, concat2(mods, "/x.bin")) == 1
+        assert streq(only_patch, concat2(patch, "/x.bin")) == 1
+        assert streq(only_base, concat2(base, "/x.bin")) == 1
+
+@test
+def file_sys_case_insensitive_fallback_maps_existing_host_name() -> void:
+    can Abort.Panic, Memory.Allocate:
+        root: static u8& = "/tmp/elisa_mount_case_insensitive"
+        base: static u8& = concat2(root, "/base")
+        fs_create_directory(root)
+        fs_create_directory(base)
+        io_close(io_open(concat2(base, "/Data.BIN"), FileAccessMode.Create, FileType.BinaryFile, FileShareFlag.ShareReadWrite).cast[void&])
+        mnt: mutable MntPoints = MntPoints_new()
+        MntPoints_Mount(mnt, base, "/app0", false)
+        resolved: static u8& = MntPoints_GetHostPath(mnt, "/app0/data.bin", null, HostPathType.Base)
+        assert streq(resolved, concat2(base, "/Data.BIN")) == 1
+
+@test
+def file_sys_sidecar_filter_matches_ds_store() -> void:
+    assert ElisaFs_IsHostSidecarEntry(".DS_Store")
+    assert ElisaFs_IsHostSidecarEntry(".ds_store")
+    assert not ElisaFs_IsHostSidecarEntry("real.bin")

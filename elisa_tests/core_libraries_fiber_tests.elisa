@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../core/libraries/fiber/fiber.elisa"
+
+def fiber_test_entry(arg_on_initialize: u64, arg_on_run_to: u64) -> void:
+    _ = arg_on_initialize
+    _ = arg_on_run_to
+
+@test
+def fiber_opt_param_initialize_and_finalize_lifecycle() -> void:
+    can Abort.Panic:
+        opt: mutable OrbisFiberOptParam = zeroed
+        assert sceFiberOptParamInitialize(opt.ref[mutable OrbisFiberOptParam&]) == ORBIS_OK
+        assert opt.magic == 0xbb40e64du32
+
+        fiber: mutable OrbisFiber = zeroed
+        assert sceFiberInitialize(fiber.ref[mutable OrbisFiber&], "fiber-a", fiber_test_entry.cast[void&], 0u64, null, 0u64, opt.ref[OrbisFiberOptParam&], 0x03500000u32) == ORBIS_OK
+        assert fiber.state == FiberState_Idle
+        assert fiber.flags & FiberFlags_SetFpuRegs != 0
+        assert sceFiberFinalize(fiber.ref[mutable OrbisFiber&]) == ORBIS_OK
+        assert sceFiberFinalize(fiber.ref[mutable OrbisFiber&]) == ORBIS_FIBER_ERROR_STATE
+
+@test
+def fiber_context_size_check_flag_and_info_defaults() -> void:
+    can Abort.Panic:
+        assert sceFiberStartContextSizeCheck(0u32) == ORBIS_OK
+
+        fiber: mutable OrbisFiber = zeroed
+        assert sceFiberInitialize(fiber.ref[mutable OrbisFiber&], "fiber-check", fiber_test_entry.cast[void&], 0u64, null, 0u64, null, 0x03000000u32) == ORBIS_OK
+        assert fiber.flags & FiberFlags_ContextSizeCheck != 0
+
+        info: mutable OrbisFiberInfo = zeroed
+        info.size <- size_of(OrbisFiberInfo).u64()
+        assert sceFiberGetInfo(fiber.ref[mutable OrbisFiber&], info.ref[mutable OrbisFiberInfo&]) == ORBIS_OK
+        assert info.size_context_margin == 0xffffffffffffffffu64
+        assert info.entry != null
+        assert info.addr_context == null
+
+        assert sceFiberStopContextSizeCheck() == ORBIS_OK
+        fp: mutable u64 = 0
+        assert sceFiberGetThreadFramePointerAddress(fp.ref[mutable u64&]) == ORBIS_FIBER_ERROR_PERMISSION
+        assert sceFiberFinalize(fiber.ref[mutable OrbisFiber&]) == ORBIS_OK
+
+@test
+def fiber_permission_checks_without_active_context() -> void:
+    can Abort.Panic:
+        self_fiber: mutable OrbisFiber&? = null
+        assert sceFiberGetSelf(self_fiber.ref[mutable OrbisFiber&?]) == ORBIS_FIBER_ERROR_PERMISSION
+
+        fp: mutable u64 = 0
+        assert sceFiberGetThreadFramePointerAddress(fp.ref[mutable u64&]) == ORBIS_FIBER_ERROR_PERMISSION
