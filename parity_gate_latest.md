@@ -5,14 +5,19 @@ Failed: 0
 
 Summary score: 13/16
 Per-subsystem counts:
-- External-C-ABI: 11
+- External-C-ABI: 9
+- Missing: 1
 - Native-Elisa: 237
 - Stub-Parity: 40
+- Temporary-Cpp-Bridge: 2
 Parity gate counts (native/bridge/fallback/unresolved):
 - native: 237
-- bridge: 0
+- bridge: 2
 - fallback: 0
 - unresolved: 0
+Ledger risk counts (missing/unverified):
+- missing: 1
+- unverified: 40
 CUSA07399 stage:
 - execution stage raw: 0
 - load: PASS
@@ -34,6 +39,8 @@ CUSA07399 artifact metrics:
 Top 25 fallback symbols:
 - none
 Top blockers:
+- none
+Failing scenario ids:
 - none
 
 ## Agent Work Queues

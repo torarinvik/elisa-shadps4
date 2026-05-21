@@ -570,7 +570,43 @@ def Linker_LoadAndStartGuestModule(self: mutable Linker&, guest_path: static u8&
     if static_strlen(host_path) == 0:
         return -1
     self.last_loaded_dynamic_host_path <- host_path
-    return Linker_LoadAndStartModule(self.ref[mutable Linker&], host_path, args, argp, p_res)
+    existing: mutable u32 = Linker_FindByFileOrHost(self.ref[Linker&], guest_path)
+    if existing == 0xFFFFFFFF.u32():
+        existing <- Linker_FindByFileOrHost(self.ref[Linker&], host_path)
+    if existing != 0xFFFFFFFF.u32():
+        self.last_started_module_index <- existing.s32()
+        self.last_start_result <- 0
+        mod_existing: mutable Module&? = Linker_GetModule(self.ref[mutable Linker&], existing.s32())
+        if mod_existing != null:
+            self.last_entry_addr <- Module_GetEntryAddress(mod_existing, 0.uintptr())
+        if p_res != null:
+            p_res <- 0
+        return existing.s32()
+    idx: s32 = Linker_LoadModuleFromHost(self.ref[mutable Linker&], guest_path, host_path, true)
+    if idx < 0:
+        if p_res != null:
+            p_res <- idx
+        return idx
+    mod_ref: mutable Module&? = Linker_GetModule(self.ref[mutable Linker&], idx)
+    if mod_ref == null:
+        if p_res != null:
+            p_res <- -1
+        self.last_started_module_index <- -1
+        self.last_start_result <- -1
+        self.last_entry_addr <- 0.uintptr()
+        return -1
+    Linker_RelocateAnyImports(self.ref[mutable Linker&], mod_ref)
+    if mod_ref.tls.image_size != 0:
+        Linker_AdvanceGenerationCounter(self.ref[mutable Linker&])
+    self.last_entry_addr <- Module_GetEntryAddress(mod_ref, 0.uintptr())
+    start_result: s32 = Module_Start(mod_ref, args, argp, null)
+    Linker_RelocateAllImports(self.ref[mutable Linker&])
+    self.last_started_module_index <- idx
+    self.last_start_result <- start_result
+    Linker_RecountImportResolution(self.ref[mutable Linker&])
+    if p_res != null:
+        p_res <- start_result
+    return idx
 
 def Linker_FindByAddress(self: mutable Linker&, address: VAddr) -> mutable Module&?:
     for i in 0..<self.modules.count:

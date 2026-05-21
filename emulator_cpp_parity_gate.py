@@ -286,6 +286,36 @@ def count_ledger_statuses() -> dict[str, int]:
     return counts
 
 
+def failing_scenario_ids(results: list[Result]) -> list[str]:
+    ids: list[str] = []
+    seen: set[str] = set()
+    panic_re = re.compile(r"^\[\s*PANIC\s*\]\s+([A-Za-z0-9_./:-]+)")
+    active_re = re.compile(r"^\[\s*ACTIVE\s*\]\s+([A-Za-z0-9_./:-]+)")
+    for r in results:
+        if r.passed:
+            continue
+        for line in r.output.splitlines():
+            text = line.strip()
+            m = panic_re.match(text) or active_re.match(text)
+            if not m:
+                continue
+            sid = m.group(1)
+            if sid in seen:
+                continue
+            seen.add(sid)
+            ids.append(sid)
+    if ids:
+        return ids
+    for r in results:
+        if r.passed or not r.step.name.startswith("elisacore test "):
+            continue
+        sid = r.step.name.removeprefix("elisacore test ").strip()
+        if sid and sid not in seen:
+            seen.add(sid)
+            ids.append(sid)
+    return ids
+
+
 def validate_rules(results: list[Result], cusa: dict[str, int | str], fallback_rows: list[dict[str, str | int]]) -> list[str]:
     errors: list[str] = []
 
@@ -378,6 +408,9 @@ def summarize_progress(results: list[Result]) -> tuple[str, dict[str, list[dict[
     bridge_count = ledger_counts.get("Temporary-Cpp-Bridge", 0)
     fallback_count = int(cusa["aerolib_fallback_imports"])
     unresolved_count = int(cusa["unresolved_imports"])
+    missing_count = ledger_counts.get("Missing", 0)
+    unverified_count = ledger_counts.get("Stub-Parity", 0) + ledger_counts.get("AeroLibFallback", 0)
+    scenario_ids = failing_scenario_ids(results)
     lines.append(f"Summary score: {passed_score}/{total_score}")
     lines.append("Per-subsystem counts:")
     for status in sorted(ledger_counts):
@@ -387,6 +420,9 @@ def summarize_progress(results: list[Result]) -> tuple[str, dict[str, list[dict[
     lines.append(f"- bridge: {bridge_count}")
     lines.append(f"- fallback: {fallback_count}")
     lines.append(f"- unresolved: {unresolved_count}")
+    lines.append("Ledger risk counts (missing/unverified):")
+    lines.append(f"- missing: {missing_count}")
+    lines.append(f"- unverified: {unverified_count}")
 
     lines.append("CUSA07399 stage:")
     lines.append(f"- execution stage raw: {cusa['execution_stage']}")
@@ -420,6 +456,12 @@ def summarize_progress(results: list[Result]) -> tuple[str, dict[str, list[dict[
     if rules:
         for err in rules[:25]:
             lines.append(f"- {err}")
+    else:
+        lines.append("- none")
+    lines.append("Failing scenario ids:")
+    if scenario_ids:
+        for sid in scenario_ids[:25]:
+            lines.append(f"- {sid}")
     else:
         lines.append("- none")
 

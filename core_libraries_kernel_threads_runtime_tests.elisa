@@ -100,9 +100,7 @@ def posix_pthread_detach(thread: void&?) -> int:
 def posix_pthread_timedjoin_np(thread: void&?, retval: mutable void&?&, abstime: OrbisKernelTimespec&?) -> int:
     if abstime == null:
         return POSIX_EINVAL
-    _ = abstime.tv_sec
-    _ = abstime.tv_nsec
-    return elisa_kernel_thread_join(thread, retval)
+    return elisa_kernel_thread_timedjoin(thread, retval, abstime.tv_sec, abstime.tv_nsec)
 
 def posix_pthread_mutex_init(mutex: mutable void&?&, attr: void&?) -> int:
     _ = attr
@@ -539,15 +537,19 @@ def runtime_thread_detach_then_timedjoin_invalid() -> void:
         elisa_kernel_test_sleep_usec(70000u64)
 
 @test
-def runtime_thread_timedjoin_behaves_like_join() -> void:
+def runtime_thread_timedjoin_times_out_then_joins() -> void:
     can Abort.Panic:
         elisa_kernel_test_slots_reset()
         thread: mutable void&? = null
         rt_assert_zero(posix_pthread_create(thread, null, rt_thread_sleep_entry.cast[void&], null))
         rt_wait_slot(0, 1)
-        ts: mutable OrbisKernelTimespec = OrbisKernelTimespec(0, 1000)
+        now_us: u64 = elisa_kernel_test_monotonic_usec()
+        timeout_abs: mutable OrbisKernelTimespec = OrbisKernelTimespec((now_us / 1000000u64).i64(), ((now_us % 1000000u64) * 1000u64).i64())
         ret: mutable void&? = null
-        rt_assert_zero(posix_pthread_timedjoin_np(thread, ret, ts.ref[OrbisKernelTimespec&]))
+        rt_assert_eq_int(posix_pthread_timedjoin_np(thread, ret, timeout_abs.ref[OrbisKernelTimespec&]), POSIX_ETIMEDOUT)
+        long_abs: mutable OrbisKernelTimespec = OrbisKernelTimespec(timeout_abs.tv_sec + 1, timeout_abs.tv_nsec)
+        ret <- null
+        rt_assert_zero(posix_pthread_timedjoin_np(thread, ret, long_abs.ref[OrbisKernelTimespec&]))
         assert ret == 0x77 as void&?
 
 @test

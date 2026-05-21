@@ -687,17 +687,43 @@ def avffmpeg_copy_decoded_payload(decoded: AVFramePublicPrefix&, payload: mutabl
         width: u32 = decoded.width.u32()
         height: u32 = decoded.height.u32()
         luma_size: u32 = width * height
-        copy_luma: mutable u32 = luma_size
-        if copy_luma > payload_size:
-            copy_luma <- payload_size
-        _ = memcpy(payload.ref[mutable void&], decoded.data[0].ref[void&], copy_luma.usize())
+        copied_luma: mutable u32 = 0
+        y_stride: mutable u32 = width
+        if decoded.linesize[0] > 0:
+            y_stride <- decoded.linesize[0].u32()
+        y: mutable u32 = 0
+        while y < height and copied_luma < payload_size:
+            remaining_luma: u32 = payload_size - copied_luma
+            row_copy: mutable u32 = width
+            if row_copy > remaining_luma:
+                row_copy <- remaining_luma
+            src_row: mutable u8&? = decoded.data[0] + (y * y_stride).usize()
+            dst_row: mutable u8& = payload + copied_luma.usize()
+            if src_row == null:
+                return
+            _ = memcpy(dst_row.ref[mutable void&], src_row.ref[void&], row_copy.usize())
+            copied_luma <- copied_luma + row_copy
+            y <- y + 1u32
         if decoded.data[1] != null and payload_size > luma_size:
-            chroma_size: mutable u32 = luma_size / 2
-            remaining: u32 = payload_size - luma_size
-            if chroma_size > remaining:
-                chroma_size <- remaining
-            dst_chroma: mutable u8& = payload + luma_size.usize()
-            _ = memcpy(dst_chroma.ref[mutable void&], decoded.data[1].ref[void&], chroma_size.usize())
+            copied_chroma: mutable u32 = 0
+            chroma_size: u32 = luma_size / 2
+            uv_rows: u32 = height / 2u32
+            uv_stride: mutable u32 = width
+            if decoded.linesize[1] > 0:
+                uv_stride <- decoded.linesize[1].u32()
+            while copied_chroma < chroma_size and copied_luma + copied_chroma < payload_size and (copied_chroma / width) < uv_rows:
+                remaining_chroma: u32 = payload_size - (copied_luma + copied_chroma)
+                row_chroma_copy: mutable u32 = width
+                if row_chroma_copy > (chroma_size - copied_chroma):
+                    row_chroma_copy <- chroma_size - copied_chroma
+                if row_chroma_copy > remaining_chroma:
+                    row_chroma_copy <- remaining_chroma
+                src_uv_row: mutable u8&? = decoded.data[1] + ((copied_chroma / width) * uv_stride).usize()
+                dst_uv_row: mutable u8& = payload + (copied_luma + copied_chroma).usize()
+                if src_uv_row == null:
+                    return
+                _ = memcpy(dst_uv_row.ref[mutable void&], src_uv_row.ref[void&], row_chroma_copy.usize())
+                copied_chroma <- copied_chroma + row_chroma_copy
         return
     if decoded.data[0] == null:
         return

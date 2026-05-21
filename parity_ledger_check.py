@@ -81,11 +81,14 @@ def main() -> int:
             if status == "Temporary-Cpp-Bridge":
                 blocker = entry.get("bridge_blocker", "")
                 plan = entry.get("retirement_plan", "")
+                criteria = entry.get("retirement_criteria", "")
                 notes = str(entry.get("notes", "")).strip()
                 if not blocker:
                     return fail(f"{name}:{symbol}: Temporary-Cpp-Bridge entry requires bridge_blocker")
                 if not plan:
                     return fail(f"{name}:{symbol}: Temporary-Cpp-Bridge entry requires retirement_plan")
+                if not criteria:
+                    return fail(f"{name}:{symbol}: Temporary-Cpp-Bridge entry requires retirement_criteria")
                 if not notes:
                     return fail(f"{name}:{symbol}: Temporary-Cpp-Bridge entry requires retirement notes in notes")
 
