@@ -55,6 +55,8 @@ struct Linker:
     hle_symbols: mutable SymbolsResolver
     last_execute_argc: mutable usize
     relocated_all_imports: mutable bool
+    last_relocated_import_count: mutable usize
+    last_unresolved_import_count: mutable usize
     last_started_module_index: mutable s32
     last_start_result: mutable s32
     hle_libs_initialized: mutable bool
@@ -70,6 +72,8 @@ global mutable linker_singleton: Linker = Linker(
     SymbolsResolver(zeroed),
     0,
     false,
+    0,
+    0,
     -1,
     0,
     false,
@@ -87,6 +91,8 @@ def Linker_New() -> Linker:
         SymbolsResolver_new(),
         0,
         false,
+        0,
+        0,
         -1,
         0,
         false,
@@ -142,10 +148,24 @@ def Linker_StaticTlsSize(self: Linker&) -> usize:
     return self.static_tls_size
 
 def Linker_RelocateAnyImports(self: mutable Linker&, module: mutable Module&) -> void:
-    _ = self
-    _ = module
+    for i in 0..<module.import_symbols.count:
+        resolved_addr: mutable u64 = 0
+        import_symbol: ImportSymbolRecord = module.import_symbols[i]
+        resolved: mutable bool = Linker_Resolve(self.ref[mutable Linker&], import_symbol.nid, module, resolved_addr.ref[mutable u64&])
+        if not resolved:
+            resolved <- Linker_Resolve(self.ref[mutable Linker&], import_symbol.name, module, resolved_addr.ref[mutable u64&])
+        module.import_symbols[i].resolved <- resolved
+        module.import_symbols[i].resolved_virtual_addr <- resolved_addr
+        if resolved:
+            self.last_relocated_import_count <- self.last_relocated_import_count + 1
+        else:
+            self.last_unresolved_import_count <- self.last_unresolved_import_count + 1
 
 def Linker_RelocateAllImports(self: mutable Linker&) -> void:
+    self.last_relocated_import_count <- 0
+    self.last_unresolved_import_count <- 0
+    for i in 0..<self.modules.count:
+        Linker_RelocateAnyImports(self.ref[mutable Linker&], self.modules[i].ref[mutable Module&])
     self.relocated_all_imports <- true
 
 def Linker_AdvanceGenerationCounter(self: mutable Linker&) -> void:
