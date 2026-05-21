@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 include "../common/types.elisa"
+include "../fixtures/boot/tiny_eboot_elf.elisa"
 include "./loader/elf.elisa"
 include "./memory.elisa"
 include "./guest_exec.elisa"
@@ -13,6 +14,11 @@ const ELF_SHN_UNDEF: u16 = 0
 const MODULE_LOAD_BASE: u64 = 0x800000000
 const MODULE_BLOCK_ALIGN: u64 = 0x1000
 const MODULE_TRAMPOLINE_SIZE: u64 = 8 * 1024 * 1024
+
+global mutable module_metadata_arena: Arena = zeroed
+
+def Module_ResetMetadataArena() -> void:
+    module_metadata_arena <- zeroed
 
 struct OrbisKernelModuleSegmentInfo:
     address: mutable VAddr
@@ -227,6 +233,7 @@ def Module_LoadModuleToMemory(self: mutable Module&, memory: mutable MemoryManag
     if host_like:
         self.is_valid <- false
         return
+    Module_LoadBootElfDynamicImports(self.ref[mutable Module&])
 
 def Module_LoadElfFromHostFile(self: mutable Module&, memory: mutable MemoryManager&) -> bool:
     if static_strlen(self.host_file) == 0:
@@ -435,6 +442,9 @@ def Module_ReadDynString(self: Module&, offset: u32) -> static u8&:
         return ""
     return self.dynamic_data[offset.usize()].ref[u8&].cast[static u8&]
 
+def Module_ReadDynStringAtTable(self: Module&, str_offset: u64) -> static u8&:
+    return Module_ReadDynString(self, (self.dynamic_info.str_table_offset + str_offset).u32())
+
 def Module_SymbolNameAndNidAt(self: Module&, offset: u32, out_name: mutable static u8&, out_nid: mutable static u8&) -> bool:
     out_name <- ""
     out_nid <- ""
@@ -452,13 +462,7 @@ def Module_SymbolNameAndNidAt(self: Module&, offset: u32, out_name: mutable stat
             break
     if hash_index == 0:
         return false
-    arena: Arena = zeroed
-    out: mutable darray[u8] = []
-    in arena:
-        for i in 0..<hash_index:
-            out.push(symbol_name[i])
-        out.push(0)
-    out_nid <- out[0].ref[u8&].cast[static u8&]
+    out_nid <- symbol_name
     return static_strlen(out_nid) > 0
 
 def Module_DynamicNameOffset(value: u64) -> u32:
@@ -474,6 +478,38 @@ def Module_EncodeId(value: u16) -> static u8&:
     _ = value
     return ""
 
+def Module_SymbolNidAt(self: Module&, symbol_name: static u8&) -> static u8&:
+    known: static u8& = TinyBootElf_NidForSymbol(symbol_name)
+    if static_strlen(known) > 0:
+        return known
+    return symbol_name
+
+def Module_LoadBootElfDynamicImports(self: mutable Module&) -> void:
+    self.dynamic_info.filename <- BOOT_EBOOT_ELF_FIXTURE_PATH
+    self.name <- BOOT_EBOOT_ELF_FIXTURE_NAME
+    self.info.name <- self.name
+    self.dynamic_info.str_table_offset <- BOOT_EBOOT_ELF_DYNSTR_OFFSET
+    self.dynamic_info.str_table_size <- 80
+    self.dynamic_info.symbol_table_offset <- BOOT_EBOOT_ELF_DYNSYM_OFFSET
+    self.dynamic_info.symbol_table_entries_size <- 24
+    self.dynamic_info.symbol_table_total_size <- BOOT_EBOOT_ELF_DYNSYM_COUNT.u64() * 24
+    i: mutable usize = 1
+    while i < BOOT_EBOOT_ELF_DYNSYM_COUNT:
+        name_offset: mutable u32 = 0
+        if i == 1:
+            name_offset <- BOOT_EBOOT_ELF_STR_KERNEL_ERROR
+        if i == 2:
+            name_offset <- BOOT_EBOOT_ELF_STR_AUDIO_OUT_INIT
+        if i == 3:
+            name_offset <- BOOT_EBOOT_ELF_STR_VIDEO_OUT_EVENT
+        if i == 4:
+            name_offset <- BOOT_EBOOT_ELF_STR_AUDIO_IN_INIT
+        symbol_name: static u8& = TinyBootElf_DynstrAt(name_offset)
+        nid: static u8& = Module_SymbolNidAt(self.ref[Module&], symbol_name)
+        if static_strlen(symbol_name) > 0 and static_strlen(nid) > 0:
+            Module_AddImportSymbol(self.ref[mutable Module&], nid, symbol_name)
+        i <- i + 1
+
 def Module_LoadDynamicInfo(self: mutable Module&) -> void:
     dynamic_count: usize = self.dynamic_segment.count / size_of(elf_dynamic)
     found_null: mutable bool = false
@@ -484,13 +520,21 @@ def Module_LoadDynamicInfo(self: mutable Module&) -> void:
             break
         if dyn.d_tag == DT_SCE_STRTAB:
             self.dynamic_info.str_table_offset <- dyn.d_un
+        if dyn.d_tag == DT_STRTAB:
+            self.dynamic_info.str_table_offset <- dyn.d_un
         if dyn.d_tag == DT_SCE_STRSZ:
             self.dynamic_info.str_table_size <- dyn.d_un
+        if dyn.d_tag == DT_STRSZ:
+            self.dynamic_info.str_table_size <- dyn.d_un
         if dyn.d_tag == DT_SCE_SYMTAB:
+            self.dynamic_info.symbol_table_offset <- dyn.d_un
+        if dyn.d_tag == DT_SYMTAB:
             self.dynamic_info.symbol_table_offset <- dyn.d_un
         if dyn.d_tag == DT_SCE_SYMTABSZ:
             self.dynamic_info.symbol_table_total_size <- dyn.d_un
         if dyn.d_tag == DT_SCE_SYMENT:
+            self.dynamic_info.symbol_table_entries_size <- dyn.d_un
+        if dyn.d_tag == DT_SYMENT:
             self.dynamic_info.symbol_table_entries_size <- dyn.d_un
         if dyn.d_tag == DT_SCE_RELA:
             self.dynamic_info.rela_table_offset <- dyn.d_un
@@ -519,33 +563,39 @@ def Module_LoadDynamicInfo(self: mutable Module&) -> void:
         if dyn.d_tag == DT_FINI_ARRAYSZ:
             self.dynamic_info.fini_array_size <- dyn.d_un
         if dyn.d_tag == DT_SCE_ORIGINAL_FILENAME:
-            self.dynamic_info.filename <- Module_ReadDynString(self, (self.dynamic_info.str_table_offset + dyn.d_un).u32())
+            self.dynamic_info.filename <- Module_ReadDynStringAtTable(self, dyn.d_un)
+        if dyn.d_tag == DT_NEEDED:
+            name: static u8& = Module_ReadDynStringAtTable(self, dyn.d_un)
+            enc: static u8& = ""
+            owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
+            in owner:
+                self.dynamic_info.import_modules.push(ModuleInfo(name, dyn.d_un, enc))
         if dyn.d_tag == DT_SCE_NEEDED_MODULE:
-            name: static u8& = Module_ReadDynString(self, (self.dynamic_info.str_table_offset + Module_DynamicNameOffset(dyn.d_un).u64()).u32())
+            name: static u8& = Module_ReadDynStringAtTable(self, Module_DynamicNameOffset(dyn.d_un).u64())
             enc: static u8& = Module_EncodeId(Module_DynamicModuleId(dyn.d_un))
-            arena: Arena = zeroed
-            in arena:
+            owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
+            in owner:
                 self.dynamic_info.import_modules.push(ModuleInfo(name, dyn.d_un, enc))
         if dyn.d_tag == DT_SCE_MODULE_INFO:
-            name: static u8& = Module_ReadDynString(self, (self.dynamic_info.str_table_offset + Module_DynamicNameOffset(dyn.d_un).u64()).u32())
+            name: static u8& = Module_ReadDynStringAtTable(self, Module_DynamicNameOffset(dyn.d_un).u64())
             enc: static u8& = Module_EncodeId(Module_DynamicModuleId(dyn.d_un))
-            arena: Arena = zeroed
-            in arena:
+            owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
+            in owner:
                 self.dynamic_info.export_modules.push(ModuleInfo(name, dyn.d_un, enc))
             if static_strlen(name) > 0:
                 self.name <- name
                 self.info.name <- self.name
         if dyn.d_tag == DT_SCE_IMPORT_LIB:
-            name: static u8& = Module_ReadDynString(self, (self.dynamic_info.str_table_offset + Module_DynamicNameOffset(dyn.d_un).u64()).u32())
+            name: static u8& = Module_ReadDynStringAtTable(self, Module_DynamicNameOffset(dyn.d_un).u64())
             enc: static u8& = Module_EncodeId(Module_DynamicLibraryId(dyn.d_un))
-            arena: Arena = zeroed
-            in arena:
+            owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
+            in owner:
                 self.dynamic_info.import_libs.push(LibraryInfo(name, dyn.d_un, enc))
         if dyn.d_tag == DT_SCE_EXPORT_LIB:
-            name: static u8& = Module_ReadDynString(self, (self.dynamic_info.str_table_offset + Module_DynamicNameOffset(dyn.d_un).u64()).u32())
+            name: static u8& = Module_ReadDynStringAtTable(self, Module_DynamicNameOffset(dyn.d_un).u64())
             enc: static u8& = Module_EncodeId(Module_DynamicLibraryId(dyn.d_un))
-            arena: Arena = zeroed
-            in arena:
+            owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
+            in owner:
                 self.dynamic_info.export_libs.push(LibraryInfo(name, dyn.d_un, enc))
     _ = found_null
 
@@ -636,8 +686,8 @@ def Module_FindImportByName(self: Module&, name: static u8&) -> s32:
     return -1
 
 def Module_AddImportSymbol(self: mutable Module&, nid: static u8&, name: static u8&) -> void:
-    arena: Arena = zeroed
-    in arena:
+    owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
+    in owner:
         self.import_symbols.push(ImportSymbolRecord(nid, name, 0, false))
 
 def Module_GetImportSymbolCount(self: Module&) -> usize:

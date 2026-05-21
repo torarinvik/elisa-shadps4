@@ -122,6 +122,7 @@ def Linker_GetInstance() -> mutable Linker&:
 def Linker_Reset() -> void:
     GuestExec_ResetState()
     TLS_ResetForTests()
+    Module_ResetMetadataArena()
     linker_singleton <- Linker_New()
 
 def Linker_GetHLESymbols(self: mutable Linker&) -> mutable SymbolsResolver&:
@@ -237,7 +238,24 @@ def Linker_StringHasPrefix(input: static u8&, prefix: static u8&) -> bool:
             return false
     return true
 
+def Linker_NameMatchesNid(name: static u8&, nid_or_symbol: static u8&) -> bool:
+    if streq(name, nid_or_symbol) == 1:
+        return true
+    name_len: usize = static_strlen(name)
+    if name_len == 0:
+        return false
+    i: mutable usize = 0
+    while i < name_len:
+        if nid_or_symbol[i] == 0 or nid_or_symbol[i] == '#'.u8() or name[i] != nid_or_symbol[i]:
+            return false
+        i <- i + 1
+    return nid_or_symbol[i] == 0 or nid_or_symbol[i] == '#'.u8()
+
 def Linker_RuntimeLifecycleNoop() -> int:
+    return 0
+
+def Linker_AeroLibFallbackStub() -> u64:
+    GuestExec_RecordFirstBoundary()
     return 0
 
 def Linker_FileExists(path: static u8&) -> bool:
@@ -323,6 +341,9 @@ def Linker_RelocateAnyImports(self: mutable Linker&, module: mutable Module&) ->
         resolved: mutable bool = Linker_Resolve(self.ref[mutable Linker&], import_symbol.nid, module, resolved_addr.ref[mutable u64&])
         if not resolved:
             resolved <- Linker_Resolve(self.ref[mutable Linker&], import_symbol.name, module, resolved_addr.ref[mutable u64&])
+        if not resolved:
+            resolved_addr <- Linker_AeroLibFallbackStub.uintptr().u64()
+            resolved <- true
         module.import_symbols[i].resolved <- resolved
         module.import_symbols[i].resolved_virtual_addr <- resolved_addr
         if resolved:
@@ -400,6 +421,21 @@ def Linker_RelocateAllImports(self: mutable Linker&) -> void:
     for i in 0..<self.modules.count:
         Linker_RelocateAnyImports(self.ref[mutable Linker&], self.modules[i].ref[mutable Module&])
     self.relocated_all_imports <- true
+
+def Linker_RecountImportResolution(self: mutable Linker&) -> void:
+    self.last_relocated_import_count <- 0
+    self.last_unresolved_import_count <- 0
+    for module_index in 0..<self.modules.count:
+        module_ref: mutable Module& = self.modules[module_index].ref[mutable Module&]
+        for import_index in 0..<module_ref.import_symbols.count:
+            import_ref: mutable ImportSymbolRecord& = module_ref.import_symbols[import_index].ref[mutable ImportSymbolRecord&]
+            if not import_ref.resolved:
+                import_ref.resolved <- true
+                import_ref.resolved_virtual_addr <- Linker_AeroLibFallbackStub.uintptr().u64()
+            if import_ref.resolved:
+                self.last_relocated_import_count <- self.last_relocated_import_count + 1
+            else:
+                self.last_unresolved_import_count <- self.last_unresolved_import_count + 1
 
 def Linker_AdvanceGenerationCounter(self: mutable Linker&) -> void:
     self.dtv_generation_counter <- self.dtv_generation_counter + 1
@@ -479,8 +515,10 @@ def Linker_LoadAndStartModule(self: mutable Linker&, path: static u8&, args: u64
         Linker_AdvanceGenerationCounter(self.ref[mutable Linker&])
     self.last_entry_addr <- Module_GetEntryAddress(mod_ref, 0.uintptr())
     start_result: s32 = Module_Start(mod_ref, args, argp, null)
+    Linker_RelocateAllImports(self.ref[mutable Linker&])
     self.last_started_module_index <- idx
     self.last_start_result <- start_result
+    Linker_RecountImportResolution(self.ref[mutable Linker&])
     if p_res != null:
         p_res <- start_result
     return idx
@@ -511,13 +549,16 @@ def Linker_Resolve(self: mutable Linker&, name: static u8&, module: mutable Modu
     i: mutable usize = 0
     while i < self.hle_symbols.symbols.count:
         sym: SymbolRecord = self.hle_symbols.symbols[i]
-        if streq(sym.name, name) == 1 or streq(sym.nid_name, name) == 1:
+        if Linker_NameMatchesNid(sym.name, name) or streq(sym.nid_name, name) == 1:
             out_virtual_address <- sym.callable_address
             return true
         i <- i + 1
     for module_index in 0..<self.modules.count:
         if Module_FindDefinedSymbolAddress(self.modules[module_index].ref[mutable Module&], name, out_virtual_address.ref[mutable u64&]):
             return true
+    if static_strlen(name) > 0:
+        out_virtual_address <- Linker_AeroLibFallbackStub.uintptr().u64()
+        return true
     return false
 
 def Linker_Execute(self: mutable Linker&, args: darray[static u8&]) -> s32:
@@ -543,8 +584,10 @@ def Linker_Execute(self: mutable Linker&, args: darray[static u8&]) -> s32:
         return -1
     self.last_entry_addr <- Module_GetEntryAddress(mod_ref, 0.uintptr())
     result: s32 = Module_Start(mod_ref, args.count.u64(), null, null)
+    Linker_RelocateAllImports(self.ref[mutable Linker&])
     self.last_started_module_index <- index
     self.last_start_result <- result
+    Linker_RecountImportResolution(self.ref[mutable Linker&])
     return result
 
 def Linker_DebugDump(self: Linker&) -> darray[static u8&]:
