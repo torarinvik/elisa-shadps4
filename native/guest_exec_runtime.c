@@ -396,7 +396,8 @@ int32_t ElisaGuestExec_RunMainEntryGuarded(ElisaGuestEntryParams* params, uint32
 }
 
 void ElisaGuestExec_EmitCusaArtifactStage(void) {
-    fprintf(stderr, "CUSA07399_EXEC_STAGE stage=load link=pass handoff=pass\n");
+    fprintf(stdout, "CUSA07399_EXEC_STAGE stage=load link=pass handoff=pass\n");
+    fflush(stdout);
 }
 
 void ElisaGuestExec_EmitCusaArtifactSummary(uint64_t module_count, uint64_t total_imports,
@@ -412,7 +413,7 @@ void ElisaGuestExec_EmitCusaArtifactSummary(uint64_t module_count, uint64_t tota
                                             int32_t boundary_status,
                                             int32_t boundary_reason,
                                             int32_t execution_stage) {
-    fprintf(stderr,
+    fprintf(stdout,
             "CUSA07399_ARTIFACT module_count=%llu total_imports=%llu "
             "unresolved_imports=%llu relocated_imports=%llu native_hle=%llu "
             "prx_export=%llu aerolib_fallback=%llu hle_symbols=%llu\n",
@@ -423,14 +424,15 @@ void ElisaGuestExec_EmitCusaArtifactSummary(uint64_t module_count, uint64_t tota
             (unsigned long long)prx_export_resolved,
             (unsigned long long)aerolib_fallback_resolved,
             (unsigned long long)hle_symbols);
-    fprintf(stderr,
+    fprintf(stdout,
             "CUSA07399_ARTIFACT entry=0x%llx main_entry=0x%llx guarded_status=%d "
             "last_signal=%d fault=0x%llx last_guest_pc=0x%llx\n",
             (unsigned long long)entry, (unsigned long long)main_entry, guarded_status,
             last_signal, (unsigned long long)fault_address, (unsigned long long)last_guest_pc);
-    fprintf(stderr,
+    fprintf(stdout,
             "CUSA07399_ARTIFACT execution_stage=%d boundary_status=%d boundary_reason=%d\n",
             execution_stage, boundary_status, boundary_reason);
+    fflush(stdout);
 }
 
 void ElisaGuestExec_EmitCusaArtifactModule(const char* module, const char* host, int32_t shared,
@@ -438,7 +440,7 @@ void ElisaGuestExec_EmitCusaArtifactModule(const char* module, const char* host,
                                            uint64_t resolved, uint64_t native_hle,
                                            uint64_t prx_export, uint64_t aerolib_fallback,
                                            uint64_t malformed, uint64_t unresolved) {
-    fprintf(stderr,
+    fprintf(stdout,
             "CUSA07399_ARTIFACT module=%s host=%s shared=%d relocations=%llu "
             "imports=%llu resolved=%llu native_hle=%llu prx_export=%llu "
             "aerolib_fallback=%llu malformed=%llu unresolved=%llu\n",
@@ -447,28 +449,32 @@ void ElisaGuestExec_EmitCusaArtifactModule(const char* module, const char* host,
             (unsigned long long)resolved, (unsigned long long)native_hle,
             (unsigned long long)prx_export, (unsigned long long)aerolib_fallback,
             (unsigned long long)malformed, (unsigned long long)unresolved);
+    fflush(stdout);
 }
 
 void ElisaGuestExec_EmitCusaArtifactImport(const char* source, const char* nid,
                                            const char* library, const char* module,
                                            const char* subsystem,
                                            uint64_t resolution) {
-    fprintf(stderr,
+    fprintf(stdout,
             "CUSA07399_ARTIFACT fallback_import source=%s nid=%s library=%s "
             "module=%s subsystem=%s resolution=%llu\n",
             source != NULL ? source : "", nid != NULL ? nid : "",
             library != NULL ? library : "", module != NULL ? module : "",
             subsystem != NULL ? subsystem : "",
             (unsigned long long)resolution);
+    fflush(stdout);
 }
 
 void ElisaGuestExec_EmitCusaArtifactLastHle(const char* module, const char* symbol) {
-    fprintf(stderr, "CUSA07399_ARTIFACT last_hle_module=%s last_hle_symbol=%s\n",
+    fprintf(stdout, "CUSA07399_ARTIFACT last_hle_module=%s last_hle_symbol=%s\n",
             module != NULL ? module : "", symbol != NULL ? symbol : "");
+    fflush(stdout);
 }
 
 void ElisaGuestExec_EmitCusaArtifactKV(const char* key, uint64_t value) {
-    fprintf(stderr, "CUSA07399_ARTIFACT %s=%llu\n",
+    fprintf(stdout, "CUSA07399_ARTIFACT %s=%llu\n",
             key != NULL ? key : "key",
             (unsigned long long)value);
+    fflush(stdout);
 }

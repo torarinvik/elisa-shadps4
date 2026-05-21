@@ -22,6 +22,7 @@ LAST_REPORT_PATH = ROOT / "parity_gate_latest.md"
 LEDGER_PATH = ROOT / "parity_ledger.json"
 PROJECT_PATH = ROOT / "project.json"
 CUSA_PATH = ROOT.parent / "shadPS4" / "Games" / "CUSA07399"
+CUSA_ARTIFACT_PATH = ROOT / "cusa07399_artifacts.txt"
 
 
 @dataclass(frozen=True)
@@ -183,6 +184,8 @@ def gather_artifact_rows(results: list[Result]) -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
     for r in results:
         rows.extend(parse_artifact_kv(r.output.splitlines()))
+    if CUSA_ARTIFACT_PATH.exists():
+        rows.extend(parse_artifact_kv(CUSA_ARTIFACT_PATH.read_text().splitlines()))
     return rows
 
 
@@ -338,10 +341,12 @@ def fallback_symbols(results: list[Result]) -> list[dict[str, str | int]]:
 def stage_name(stage: int) -> str:
     mapping = {
         0: "none",
-        1: "handoff",
-        2: "guarded-entry",
-        3: "first-boundary",
-        4: "first-frame",
+        1: "load",
+        2: "link",
+        3: "handoff",
+        4: "guarded-entry",
+        5: "first-boundary",
+        6: "crash-captured",
     }
     return mapping.get(stage, f"unknown({stage})")
 
