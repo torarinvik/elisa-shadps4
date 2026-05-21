@@ -62,6 +62,10 @@ struct Linker:
     relocated_all_imports: mutable bool
     last_relocated_import_count: mutable usize
     last_unresolved_import_count: mutable usize
+    last_total_import_count: mutable usize
+    last_native_hle_resolved_count: mutable usize
+    last_prx_export_resolved_count: mutable usize
+    last_aerolib_fallback_resolved_count: mutable usize
     last_started_module_index: mutable s32
     last_start_result: mutable s32
     last_entry_addr: mutable VAddr
@@ -81,6 +85,10 @@ global mutable linker_singleton: Linker = Linker(
     SymbolsResolver(zeroed),
     0,
     false,
+    0,
+    0,
+    0,
+    0,
     0,
     0,
     -1,
@@ -104,6 +112,10 @@ def Linker_New() -> Linker:
         SymbolsResolver_new(),
         0,
         false,
+        0,
+        0,
+        0,
+        0,
         0,
         0,
         -1,
@@ -255,7 +267,7 @@ def Linker_RuntimeLifecycleNoop() -> int:
     return 0
 
 def Linker_AeroLibFallbackStub() -> u64:
-    GuestExec_RecordFirstBoundary()
+    GuestExec_RecordFirstBoundary(GUEST_EXEC_BOUNDARY_REASON_AEROLIB_FALLBACK)
     return 0
 
 def Linker_FileExists(path: static u8&) -> bool:
@@ -336,18 +348,24 @@ def Linker_LoadDependencyClosure(self: mutable Linker&) -> void:
 
 def Linker_RelocateAnyImports(self: mutable Linker&, module: mutable Module&) -> void:
     for i in 0..<module.import_symbols.count:
+        self.last_total_import_count <- self.last_total_import_count + 1
         resolved_addr: mutable u64 = 0
+        resolved_kind: mutable u8 = IMPORT_RESOLUTION_UNRESOLVED
         import_symbol: ImportSymbolRecord = module.import_symbols[i]
-        resolved: mutable bool = Linker_Resolve(self.ref[mutable Linker&], import_symbol.nid, module, resolved_addr.ref[mutable u64&])
+        resolved: mutable bool = Linker_Resolve(self.ref[mutable Linker&], import_symbol.nid, module, resolved_addr.ref[mutable u64&], resolved_kind.ref[mutable u8&])
         if not resolved:
-            resolved <- Linker_Resolve(self.ref[mutable Linker&], import_symbol.name, module, resolved_addr.ref[mutable u64&])
-        if not resolved:
-            resolved_addr <- Linker_AeroLibFallbackStub.uintptr().u64()
-            resolved <- true
+            resolved <- Linker_Resolve(self.ref[mutable Linker&], import_symbol.raw_symbol, module, resolved_addr.ref[mutable u64&], resolved_kind.ref[mutable u8&])
         module.import_symbols[i].resolved <- resolved
         module.import_symbols[i].resolved_virtual_addr <- resolved_addr
+        module.import_symbols[i].resolution_kind <- resolved_kind
         if resolved:
             self.last_relocated_import_count <- self.last_relocated_import_count + 1
+            if resolved_kind == IMPORT_RESOLUTION_NATIVE_HLE:
+                self.last_native_hle_resolved_count <- self.last_native_hle_resolved_count + 1
+            elif resolved_kind == IMPORT_RESOLUTION_PRX_EXPORT:
+                self.last_prx_export_resolved_count <- self.last_prx_export_resolved_count + 1
+            elif resolved_kind == IMPORT_RESOLUTION_AEROLIB_FALLBACK:
+                self.last_aerolib_fallback_resolved_count <- self.last_aerolib_fallback_resolved_count + 1
         else:
             self.last_unresolved_import_count <- self.last_unresolved_import_count + 1
     Linker_ApplyModuleRelocations(self.ref[mutable Linker&], module.ref[mutable Module&])
@@ -379,7 +397,8 @@ def Linker_ApplyRelocationEntry(self: mutable Linker&, module: mutable Module&, 
                     return true
         symbol_name: static u8& = Module_GetSymbolNameByIndex(module.ref[mutable Module&], symbol_index)
         resolved_addr: mutable u64 = 0
-        resolved: mutable bool = Linker_Resolve(self.ref[mutable Linker&], symbol_name, module, resolved_addr.ref[mutable u64&])
+        rel_kind: mutable u8 = IMPORT_RESOLUTION_UNRESOLVED
+        resolved: mutable bool = Linker_Resolve(self.ref[mutable Linker&], symbol_name, module, resolved_addr.ref[mutable u64&], rel_kind.ref[mutable u8&])
         if not resolved:
             import_index: s32 = Module_FindImportByName(module, symbol_name)
             if import_index >= 0 and module.import_symbols[import_index.usize()].resolved:
@@ -416,24 +435,36 @@ def Linker_ApplyModuleRelocations(self: mutable Linker&, module: mutable Module&
     Linker_ApplyRelocationTable(self.ref[mutable Linker&], module.ref[mutable Module&], module.dynamic_info.jmp_relocation_offset, module.dynamic_info.jmp_relocation_total_size, entry_size)
 
 def Linker_RelocateAllImports(self: mutable Linker&) -> void:
+    self.last_total_import_count <- 0
     self.last_relocated_import_count <- 0
     self.last_unresolved_import_count <- 0
+    self.last_native_hle_resolved_count <- 0
+    self.last_prx_export_resolved_count <- 0
+    self.last_aerolib_fallback_resolved_count <- 0
     for i in 0..<self.modules.count:
         Linker_RelocateAnyImports(self.ref[mutable Linker&], self.modules[i].ref[mutable Module&])
     self.relocated_all_imports <- true
 
 def Linker_RecountImportResolution(self: mutable Linker&) -> void:
+    self.last_total_import_count <- 0
     self.last_relocated_import_count <- 0
     self.last_unresolved_import_count <- 0
+    self.last_native_hle_resolved_count <- 0
+    self.last_prx_export_resolved_count <- 0
+    self.last_aerolib_fallback_resolved_count <- 0
     for module_index in 0..<self.modules.count:
         module_ref: mutable Module& = self.modules[module_index].ref[mutable Module&]
         for import_index in 0..<module_ref.import_symbols.count:
             import_ref: mutable ImportSymbolRecord& = module_ref.import_symbols[import_index].ref[mutable ImportSymbolRecord&]
-            if not import_ref.resolved:
-                import_ref.resolved <- true
-                import_ref.resolved_virtual_addr <- Linker_AeroLibFallbackStub.uintptr().u64()
+            self.last_total_import_count <- self.last_total_import_count + 1
             if import_ref.resolved:
                 self.last_relocated_import_count <- self.last_relocated_import_count + 1
+                if import_ref.resolution_kind == IMPORT_RESOLUTION_NATIVE_HLE:
+                    self.last_native_hle_resolved_count <- self.last_native_hle_resolved_count + 1
+                elif import_ref.resolution_kind == IMPORT_RESOLUTION_PRX_EXPORT:
+                    self.last_prx_export_resolved_count <- self.last_prx_export_resolved_count + 1
+                elif import_ref.resolution_kind == IMPORT_RESOLUTION_AEROLIB_FALLBACK:
+                    self.last_aerolib_fallback_resolved_count <- self.last_aerolib_fallback_resolved_count + 1
             else:
                 self.last_unresolved_import_count <- self.last_unresolved_import_count + 1
 
@@ -441,7 +472,7 @@ def Linker_AdvanceGenerationCounter(self: mutable Linker&) -> void:
     self.dtv_generation_counter <- self.dtv_generation_counter + 1
 
 def Linker_TlsGetAddr(self: Linker&, module_index: u64, offset: u64) -> uintptr:
-    GuestExec_RecordFirstBoundary()
+    GuestExec_RecordFirstBoundary(GUEST_EXEC_BOUNDARY_REASON_NATIVE_HLE)
     if module_index == 0u64:
         return offset.uintptr()
     module_slot: u64 = module_index - 1u64
@@ -540,24 +571,29 @@ def Linker_FindByAddress(self: mutable Linker&, address: VAddr) -> mutable Modul
 def Linker_Relocate(self: mutable Linker&, module: mutable Module&) -> void:
     Linker_RelocateAnyImports(self.ref[mutable Linker&], module.ref[mutable Module&])
 
-def Linker_Resolve(self: mutable Linker&, name: static u8&, module: mutable Module&, out_virtual_address: mutable u64&) -> bool:
+def Linker_Resolve(self: mutable Linker&, name: static u8&, module: mutable Module&, out_virtual_address: mutable u64&, out_resolution_kind: mutable u8&) -> bool:
     _ = module
     out_virtual_address <- 0
+    out_resolution_kind <- IMPORT_RESOLUTION_UNRESOLVED
     if streq(name, "module_start") == 1 or streq(name, "module_stop") == 1 or streq(name, "compilerrt_abort_impl") == 1 or Linker_StringHasPrefix(name, "Need_"):
         out_virtual_address <- Linker_RuntimeLifecycleNoop.uintptr().u64()
+        out_resolution_kind <- IMPORT_RESOLUTION_NATIVE_HLE
         return true
     i: mutable usize = 0
     while i < self.hle_symbols.symbols.count:
         sym: SymbolRecord = self.hle_symbols.symbols[i]
         if Linker_NameMatchesNid(sym.name, name) or streq(sym.nid_name, name) == 1:
             out_virtual_address <- sym.callable_address
+            out_resolution_kind <- IMPORT_RESOLUTION_NATIVE_HLE
             return true
         i <- i + 1
     for module_index in 0..<self.modules.count:
         if Module_FindDefinedSymbolAddress(self.modules[module_index].ref[mutable Module&], name, out_virtual_address.ref[mutable u64&]):
+            out_resolution_kind <- IMPORT_RESOLUTION_PRX_EXPORT
             return true
     if static_strlen(name) > 0:
         out_virtual_address <- Linker_AeroLibFallbackStub.uintptr().u64()
+        out_resolution_kind <- IMPORT_RESOLUTION_AEROLIB_FALLBACK
         return true
     return false
 

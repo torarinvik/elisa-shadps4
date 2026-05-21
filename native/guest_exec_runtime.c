@@ -14,7 +14,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <sys/mman.h>
-#include <sys/wait.h>
+#include <sys/time.h>
 #include <unistd.h>
 #endif
 
@@ -31,20 +31,39 @@ typedef uint64_t (*ElisaGuestExecTestFunc)(uint64_t, uint64_t);
 static int32_t elisa_guest_exec_last_status = 0;
 static int32_t elisa_guest_exec_last_signal = 0;
 static uintptr_t elisa_guest_exec_last_fault_address = 0;
+static uintptr_t elisa_guest_exec_last_guest_pc = 0;
 
 #if !defined(_WIN32)
 static sigjmp_buf elisa_guest_exec_jmp;
 static volatile sig_atomic_t elisa_guest_exec_guard_active = 0;
+static volatile sig_atomic_t elisa_guest_exec_timeout_fired = 0;
 static struct sigaction elisa_guest_exec_old_segv;
 static struct sigaction elisa_guest_exec_old_bus;
 static struct sigaction elisa_guest_exec_old_ill;
 static struct sigaction elisa_guest_exec_old_fpe;
+static struct sigaction elisa_guest_exec_old_alrm;
+
+static uintptr_t elisa_guest_exec_extract_pc(void* uctx) {
+    (void)uctx;
+    return 0;
+}
 
 static void elisa_guest_exec_signal_handler(int sig, siginfo_t* info, void* uctx) {
     (void)uctx;
     elisa_guest_exec_last_status = -sig;
     elisa_guest_exec_last_signal = sig;
     elisa_guest_exec_last_fault_address = info != NULL ? (uintptr_t)info->si_addr : 0;
+    elisa_guest_exec_last_guest_pc = elisa_guest_exec_extract_pc(uctx);
+    if (elisa_guest_exec_guard_active) {
+        siglongjmp(elisa_guest_exec_jmp, 1);
+    }
+}
+
+static void elisa_guest_exec_alarm_handler(int sig) {
+    (void)sig;
+    elisa_guest_exec_timeout_fired = 1;
+    elisa_guest_exec_last_status = -3;
+    elisa_guest_exec_last_signal = SIGALRM;
     if (elisa_guest_exec_guard_active) {
         siglongjmp(elisa_guest_exec_jmp, 1);
     }
@@ -60,6 +79,11 @@ static void __attribute__((unused)) elisa_guest_exec_install_guards(void) {
     sigaction(SIGBUS, &sa, &elisa_guest_exec_old_bus);
     sigaction(SIGILL, &sa, &elisa_guest_exec_old_ill);
     sigaction(SIGFPE, &sa, &elisa_guest_exec_old_fpe);
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = elisa_guest_exec_alarm_handler;
+    sa.sa_flags = 0;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGALRM, &sa, &elisa_guest_exec_old_alrm);
 }
 
 static void __attribute__((unused)) elisa_guest_exec_restore_guards(void) {
@@ -67,12 +91,9 @@ static void __attribute__((unused)) elisa_guest_exec_restore_guards(void) {
     sigaction(SIGBUS, &elisa_guest_exec_old_bus, NULL);
     sigaction(SIGILL, &elisa_guest_exec_old_ill, NULL);
     sigaction(SIGFPE, &elisa_guest_exec_old_fpe, NULL);
+    sigaction(SIGALRM, &elisa_guest_exec_old_alrm, NULL);
 }
 #endif
-
-static void __attribute__((noreturn, unused)) elisa_guest_exec_child_exit(int32_t code) {
-    _exit(code & 0x7f);
-}
 
 static void __attribute__((unused)) elisa_guest_exec_default_exit(int32_t code) {
     (void)code;
@@ -86,7 +107,9 @@ static void __attribute__((unused)) elisa_guest_exec_default_exit(int32_t code) 
 }
 
 int32_t ElisaGuestExec_IsSupported(void) {
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(_WIN32)
+    return 0;
+#elif defined(__x86_64__) || defined(_M_X64)
     return 1;
 #else
     return 0;
@@ -105,10 +128,16 @@ uintptr_t ElisaGuestExec_LastFaultAddress(void) {
     return elisa_guest_exec_last_fault_address;
 }
 
+uintptr_t ElisaGuestExec_LastGuestPC(void) {
+    return elisa_guest_exec_last_guest_pc;
+}
+
 void ElisaGuestExec_ResetCrashState(void) {
     elisa_guest_exec_last_status = 0;
     elisa_guest_exec_last_signal = 0;
     elisa_guest_exec_last_fault_address = 0;
+    elisa_guest_exec_last_guest_pc = 0;
+    elisa_guest_exec_timeout_fired = 0;
 }
 
 int32_t ElisaGuestExec_MapRegion(uintptr_t address, uint64_t size, uint32_t prot) {
@@ -285,48 +314,37 @@ int32_t ElisaGuestExec_RunMainEntryGuarded(ElisaGuestEntryParams* params, uint32
         return -1;
     }
 #if defined(__x86_64__) && !defined(_WIN32)
+    typedef void (*ElisaGuestMainEntryFn)(ElisaGuestEntryParams*, ElisaGuestExitFunc);
     ElisaGuestExec_ResetCrashState();
-    pid_t child = fork();
-    if (child < 0) {
-        elisa_guest_exec_last_status = -4;
-        return -4;
+    elisa_guest_exec_install_guards();
+    elisa_guest_exec_guard_active = 1;
+    if (timeout_ms != 0) {
+        struct itimerval timer;
+        memset(&timer, 0, sizeof(timer));
+        timer.it_value.tv_sec = timeout_ms / 1000u;
+        timer.it_value.tv_usec = (timeout_ms % 1000u) * 1000u;
+        setitimer(ITIMER_REAL, &timer, NULL);
     }
-    if (child == 0) {
-        ElisaGuestExec_RunMainEntry(params, elisa_guest_exec_child_exit);
-    }
-
-    uint32_t waited_ms = 0;
-    int status = 0;
-    for (;;) {
-        pid_t result = waitpid(child, &status, WNOHANG);
-        if (result == child) {
-            if (WIFSIGNALED(status)) {
-                int sig = WTERMSIG(status);
-                elisa_guest_exec_last_status = -sig;
-                elisa_guest_exec_last_signal = sig;
-                return elisa_guest_exec_last_status;
-            }
-            if (WIFEXITED(status)) {
-                elisa_guest_exec_last_status = WEXITSTATUS(status);
-                return elisa_guest_exec_last_status;
-            }
-            elisa_guest_exec_last_status = -5;
-            return -5;
-        }
-        if (result < 0) {
-            elisa_guest_exec_last_status = -6;
-            return -6;
-        }
-        if (timeout_ms != 0 && waited_ms >= timeout_ms) {
-            kill(child, SIGKILL);
-            (void)waitpid(child, &status, 0);
+    if (sigsetjmp(elisa_guest_exec_jmp, 1) != 0) {
+        struct itimerval timer_off;
+        memset(&timer_off, 0, sizeof(timer_off));
+        setitimer(ITIMER_REAL, &timer_off, NULL);
+        elisa_guest_exec_guard_active = 0;
+        elisa_guest_exec_restore_guards();
+        if (elisa_guest_exec_timeout_fired) {
             elisa_guest_exec_last_status = -3;
-            elisa_guest_exec_last_signal = SIGKILL;
-            return -3;
         }
-        usleep(1000);
-        waited_ms += 1;
+        return elisa_guest_exec_last_status;
     }
+    ElisaGuestMainEntryFn entry = (ElisaGuestMainEntryFn)params->entry_addr;
+    entry(params, elisa_guest_exec_default_exit);
+    struct itimerval timer_off;
+    memset(&timer_off, 0, sizeof(timer_off));
+    setitimer(ITIMER_REAL, &timer_off, NULL);
+    elisa_guest_exec_guard_active = 0;
+    elisa_guest_exec_restore_guards();
+    elisa_guest_exec_last_status = 1;
+    return 1;
 #else
     (void)timeout_ms;
     ElisaGuestExec_ResetCrashState();
@@ -339,21 +357,38 @@ void ElisaGuestExec_EmitCusaArtifactStage(void) {
     fprintf(stderr, "CUSA07399_ARTIFACT stage=load link=pass handoff=pass\n");
 }
 
-void ElisaGuestExec_EmitCusaArtifactSummary(uint64_t module_count, uint64_t unresolved_imports,
-                                            uint64_t relocated_imports, uint64_t hle_symbols,
-                                            uint64_t entry, uint64_t main_entry,
-                                            int32_t guarded_status, int32_t last_signal,
-                                            uint64_t fault_address) {
+void ElisaGuestExec_EmitCusaArtifactSummary(uint64_t module_count, uint64_t total_imports,
+                                            uint64_t unresolved_imports,
+                                            uint64_t relocated_imports,
+                                            uint64_t native_hle_resolved,
+                                            uint64_t prx_export_resolved,
+                                            uint64_t aerolib_fallback_resolved,
+                                            uint64_t hle_symbols, uint64_t entry,
+                                            uint64_t main_entry, int32_t guarded_status,
+                                            int32_t last_signal, uint64_t fault_address,
+                                            uint64_t last_guest_pc,
+                                            int32_t boundary_status,
+                                            int32_t boundary_reason,
+                                            int32_t execution_stage) {
     fprintf(stderr,
-            "CUSA07399_ARTIFACT module_count=%llu unresolved_imports=%llu "
-            "relocated_imports=%llu hle_symbols=%llu\n",
-            (unsigned long long)module_count, (unsigned long long)unresolved_imports,
-            (unsigned long long)relocated_imports, (unsigned long long)hle_symbols);
+            "CUSA07399_ARTIFACT module_count=%llu total_imports=%llu "
+            "unresolved_imports=%llu relocated_imports=%llu native_hle=%llu "
+            "prx_export=%llu aerolib_fallback=%llu hle_symbols=%llu\n",
+            (unsigned long long)module_count, (unsigned long long)total_imports,
+            (unsigned long long)unresolved_imports,
+            (unsigned long long)relocated_imports,
+            (unsigned long long)native_hle_resolved,
+            (unsigned long long)prx_export_resolved,
+            (unsigned long long)aerolib_fallback_resolved,
+            (unsigned long long)hle_symbols);
     fprintf(stderr,
             "CUSA07399_ARTIFACT entry=0x%llx main_entry=0x%llx guarded_status=%d "
-            "last_signal=%d fault=0x%llx\n",
+            "last_signal=%d fault=0x%llx last_guest_pc=0x%llx\n",
             (unsigned long long)entry, (unsigned long long)main_entry, guarded_status,
-            last_signal, (unsigned long long)fault_address);
+            last_signal, (unsigned long long)fault_address, (unsigned long long)last_guest_pc);
+    fprintf(stderr,
+            "CUSA07399_ARTIFACT execution_stage=%d boundary_status=%d boundary_reason=%d\n",
+            execution_stage, boundary_status, boundary_reason);
 }
 
 void ElisaGuestExec_EmitCusaArtifactModule(const char* module, const char* host, int32_t shared,
@@ -365,4 +400,10 @@ void ElisaGuestExec_EmitCusaArtifactModule(const char* module, const char* host,
             module != NULL ? module : "", host != NULL ? host : "", shared,
             (unsigned long long)relocations, (unsigned long long)imports,
             (unsigned long long)resolved);
+}
+
+void ElisaGuestExec_EmitCusaArtifactKV(const char* key, uint64_t value) {
+    fprintf(stderr, "CUSA07399_ARTIFACT %s=%llu\n",
+            key != NULL ? key : "key",
+            (unsigned long long)value);
 }

@@ -15,6 +15,16 @@ const MODULE_LOAD_BASE: u64 = 0x800000000
 const MODULE_BLOCK_ALIGN: u64 = 0x1000
 const MODULE_TRAMPOLINE_SIZE: u64 = 8 * 1024 * 1024
 
+const IMPORT_SYMBOL_TYPE_UNKNOWN: u8 = 0u8
+const IMPORT_SYMBOL_TYPE_FUNCTION: u8 = 1u8
+const IMPORT_SYMBOL_TYPE_OBJECT: u8 = 2u8
+const IMPORT_SYMBOL_TYPE_TLS: u8 = 3u8
+
+const IMPORT_RESOLUTION_UNRESOLVED: u8 = 0u8
+const IMPORT_RESOLUTION_NATIVE_HLE: u8 = 1u8
+const IMPORT_RESOLUTION_PRX_EXPORT: u8 = 2u8
+const IMPORT_RESOLUTION_AEROLIB_FALLBACK: u8 = 3u8
+
 global mutable module_metadata_arena: Arena = zeroed
 
 def Module_ResetMetadataArena() -> void:
@@ -59,7 +69,12 @@ struct LibraryInfo:
     enc_id: mutable static u8&
 
 struct ImportSymbolRecord:
+    raw_symbol: mutable static u8&
     nid: mutable static u8&
+    library: mutable static u8&
+    module: mutable static u8&
+    symbol_type: mutable u8
+    resolution_kind: mutable u8
     name: mutable static u8&
     resolved_virtual_addr: mutable u64
     resolved: mutable bool
@@ -457,13 +472,77 @@ def Module_SymbolNameAndNidAt(self: Module&, offset: u32, out_name: mutable stat
         return false
     hash_index: mutable usize = name_len
     for i in 0..<name_len:
-        if symbol_name[i] == '#'.u8():
+        if symbol_name[i] == 35u8:
             hash_index <- i
-            break
+            i <- name_len
     if hash_index == 0:
         return false
-    out_nid <- symbol_name
+    owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
+    out: mutable darray[u8] = []
+    in owner:
+        i: mutable usize = 0
+        while i < hash_index:
+            out.push(symbol_name[i])
+            i <- i + 1
+        out.push(0)
+    out_nid <- out[0].ref[u8&].cast[static u8&]
     return static_strlen(out_nid) > 0
+
+def Module_CopySlice(input: static u8&, start: usize, end_exclusive: usize) -> static u8&:
+    if end_exclusive <= start:
+        return ""
+    owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
+    out: mutable darray[u8] = []
+    in owner:
+        i: mutable usize = start
+        while i < end_exclusive:
+            out.push(input[i])
+            i <- i + 1
+        out.push(0)
+    return out[0].ref[u8&].cast[static u8&]
+
+def Module_ParseImportSymbol(raw_symbol: static u8&, out_nid: mutable static u8&, out_library: mutable static u8&, out_module: mutable static u8&) -> bool:
+    out_nid <- ""
+    out_library <- ""
+    out_module <- ""
+    total: usize = static_strlen(raw_symbol)
+    if total == 0:
+        return false
+    first_hash: mutable usize = total
+    second_hash: mutable usize = total
+    i: mutable usize = 0
+    while i < total:
+        if raw_symbol[i] == 35u8:
+            if first_hash == total:
+                first_hash <- i
+            elif second_hash == total:
+                second_hash <- i
+                i <- total
+        i <- i + 1
+    if first_hash == 0:
+        return false
+    if first_hash == total:
+        out_nid <- raw_symbol
+        return true
+    out_nid <- Module_CopySlice(raw_symbol, 0, first_hash)
+    if second_hash == total:
+        if first_hash + 1 < total:
+            out_library <- Module_CopySlice(raw_symbol, first_hash + 1, total)
+    else:
+        if second_hash > first_hash + 1:
+            out_library <- Module_CopySlice(raw_symbol, first_hash + 1, second_hash)
+        if second_hash + 1 < total:
+            out_module <- Module_CopySlice(raw_symbol, second_hash + 1, total)
+    return static_strlen(out_nid) > 0
+
+def Module_ImportSymbolTypeFromElfType(typ: u8) -> u8:
+    if typ == STT_FUN:
+        return IMPORT_SYMBOL_TYPE_FUNCTION
+    if typ == STT_OBJECT:
+        return IMPORT_SYMBOL_TYPE_OBJECT
+    if typ == STT_TLS:
+        return IMPORT_SYMBOL_TYPE_TLS
+    return IMPORT_SYMBOL_TYPE_UNKNOWN
 
 def Module_DynamicNameOffset(value: u64) -> u32:
     return (value & 0xffffffffu64).u32()
@@ -507,7 +586,7 @@ def Module_LoadBootElfDynamicImports(self: mutable Module&) -> void:
         symbol_name: static u8& = TinyBootElf_DynstrAt(name_offset)
         nid: static u8& = Module_SymbolNidAt(self.ref[Module&], symbol_name)
         if static_strlen(symbol_name) > 0 and static_strlen(nid) > 0:
-            Module_AddImportSymbol(self.ref[mutable Module&], nid, symbol_name)
+            Module_AddImportSymbol(self.ref[mutable Module&], nid, symbol_name, IMPORT_SYMBOL_TYPE_UNKNOWN)
         i <- i + 1
 
 def Module_LoadDynamicInfo(self: mutable Module&) -> void:
@@ -517,7 +596,8 @@ def Module_LoadDynamicInfo(self: mutable Module&) -> void:
         dyn: elf_dynamic& = Module_DynamicAt(self, dyn_index * size_of(elf_dynamic))
         if dyn.d_tag == DT_NULL:
             found_null <- true
-            break
+        if found_null:
+            continue
         if dyn.d_tag == DT_SCE_STRTAB:
             self.dynamic_info.str_table_offset <- dyn.d_un
         if dyn.d_tag == DT_STRTAB:
@@ -619,7 +699,7 @@ def Module_LoadSymbols(self: mutable Module&) -> void:
             symbol_name: mutable static u8& = ""
             nid: mutable static u8& = ""
             if Module_SymbolNameAndNidAt(self, name_offset, symbol_name.ref[mutable static u8&], nid.ref[mutable static u8&]):
-                Module_AddImportSymbol(self.ref[mutable Module&], nid, symbol_name)
+                Module_AddImportSymbol(self.ref[mutable Module&], nid, symbol_name, Module_ImportSymbolTypeFromElfType(typ))
         sym_offset <- sym_offset + entry_size
 
 def Module_GetSymbolNameByIndex(self: mutable Module&, symbol_index: u32) -> static u8&:
@@ -685,10 +765,17 @@ def Module_FindImportByName(self: Module&, name: static u8&) -> s32:
             return i.s32()
     return -1
 
-def Module_AddImportSymbol(self: mutable Module&, nid: static u8&, name: static u8&) -> void:
+def Module_AddImportSymbol(self: mutable Module&, nid: static u8&, name: static u8&, symbol_type: u8) -> void:
+    parsed_nid: mutable static u8& = ""
+    parsed_library: mutable static u8& = ""
+    parsed_module: mutable static u8& = ""
+    _ = Module_ParseImportSymbol(name, parsed_nid.ref[mutable static u8&], parsed_library.ref[mutable static u8&], parsed_module.ref[mutable static u8&])
+    final_nid: mutable static u8& = nid
+    if static_strlen(parsed_nid) > 0:
+        final_nid <- parsed_nid
     owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
     in owner:
-        self.import_symbols.push(ImportSymbolRecord(nid, name, 0, false))
+        self.import_symbols.push(ImportSymbolRecord(name, final_nid, parsed_library, parsed_module, symbol_type, IMPORT_RESOLUTION_UNRESOLVED, name, 0, false))
 
 def Module_GetImportSymbolCount(self: Module&) -> usize:
     return self.import_symbols.count
