@@ -4,6 +4,7 @@
 include "../common/types.elisa"
 include "./loader/elf.elisa"
 include "./memory.elisa"
+include "./guest_exec.elisa"
 include "../fixtures/boot/tiny_eboot_elf.elisa"
 
 const SCE_DBG_MAX_NAME_LENGTH: usize = 256
@@ -223,6 +224,8 @@ def Module_Start(self: mutable Module&, args: u64, argp: void&?, param: void&?) 
     self.last_start_init_count <- 0
     if self.dynamic_info.init_array_virtual_addr != 0 and self.dynamic_info.init_array_size >= 8:
         self.last_start_init_count <- self.dynamic_info.init_array_size / 8
+    if GuestExec_IsEnabled():
+        GuestExec_RunMainEntry(self.last_start_entry_addr, args.int(), argp)
     return 0
 
 def Module_LoadModuleToMemory(self: mutable Module&, memory: mutable MemoryManager&, max_tls_index: mutable u32&) -> void:
@@ -230,7 +233,11 @@ def Module_LoadModuleToMemory(self: mutable Module&, memory: mutable MemoryManag
     self.tls.modid <- max_tls_index
     if self.is_shared_lib:
         return
+    host_like: bool = Module_IsLikelyHostFile(self.host_file)
     if Module_LoadElfFromHostFile(self.ref[mutable Module&], memory):
+        return
+    if host_like:
+        self.is_valid <- false
         return
     _ = Module_LoadBootElfDynamicImports(self.ref[mutable Module&])
 

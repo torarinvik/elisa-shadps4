@@ -5,6 +5,7 @@ include "../common/types.elisa"
 include "./module.elisa"
 include "./loader/elf.elisa"
 include "./memory.elisa"
+include "./guest_exec.elisa"
 
 struct SymbolRecord:
     name: mutable static u8&
@@ -63,8 +64,11 @@ struct Linker:
     last_started_module_index: mutable s32
     last_start_result: mutable s32
     last_entry_addr: mutable VAddr
+    native_guest_exec_requested: mutable bool
     hle_libs_initialized: mutable bool
     hle_registered_symbol_count: mutable usize
+    app0_host_root: mutable static u8&?
+    last_loaded_dynamic_host_path: mutable static u8&?
 
 global mutable linker_singleton: Linker = Linker(
     0.uintptr(),
@@ -82,7 +86,10 @@ global mutable linker_singleton: Linker = Linker(
     0,
     0.uintptr(),
     false,
-    0
+    false,
+    0,
+    null,
+    null
 )
 
 def Linker_New() -> Linker:
@@ -102,13 +109,17 @@ def Linker_New() -> Linker:
         0,
         0.uintptr(),
         false,
-        0
+        false,
+        0,
+        null,
+        null
     )
 
 def Linker_GetInstance() -> mutable Linker&:
     return linker_singleton.ref[mutable Linker&]
 
 def Linker_Reset() -> void:
+    GuestExec_Enable(false)
     linker_singleton <- Linker_New()
 
 def Linker_GetHLESymbols(self: mutable Linker&) -> mutable SymbolsResolver&:
@@ -152,6 +163,67 @@ def Linker_MaxTlsIndex(self: Linker&) -> u32:
 
 def Linker_GenerationCounter(self: Linker&) -> u32:
     return self.dtv_generation_counter
+
+def Linker_EnableNativeGuestExecution(self: mutable Linker&, enabled: bool) -> void:
+    self.native_guest_exec_requested <- enabled
+    GuestExec_Enable(enabled)
+
+def Linker_SetApp0HostRoot(self: mutable Linker&, root: static u8&) -> void:
+    self.app0_host_root <- root
+
+def Linker_Substr(input: static u8&, start: usize, len: usize) -> static u8&:
+    arena: Arena = zeroed
+    out: mutable darray[u8] = []
+    in arena:
+        for i in 0..<len:
+            out.push(input[start + i])
+        out.push(0)
+    return out[0].ref[static u8&]
+
+def Linker_Concat2(lhs: static u8&, rhs: static u8&) -> static u8&:
+    lhs_len: usize = static_strlen(lhs)
+    rhs_len: usize = static_strlen(rhs)
+    arena: Arena = zeroed
+    out: mutable darray[u8] = []
+    in arena:
+        for i in 0..<lhs_len:
+            out.push(lhs[i])
+        for j in 0..<rhs_len:
+            out.push(rhs[j])
+        out.push(0)
+    return out[0].ref[static u8&]
+
+def Linker_PathJoin(lhs: static u8&, rhs: static u8&) -> static u8&:
+    if static_strlen(lhs) == 0:
+        return rhs
+    if static_strlen(rhs) == 0:
+        return lhs
+    if lhs[static_strlen(lhs) - 1] == '/'.u8():
+        return Linker_Concat2(lhs, rhs)
+    return Linker_Concat2(Linker_Concat2(lhs, "/"), rhs)
+
+def Linker_StringContainsSlash(input: static u8&) -> bool:
+    for i in 0..<static_strlen(input):
+        if input[i] == '/'.u8():
+            return true
+    return false
+
+def Linker_ResolveGuestModulePath(self: Linker&, guest_path: static u8&) -> static u8&:
+    len: usize = static_strlen(guest_path)
+    if len == 0:
+        return ""
+    root: mutable static u8& = ""
+    if self.app0_host_root != null:
+        root <- self.app0_host_root
+    if len >= 5 and guest_path[0] == '/'.u8() and guest_path[1] == 'a'.u8() and guest_path[2] == 'p'.u8() and guest_path[3] == 'p'.u8() and guest_path[4] == '0'.u8():
+        if len == 5:
+            return root
+        if guest_path[5] == '/'.u8():
+            suffix: static u8& = Linker_Substr(guest_path, 6, len - 6)
+            return Linker_PathJoin(root, suffix)
+    if guest_path[0] != '/'.u8() and not Linker_StringContainsSlash(guest_path):
+        return Linker_PathJoin(root, guest_path)
+    return guest_path
 
 def Linker_StaticTlsSize(self: Linker&) -> usize:
     return self.static_tls_size
@@ -267,6 +339,8 @@ def Linker_LoadModuleFromHost(self: mutable Linker&, guest_name: static u8&, hos
     Module_SetHostFile(module.ref[mutable Module&], host_name)
     memory: mutable MemoryManager& = Memory_Instance()
     Module_LoadModuleToMemory(module.ref[mutable Module&], memory, self.max_tls_index.ref[mutable u32&])
+    if not module.is_valid:
+        return -1
     if not is_dynamic:
         self.num_static_modules <- self.num_static_modules + 1
     arena: Arena = zeroed
@@ -275,6 +349,11 @@ def Linker_LoadModuleFromHost(self: mutable Linker&, guest_name: static u8&, hos
     return (self.modules.count - 1).s32()
 
 def Linker_LoadAndStartModule(self: mutable Linker&, path: static u8&, args: u64, argp: void&?, p_res: mutable int&?) -> s32:
+    existing: u32 = Linker_FindByName(self.ref[Linker&], path)
+    if existing != 0xFFFFFFFF.u32():
+        if p_res != null:
+            p_res <- 0
+        return existing.s32()
     idx: s32 = Linker_LoadModule(self.ref[mutable Linker&], path, true)
     if idx < 0:
         if p_res != null:
@@ -289,6 +368,13 @@ def Linker_LoadAndStartModule(self: mutable Linker&, path: static u8&, args: u64
     if p_res != null:
         p_res <- start_result
     return idx
+
+def Linker_LoadAndStartGuestModule(self: mutable Linker&, guest_path: static u8&, args: u64, argp: void&?, p_res: mutable int&?) -> s32:
+    host_path: static u8& = Linker_ResolveGuestModulePath(self.ref[Linker&], guest_path)
+    if static_strlen(host_path) == 0:
+        return -1
+    self.last_loaded_dynamic_host_path <- host_path
+    return Linker_LoadAndStartModule(self.ref[mutable Linker&], host_path, args, argp, p_res)
 
 def Linker_FindByAddress(self: mutable Linker&, address: VAddr) -> mutable Module&?:
     for i in 0..<self.modules.count:
