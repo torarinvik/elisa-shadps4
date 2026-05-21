@@ -13,7 +13,7 @@ Per-subsystem counts:
 Parity gate counts (native/bridge/fallback/unresolved):
 - native: 247
 - bridge: 2
-- fallback: 293
+- fallback: 149
 - unresolved: 0
 Ledger risk counts (missing/unverified):
 - missing: 1
@@ -53,10 +53,10 @@ CUSA07399 stage:
   - VIDEO_STAGE_first_frame_candidate=0
 CUSA07399 artifact metrics:
 - CUSA module count: 4
-- imports total: 1152
-- native HLE count: 547
-- PRX export count: 312
-- AeroLib fallback count: 293
+- imports total: 1151
+- native HLE count: 691
+- PRX export count: 311
+- AeroLib fallback count: 149
 - unresolved count: 0
 - malformed count: 0
 - audio SDL available: 0
@@ -81,56 +81,56 @@ Real CUSA runtime service signals:
 - last HLE call: module=libc symbol=RpQJJVKTiFM
 - current video/audio/input stage: graphics=0 audio-input-service=0
 Top 50 fallback symbols:
-- [1] nid=-Q1-u1a7p0g lib=BB module=c source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=-RJWNMK3fC8 lib=BB module=c source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=4AAcTU9R3XM lib=BB module=c source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=M1Gma1ocrGE lib=BB module=c source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=MPe0EeBGM-E lib=BB module=c source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=Nn7zKwnA5q0 lib=BB module=c source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=Uco1I0dlDi8 lib=BB module=c source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=gUPGiOQ1tmQ lib=BB module=c source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=rvBSfTimejE lib=BB module=c source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=ts6GlZOKRrE lib=BB module=c source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=uWIYLFkkwqk lib=BB module=c source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=v6EZ-YWRdMs lib=BB module=c source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=2xxUtuC-RzE lib=BD module=v source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=tIYf0W5VTi8 lib=BD module=v source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=54phPH2LZls lib=BG module=x source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=9TrhuGzberQ lib=BG module=x source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=Ao2YNSA7-Qo lib=BG module=x source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=CrLqDwWLoXM lib=BG module=x source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=Oo0S5PH7FIQ lib=BG module=x source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=YeJl6yDlhW0 lib=BG module=x source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=ajVj3QG2um4 lib=BG module=x source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=b7kJI+nx2hg lib=BG module=x source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=cQ6DGsQEjV4 lib=BG module=x source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=nXpje5yNpaE lib=BG module=x source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=oV9GAdJ23Gw lib=BG module=x source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=+BzXYkqYeLE lib=BH module=d source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=12wOHk8ywb0 lib=BH module=d source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=188x57JYp0g lib=BH module=d source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=4czppHBiriw lib=BH module=d source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=PrdHuuDekhY lib=BH module=d source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=R1Jvn8bSCW8 lib=BH module=d source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=Zxa0VhQVTsk lib=BH module=d source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=eoht7mQOCmo lib=BH module=d source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=f7uOxY9mM1U lib=BH module=d source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=geDaqgH9lTg lib=BH module=d source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=qBDmpCyGssE lib=BH module=d source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=FCygF4Ec4so lib=E module=F source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=OWCJUmrWH1g lib=E module=F source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=tb3cZTCl8Ps lib=E module=F source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=+AFvOEXrKJk lib=G module=H source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=+xuDhxlWRPg lib=G module=H source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=0BzLGljcwBo lib=G module=H source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=1qXLHIpROPE lib=G module=H source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=26PM5Mzl8zc lib=G module=H source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=29oKvKXzEZo lib=G module=H source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=4v+otIIdjqg lib=G module=H source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=5q95ravnueg lib=G module=H source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=5uFKckiJYRM lib=G module=H source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=5udAm+6boVg lib=G module=H source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
-- [1] nid=6YRHhh5mHCs lib=G module=H source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=-hJRce8wn1U lib=J module=K source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=Cxwy7wHq4J0 lib=J module=K source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=OcAgPxcq5Vk lib=J module=K source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=PR5k1penBLM lib=J module=K source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=RujUxbr3haM lib=J module=K source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=cK6bYHf-Q5E lib=J module=K source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=i-XwZjw0OOY lib=J module=K source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=4tPhsP6FpDI lib=f module=f source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=KK3Bdg1RWK0 lib=f module=f source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=YuH2FA7azqQ lib=f module=f source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=s9e3+YpRnzw lib=f module=f source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=eR2bZFAAU0Q lib=j module=j source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=g8cM39EUZ6o lib=j module=j source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=656LMQSrg6U lib=k module=k source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=Vo5V8KAwCmk lib=k module=k source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=fZo48un7LK4 lib=k module=k source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=rPo6tV8D9bM lib=k module=k source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=1xxcMiGu2fo lib=l module=l source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=yH17Q6NWtVg lib=l module=l source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=KHvkPQJDMLk lib=n module=n source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=OOFxrMY+mfI lib=n module=n source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=bGYkY6q3bIw lib=n module=n source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=fZJQzFK4Gv4 lib=n module=n source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=s28dalBwp2g lib=n module=n source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=tWoe9IlGAhs lib=n module=n source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=FraP7debcdg lib=o module=o source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=h1dR-t5ISgg lib=o module=o source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=jqb7HntFQFc lib=o module=o source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=ocHtyBwHfys lib=o module=o source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=+B-xlbiWDJ4 lib=r module=r source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=+FYcYefsVX0 lib=r module=r source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=1+DgKL0haWQ lib=r module=r source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=7rogx92EEyc lib=r module=r source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=Avv7OApgCJk lib=r module=r source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=BkjBP+YC19w lib=r module=r source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=FXP359ygujs lib=r module=r source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=JQKWIsS9joE lib=r module=r source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=MO24vDhmS4E lib=r module=r source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=N1EBMeGhf7E lib=r module=r source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=ObkDGDBsVtw lib=r module=r source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=OqQKX0h5COw lib=r module=r source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=PEjv7CVDRYs lib=r module=r source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=SSCaczu2aMQ lib=r module=r source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=SsRbbCiWoGw lib=r module=r source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=W-2WOXEHGck lib=r module=r source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=WaSFJoRWXaI lib=r module=r source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=cKYtVmeSTcw lib=r module=r source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=eCRMCSk96NU lib=r module=r source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=exAxkyVLt0s lib=r module=r source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
+- [1] nid=f4Onl7efPEY lib=r module=r source=/app0/eboot.bin subsystem=kernel status=AeroLibFallback
 Top blockers:
 - none
 Failing scenario ids:
@@ -138,31 +138,31 @@ Failing scenario ids:
 
 ## Agent Work Queues
 ### kernel_fallbacks
-- [1] -Q1-u1a7p0g BB c (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
-- [1] -RJWNMK3fC8 BB c (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
-- [1] 4AAcTU9R3XM BB c (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
-- [1] M1Gma1ocrGE BB c (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
-- [1] MPe0EeBGM-E BB c (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
-- [1] Nn7zKwnA5q0 BB c (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
-- [1] Uco1I0dlDi8 BB c (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
-- [1] gUPGiOQ1tmQ BB c (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
-- [1] rvBSfTimejE BB c (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
-- [1] ts6GlZOKRrE BB c (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
-- [1] uWIYLFkkwqk BB c (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
-- [1] v6EZ-YWRdMs BB c (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
-- [1] 2xxUtuC-RzE BD v (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
-- [1] tIYf0W5VTi8 BD v (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
-- [1] 54phPH2LZls BG x (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
-- [1] 9TrhuGzberQ BG x (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
-- [1] Ao2YNSA7-Qo BG x (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
-- [1] CrLqDwWLoXM BG x (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
-- [1] Oo0S5PH7FIQ BG x (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
-- [1] YeJl6yDlhW0 BG x (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
-- [1] ajVj3QG2um4 BG x (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
-- [1] b7kJI+nx2hg BG x (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
-- [1] cQ6DGsQEjV4 BG x (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
-- [1] nXpje5yNpaE BG x (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
-- [1] oV9GAdJ23Gw BG x (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
+- [1] -hJRce8wn1U J K (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
+- [1] Cxwy7wHq4J0 J K (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
+- [1] OcAgPxcq5Vk J K (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
+- [1] PR5k1penBLM J K (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
+- [1] RujUxbr3haM J K (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
+- [1] cK6bYHf-Q5E J K (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
+- [1] i-XwZjw0OOY J K (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
+- [1] 4tPhsP6FpDI f f (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
+- [1] KK3Bdg1RWK0 f f (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
+- [1] YuH2FA7azqQ f f (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
+- [1] s9e3+YpRnzw f f (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
+- [1] eR2bZFAAU0Q j j (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
+- [1] g8cM39EUZ6o j j (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
+- [1] 656LMQSrg6U k k (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
+- [1] Vo5V8KAwCmk k k (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
+- [1] fZo48un7LK4 k k (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
+- [1] rPo6tV8D9bM k k (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
+- [1] 1xxcMiGu2fo l l (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
+- [1] yH17Q6NWtVg l l (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
+- [1] KHvkPQJDMLk n n (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
+- [1] OOFxrMY+mfI n n (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
+- [1] bGYkY6q3bIw n n (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
+- [1] fZJQzFK4Gv4 n n (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
+- [1] s28dalBwp2g n n (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
+- [1] tWoe9IlGAhs n n (/app0/eboot.bin) subsystem=kernel status=AeroLibFallback
 ### graphics_fallbacks
 - none
 ### audio_input_service_fallbacks
@@ -171,9 +171,9 @@ Failing scenario ids:
 - none
 
 ## Fallback Delta
-- fallback count before: 293
-- fallback count after: 293
-- fallback symbols newly resolved: 0
+- fallback count before: 154
+- fallback count after: 149
+- fallback symbols newly resolved: 5
 
 ## Steps
 - PASS: project.json syntax
