@@ -1215,6 +1215,25 @@ def avplayer_add_source_ex_validation_matches_cpp() -> void:
         assert sceAvPlayerClose(handle) == ORBIS_OK
 
 @test
+def avplayer_add_source_ex_uses_uri_length_slice_like_cpp() -> void:
+    can Thread.Spawn, Thread.Join, Abort.Panic:
+        init_data: AvPlayerInitData = build_init_data()
+        handle: AvPlayerHandle = sceAvPlayerInit(init_data.ref[mutable AvPlayerInitData&])
+        assert handle != 0
+
+        details: AvPlayerSourceDetailsRaw = zeroed
+        details_ref: mutable AvPlayerSourceDetails&? = details.ref[mutable AvPlayerSourceDetailsRaw&].cast[mutable AvPlayerSourceDetails&?]
+        long_name: i8&? = "ghost.mp4.trailing".cast[i8&?]
+        details.uri_name <- long_name.cast[usize]
+        details.uri_length <- runtime_strlen("ghost.mp4".cast[u8&?]).u32()
+        details.source_type <- AVPLAYER_SOURCE_TYPE_UNKNOWN
+
+        # C++ builds a std::string_view(name, length) before source-type resolution.
+        # With ".mp4" slice this should pass type validation, then fail during open.
+        assert sceAvPlayerAddSourceEx(handle, AVPLAYER_URI_TYPE_SOURCE, details_ref) == ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
+        assert sceAvPlayerClose(handle) == ORBIS_OK
+
+@test
 def avplayer_is_active_true_in_ready_state_like_cpp() -> void:
     can Thread.Spawn, Thread.Join, Abort.Panic:
         init_data: AvPlayerInitData = build_init_data()
@@ -1330,6 +1349,52 @@ def avplayer_invalid_state_transition_does_not_force_error_like_cpp() -> void:
         assert not avs_set_state(slot, AV_STATE_READY)
         assert g_state_current[slot] == AV_STATE_INITIAL
         assert g_state_warning_last[slot] == 0
+
+@test
+def avplayer_state_jump_suppresses_event_processing_like_cpp() -> void:
+    can Abort.Panic:
+        slot: int = 0
+        avs_init_handle(slot)
+        assert avs_set_state(slot, AV_STATE_JUMP)
+        avs_on_warning(slot, 0x1234)
+        queued_before: int = g_state_event_q_size[slot]
+        assert queued_before == 1
+        avs_process_events(slot, true)
+        assert g_state_event_q_size[slot] == queued_before
+        assert g_state_warning_last[slot] == 0
+        assert avs_set_state(slot, AV_STATE_PLAY)
+        avs_process_events(slot, true)
+        assert g_state_event_q_size[slot] == 0
+        assert g_state_warning_last[slot] == 0x1234
+
+@test
+def avplayer_controller_tick_updates_buffering_from_source_readiness_like_cpp() -> void:
+    can Abort.Panic:
+        slot: int = 1
+        avs_init_handle(slot)
+        avsrc_init_handle(slot)
+        g_state_has_source[slot] <- true
+        g_state_current[slot] <- AV_STATE_PLAY
+        g_state_previous[slot] <- AV_STATE_PLAY
+        avsrc_has_source[slot] <- true
+        avsrc_started[slot] <- true
+        avsrc_video_enabled[slot] <- true
+        avsrc_audio_enabled[slot] <- false
+        avsrc_is_eof[slot] <- false
+        avsrc_video_eof[slot] <- false
+        avsrc_audio_eof[slot] <- false
+        avsrc_video_q_size[slot] <- 0
+        avsrc_video_pkt_q_size[slot] <- 0
+        avsrc_audio_q_size[slot] <- 0
+        avsrc_audio_pkt_q_size[slot] <- 0
+
+        avplayer_controller_tick(slot)
+        assert g_state_current[slot] == AV_STATE_BUFFERING
+
+        avsrc_video_q_size[slot] <- 11
+        avsrc_video_pkt_q_size[slot] <- 0
+        avplayer_controller_tick(slot)
+        assert g_state_current[slot] == AV_STATE_PLAY
 
 @test
 def avplayer_nid_table_matches_cpp_registration_edges() -> void:

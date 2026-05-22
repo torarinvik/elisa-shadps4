@@ -10,6 +10,9 @@ include "./avplayer_source.elisa"
 extern pthread_create(thread: mutable uintptr&, attr: void&?, start_routine: void&, arg: void&?) -> int effects[Thread.Spawn]
 extern pthread_join(thread: uintptr, thread_return: mutable void&?) -> int effects[Thread.Join]
 extern usleep(usec: u32) -> int effects[Thread.Sleep]
+extern malloc(size: usize) -> mutable heap void&?
+extern free(ptr: mutable void&) -> void
+extern memcpy(dest: mutable void&, src: void&, n: usize) -> mutable void&
 
 const AVPLAYER_MAX_HANDLES: int = 64
 
@@ -483,13 +486,25 @@ def avplayer_controller_thread_stop():
 def avplayer_controller_tick(slot: int):
     # Mirror C++ controller runtime signaling paths: warning forwarding and EOF
     # queueing are controller-driven. Buffering transitions are exercised in
-    # dedicated state tests until source/controller threading is synchronized.
+    # the same controller tick path from source readiness checks.
+    had_pending_before: bool = g_state_event_q_size[slot] > 0 or g_state_event_last[slot] != 0 or g_state_warning_last[slot] != 0
+    source_signal_enqueued: mutable bool = false
     pending_warning: mutable i32 = 0
     if avsrc_consume_warning(slot, pending_warning):
         avs_on_warning(slot, pending_warning)
+        source_signal_enqueued <- true
     if avsrc_should_signal_eof(slot):
         avs_on_eof(slot)
+        source_signal_enqueued <- true
     avs_process_events(slot, avsrc_get_stream_count(slot) > 0)
+    avplayer_dispatch_state_events(slot)
+    if had_pending_before or source_signal_enqueued:
+        return
+    if not avsrc_started[slot]:
+        return
+    has_frames_for_play: bool = avsrc_has_frames(slot, 0u32)
+    has_frames_for_buffer_resume: bool = avsrc_has_frames(slot, 10u32)
+    avs_update_buffering_state(slot, has_frames_for_play, has_frames_for_buffer_resume)
     avplayer_dispatch_state_events(slot)
 
 def avplayer_valid_handle(handle: AvPlayerHandle) -> bool:
@@ -579,6 +594,20 @@ def avplayer_auto_start_streams(handle: AvPlayerHandle) -> bool:
     # path as an explicit guest call so state/event side effects stay identical.
     return sceAvPlayerStart(handle) == ORBIS_OK
 
+def avplayer_copy_uri_name_with_length(uri_name: i8&, uri_len: u32) -> mutable heap i8&?:
+    copy_len: usize = uri_len.usize()
+    raw: mutable heap void&? = malloc(copy_len + 1usize)
+    if raw == null:
+        return null
+    dst: mutable heap i8& = raw.cast[mutable heap i8&]
+    _ = memcpy(dst.cast[mutable void&], uri_name.cast[void&], copy_len)
+    dst[copy_len] <- 0
+    return dst
+
+def avplayer_free_uri_name_copy(uri_copy: mutable heap i8&?):
+    if uri_copy != null:
+        free(uri_copy.cast[mutable void&])
+
 def sceAvPlayerAddSource(handle: AvPlayerHandle, filename: i8&?) -> i32:
     if not avplayer_valid_handle(handle) or filename == null:
         return ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
@@ -602,14 +631,20 @@ def sceAvPlayerAddSourceEx(handle: AvPlayerHandle, uri_type: u32, source_details
         return ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
     if source_details.uri.name == null:
         return ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
-    type_res: i32 = avimpl_validate_source_type(source_details.uri.name, source_details.source_type)
-    if type_res != ORBIS_OK:
-        return type_res
     if source_details.uri.length == 0u32:
         return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
-    avsrc_set_use_vdec2(handle - 1, g_handle_use_vdec2[handle - 1])
-    if not avsrc_add_source_path(handle - 1, source_details.uri.name):
+    uri_name_copy: mutable heap i8&? = avplayer_copy_uri_name_with_length(source_details.uri.name.cast[i8&], source_details.uri.length)
+    if uri_name_copy == null:
         return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
+    type_res: i32 = avimpl_validate_source_type(uri_name_copy.cast[i8&?], source_details.source_type)
+    if type_res != ORBIS_OK:
+        avplayer_free_uri_name_copy(uri_name_copy)
+        return type_res
+    avsrc_set_use_vdec2(handle - 1, g_handle_use_vdec2[handle - 1])
+    if not avsrc_add_source_path(handle - 1, uri_name_copy.cast[i8&?]):
+        avplayer_free_uri_name_copy(uri_name_copy)
+        return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
+    avplayer_free_uri_name_copy(uri_name_copy)
     avs_on_add_source(handle - 1)
     avplayer_controller_tick(handle - 1)
     if g_handle_auto_start[handle - 1]:
