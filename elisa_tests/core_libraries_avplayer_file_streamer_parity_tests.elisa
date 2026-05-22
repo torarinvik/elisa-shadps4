@@ -20,6 +20,13 @@ global mutable g_avp_event_ids: i32[64] = zeroed
 global mutable g_avp_warning_count: i32 = 0
 global mutable g_avp_warning_values: i32[64] = zeroed
 
+struct AvPlayerSourceDetailsRaw layout c:
+    uri_name: mutable usize
+    uri_length: mutable u32
+    reserved1: mutable u8[64]
+    source_type: mutable i32
+    reserved2: mutable u8[44]
+
 def avp_reset_file_probe():
     g_avp_open_calls <- 0
     g_avp_close_calls <- 0
@@ -1167,6 +1174,78 @@ def avplayer_public_api_invalid_handle_contracts() -> void:
         assert sceAvPlayerCurrentTime(bad_handle) == ORBIS_AVPLAYER_ERROR_INVALID_PARAMS.u64()
 
 @test
+def avplayer_add_source_path_validation_matches_cpp() -> void:
+    can Thread.Spawn, Thread.Join, Abort.Panic:
+        init_data: AvPlayerInitData = build_init_data()
+        handle: AvPlayerHandle = sceAvPlayerInit(init_data.ref[mutable AvPlayerInitData&])
+        assert handle != 0
+        assert sceAvPlayerAddSource(handle, null) == ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+        assert sceAvPlayerAddSource(handle, "".cast[i8&?]) == ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
+        assert sceAvPlayerAddSource(handle, "https://example.com/live.m3u8".cast[i8&?]) == ORBIS_AVPLAYER_ERROR_NOT_SUPPORTED
+        assert sceAvPlayerClose(handle) == ORBIS_OK
+
+@test
+def avplayer_add_source_ex_validation_matches_cpp() -> void:
+    can Thread.Spawn, Thread.Join, Abort.Panic:
+        init_data: AvPlayerInitData = build_init_data()
+        handle: AvPlayerHandle = sceAvPlayerInit(init_data.ref[mutable AvPlayerInitData&])
+        assert handle != 0
+
+        details: AvPlayerSourceDetailsRaw = zeroed
+        details_ref: mutable AvPlayerSourceDetails&? = details.ref[mutable AvPlayerSourceDetailsRaw&].cast[mutable AvPlayerSourceDetails&?]
+        assert sceAvPlayerAddSourceEx(handle, AVPLAYER_URI_TYPE_SOURCE, null) == ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+        assert sceAvPlayerAddSourceEx(handle, 1u32, details_ref) == ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+
+        details.uri_name <- 0usize
+        details.uri_length <- 0u32
+        details.source_type <- AVPLAYER_SOURCE_TYPE_UNKNOWN
+        assert sceAvPlayerAddSourceEx(handle, AVPLAYER_URI_TYPE_SOURCE, details_ref) == ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+
+        details.uri_name <- "video.mp4".cast[usize]
+        details.uri_length <- 0u32
+        details.source_type <- AVPLAYER_SOURCE_TYPE_UNKNOWN
+        assert sceAvPlayerAddSourceEx(handle, AVPLAYER_URI_TYPE_SOURCE, details_ref) == ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
+
+        hls_name: i8&? = "playlist.m3u8".cast[i8&?]
+        details.uri_name <- hls_name.cast[usize]
+        details.uri_length <- runtime_strlen(hls_name.cast[u8&?]).u32()
+        details.source_type <- AVPLAYER_SOURCE_TYPE_UNKNOWN
+        assert sceAvPlayerAddSourceEx(handle, AVPLAYER_URI_TYPE_SOURCE, details_ref) == ORBIS_AVPLAYER_ERROR_NOT_SUPPORTED
+
+        assert sceAvPlayerClose(handle) == ORBIS_OK
+
+@test
+def avplayer_is_active_true_in_ready_state_like_cpp() -> void:
+    can Thread.Spawn, Thread.Join, Abort.Panic:
+        init_data: AvPlayerInitData = build_init_data()
+        init_data.auto_start <- false
+        init_data.event_replacement.object_ptr <- null
+        init_data.event_replacement.event_callback <- avplayer_null_event_callback.cast[void&?]
+        handle: AvPlayerHandle = sceAvPlayerInit(init_data.ref[mutable AvPlayerInitData&])
+        assert handle != 0
+        assert sceAvPlayerAddSource(handle, AVPLAYER_LOCAL_MP4_FIXTURE.cast[i8&?]) == ORBIS_OK
+        slot: int = handle - 1
+        assert g_state_current[slot] == AV_STATE_READY
+        assert sceAvPlayerIsActive(handle)
+        assert sceAvPlayerClose(handle) == ORBIS_OK
+
+@test
+def avplayer_get_stream_info_zeroes_output_on_failure_like_cpp() -> void:
+    can Thread.Spawn, Thread.Join, Abort.Panic:
+        init_data: AvPlayerInitData = build_init_data()
+        handle: AvPlayerHandle = sceAvPlayerInit(init_data.ref[mutable AvPlayerInitData&])
+        assert handle != 0
+        assert sceAvPlayerAddSource(handle, AVPLAYER_LOCAL_MP4_FIXTURE.cast[i8&?]) == ORBIS_OK
+        stream_count: i32 = sceAvPlayerStreamCount(handle)
+        assert stream_count > 0
+        bad_stream_id: u32 = (stream_count.u32() + 99u32)
+        info: AvPlayerStreamInfo = zeroed
+        info.typ <- 0xdeadbeefu32
+        info.duration <- 0xffffffffffffffffu64
+        assert sceAvPlayerGetStreamInfo(handle, bad_stream_id, info.ref[mutable AvPlayerStreamInfo&]) == ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
+        assert sceAvPlayerClose(handle) == ORBIS_OK
+
+@test
 def avplayer_stubbed_control_apis_return_success_for_valid_handle_like_cpp() -> void:
     can Thread.Spawn, Thread.Join, Abort.Panic:
         handle: AvPlayerHandle = avp_prepare_fixture_handle_for_stream(AVPLAYER_STREAM_TYPE_VIDEO)
@@ -1229,6 +1308,28 @@ def avplayer_is_active_remains_true_while_paused_like_cpp() -> void:
         assert sceAvPlayerResume(handle) == ORBIS_OK
         assert sceAvPlayerIsActive(handle)
         assert sceAvPlayerClose(handle) == ORBIS_OK
+
+@test
+def avplayer_pause_from_buffering_state_succeeds_like_cpp() -> void:
+    can Thread.Spawn, Thread.Join, Thread.Sleep, Abort.Panic:
+        handle: AvPlayerHandle = avp_prepare_started_fixture_handle_for_stream(AVPLAYER_STREAM_TYPE_VIDEO)
+        assert handle != 0
+        slot: int = handle - 1
+        assert g_state_current[slot] == AV_STATE_PLAY
+        assert avs_set_state(slot, AV_STATE_BUFFERING)
+        assert sceAvPlayerPause(handle) == ORBIS_OK
+        assert g_state_current[slot] == AV_STATE_PAUSE
+        assert sceAvPlayerClose(handle) == ORBIS_OK
+
+@test
+def avplayer_invalid_state_transition_does_not_force_error_like_cpp() -> void:
+    can Abort.Panic:
+        slot: int = 0
+        avs_init_handle(slot)
+        # INITIAL -> READY is invalid and should leave state unchanged.
+        assert not avs_set_state(slot, AV_STATE_READY)
+        assert g_state_current[slot] == AV_STATE_INITIAL
+        assert g_state_warning_last[slot] == 0
 
 @test
 def avplayer_nid_table_matches_cpp_registration_edges() -> void:

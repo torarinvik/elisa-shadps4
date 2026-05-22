@@ -580,8 +580,11 @@ def avplayer_auto_start_streams(handle: AvPlayerHandle) -> bool:
     return sceAvPlayerStart(handle) == ORBIS_OK
 
 def sceAvPlayerAddSource(handle: AvPlayerHandle, filename: i8&?) -> i32:
-    if not avplayer_valid_handle(handle):
+    if not avplayer_valid_handle(handle) or filename == null:
         return ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+    type_res: i32 = avimpl_validate_source_type(filename, AVPLAYER_SOURCE_TYPE_UNKNOWN)
+    if type_res != ORBIS_OK:
+        return type_res
     avsrc_set_use_vdec2(handle - 1, g_handle_use_vdec2[handle - 1])
     if not avsrc_add_source_path(handle - 1, filename):
         return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
@@ -597,9 +600,13 @@ def sceAvPlayerAddSourceEx(handle: AvPlayerHandle, uri_type: u32, source_details
         return ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
     if source_details == null:
         return ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+    if source_details.uri.name == null:
+        return ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
     type_res: i32 = avimpl_validate_source_type(source_details.uri.name, source_details.source_type)
     if type_res != ORBIS_OK:
         return type_res
+    if source_details.uri.length == 0u32:
+        return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
     avsrc_set_use_vdec2(handle - 1, g_handle_use_vdec2[handle - 1])
     if not avsrc_add_source_path(handle - 1, source_details.uri.name):
         return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
@@ -691,28 +698,30 @@ def sceAvPlayerGetAudioData(handle: AvPlayerHandle, p_info: mutable AvPlayerFram
 def sceAvPlayerGetStreamInfo(handle: AvPlayerHandle, stream_id: u32, p_info: mutable AvPlayerStreamInfo&?) -> i32:
     if not avplayer_valid_handle(handle) or p_info == null:
         return ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+    info: mutable AvPlayerStreamInfo& = p_info.cast[mutable AvPlayerStreamInfo&]
+    info <- zeroed
     typ: mutable u32 = 0
     video_width: mutable u32 = 0
     video_height: mutable u32 = 0
     audio_channels: mutable u32 = 0
     audio_sample_rate: mutable u32 = 0
-    if not avsrc_get_stream_info(handle - 1, stream_id, typ, p_info.duration, p_info.start_time, video_width, video_height, audio_channels, audio_sample_rate):
+    if not avsrc_get_stream_info(handle - 1, stream_id, typ, info.duration, info.start_time, video_width, video_height, audio_channels, audio_sample_rate):
         return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
-    avplayer_copy_language_codes(p_info.details, avsrc_get_stream_language(handle - 1, stream_id))
-    p_info.typ <- typ
+    avplayer_copy_language_codes(info.details, avsrc_get_stream_language(handle - 1, stream_id))
+    info.typ <- typ
     if typ == AVPLAYER_STREAM_TYPE_VIDEO:
-        video_details: mutable AvPlayerStreamDetailsVideo& = avplayer_stream_details_video(p_info.details)
+        video_details: mutable AvPlayerStreamDetailsVideo& = avplayer_stream_details_video(info.details)
         video_details.width <- video_width
         video_details.height <- video_height
         if video_height > 0:
             video_details.aspect_ratio <- video_width.f32() / video_height.f32()
     elif typ == AVPLAYER_STREAM_TYPE_AUDIO:
-        audio_details: mutable AvPlayerStreamDetailsAudio& = avplayer_stream_details_audio(p_info.details)
+        audio_details: mutable AvPlayerStreamDetailsAudio& = avplayer_stream_details_audio(info.details)
         audio_details.channel_count <- audio_channels.u16()
         audio_details.sample_rate <- audio_sample_rate
         audio_details.size <- 0
     elif typ == AVPLAYER_STREAM_TYPE_TIMED_TEXT:
-        subs_details: mutable AvPlayerStreamDetailsTimedText& = avplayer_stream_details_subs(p_info.details)
+        subs_details: mutable AvPlayerStreamDetailsTimedText& = avplayer_stream_details_subs(info.details)
         subs_details.text_size <- 12
         subs_details.font_size <- 12
     else:
