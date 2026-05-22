@@ -15,6 +15,7 @@ typedef struct ElisaKernelThread {
     void *arg;
     void *result;
     int finished;
+    int completed_normally;
     int joined;
     int detached;
 } ElisaKernelThread;
@@ -127,15 +128,12 @@ static int elisa_kernel_thread_errno(int err) {
     }
 }
 
-static void *elisa_kernel_thread_trampoline(void *raw) {
+static void elisa_kernel_thread_finish(void *raw) {
     ElisaKernelThread *state = (ElisaKernelThread *)raw;
-    void *result = NULL;
-    if (state->entry != NULL) {
-        result = state->entry(state->arg);
-    }
-
     pthread_mutex_lock(&state->mutex);
-    state->result = result;
+    if (!state->completed_normally) {
+        state->result = PTHREAD_CANCELED;
+    }
     state->finished = 1;
     pthread_cond_broadcast(&state->cond);
     const int detached = state->detached;
@@ -146,6 +144,18 @@ static void *elisa_kernel_thread_trampoline(void *raw) {
         pthread_cond_destroy(&state->cond);
         free(state);
     }
+}
+
+static void *elisa_kernel_thread_trampoline(void *raw) {
+    ElisaKernelThread *state = (ElisaKernelThread *)raw;
+    void *result = NULL;
+    pthread_cleanup_push(elisa_kernel_thread_finish, state);
+    if (state->entry != NULL) {
+        result = state->entry(state->arg);
+    }
+    state->result = result;
+    state->completed_normally = 1;
+    pthread_cleanup_pop(1);
     return result;
 }
 

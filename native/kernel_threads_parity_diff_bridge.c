@@ -66,6 +66,31 @@ typedef struct OracleThread {
     int joined;
 } OracleThread;
 
+static pthread_key_t g_parity_tls_key;
+static pthread_once_t g_parity_tls_once = PTHREAD_ONCE_INIT;
+static volatile int g_oracle_cancel_started = 0;
+static volatile int g_oracle_cancel_cleanup = 0;
+static volatile int g_oracle_cancel_tls_dtor = 0;
+static volatile int g_elisa_cancel_started = 0;
+static volatile int g_elisa_cancel_cleanup = 0;
+static volatile int g_elisa_cancel_tls_dtor = 0;
+
+static void parity_tls_dtor(void *value) {
+    if (value != NULL) {
+        volatile int *counter = (volatile int *)value;
+        __sync_add_and_fetch(counter, 1);
+    }
+}
+
+static void parity_tls_key_init(void) {
+    (void)pthread_key_create(&g_parity_tls_key, parity_tls_dtor);
+}
+
+static void parity_cancel_cleanup(void *raw) {
+    volatile int *counter = (volatile int *)raw;
+    __sync_add_and_fetch(counter, 1);
+}
+
 static void *oracle_worker_fn(void *arg) {
     uintptr_t v = (uintptr_t)arg;
     if (v == 1u) {
@@ -77,6 +102,22 @@ static void *oracle_worker_fn(void *arg) {
     }
     if (v == 2u) {
         return (void *)0x123456;
+    }
+    if (v == 3u || v == 4u) {
+        volatile int *started = (v == 3u) ? &g_oracle_cancel_started : &g_elisa_cancel_started;
+        volatile int *cleanup = (v == 3u) ? &g_oracle_cancel_cleanup : &g_elisa_cancel_cleanup;
+        volatile int *tls_dtor = (v == 3u) ? &g_oracle_cancel_tls_dtor : &g_elisa_cancel_tls_dtor;
+        pthread_once(&g_parity_tls_once, parity_tls_key_init);
+        pthread_cleanup_push(parity_cancel_cleanup, (void *)cleanup);
+        (void)pthread_setspecific(g_parity_tls_key, (void *)tls_dtor);
+        __sync_lock_test_and_set(started, 1);
+        for (;;) {
+            struct timespec ts;
+            ts.tv_sec = 0;
+            ts.tv_nsec = 5000000L;
+            nanosleep(&ts, NULL);
+        }
+        pthread_cleanup_pop(0);
     }
     return NULL;
 }
@@ -123,6 +164,12 @@ int oracle_thread_detach(void *handle) {
 
 int oracle_thread_timedjoin_like_cpp(void *handle, void **retval) {
     return oracle_thread_join(handle, retval);
+}
+
+int oracle_thread_cancel(void *handle) {
+    OracleThread *ot = (OracleThread *)handle;
+    if (!ot) return POSIX_EINVAL_ELISA;
+    return pthread_cancel(ot->thread);
 }
 
 int oracle_thread_getname_self(char *buf, uint64_t len) {
@@ -390,4 +437,68 @@ int elisa_adapter_event_cancel_wake_scenario(void) {
     pthread_join(t, NULL);
     elisa_adapter_event_destroy(ev);
     return ((cancel_ret & 0xFFFF) << 16) | (wa.result & 0xFFFF);
+}
+
+static int parity_run_cancel_cleanup_tls_scenario(int use_elisa) {
+    int err = 0;
+    void *handle = NULL;
+    void *ret = NULL;
+    int cancel_ret = 0;
+    int join_ret = 0;
+    if (use_elisa) {
+        g_elisa_cancel_started = 0;
+        g_elisa_cancel_cleanup = 0;
+        g_elisa_cancel_tls_dtor = 0;
+        handle = elisa_adapter_thread_create(4, &err);
+    } else {
+        g_oracle_cancel_started = 0;
+        g_oracle_cancel_cleanup = 0;
+        g_oracle_cancel_tls_dtor = 0;
+        handle = oracle_thread_create(3, &err);
+    }
+    if (handle == NULL || err != 0) {
+        return -1;
+    }
+
+    for (int i = 0; i < 250; ++i) {
+        int started = use_elisa ? g_elisa_cancel_started : g_oracle_cancel_started;
+        if (started != 0) {
+            break;
+        }
+        struct timespec ts = {.tv_sec = 0, .tv_nsec = 1000000L};
+        nanosleep(&ts, NULL);
+    }
+
+    if (use_elisa ? (g_elisa_cancel_started == 0) : (g_oracle_cancel_started == 0)) {
+        return -2;
+    }
+
+    cancel_ret = use_elisa ? elisa_adapter_thread_cancel(handle) : oracle_thread_cancel(handle);
+    join_ret = use_elisa ? elisa_adapter_thread_join(handle, &ret) : oracle_thread_join(handle, &ret);
+    if (cancel_ret != 0 || join_ret != 0) {
+        return -3;
+    }
+
+    if (use_elisa) {
+        if (g_elisa_cancel_cleanup <= 0 || g_elisa_cancel_tls_dtor <= 0) {
+            return -4;
+        }
+    } else {
+        if (g_oracle_cancel_cleanup <= 0 || g_oracle_cancel_tls_dtor <= 0) {
+            return -4;
+        }
+    }
+
+    if (ret != PTHREAD_CANCELED) {
+        return -5;
+    }
+    return 0;
+}
+
+int oracle_cancel_cleanup_tls_scenario(void) {
+    return parity_run_cancel_cleanup_tls_scenario(0);
+}
+
+int elisa_adapter_cancel_cleanup_tls_scenario(void) {
+    return parity_run_cancel_cleanup_tls_scenario(1);
 }
