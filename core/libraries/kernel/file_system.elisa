@@ -20,8 +20,11 @@ extern mkdir(path: static u8&, mode: int) -> int
 extern rmdir(path: static u8&) -> int
 extern rename(old_path: static u8&, new_path: static u8&) -> int
 extern unlink(path: static u8&) -> int
+@link_name(select)
+extern c_select(nfds: int, readfds: void&?, writefds: void&?, exceptfds: void&?, timeout: void&?) -> int
 
 const KERNEL_FILE_MAX_FDS: int = 1024
+const KERNEL_FILE_FD_SET_BYTES: usize = 128
 const ORBIS_KERNEL_O_RDONLY: int = 0x0000
 const ORBIS_KERNEL_O_WRONLY: int = 0x0001
 const ORBIS_KERNEL_O_RDWR: int = 0x0002
@@ -212,6 +215,61 @@ def KernelFile_GetHandle(fd: int) -> mutable KernelFileHandle&?:
     if not g_kernel_file_handles[fd].opened:
         return null
     return g_kernel_file_handles[fd].ref[mutable KernelFileHandle&]
+
+def KernelFile_FdSetIsSet(set: void&?, fd: int) -> bool:
+    if set == null or fd < 0 or fd >= KERNEL_FILE_MAX_FDS:
+        return false
+    bytes: u8& = set.cast[u8&]
+    byte_index: usize = (fd / 8).usize()
+    bit_index: int = fd % 8
+    mask: u8 = (1 << bit_index).u8()
+    return (bytes[byte_index] & mask) != 0
+
+def KernelFile_FdSetSet(set: void&?, fd: int) -> void:
+    if set == null or fd < 0 or fd >= KERNEL_FILE_MAX_FDS:
+        return
+    bytes: mutable u8& = set.cast[mutable u8&]
+    byte_index: usize = (fd / 8).usize()
+    bit_index: int = fd % 8
+    mask: u8 = (1 << bit_index).u8()
+    bytes[byte_index] <- bytes[byte_index] | mask
+
+def KernelFile_FdSetZero(set: void&?) -> void:
+    if set == null:
+        return
+    bytes: mutable u8& = set.cast[mutable u8&]
+    for i in 0..<KERNEL_FILE_FD_SET_BYTES:
+        bytes[i] <- 0
+
+def KernelFile_SelectRequested(readfds: void&?, writefds: void&?, exceptfds: void&?, fd: int) -> bool:
+    return KernelFile_FdSetIsSet(readfds, fd) or KernelFile_FdSetIsSet(writefds, fd) or KernelFile_FdSetIsSet(exceptfds, fd)
+
+def KernelFile_SelectNativeFd(handle: mutable KernelFileHandle&) -> int:
+    if handle.kind != KERNEL_FILE_KIND_REGULAR or handle.file == null:
+        return -1
+    return io_get_mapping(handle.file.cast[void&]).int()
+
+def KernelFile_SelectPrepareSet(guest_set: void&?, host_set: void&?, native_fd: int) -> bool:
+    if guest_set == null:
+        return false
+    KernelFile_FdSetSet(host_set, native_fd)
+    return true
+
+def KernelFile_SelectCopyReady(guest_set: void&?, host_set: void&?, host_to_guest: mutable array[int, 1024]&, max_fd: int) -> void:
+    if guest_set == null:
+        return
+    KernelFile_FdSetZero(guest_set)
+    for native_fd in 0..<(max_fd + 1):
+        guest_fd: int = host_to_guest[native_fd]
+        if guest_fd >= 0 and KernelFile_FdSetIsSet(host_set, native_fd):
+            KernelFile_FdSetSet(guest_set, guest_fd)
+
+def KernelFile_SelectRestoreDiskReady(guest_set: void&?, ready: mutable array[bool, 1024]&) -> void:
+    if guest_set == null:
+        return
+    for guest_fd in 0..<KERNEL_FILE_MAX_FDS:
+        if ready[guest_fd]:
+            KernelFile_FdSetSet(guest_set, guest_fd)
 
 def KernelFile_AccessModeToIo(access_mode: int) -> FileAccessMode:
     if (access_mode & 0x3) == ORBIS_KERNEL_O_RDONLY:
@@ -966,12 +1024,78 @@ def sceKernelUnlink(path: u8&?) -> int:
     return result
 
 def posix_select(nfds: int, readfds: void&?, writefds: void&?, exceptfds: void&?, timeout: void&?) -> int:
-    _ = nfds
-    _ = readfds
-    _ = writefds
-    _ = exceptfds
-    _ = timeout
-    return -1
+    if nfds <= 0:
+        return 0
+    limit: mutable int = nfds
+    if limit > KERNEL_FILE_MAX_FDS:
+        limit <- KERNEL_FILE_MAX_FDS
+
+    host_read: mutable array[u8, 128] = zeroed
+    host_write: mutable array[u8, 128] = zeroed
+    host_except: mutable array[u8, 128] = zeroed
+    host_to_guest: mutable array[int, 1024] = zeroed
+    disk_read_ready: mutable array[bool, 1024] = zeroed
+    disk_write_ready: mutable array[bool, 1024] = zeroed
+    disk_except_ready: mutable array[bool, 1024] = zeroed
+    for i in 0..<KERNEL_FILE_MAX_FDS:
+        host_to_guest[i] <- -1
+
+    host_read_ptr: void& = host_read[0].ref[mutable u8&].cast[void&]
+    host_write_ptr: void& = host_write[0].ref[mutable u8&].cast[void&]
+    host_except_ptr: void& = host_except[0].ref[mutable u8&].cast[void&]
+    max_fd: mutable int = -1
+    disk_ready_count: mutable int = 0
+
+    for guest_fd in 0..<limit:
+        if not KernelFile_SelectRequested(readfds, writefds, exceptfds, guest_fd):
+            continue
+        handle: mutable KernelFileHandle&? = KernelFile_GetHandle(guest_fd)
+        if handle == null:
+            return KernelFile_PosixFail(POSIX_EBADF)
+        handle_ref: mutable KernelFileHandle& = handle as mutable KernelFileHandle&
+        if handle_ref.kind == KERNEL_FILE_KIND_REGULAR:
+            if KernelFile_FdSetIsSet(readfds, guest_fd):
+                disk_read_ready[guest_fd] <- true
+            if KernelFile_FdSetIsSet(writefds, guest_fd):
+                disk_write_ready[guest_fd] <- true
+            if KernelFile_FdSetIsSet(exceptfds, guest_fd):
+                disk_except_ready[guest_fd] <- true
+            disk_ready_count <- disk_ready_count + 1
+            continue
+        native_fd: int = KernelFile_SelectNativeFd(handle_ref)
+        if native_fd < 0 or native_fd >= KERNEL_FILE_MAX_FDS:
+            continue
+        host_to_guest[native_fd] <- guest_fd
+        if native_fd > max_fd:
+            max_fd <- native_fd
+        if KernelFile_FdSetIsSet(readfds, guest_fd):
+            _ = KernelFile_SelectPrepareSet(readfds, host_read_ptr, native_fd)
+        if KernelFile_FdSetIsSet(writefds, guest_fd):
+            _ = KernelFile_SelectPrepareSet(writefds, host_write_ptr, native_fd)
+        if KernelFile_FdSetIsSet(exceptfds, guest_fd):
+            _ = KernelFile_SelectPrepareSet(exceptfds, host_except_ptr, native_fd)
+
+    if max_fd < 0:
+        if disk_ready_count > 0:
+            KernelFile_FdSetZero(readfds)
+            KernelFile_FdSetZero(writefds)
+            KernelFile_FdSetZero(exceptfds)
+            KernelFile_SelectRestoreDiskReady(readfds, disk_read_ready.ref[mutable array[bool, 1024]&])
+            KernelFile_SelectRestoreDiskReady(writefds, disk_write_ready.ref[mutable array[bool, 1024]&])
+            KernelFile_SelectRestoreDiskReady(exceptfds, disk_except_ready.ref[mutable array[bool, 1024]&])
+        return disk_ready_count
+
+    native_ret: int = c_select(max_fd + 1, host_read_ptr, host_write_ptr, host_except_ptr, timeout)
+    if native_ret <= 0:
+        return native_ret if disk_ready_count == 0 else disk_ready_count
+
+    KernelFile_SelectCopyReady(readfds, host_read_ptr, host_to_guest.ref[mutable array[int, 1024]&], max_fd)
+    KernelFile_SelectCopyReady(writefds, host_write_ptr, host_to_guest.ref[mutable array[int, 1024]&], max_fd)
+    KernelFile_SelectCopyReady(exceptfds, host_except_ptr, host_to_guest.ref[mutable array[int, 1024]&], max_fd)
+    KernelFile_SelectRestoreDiskReady(readfds, disk_read_ready.ref[mutable array[bool, 1024]&])
+    KernelFile_SelectRestoreDiskReady(writefds, disk_write_ready.ref[mutable array[bool, 1024]&])
+    KernelFile_SelectRestoreDiskReady(exceptfds, disk_except_ready.ref[mutable array[bool, 1024]&])
+    return native_ret + disk_ready_count
 
 def RegisterFileSystem(sym: void&?) -> void:
     _ = sym
