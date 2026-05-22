@@ -16,8 +16,13 @@ include "../../../../compiler/runtime/elisacore_std/cxx_parity.elisa"
 extern __Error() -> void&?
 extern SetPosixErrno(e: int) -> void
 extern ErrnoToSceKernelError(err: int) -> int
+extern mkdir(path: static u8&, mode: int) -> int
+extern rmdir(path: static u8&) -> int
+extern rename(old_path: static u8&, new_path: static u8&) -> int
+extern unlink(path: static u8&) -> int
 
 const KERNEL_FILE_MAX_FDS: int = 1024
+const ORBIS_KERNEL_O_RDONLY: int = 0x0000
 const ORBIS_KERNEL_O_WRONLY: int = 0x0001
 const ORBIS_KERNEL_O_RDWR: int = 0x0002
 const ORBIS_KERNEL_O_APPEND: int = 0x0008
@@ -29,6 +34,8 @@ const ORBIS_F_GETFD: int = 1
 const ORBIS_F_SETFD: int = 2
 const ORBIS_F_GETFL: int = 3
 const ORBIS_F_SETFL: int = 4
+const KERNEL_FILE_KIND_REGULAR: int = 0
+const KERNEL_FILE_KIND_DIRECTORY: int = 1
 const KERNEL_FILE_REGULAR_MODE: u32 = 0x81ff
 const KERNEL_FILE_DIRECTORY_MODE: u32 = 0x41ff
 
@@ -42,6 +49,11 @@ struct OrbisKernelStat:
     st_blksize: mutable i64
     st_blocks: mutable i64
 
+@fixed_layout
+struct OrbisKernelIovec:
+    iov_base: mutable void&?
+    iov_len: mutable u64
+
 struct KernelFileHandle:
     opened: mutable bool
     offset: mutable i64
@@ -49,9 +61,10 @@ struct KernelFileHandle:
     file: mutable void&?
     path: mutable static u8&
     open_flags: mutable int
+    kind: mutable int
 
 def KernelFileHandle_new() -> KernelFileHandle:
-    return KernelFileHandle(false, 0, 0, null, "", 0)
+    return KernelFileHandle(false, 0, 0, null, "", 0, KERNEL_FILE_KIND_REGULAR)
 
 global mutable g_kernel_file_handles: array[KernelFileHandle, 1024] = zeroed
 
@@ -121,10 +134,14 @@ def KernelFile_GetHandle(fd: int) -> mutable KernelFileHandle&?:
     return g_kernel_file_handles[fd].ref[mutable KernelFileHandle&]
 
 def KernelFile_AccessModeToIo(access_mode: int) -> FileAccessMode:
-    if (access_mode & 0x3) == 0:
+    if (access_mode & 0x3) == ORBIS_KERNEL_O_RDONLY:
         return FileAccessMode.Read
-    if (access_mode & 0x3) == 1:
+    if (access_mode & 0x3) == ORBIS_KERNEL_O_WRONLY:
+        if (access_mode & ORBIS_KERNEL_O_APPEND) != 0:
+            return FileAccessMode.Append
         return FileAccessMode.Write
+    if (access_mode & ORBIS_KERNEL_O_APPEND) != 0:
+        return FileAccessMode.ReadAppend
     return FileAccessMode.ReadWrite
 
 def KernelFile_OpenHandle(self: mutable KernelFileHandle&, path: static u8&, flags: int) -> int:
@@ -138,7 +155,14 @@ def KernelFile_OpenHandle(self: mutable KernelFileHandle&, path: static u8&, fla
     self.size <- io_get_size(opened.cast[void&]).i64()
     self.path <- path
     self.open_flags <- flags
+    self.kind <- KERNEL_FILE_KIND_REGULAR
     return ORBIS_OK
+
+def KernelFile_IsWriteOnlyFlags(flags: int) -> bool:
+    return (flags & 0x3) == ORBIS_KERNEL_O_WRONLY
+
+def KernelFile_IsReadOnlyFlags(flags: int) -> bool:
+    return (flags & 0x3) == ORBIS_KERNEL_O_RDONLY
 
 def KernelFile_ReadHandle(self: mutable KernelFileHandle&, buf: void&?, nbytes: u64) -> i64:
     if not self.opened or self.file == null:
@@ -201,6 +225,9 @@ def KernelFile_Open(raw_path: u8&?, flags: int, mode: int) -> int:
         return KernelFile_PosixFail(POSIX_EFAULT)
     _ = mode
     guest_path: static u8& = raw_path.cast[static u8&]
+    access_mode: int = flags & 0x3
+    if access_mode != ORBIS_KERNEL_O_RDONLY and access_mode != ORBIS_KERNEL_O_WRONLY and access_mode != ORBIS_KERNEL_O_RDWR:
+        return KernelFile_PosixFail(POSIX_EINVAL)
     if runtime_strlen(guest_path) > 255:
         return KernelFile_PosixFail(POSIX_ENAMETOOLONG)
     read_only: mutable bool = false
@@ -212,8 +239,27 @@ def KernelFile_Open(raw_path: u8&?, flags: int, mode: int) -> int:
             return KernelFile_PosixFail(POSIX_ENOENT)
         if read_only:
             return KernelFile_PosixFail(POSIX_EROFS)
+        create_file: void&? = io_open(host_path, FileAccessMode.Create, FileType.BinaryFile, FileShareFlag.ShareReadWrite)
+        if create_file == null:
+            return KernelFile_PosixFail(POSIX_EIO)
+        io_close(create_file.cast[void&])
     if fs_is_directory(host_path):
-        return KernelFile_PosixFail(POSIX_EISDIR)
+        if access_mode != ORBIS_KERNEL_O_RDONLY:
+            return KernelFile_PosixFail(POSIX_EISDIR)
+        if (flags & ORBIS_KERNEL_O_TRUNC) != 0:
+            return KernelFile_PosixFail(POSIX_EISDIR)
+        fd_dir: int = KernelFile_AllocFd()
+        if fd_dir < 0:
+            return KernelFile_PosixFail(POSIX_EMFILE)
+        dir_handle: mutable KernelFileHandle& = g_kernel_file_handles[fd_dir].ref[mutable KernelFileHandle&]
+        dir_handle.opened <- true
+        dir_handle.offset <- 0
+        dir_handle.size <- 0
+        dir_handle.file <- null
+        dir_handle.path <- host_path
+        dir_handle.open_flags <- flags
+        dir_handle.kind <- KERNEL_FILE_KIND_DIRECTORY
+        return fd_dir
     fd: int = KernelFile_AllocFd()
     if fd < 0:
         return KernelFile_PosixFail(POSIX_EMFILE)
@@ -226,7 +272,7 @@ def KernelFile_Open(raw_path: u8&?, flags: int, mode: int) -> int:
             io_close(trunc_file.cast[void&])
     result: int = KernelFile_OpenHandle(g_kernel_file_handles[fd].ref[mutable KernelFileHandle&], host_path, flags)
     if result < 0:
-        return KernelFile_PosixFail(POSIX_EBADF)
+        return result
     return fd
 
 def posix_open(filename: u8&?, flags: int, mode: int) -> int:
@@ -294,40 +340,99 @@ def sceKernelFcntl(fd: int, cmd: int, arg: i64) -> int:
     return result
 
 def KernelFile_Write(fd: int, buf: void&?, nbytes: u64) -> i64:
-    _ = fd
-    _ = buf
-    _ = nbytes
-    return ORBIS_OK
+    h: mutable KernelFileHandle&? = KernelFile_GetHandle(fd)
+    if h == null:
+        return KernelFile_PosixFail64(POSIX_EBADF)
+    handle: mutable KernelFileHandle& = h
+    if handle.kind == KERNEL_FILE_KIND_DIRECTORY:
+        return KernelFile_PosixFail64(POSIX_EBADF)
+    if KernelFile_IsReadOnlyFlags(handle.open_flags):
+        return KernelFile_PosixFail64(POSIX_EBADF)
+    if handle.file == null:
+        return KernelFile_PosixFail64(POSIX_EBADF)
+    if buf == null and nbytes > 0:
+        return KernelFile_PosixFail64(POSIX_EFAULT)
+    if not io_seek(handle.file.cast[void&], handle.offset, SeekOrigin.SetOrigin):
+        return KernelFile_PosixFail64(POSIX_EINVAL)
+    if nbytes == 0:
+        return 0
+    if buf == null:
+        return KernelFile_PosixFail64(POSIX_EFAULT)
+    write_buf: void& = buf.cast[void&]
+    written: usize = io_write(handle.file.cast[void&], write_buf, 1, nbytes.usize())
+    handle.offset <- handle.offset + written.i64()
+    if handle.offset > handle.size:
+        handle.size <- handle.offset
+    return written.i64()
 
 def posix_write(fd: int, buf: void&?, nbytes: u64) -> i64:
-    _ = fd
-    _ = buf
-    _ = nbytes
-    return -1
+    return KernelFile_Write(fd, buf, nbytes)
 
 def sceKernelWrite(fd: int, buf: void&?, nbytes: u64) -> i64:
-    _ = fd
-    _ = buf
-    _ = nbytes
-    return ORBIS_OK
+    result: i64 = KernelFile_Write(fd, buf, nbytes)
+    if result < 0:
+        return KernelFile_SceErrorFromErrno().i64()
+    return result
 
 def KernelFile_Readv(fd: int, iov: void&?, iovcnt: int) -> i64:
-    _ = fd
-    _ = iov
-    _ = iovcnt
-    return ORBIS_OK
+    if iovcnt < 0:
+        return KernelFile_PosixFail64(POSIX_EINVAL)
+    if iov == null and iovcnt > 0:
+        return KernelFile_PosixFail64(POSIX_EFAULT)
+    h: mutable KernelFileHandle&? = KernelFile_GetHandle(fd)
+    if h == null:
+        return KernelFile_PosixFail64(POSIX_EBADF)
+    handle: mutable KernelFileHandle& = h
+    if handle.kind == KERNEL_FILE_KIND_DIRECTORY:
+        return KernelFile_PosixFail64(POSIX_EBADF)
+    if KernelFile_IsWriteOnlyFlags(handle.open_flags):
+        return KernelFile_PosixFail64(POSIX_EBADF)
+    total_read: mutable i64 = 0
+    can Abort.Panic:
+        for i in 0..<iovcnt:
+            item: OrbisKernelIovec = cxx_read_array_at[OrbisKernelIovec](iov, i.usize())
+            n: i64 = KernelFile_Read(fd, item.iov_base, item.iov_len)
+            if n < 0:
+                if total_read > 0:
+                    return total_read
+                return -1
+            total_read <- total_read + n
+            if n != item.iov_len.i64():
+                break
+    return total_read
 
 def KernelFile_Writev(fd: int, iov: void&?, iovcnt: int) -> i64:
-    _ = fd
-    _ = iov
-    _ = iovcnt
-    return ORBIS_OK
+    if iovcnt < 0:
+        return KernelFile_PosixFail64(POSIX_EINVAL)
+    if iov == null and iovcnt > 0:
+        return KernelFile_PosixFail64(POSIX_EFAULT)
+    h: mutable KernelFileHandle&? = KernelFile_GetHandle(fd)
+    if h == null:
+        return KernelFile_PosixFail64(POSIX_EBADF)
+    handle: mutable KernelFileHandle& = h
+    if handle.kind == KERNEL_FILE_KIND_DIRECTORY:
+        return KernelFile_PosixFail64(POSIX_EBADF)
+    if KernelFile_IsReadOnlyFlags(handle.open_flags):
+        return KernelFile_PosixFail64(POSIX_EBADF)
+    total_written: mutable i64 = 0
+    can Abort.Panic:
+        for i in 0..<iovcnt:
+            item: OrbisKernelIovec = cxx_read_array_at[OrbisKernelIovec](iov, i.usize())
+            n: i64 = KernelFile_Write(fd, item.iov_base, item.iov_len)
+            if n < 0:
+                if total_written > 0:
+                    return total_written
+                return -1
+            total_written <- total_written + n
+            if n != item.iov_len.i64():
+                break
+    return total_written
 
 def sceKernelWritev(fd: int, iov: void&?, iovcnt: int) -> i64:
-    _ = fd
-    _ = iov
-    _ = iovcnt
-    return ORBIS_OK
+    result: i64 = KernelFile_Writev(fd, iov, iovcnt)
+    if result < 0:
+        return KernelFile_SceErrorFromErrno().i64()
+    return result
 
 def posix_lseek(fd: int, offset: i64, whence: int) -> i64:
     h: mutable KernelFileHandle&? = KernelFile_GetHandle(fd)
@@ -357,22 +462,52 @@ def sceKernelRead(fd: int, buf: void&?, nbytes: u64) -> i64:
     return result
 
 def posix_mkdir(path: u8&?, mode: int) -> int:
-    _ = path
-    _ = mode
-    return -1
+    if path == null:
+        return KernelFile_PosixFail(POSIX_EFAULT)
+    guest_path: static u8& = path.cast[static u8&]
+    if runtime_strlen(guest_path) > 255:
+        return KernelFile_PosixFail(POSIX_ENAMETOOLONG)
+    read_only: mutable bool = false
+    host_path: static u8& = KernelFile_ResolveHostPath(guest_path, read_only.ref[mutable bool&])
+    if fs_exists(host_path):
+        return KernelFile_PosixFail(POSIX_EEXIST)
+    if read_only:
+        return KernelFile_PosixFail(POSIX_EROFS)
+    if mkdir(host_path, mode) != 0:
+        return KernelFile_PosixFail(POSIX_EIO)
+    if not fs_exists(host_path):
+        return KernelFile_PosixFail(POSIX_ENOENT)
+    return ORBIS_OK
 
 def sceKernelMkdir(path: u8&?, mode: int) -> int:
-    _ = path
-    _ = mode
-    return ORBIS_OK
+    result: int = posix_mkdir(path, mode)
+    if result < 0:
+        return KernelFile_SceErrorFromErrno()
+    return result
 
 def posix_rmdir(path: u8&?) -> int:
-    _ = path
-    return -1
+    if path == null:
+        return KernelFile_PosixFail(POSIX_EFAULT)
+    guest_path: static u8& = path.cast[static u8&]
+    if runtime_strlen(guest_path) > 255:
+        return KernelFile_PosixFail(POSIX_ENAMETOOLONG)
+    read_only: mutable bool = false
+    host_path: static u8& = KernelFile_ResolveHostPath(guest_path, read_only.ref[mutable bool&])
+    if read_only:
+        return KernelFile_PosixFail(POSIX_EROFS)
+    if not fs_is_directory(host_path):
+        return KernelFile_PosixFail(POSIX_ENOTDIR)
+    if not fs_exists(host_path):
+        return KernelFile_PosixFail(POSIX_ENOENT)
+    if rmdir(host_path) != 0:
+        return KernelFile_PosixFail(POSIX_EIO)
+    return ORBIS_OK
 
 def sceKernelRmdir(path: u8&?) -> int:
-    _ = path
-    return ORBIS_OK
+    result: int = posix_rmdir(path)
+    if result < 0:
+        return KernelFile_SceErrorFromErrno()
+    return result
 
 def posix_stat(path: u8&?, sb: void&?) -> int:
     if path == null:
@@ -390,7 +525,14 @@ def sceKernelStat(path: u8&?, sb: void&?) -> int:
     return result
 
 def sceKernelCheckReachability(path: u8&?) -> int:
-    _ = path
+    if path == null:
+        return ORBIS_KERNEL_ERROR_EFAULT
+    guest_path: static u8& = path.cast[static u8&]
+    if runtime_strlen(guest_path) > 255:
+        return ORBIS_KERNEL_ERROR_ENAMETOOLONG
+    host_path: static u8& = KernelFile_ResolveHostPath(guest_path, null)
+    if not fs_exists(host_path):
+        return ORBIS_KERNEL_ERROR_ENOENT
     return ORBIS_OK
 
 def posix_fstat(fd: int, sb: void&?) -> int:
@@ -464,7 +606,10 @@ def posix_chmod(path: u8&?, mode: u16) -> int:
     guest_path: static u8& = path.cast[static u8&]
     if runtime_strlen(guest_path) > 255:
         return KernelFile_PosixFail(POSIX_ENAMETOOLONG)
-    host_path: static u8& = KernelFile_ResolveHostPath(guest_path, null)
+    read_only: mutable bool = false
+    host_path: static u8& = KernelFile_ResolveHostPath(guest_path, read_only.ref[mutable bool&])
+    if read_only:
+        return KernelFile_PosixFail(POSIX_EROFS)
     if not fs_exists(host_path):
         return KernelFile_PosixFail(POSIX_ENOENT)
     return ORBIS_OK
@@ -482,7 +627,10 @@ def posix_utimes(path: u8&?, times: void&?) -> int:
     guest_path: static u8& = path.cast[static u8&]
     if runtime_strlen(guest_path) > 255:
         return KernelFile_PosixFail(POSIX_ENAMETOOLONG)
-    host_path: static u8& = KernelFile_ResolveHostPath(guest_path, null)
+    read_only: mutable bool = false
+    host_path: static u8& = KernelFile_ResolveHostPath(guest_path, read_only.ref[mutable bool&])
+    if read_only:
+        return KernelFile_PosixFail(POSIX_EROFS)
     if not fs_exists(host_path):
         return KernelFile_PosixFail(POSIX_ENOENT)
     return ORBIS_OK
@@ -494,105 +642,227 @@ def sceKernelUtimes(path: u8&?, times: void&?) -> int:
     return result
 
 def posix_rename(from_path: u8&?, to_path: u8&?) -> int:
-    _ = from_path
-    _ = to_path
-    return -1
+    if from_path == null or to_path == null:
+        return KernelFile_PosixFail(POSIX_EFAULT)
+    from_guest: static u8& = from_path.cast[static u8&]
+    to_guest: static u8& = to_path.cast[static u8&]
+    if runtime_strlen(from_guest) > 255 or runtime_strlen(to_guest) > 255:
+        return KernelFile_PosixFail(POSIX_ENAMETOOLONG)
+    from_ro: mutable bool = false
+    to_ro: mutable bool = false
+    src_path: static u8& = KernelFile_ResolveHostPath(from_guest, from_ro.ref[mutable bool&])
+    dst_path: static u8& = KernelFile_ResolveHostPath(to_guest, to_ro.ref[mutable bool&])
+    if not fs_exists(src_path):
+        return KernelFile_PosixFail(POSIX_ENOENT)
+    if from_ro or to_ro:
+        return KernelFile_PosixFail(POSIX_EROFS)
+    if rename(src_path, dst_path) != 0:
+        return KernelFile_PosixFail(POSIX_EIO)
+    return ORBIS_OK
 
 def sceKernelRename(from_path: u8&?, to_path: u8&?) -> int:
-    _ = from_path
-    _ = to_path
-    return ORBIS_OK
+    result: int = posix_rename(from_path, to_path)
+    if result < 0:
+        return KernelFile_SceErrorFromErrno()
+    return result
 
 def sceKernelPreadv(fd: int, iov: void&?, iovcnt: int, offset: i64) -> i64:
-    _ = fd
-    _ = iov
-    _ = iovcnt
-    _ = offset
-    return ORBIS_OK
+    result: i64 = posix_preadv(fd, iov, iovcnt, offset)
+    if result < 0:
+        return KernelFile_SceErrorFromErrno().i64()
+    return result
+
+def posix_preadv(fd: int, iov: void&?, iovcnt: int, offset: i64) -> i64:
+    if iovcnt < 0:
+        return KernelFile_PosixFail64(POSIX_EINVAL)
+    if iov == null and iovcnt > 0:
+        return KernelFile_PosixFail64(POSIX_EFAULT)
+    if offset < 0:
+        return KernelFile_PosixFail64(POSIX_EINVAL)
+    h: mutable KernelFileHandle&? = KernelFile_GetHandle(fd)
+    if h == null:
+        return KernelFile_PosixFail64(POSIX_EBADF)
+    handle: mutable KernelFileHandle& = h
+    if handle.kind == KERNEL_FILE_KIND_DIRECTORY:
+        return KernelFile_PosixFail64(POSIX_EBADF)
+    if KernelFile_IsWriteOnlyFlags(handle.open_flags):
+        return KernelFile_PosixFail64(POSIX_EBADF)
+    if handle.file == null:
+        return KernelFile_PosixFail64(POSIX_EBADF)
+    old_offset: i64 = handle.offset
+    old_pos: i64 = io_tell(handle.file.cast[void&])
+    if old_pos < 0:
+        return KernelFile_PosixFail64(POSIX_EIO)
+    if not io_seek(handle.file.cast[void&], offset, SeekOrigin.SetOrigin):
+        return KernelFile_PosixFail64(POSIX_EIO)
+    handle.offset <- offset
+    total_read: mutable i64 = 0
+    can Abort.Panic:
+        for i in 0..<iovcnt:
+            item: OrbisKernelIovec = cxx_read_array_at[OrbisKernelIovec](iov, i.usize())
+            if item.iov_base == null and item.iov_len > 0:
+                handle.offset <- old_offset
+                _ = io_seek(handle.file.cast[void&], old_pos, SeekOrigin.SetOrigin)
+                return KernelFile_PosixFail64(POSIX_EFAULT)
+            if item.iov_len == 0:
+                continue
+            n: i64 = KernelFile_Read(fd, item.iov_base as void&?, item.iov_len)
+            if n < 0:
+                handle.offset <- old_offset
+                _ = io_seek(handle.file.cast[void&], old_pos, SeekOrigin.SetOrigin)
+                return n
+            total_read <- total_read + n
+            if n != item.iov_len.i64():
+                break
+    handle.offset <- old_offset
+    _ = io_seek(handle.file.cast[void&], old_pos, SeekOrigin.SetOrigin)
+    return total_read
 
 def posix_pread(fd: int, buf: void&?, nbytes: u64, offset: i64) -> i64:
-    _ = fd
-    _ = buf
-    _ = nbytes
-    _ = offset
-    return -1
+    can Abort.Panic:
+        iov: mutable OrbisKernelIovec = OrbisKernelIovec(buf, nbytes)
+        return posix_preadv(fd, iov.ref[mutable OrbisKernelIovec&].cast[void&], 1, offset)
 
 def sceKernelPread(fd: int, buf: void&?, nbytes: u64, offset: i64) -> i64:
-    _ = fd
-    _ = buf
-    _ = nbytes
-    _ = offset
-    return ORBIS_OK
+    result: i64 = posix_pread(fd, buf, nbytes, offset)
+    if result < 0:
+        return KernelFile_SceErrorFromErrno().i64()
+    return result
 
 def posix_fsync(fd: int) -> int:
-    _ = fd
-    return -1
+    h: mutable KernelFileHandle&? = KernelFile_GetHandle(fd)
+    if h == null:
+        return KernelFile_PosixFail(POSIX_EBADF)
+    handle: mutable KernelFileHandle& = h
+    if handle.file == null:
+        return ORBIS_OK
+    if not io_flush(handle.file.cast[void&]):
+        return KernelFile_PosixFail(POSIX_EIO)
+    return ORBIS_OK
 
 def sceKernelFsync(fd: int) -> int:
-    _ = fd
-    return ORBIS_OK
+    result: int = posix_fsync(fd)
+    if result < 0:
+        return KernelFile_SceErrorFromErrno()
+    return result
 
 def sceKernelGetdents(fd: int, buf: u8&?, nbytes: u64) -> i64:
-    _ = fd
-    _ = buf
-    _ = nbytes
-    return ORBIS_OK
+    result: i64 = posix_getdents(fd, buf, nbytes)
+    if result < 0:
+        return KernelFile_SceErrorFromErrno().i64()
+    return result
 
 def KernelFile_Getdirentries(fd: int, buf: u8&?, nbytes: u64, basep: void&?) -> i64:
-    _ = fd
-    _ = buf
-    _ = nbytes
     _ = basep
-    return ORBIS_OK
+    return posix_getdents(fd, buf, nbytes)
 
 def posix_getdents(fd: int, buf: u8&?, nbytes: u64) -> i64:
-    _ = fd
-    _ = buf
-    _ = nbytes
-    return -1
+    if buf == null:
+        return KernelFile_PosixFail64(POSIX_EFAULT)
+    h: mutable KernelFileHandle&? = KernelFile_GetHandle(fd)
+    if h == null:
+        return KernelFile_PosixFail64(POSIX_EBADF)
+    if nbytes < 512:
+        return KernelFile_PosixFail64(POSIX_EINVAL)
+    handle: mutable KernelFileHandle& = h
+    if handle.kind != KERNEL_FILE_KIND_DIRECTORY:
+        return KernelFile_PosixFail64(POSIX_EINVAL)
+    return 0
 
 def sceKernelGetdirentries(fd: int, buf: u8&?, nbytes: u64, basep: void&?) -> i64:
-    _ = fd
-    _ = buf
-    _ = nbytes
-    _ = basep
-    return ORBIS_OK
+    result: i64 = KernelFile_Getdirentries(fd, buf, nbytes, basep)
+    if result < 0:
+        return KernelFile_SceErrorFromErrno().i64()
+    return result
 
 def posix_pwrite(fd: int, buf: void&?, nbytes: u64, offset: i64) -> i64:
-    _ = fd
-    _ = buf
-    _ = nbytes
-    _ = offset
-    return -1
+    can Abort.Panic:
+        iov: mutable OrbisKernelIovec = OrbisKernelIovec(buf, nbytes)
+        return posix_pwritev(fd, iov.ref[mutable OrbisKernelIovec&].cast[void&], 1, offset)
 
 def posix_pwritev(fd: int, iov: void&?, iovcnt: int, offset: i64) -> i64:
-    _ = fd
-    _ = iov
-    _ = iovcnt
-    _ = offset
-    return -1
+    if iovcnt < 0:
+        return KernelFile_PosixFail64(POSIX_EINVAL)
+    if iov == null and iovcnt > 0:
+        return KernelFile_PosixFail64(POSIX_EFAULT)
+    if offset < 0:
+        return KernelFile_PosixFail64(POSIX_EINVAL)
+    h: mutable KernelFileHandle&? = KernelFile_GetHandle(fd)
+    if h == null:
+        return KernelFile_PosixFail64(POSIX_EBADF)
+    handle: mutable KernelFileHandle& = h
+    if handle.kind == KERNEL_FILE_KIND_DIRECTORY:
+        return KernelFile_PosixFail64(POSIX_EBADF)
+    if KernelFile_IsReadOnlyFlags(handle.open_flags):
+        return KernelFile_PosixFail64(POSIX_EBADF)
+    if handle.file == null:
+        return KernelFile_PosixFail64(POSIX_EBADF)
+    old_offset: i64 = handle.offset
+    old_pos: i64 = io_tell(handle.file.cast[void&])
+    if old_pos < 0:
+        return KernelFile_PosixFail64(POSIX_EIO)
+    if not io_seek(handle.file.cast[void&], offset, SeekOrigin.SetOrigin):
+        return KernelFile_PosixFail64(POSIX_EIO)
+    handle.offset <- offset
+    total_written: mutable i64 = 0
+    can Abort.Panic:
+        for i in 0..<iovcnt:
+            item: OrbisKernelIovec = cxx_read_array_at[OrbisKernelIovec](iov, i.usize())
+            if item.iov_base == null and item.iov_len > 0:
+                handle.offset <- old_offset
+                _ = io_seek(handle.file.cast[void&], old_pos, SeekOrigin.SetOrigin)
+                return KernelFile_PosixFail64(POSIX_EFAULT)
+            if item.iov_len == 0:
+                continue
+            n: i64 = KernelFile_Write(fd, item.iov_base as void&?, item.iov_len)
+            if n < 0:
+                handle.offset <- old_offset
+                _ = io_seek(handle.file.cast[void&], old_pos, SeekOrigin.SetOrigin)
+                return n
+            total_written <- total_written + n
+            if n != item.iov_len.i64():
+                break
+    if offset + total_written > handle.size:
+        handle.size <- offset + total_written
+    handle.offset <- old_offset
+    _ = io_seek(handle.file.cast[void&], old_pos, SeekOrigin.SetOrigin)
+    return total_written
 
 def sceKernelPwrite(fd: int, buf: void&?, nbytes: u64, offset: i64) -> i64:
-    _ = fd
-    _ = buf
-    _ = nbytes
-    _ = offset
-    return ORBIS_OK
+    result: i64 = posix_pwrite(fd, buf, nbytes, offset)
+    if result < 0:
+        return KernelFile_SceErrorFromErrno().i64()
+    return result
 
 def sceKernelPwritev(fd: int, iov: void&?, iovcnt: int, offset: i64) -> i64:
-    _ = fd
-    _ = iov
-    _ = iovcnt
-    _ = offset
-    return ORBIS_OK
+    result: i64 = posix_pwritev(fd, iov, iovcnt, offset)
+    if result < 0:
+        return KernelFile_SceErrorFromErrno().i64()
+    return result
 
 def posix_unlink(path: u8&?) -> int:
-    _ = path
-    return -1
+    if path == null:
+        return KernelFile_PosixFail(POSIX_EINVAL)
+    guest_path: static u8& = path.cast[static u8&]
+    if runtime_strlen(guest_path) > 255:
+        return KernelFile_PosixFail(POSIX_ENAMETOOLONG)
+    read_only: mutable bool = false
+    host_path: static u8& = KernelFile_ResolveHostPath(guest_path, read_only.ref[mutable bool&])
+    if not fs_exists(host_path):
+        return KernelFile_PosixFail(POSIX_ENOENT)
+    if read_only:
+        return KernelFile_PosixFail(POSIX_EROFS)
+    if fs_is_directory(host_path):
+        return KernelFile_PosixFail(POSIX_EPERM)
+    if unlink(host_path) != 0:
+        return KernelFile_PosixFail(POSIX_EIO)
+    return ORBIS_OK
 
 def sceKernelUnlink(path: u8&?) -> int:
-    _ = path
-    return ORBIS_OK
+    result: int = posix_unlink(path)
+    if result < 0:
+        return KernelFile_SceErrorFromErrno()
+    return result
 
 def posix_select(nfds: int, readfds: void&?, writefds: void&?, exceptfds: void&?, timeout: void&?) -> int:
     _ = nfds

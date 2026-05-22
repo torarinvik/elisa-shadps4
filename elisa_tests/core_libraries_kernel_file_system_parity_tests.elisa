@@ -89,3 +89,112 @@ def kernel_file_sys_invalid_fd_and_null_pointer_ordering() -> void:
         assert sceKernelClose(99) == ORBIS_KERNEL_ERROR_EBADF
         assert posix_stat(null, null) == -1
         assert sceKernelStat(null, null) == ORBIS_KERNEL_ERROR_EFAULT
+
+@test
+def kernel_file_sys_write_pread_pwrite_roundtrip() -> void:
+    can Abort.Panic, Memory.Allocate:
+        KernelFile_ResetForTest()
+        KernelFile_MountForTest("/tmp", "/app0", false)
+        guest_path: static u8& = "/app0/elisa_fs_roundtrip.bin"
+        host_path: static u8& = KernelFile_ResolveHostPath(guest_path, null)
+        if fs_exists(host_path):
+            _ = posix_unlink(guest_path.cast[u8&?])
+
+        fd: int = sceKernelOpen(guest_path.cast[u8&?], ORBIS_KERNEL_O_RDWR | ORBIS_KERNEL_O_CREAT, null)
+        assert fd >= 3
+
+        payload: mutable array[u8, 5] = zeroed
+        payload[0] <- 'a'.u8()
+        payload[1] <- 'b'.u8()
+        payload[2] <- 'c'.u8()
+        payload[3] <- 'd'.u8()
+        payload[4] <- 'e'.u8()
+        assert posix_write(fd, payload[0].ref[mutable void&], 5) == 5
+
+        patch: mutable array[u8, 1] = zeroed
+        patch[0] <- 'Z'.u8()
+        assert posix_pwrite(fd, patch[0].ref[mutable void&], 1, 1) == 1
+
+        out: mutable array[u8, 5] = zeroed
+        assert posix_pread(fd, out[0].ref[mutable void&], 5, 0) == 5
+        assert out[0] == 'a'.u8()
+        assert out[1] == 'Z'.u8()
+        assert out[2] == 'c'.u8()
+        assert out[3] == 'd'.u8()
+        assert out[4] == 'e'.u8()
+
+        assert sceKernelClose(fd) == ORBIS_OK
+        assert posix_unlink(guest_path.cast[u8&?]) == ORBIS_OK
+
+@test
+def kernel_file_sys_write_error_ordering_invalid_fd() -> void:
+    can Abort.Panic, Memory.Allocate:
+        KernelFile_ResetForTest()
+        KernelFile_MountForTest("/tmp", "/app0", false)
+
+        bad_write: i64 = posix_write(99, null, 4)
+        assert bad_write == -1
+        assert sceKernelWrite(99, null, 4) == ORBIS_KERNEL_ERROR_EBADF.i64()
+
+@test
+def kernel_file_sys_getdents_error_ordering() -> void:
+    can Abort.Panic, Memory.Allocate:
+        KernelFile_ResetForTest()
+        KernelFile_MountForTest("/tmp", "/app0", false)
+
+        dir_fd: int = sceKernelOpen("/app0".cast[u8&?], ORBIS_KERNEL_O_RDONLY | ORBIS_KERNEL_O_DIRECTORY, null)
+        assert dir_fd >= 3
+        tiny: mutable array[u8, 8] = zeroed
+        assert posix_getdents(dir_fd, null, 1024) == -1
+        assert posix_getdents(dir_fd, tiny[0].ref[mutable u8&], 8) == -1
+        assert sceKernelClose(dir_fd) == ORBIS_OK
+
+@test
+def kernel_file_sys_directory_open_close() -> void:
+    can Abort.Panic, Memory.Allocate:
+        KernelFile_ResetForTest()
+        KernelFile_MountForTest("/tmp", "/app0", false)
+        dir_fd: int = sceKernelOpen("/app0".cast[u8&?], ORBIS_KERNEL_O_RDONLY | ORBIS_KERNEL_O_DIRECTORY, null)
+        assert dir_fd >= 3
+        assert sceKernelClose(dir_fd) == ORBIS_OK
+
+@test
+def kernel_file_sys_mkdir_rename_unlink_rmdir_cycle() -> void:
+    can Abort.Panic, Memory.Allocate:
+        KernelFile_ResetForTest()
+        KernelFile_MountForTest("/tmp", "/sandbox", false)
+
+        dir_guest: static u8& = "/sandbox/elisa_fs_dir"
+        file_a_guest: static u8& = "/sandbox/elisa_fs_dir/a.txt"
+        file_b_guest: static u8& = "/sandbox/elisa_fs_dir/b.txt"
+        dir_host: static u8& = KernelFile_ResolveHostPath(dir_guest, null)
+        file_a_host: static u8& = KernelFile_ResolveHostPath(file_a_guest, null)
+        file_b_host: static u8& = KernelFile_ResolveHostPath(file_b_guest, null)
+
+        if fs_exists(file_a_host):
+            _ = posix_unlink(file_a_guest.cast[u8&?])
+        if fs_exists(file_b_host):
+            _ = posix_unlink(file_b_guest.cast[u8&?])
+        if fs_exists(dir_host):
+            _ = posix_rmdir(dir_guest.cast[u8&?])
+
+        assert posix_mkdir(dir_guest.cast[u8&?], 0x1ff) == ORBIS_OK
+        assert fs_exists(dir_host)
+
+        fd: int = sceKernelOpen(file_a_guest.cast[u8&?], ORBIS_KERNEL_O_RDWR | ORBIS_KERNEL_O_CREAT, null)
+        assert fd >= 3
+        one: mutable array[u8, 1] = zeroed
+        one[0] <- 'x'.u8()
+        assert posix_write(fd, one[0].ref[mutable void&], 1) == 1
+        assert sceKernelClose(fd) == ORBIS_OK
+        assert fs_exists(file_a_host)
+
+        assert posix_rename(file_a_guest.cast[u8&?], file_b_guest.cast[u8&?]) == ORBIS_OK
+        assert not fs_exists(file_a_host)
+        assert fs_exists(file_b_host)
+
+        assert posix_unlink(file_b_guest.cast[u8&?]) == ORBIS_OK
+        assert not fs_exists(file_b_host)
+
+        assert posix_rmdir(dir_guest.cast[u8&?]) == ORBIS_OK
+        assert not fs_exists(dir_host)
