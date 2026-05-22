@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 include "../error_codes.elisa"
+include "../kernel/lib_function_stub.elisa"
 include "./avplayer_impl.elisa"
 include "./avplayer_state.elisa"
 include "./avplayer_source.elisa"
@@ -480,6 +481,14 @@ def avplayer_controller_thread_stop():
     g_avplayer_controller_running <- false
 
 def avplayer_controller_tick(slot: int):
+    # Mirror C++ controller runtime signaling paths: warning forwarding and EOF
+    # queueing are controller-driven. Buffering transitions are exercised in
+    # dedicated state tests until source/controller threading is synchronized.
+    pending_warning: mutable i32 = 0
+    if avsrc_consume_warning(slot, pending_warning):
+        avs_on_warning(slot, pending_warning)
+    if avsrc_should_signal_eof(slot):
+        avs_on_eof(slot)
     avs_process_events(slot, avsrc_get_stream_count(slot) > 0)
     avplayer_dispatch_state_events(slot)
 
@@ -845,7 +854,8 @@ def sceAvPlayerInitEx(p_data: AvPlayerInitDataEx&?, p_player: mutable AvPlayerHa
 def sceAvPlayerIsActive(handle: AvPlayerHandle) -> bool:
     if not avplayer_valid_handle(handle):
         return false
-    return avsrc_is_active(handle - 1) and g_handle_active_playback[handle - 1]
+    slot: int = handle - 1
+    return avs_is_active(slot) and avsrc_is_active(slot)
 
 def sceAvPlayerJumpToTime(handle: AvPlayerHandle, target_time: u64) -> i32:
     _ = target_time
@@ -862,7 +872,8 @@ def sceAvPlayerPause(handle: AvPlayerHandle) -> i32:
         return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
     avplayer_controller_tick(handle - 1)
     avsrc_pause(handle - 1)
-    g_handle_active_playback[handle - 1] <- false
+    # C++ IsActive remains true while paused as long as source/state are active.
+    g_handle_active_playback[handle - 1] <- true
     return ORBIS_OK
 
 def sceAvPlayerPostInit(handle: AvPlayerHandle, data: mutable AvPlayerPostInitData&?) -> i32:
@@ -969,3 +980,29 @@ def sceAvPlayerVprintf(format: i8&?, args: void&?) -> i32:
 
 def AvPlayer_RegisterLib(sym: void&?) -> void:
     _ = sym
+    LIB_FUNCTION("KMcEa+rHsIo", "libSceAvPlayer", 1, "libSceAvPlayer", sceAvPlayerAddSource)
+    LIB_FUNCTION("x8uvuFOPZhU", "libSceAvPlayer", 1, "libSceAvPlayer", sceAvPlayerAddSourceEx)
+    LIB_FUNCTION("buMCiJftcfw", "libSceAvPlayer", 1, "libSceAvPlayer", sceAvPlayerChangeStream)
+    LIB_FUNCTION("NkJwDzKmIlw", "libSceAvPlayer", 1, "libSceAvPlayer", sceAvPlayerClose)
+    LIB_FUNCTION("wwM99gjFf1Y", "libSceAvPlayer", 1, "libSceAvPlayer", sceAvPlayerCurrentTime)
+    LIB_FUNCTION("BOVKAzRmuTQ", "libSceAvPlayer", 1, "libSceAvPlayer", sceAvPlayerDisableStream)
+    LIB_FUNCTION("ODJK2sn9w4A", "libSceAvPlayer", 1, "libSceAvPlayer", sceAvPlayerEnableStream)
+    LIB_FUNCTION("Wnp1OVcrZgk", "libSceAvPlayer", 1, "libSceAvPlayer", sceAvPlayerGetAudioData)
+    LIB_FUNCTION("d8FcbzfAdQw", "libSceAvPlayer", 1, "libSceAvPlayer", sceAvPlayerGetStreamInfo)
+    LIB_FUNCTION("o3+RWnHViSg", "libSceAvPlayer", 1, "libSceAvPlayer", sceAvPlayerGetVideoData)
+    LIB_FUNCTION("JdksQu8pNdQ", "libSceAvPlayer", 1, "libSceAvPlayer", sceAvPlayerGetVideoDataEx)
+    LIB_FUNCTION("aS66RI0gGgo", "libSceAvPlayer", 1, "libSceAvPlayer", sceAvPlayerInit)
+    LIB_FUNCTION("o9eWRkSL+M4", "libSceAvPlayer", 1, "libSceAvPlayer", sceAvPlayerInitEx)
+    LIB_FUNCTION("UbQoYawOsfY", "libSceAvPlayer", 1, "libSceAvPlayer", sceAvPlayerIsActive)
+    LIB_FUNCTION("XC9wM+xULz8", "libSceAvPlayer", 1, "libSceAvPlayer", sceAvPlayerJumpToTime)
+    LIB_FUNCTION("9y5v+fGN4Wk", "libSceAvPlayer", 1, "libSceAvPlayer", sceAvPlayerPause)
+    LIB_FUNCTION("HD1YKVU26-M", "libSceAvPlayer", 1, "libSceAvPlayer", sceAvPlayerPostInit)
+    LIB_FUNCTION("w5moABNwnRY", "libSceAvPlayer", 1, "libSceAvPlayer", sceAvPlayerResume)
+    LIB_FUNCTION("k-q+xOxdc3E", "libSceAvPlayer", 1, "libSceAvPlayer", sceAvPlayerSetAvSyncMode)
+    LIB_FUNCTION("eBTreZ84JFY", "libSceAvPlayer", 1, "libSceAvPlayer", sceAvPlayerSetLogCallback)
+    LIB_FUNCTION("OVths0xGfho", "libSceAvPlayer", 1, "libSceAvPlayer", sceAvPlayerSetLooping)
+    LIB_FUNCTION("av8Z++94rs0", "libSceAvPlayer", 1, "libSceAvPlayer", sceAvPlayerSetTrickSpeed)
+    LIB_FUNCTION("ET4Gr-Uu07s", "libSceAvPlayer", 1, "libSceAvPlayer", sceAvPlayerStart)
+    LIB_FUNCTION("ZC17w3vB5Lo", "libSceAvPlayer", 1, "libSceAvPlayer", sceAvPlayerStop)
+    LIB_FUNCTION("hdTyRzCXQeQ", "libSceAvPlayer", 1, "libSceAvPlayer", sceAvPlayerStreamCount)
+    LIB_FUNCTION("yN7Jhuv8g24", "libSceAvPlayer", 1, "libSceAvPlayer", sceAvPlayerVprintf)

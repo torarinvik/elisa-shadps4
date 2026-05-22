@@ -133,6 +133,7 @@ Current validated prefix structs:
 - `Implemented`: warning event payload forwarding is parity-tested for source-side loop-back warning paths
 - `Implemented`: buffering transition event ordering (`PLAY -> BUFFERING -> PLAY`) is parity-tested through controller tick dispatch
 - `Implemented`: controller dispatch now skips callback invocation when the guest did not install an event callback, matching the C++ no-callback behavior instead of calling a dummy Elisa function pointer
+- `Implemented`: controller tick now forwards pending source warnings and queues EOF transitions before dispatching guest events, matching C++ controller signaling paths without introducing unsynchronized source-thread races.
 - `Implemented`: started FFmpeg-backed public frame retrieval now opens source codecs, uses a concrete libc clock FFI, enters active playback, and returns decoded video/audio payloads through `sceAvPlayerGetVideoDataEx` and `sceAvPlayerGetAudioData`
 - `Implemented`: `Stop -> Starting -> Play` is now a valid transition so explicit restart from stopped/active paths follows C++ `AvPlayerState::Start`.
 - `Implemented`: init starts a host-backed controller tick thread, mirroring C++ constructor lifecycle.
@@ -158,3 +159,5 @@ Current validated prefix structs:
 - Expand parity harness scenarios for EOF/loop, buffering transitions, and
   invalid-state edge behavior.
 - `Implemented`: API validation matrix expanded for invalid handles and C++-stub control entrypoint contracts.
+- `Implemented`: `sceAvPlayerIsActive` now follows C++ activity semantics for paused playback (`Pause` remains active while source/state are active).
+- `Implemented`: `AvPlayer_RegisterLib` now registers the full C++ `libSceAvPlayer` NID set (excluding the intentionally non-registered printf vararg entry, matching C++).
