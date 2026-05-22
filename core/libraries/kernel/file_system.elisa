@@ -18,9 +18,17 @@ extern SetPosixErrno(e: int) -> void
 extern ErrnoToSceKernelError(err: int) -> int
 
 const KERNEL_FILE_MAX_FDS: int = 1024
+const ORBIS_KERNEL_O_WRONLY: int = 0x0001
+const ORBIS_KERNEL_O_RDWR: int = 0x0002
+const ORBIS_KERNEL_O_APPEND: int = 0x0008
 const ORBIS_KERNEL_O_CREAT: int = 0x0200
 const ORBIS_KERNEL_O_TRUNC: int = 0x0400
 const ORBIS_KERNEL_O_DIRECTORY: int = 0x00020000
+const ORBIS_F_DUPFD: int = 0
+const ORBIS_F_GETFD: int = 1
+const ORBIS_F_SETFD: int = 2
+const ORBIS_F_GETFL: int = 3
+const ORBIS_F_SETFL: int = 4
 const KERNEL_FILE_REGULAR_MODE: u32 = 0x81ff
 const KERNEL_FILE_DIRECTORY_MODE: u32 = 0x41ff
 
@@ -40,9 +48,10 @@ struct KernelFileHandle:
     size: mutable i64
     file: mutable void&?
     path: mutable static u8&
+    open_flags: mutable int
 
 def KernelFileHandle_new() -> KernelFileHandle:
-    return KernelFileHandle(false, 0, 0, null, "")
+    return KernelFileHandle(false, 0, 0, null, "", 0)
 
 global mutable g_kernel_file_handles: array[KernelFileHandle, 1024] = zeroed
 
@@ -128,6 +137,7 @@ def KernelFile_OpenHandle(self: mutable KernelFileHandle&, path: static u8&, fla
     self.offset <- 0
     self.size <- io_get_size(opened.cast[void&]).i64()
     self.path <- path
+    self.open_flags <- flags
     return ORBIS_OK
 
 def KernelFile_ReadHandle(self: mutable KernelFileHandle&, buf: void&?, nbytes: u64) -> i64:
@@ -246,6 +256,39 @@ def posix_close(fd: int) -> int:
 
 def sceKernelClose(fd: int) -> int:
     result: int = KernelFile_Close(fd)
+    if result < 0:
+        return KernelFile_SceErrorFromErrno()
+    return result
+
+def KernelFile_Fcntl(fd: int, cmd: int, arg: i64) -> int:
+    h: mutable KernelFileHandle&? = KernelFile_GetHandle(fd)
+    if h == null:
+        return KernelFile_PosixFail(POSIX_EBADF)
+    handle: mutable KernelFileHandle& = h
+    if cmd == ORBIS_F_DUPFD:
+        new_fd: int = KernelFile_AllocFd()
+        if new_fd < 0:
+            return KernelFile_PosixFail(POSIX_EMFILE)
+        _ = arg
+        dup_result: int = KernelFile_OpenHandle(g_kernel_file_handles[new_fd].ref[mutable KernelFileHandle&], handle.path, handle.open_flags)
+        if dup_result < 0:
+            g_kernel_file_handles[new_fd] <- KernelFileHandle_new()
+            return dup_result
+        g_kernel_file_handles[new_fd].offset <- handle.offset
+        return new_fd
+    if cmd == ORBIS_F_GETFD:
+        return 0
+    if cmd == ORBIS_F_SETFD:
+        return 0
+    if cmd == ORBIS_F_GETFL:
+        return handle.open_flags
+    if cmd == ORBIS_F_SETFL:
+        handle.open_flags <- (handle.open_flags & 0x3) | (arg.int() & ~0x3)
+        return 0
+    return KernelFile_PosixFail(POSIX_EINVAL)
+
+def sceKernelFcntl(fd: int, cmd: int, arg: i64) -> int:
+    result: int = KernelFile_Fcntl(fd, cmd, arg)
     if result < 0:
         return KernelFile_SceErrorFromErrno()
     return result
@@ -414,6 +457,42 @@ def sceKernelTruncate(path: u8&?, length: i64) -> int:
         return KernelFile_SceErrorFromErrno()
     return result
 
+def posix_chmod(path: u8&?, mode: u16) -> int:
+    _ = mode
+    if path == null:
+        return KernelFile_PosixFail(POSIX_EFAULT)
+    guest_path: static u8& = path.cast[static u8&]
+    if runtime_strlen(guest_path) > 255:
+        return KernelFile_PosixFail(POSIX_ENAMETOOLONG)
+    host_path: static u8& = KernelFile_ResolveHostPath(guest_path, null)
+    if not fs_exists(host_path):
+        return KernelFile_PosixFail(POSIX_ENOENT)
+    return ORBIS_OK
+
+def sceKernelChmod(path: u8&?, mode: u16) -> int:
+    result: int = posix_chmod(path, mode)
+    if result < 0:
+        return KernelFile_SceErrorFromErrno()
+    return result
+
+def posix_utimes(path: u8&?, times: void&?) -> int:
+    _ = times
+    if path == null:
+        return KernelFile_PosixFail(POSIX_EFAULT)
+    guest_path: static u8& = path.cast[static u8&]
+    if runtime_strlen(guest_path) > 255:
+        return KernelFile_PosixFail(POSIX_ENAMETOOLONG)
+    host_path: static u8& = KernelFile_ResolveHostPath(guest_path, null)
+    if not fs_exists(host_path):
+        return KernelFile_PosixFail(POSIX_ENOENT)
+    return ORBIS_OK
+
+def sceKernelUtimes(path: u8&?, times: void&?) -> int:
+    result: int = posix_utimes(path, times)
+    if result < 0:
+        return KernelFile_SceErrorFromErrno()
+    return result
+
 def posix_rename(from_path: u8&?, to_path: u8&?) -> int:
     _ = from_path
     _ = to_path
@@ -547,6 +626,7 @@ def RegisterFileSystem(sym: void&?) -> void:
     LIB_FUNCTION("AqBioC2vF3I", "libScePosix", 1, "libkernel", posix_read)
     LIB_FUNCTION("AqBioC2vF3I", "libkernel", 1, "libkernel", posix_read)
     LIB_FUNCTION("Cg4srZ6TKbU", "libkernel", 1, "libkernel", sceKernelRead)
+    LIB_FUNCTION("SoZkxZkCHaw", "libkernel", 1, "libkernel", sceKernelFcntl)
     LIB_FUNCTION("JGMio+21L4c", "libScePosix", 1, "libkernel", posix_mkdir)
     LIB_FUNCTION("JGMio+21L4c", "libkernel", 1, "libkernel", posix_mkdir)
     LIB_FUNCTION("1-LFLmRFxxM", "libkernel", 1, "libkernel", sceKernelMkdir)
@@ -561,8 +641,11 @@ def RegisterFileSystem(sym: void&?) -> void:
     LIB_FUNCTION("mqQMh1zPPT8", "libkernel", 1, "libkernel", posix_fstat)
     LIB_FUNCTION("kBwCPsYX-m4", "libkernel", 1, "libkernel", sceKernelFstat)
     LIB_FUNCTION("ih4CD9-gghM", "libkernel", 1, "libkernel", posix_ftruncate)
+    LIB_FUNCTION("ih4CD9-gghM", "libScePosix", 1, "libkernel", posix_ftruncate)
     LIB_FUNCTION("VW3TVZiM4-E", "libkernel", 1, "libkernel", sceKernelFtruncate)
     LIB_FUNCTION("WlyEA-sLDf0", "libkernel", 1, "libkernel", sceKernelTruncate)
+    LIB_FUNCTION("fgIsQ10xYVA", "libkernel", 1, "libkernel", sceKernelChmod)
+    LIB_FUNCTION("0Cq8ipKr9n0", "libkernel", 1, "libkernel", sceKernelUtimes)
     LIB_FUNCTION("NN01qLRhiqU", "libScePosix", 1, "libkernel", posix_rename)
     LIB_FUNCTION("NN01qLRhiqU", "libkernel", 1, "libkernel", posix_rename)
     LIB_FUNCTION("52NcYU9+lEo", "libkernel", 1, "libkernel", sceKernelRename)
@@ -578,6 +661,7 @@ def RegisterFileSystem(sym: void&?) -> void:
     LIB_FUNCTION("2G6i6hMIUUY", "libkernel", 1, "libkernel", posix_getdents)
     LIB_FUNCTION("taRWhTJFTgE", "libkernel", 1, "libkernel", sceKernelGetdirentries)
     LIB_FUNCTION("C2kJ-byS5rM", "libkernel", 1, "libkernel", posix_pwrite)
+    LIB_FUNCTION("C2kJ-byS5rM", "libScePosix", 1, "libkernel", posix_pwrite)
     LIB_FUNCTION("FCcmRZhWtOk", "libScePosix", 1, "libkernel", posix_pwritev)
     LIB_FUNCTION("FCcmRZhWtOk", "libkernel", 1, "libkernel", posix_pwritev)
     LIB_FUNCTION("nKWi-N2HBV4", "libkernel", 1, "libkernel", sceKernelPwrite)
