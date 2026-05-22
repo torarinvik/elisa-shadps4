@@ -561,6 +561,59 @@ def avplayer_ffmpeg_convert_audio_to_s16_converts_fltp_frame() -> void:
         avffmpeg_free_frame(frame)
 
 @test
+def avplayer_ffmpeg_copy_frame_metadata_and_payload_converts_fltp_to_s16_bytes() -> void:
+    can Abort.Panic:
+        frame: mutable void&? = av_frame_alloc()
+        assert frame != null
+
+        src: mutable AVFramePublicPrefix& = frame.cast[mutable AVFramePublicPrefix&]
+        src.format <- AV_SAMPLE_FMT_FLTP
+        src.nb_samples <- 4
+        src.sample_rate <- 48000
+        av_channel_layout_default(src.ch_layout.ref[mutable void&], 2)
+        assert av_frame_get_buffer(frame, 0) == 0
+
+        # L channel = +1.0f (0x3f800000), R channel = -1.0f (0xbf800000)
+        left: mutable u8&? = src.data[0]
+        right: mutable u8&? = src.data[1]
+        assert left != null
+        assert right != null
+        i: mutable u32 = 0
+        while i < 4u32:
+            base: usize = (i * 4u32).usize()
+            left[base + 0usize] <- 0x00u8
+            left[base + 1usize] <- 0x00u8
+            left[base + 2usize] <- 0x80u8
+            left[base + 3usize] <- 0x3fu8
+            right[base + 0usize] <- 0x00u8
+            right[base + 1usize] <- 0x00u8
+            right[base + 2usize] <- 0x80u8
+            right[base + 3usize] <- 0xbfu8
+            i <- i + 1u32
+
+        payload: mutable u8[16] = zeroed
+        out_audio_samples: mutable u32 = 0
+        out_audio_sample_rate: mutable u32 = 0
+        out_audio_channels: mutable u32 = 0
+        out_video_width: mutable u32 = 0
+        out_video_height: mutable u32 = 0
+        out_video_pitch: mutable u32 = 0
+        out_video_aspect_num: mutable u32 = 0
+        out_video_aspect_den: mutable u32 = 0
+        avffmpeg_copy_frame_metadata_and_payload(frame, payload[0].ref[mutable u8&], 16u32, false, out_audio_samples, out_audio_sample_rate, out_audio_channels, out_video_width, out_video_height, out_video_pitch, out_video_aspect_num, out_video_aspect_den)
+
+        assert out_audio_samples == 4u32
+        assert out_audio_sample_rate == 48000u32
+        assert out_audio_channels == 2u32
+        # Interleaved s16 expected: L=0x7fff, R=0x8000 (little-endian).
+        assert payload[0] == 0xffu8
+        assert payload[1] == 0x7fu8
+        assert payload[2] == 0x00u8
+        assert payload[3] == 0x80u8
+
+        avffmpeg_free_frame(frame)
+
+@test
 def avplayer_frame_info_video_metadata_matches_ex() -> void:
     can Thread.Spawn, Thread.Join, Thread.Sleep, Abort.Panic:
         handle_v: AvPlayerHandle = avp_prepare_fixture_handle_for_stream(AVPLAYER_STREAM_TYPE_VIDEO)
