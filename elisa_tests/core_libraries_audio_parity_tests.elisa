@@ -44,6 +44,19 @@ def audio_try_probe_openal() -> bool:
     audio_openal_available <- true
     return true
 
+def audio_wait_for_last_output_time_change(handle: s32, previous: u64) -> u64:
+    can Thread.Sleep, Abort.Panic:
+        current: mutable u64 = previous
+        attempts: mutable s32 = 0
+        while attempts < 80:
+            assert sceAudioOutGetLastOutputTime(handle, current.ref[mutable u64&]) == ORBIS_OK
+            if current != previous:
+                return current
+            sleep_usec(1000u64)
+            attempts <- attempts + 1
+        assert current != previous
+        return current
+
 def audio_skip_backend_sdl() -> void:
     can Console.Write:
         _ = puts("AUDIO_RUNTIME_SKIP backend unavailable: SDL3")
@@ -76,6 +89,7 @@ def audioout_handle_and_batch_validation() -> void:
         bad: s32 = 0x10000000
         assert sceAudioOutClose(bad) == ORBIS_AUDIO_OUT_ERROR_INVALID_PORT
         assert sceAudioOutGetLastOutputTime(h, null) == ORBIS_AUDIO_OUT_ERROR_INVALID_POINTER
+        assert sceAudioOutOutput(h, null) == 0
         params: mutable u8[32]
         _ = memset(params[0].ref[mutable u8&] as mutable void&, 0, 32usize)
         _ = memcpy(params[0].ref[mutable u8&] as mutable void&, h.ref[s32&] as void&, 4usize)
@@ -121,10 +135,10 @@ def audioout_outputs_param_decode_preserves_buffer_pointer_array() -> void:
 
         t0_after: mutable u64 = 0u64
         t1_after: mutable u64 = 0u64
-        assert sceAudioOutGetLastOutputTime(h0, t0_after.ref[mutable u64&]) == ORBIS_OK
-        assert sceAudioOutGetLastOutputTime(h1, t1_after.ref[mutable u64&]) == ORBIS_OK
-        assert t0_after == t0_before + 1u64
-        assert t1_after == t1_before + 1u64
+        t0_after <- audio_wait_for_last_output_time_change(h0, t0_before)
+        t1_after <- audio_wait_for_last_output_time_change(h1, t1_before)
+        assert t0_after != t0_before
+        assert t1_after != t1_before
         audio_output_opened <- true
         audio_emit_backend_status()
 

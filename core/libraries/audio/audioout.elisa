@@ -7,10 +7,14 @@ include "./audioout_nids.elisa"
 include "./sdl_audio_out.elisa"
 include "./openal_audio_out.elisa"
 include "./openal_manager.elisa"
+include "../kernel/time.elisa"
+include "../../../../compiler/runtime/elisacore_std/elisacore_runtime_concurrency.elisa"
 include "../../guest_exec.elisa"
 
 @link_name(ElisaGuestExec_EmitCusaArtifactKV)
 extern c_GuestExec_EmitCusaArtifactKV(key: static u8&?, value: u64) -> void
+extern malloc(size: usize) -> mutable heap void&?
+extern free(ptr: heap void&) -> void
 
 const AUDIOOUT_HANDLE_TAG: s32 = 0x20000000
 
@@ -25,6 +29,15 @@ global mutable audioout_backend_open: bool[25] = [false, false, false, false, fa
 global mutable audioout_backend_is_openal: bool[25] = [false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false]
 global mutable audioout_backend_mode_openal: bool = false
 global mutable audioout_frame_bytes: u32[25] = [0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32]
+global mutable audioout_port_buffer_ptr: mutable heap void&?[25] = [null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null]
+global mutable audioout_port_buffer_size: u32[25] = [0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32]
+global mutable audioout_port_ready: bool[25] = [false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false]
+global mutable audioout_port_stop: bool[25] = [false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false]
+global mutable audioout_port_worker_started: bool[25] = [false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false]
+global mutable audioout_port_worker_handles: uintptr[25] = zeroed
+global mutable audioout_port_worker_args: s32[25] = zeroed
+global mutable audioout_port_mutexes: Mutex[25] = zeroed
+global mutable audioout_port_cvars: CondVar[25] = zeroed
 global mutable audioout_volume: s32[200] = zeroed
 global mutable audioout_decode_handles_buf: s32[25] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 global mutable audioout_decode_ptrs_buf: void&?[25] = [null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null, null]
@@ -97,6 +110,83 @@ def sceAudioOutSelectBackendOpenAL(enable: bool) -> s32:
         OpenALManager_Shutdown()
     audioout_backend_mode_openal <- enable
     return ORBIS_OK
+
+def audioout_port_period_us(pid: s32) -> u64:
+    frames: u64 = audioout_frames[pid] as u64
+    if frames == 0u64:
+        return 0u64
+    return ((frames * 1000000u64) + 24000u64) / 48000u64
+
+def audioout_port_prepare_runtime(pid: s32) -> bool:
+    mutex_init(audioout_port_mutexes[pid].ref[mutable Mutex&])
+    condvar_init(audioout_port_cvars[pid].ref[mutable CondVar&])
+    audioout_port_ready[pid] <- false
+    audioout_port_stop[pid] <- false
+    audioout_port_worker_started[pid] <- false
+    audioout_port_worker_handles[pid] <- 0usize
+    return audioout_port_mutexes[pid].handle != null and audioout_port_cvars[pid].handle != null
+
+def audioout_port_shutdown_runtime(pid: s32) -> void:
+    if audioout_port_worker_started[pid]:
+        audioout_port_stop[pid] <- true
+        audioout_port_ready[pid] <- false
+        if audioout_port_mutexes[pid].handle != null:
+            g: mutable MutexGuard[Held] = mutex_lock(audioout_port_mutexes[pid])
+            notify_one(audioout_port_cvars[pid])
+            mutex_unlock(move g)
+        _ = ctx_thread_join(audioout_port_worker_handles[pid])
+        audioout_port_worker_handles[pid] <- 0usize
+        audioout_port_worker_started[pid] <- false
+    if audioout_port_mutexes[pid].handle != null:
+        mutex_destroy(audioout_port_mutexes[pid].ref[mutable Mutex&])
+    if audioout_port_cvars[pid].handle != null:
+        condvar_destroy(audioout_port_cvars[pid].ref[mutable CondVar&])
+    buf: mutable heap void&? = audioout_port_buffer_ptr[pid]
+    if buf != null:
+        free(buf.cast[heap void&])
+        audioout_port_buffer_ptr[pid] <- null
+    audioout_port_buffer_size[pid] <- 0u32
+    audioout_port_ready[pid] <- false
+    audioout_port_stop[pid] <- false
+
+def audioout_port_worker_entry(arg: void&?) -> void&?:
+    can Sync.Lock, Sync.Notify, Thread.Sleep:
+        if arg == null:
+            return null
+        pid_ref: mutable s32& = arg as mutable s32&
+        pid: s32 = pid_ref[0]
+        period_us: mutable u64 = audioout_port_period_us(pid)
+        if period_us == 0u64:
+            period_us <- 1u64
+        while true:
+            if audioout_port_stop[pid]:
+                break
+            if audioout_port_mutexes[pid].handle == null:
+                break
+            g: mutable MutexGuard[Held] = mutex_lock(audioout_port_mutexes[pid])
+            if audioout_port_stop[pid]:
+                mutex_unlock(move g)
+                break
+            if audioout_port_ready[pid]:
+                ptr: mutable heap void&? = audioout_port_buffer_ptr[pid]
+                size_bytes: u32 = audioout_port_buffer_size[pid]
+                if ptr != null and audioout_backend_open[pid]:
+                    buf8: mutable heap u8& = ptr.cast[mutable heap u8&]
+                    if audioout_backend_is_openal[pid]:
+                        fmt: s32 = audioout_openal_select_format(pid)
+                        if fmt != 0:
+                            prep_ptr: void& = buf8.cast[void&]
+                            prep_size: mutable s32 = size_bytes as s32
+                            queue_ptr: void& = audioout_openal_prepare_data(pid, prep_ptr, fmt, prep_size)
+                            _ = audioout_openal_queue(pid, queue_ptr, prep_size, 48000, fmt)
+                    else:
+                        _ = AudioFFI_AudioOutSDLQueue(pid, buf8.cast[void&], size_bytes)
+                audioout_port_ready[pid] <- false
+                audioout_last_time[pid] <- sceKernelGetProcessTime()
+                notify_one(audioout_port_cvars[pid])
+            mutex_unlock(move g)
+            sleep_usec(period_us)
+        return null
 
 # Configure ABI layout for OrbisAudioOutOutputParam decode.
 # 64-bit default: { s32 handle; pad4; void* ptr } => stride 16, ptr offset 8, ptr width 8.
@@ -177,6 +267,54 @@ def sceAudioOutOpen(user_id: s32, port_type: s32, index: s32, length: u32, sampl
     audioout_frames[pid] <- length
     audioout_data_format[pid] <- data_format
     audioout_frame_bytes[pid] <- frame_bytes
+    audioout_port_buffer_size[pid] <- length * frame_bytes
+    audioout_port_buffer_ptr[pid] <- malloc(audioout_port_buffer_size[pid])
+    if audioout_port_buffer_ptr[pid] == null:
+        audioout_open_mask[pid] <- false
+        audioout_backend_open[pid] <- false
+        audioout_backend_is_openal[pid] <- false
+        audioout_data_format[pid] <- 0u32
+        audioout_frame_bytes[pid] <- 0u32
+        audioout_port_buffer_size[pid] <- 0u32
+        audioout_port_shutdown_runtime(pid)
+        if audioout_backend_mode_openal:
+            audioout_openal_close_port(pid)
+        else:
+            AudioFFI_AudioOutSDLClose(pid)
+        return ORBIS_AUDIO_OUT_ERROR_OUT_OF_MEMORY
+    if not audioout_port_prepare_runtime(pid):
+        audioout_open_mask[pid] <- false
+        audioout_backend_open[pid] <- false
+        audioout_backend_is_openal[pid] <- false
+        audioout_data_format[pid] <- 0u32
+        audioout_frame_bytes[pid] <- 0u32
+        audioout_port_buffer_size[pid] <- 0u32
+        audioout_port_shutdown_runtime(pid)
+        if audioout_backend_mode_openal:
+            audioout_openal_close_port(pid)
+        else:
+            AudioFFI_AudioOutSDLClose(pid)
+        return ORBIS_AUDIO_OUT_ERROR_OUT_OF_MEMORY
+    audioout_port_worker_args[pid] <- pid
+    worker_rc: int = ctx_thread_create(
+        audioout_port_worker_handles[pid].ref[mutable uintptr&],
+        audioout_port_worker_entry.cast[void&],
+        audioout_port_worker_args[pid].ref[mutable s32&] as void&?
+    )
+    if worker_rc != 0:
+        audioout_port_shutdown_runtime(pid)
+        audioout_open_mask[pid] <- false
+        audioout_backend_open[pid] <- false
+        audioout_backend_is_openal[pid] <- false
+        audioout_data_format[pid] <- 0u32
+        audioout_frame_bytes[pid] <- 0u32
+        audioout_port_buffer_size[pid] <- 0u32
+        if audioout_backend_mode_openal:
+            audioout_openal_close_port(pid)
+        else:
+            AudioFFI_AudioOutSDLClose(pid)
+        return ORBIS_AUDIO_OUT_ERROR_TRANS_EVENT
+    audioout_port_worker_started[pid] <- true
     audioout_last_time[pid] <- 0u64
     vbase: mutable s32 = pid * 8
     vi: mutable s32 = 0
@@ -200,6 +338,7 @@ def sceAudioOutClose(handle: s32) -> s32:
     if not audioout_open_mask[pid]:
         return ORBIS_AUDIO_OUT_ERROR_NOT_OPENED
     audioout_open_mask[pid] <- false
+    audioout_port_shutdown_runtime(pid)
     audioout_backend_open[pid] <- false
     if audioout_backend_is_openal[pid]:
         audioout_openal_close_port(pid)
@@ -209,6 +348,11 @@ def sceAudioOutClose(handle: s32) -> s32:
     audioout_data_format[pid] <- 0u32
     audioout_frame_bytes[pid] <- 0u32
     audioout_backend_is_openal[pid] <- false
+    buf2: mutable heap void&? = audioout_port_buffer_ptr[pid]
+    if buf2 != null:
+        free(buf2.cast[heap void&])
+        audioout_port_buffer_ptr[pid] <- null
+    audioout_port_buffer_size[pid] <- 0u32
     audioout_emit_u64("audio_output_closed", 1u64)
     return ORBIS_OK
 
@@ -282,31 +426,31 @@ def sceAudioOutOutput(handle: s32, ptr: mutable u8&?) -> s32:
         return ORBIS_AUDIO_OUT_ERROR_INVALID_PORT_TYPE
     if not audioout_open_mask[pid]:
         return ORBIS_AUDIO_OUT_ERROR_NOT_OPENED
-    if ptr == null:
-        return 0
-    bytes_len: u32 = audioout_frames[pid] * audioout_frame_bytes[pid]
-    if audioout_backend_is_openal[pid]:
-        fmt: s32 = audioout_openal_select_format(pid)
-        if fmt == 0:
-            return ORBIS_AUDIO_OUT_ERROR_INVALID_FORMAT
-        prep_ptr: void& = ptr as void&
-        prep_size: mutable s32 = bytes_len as s32
-        queue_ptr: void& = audioout_openal_prepare_data(pid, prep_ptr, fmt, prep_size)
-        if not audioout_openal_queue(pid, queue_ptr, prep_size, 48000, fmt):
+    g: mutable MutexGuard[Held] = mutex_lock(audioout_port_mutexes[pid])
+    while audioout_port_ready[pid]:
+        g <- cond_wait(audioout_port_cvars[pid], move g)
+    if audioout_port_stop[pid] or not audioout_open_mask[pid]:
+        mutex_unlock(move g)
+        return ORBIS_AUDIO_OUT_ERROR_NOT_OPENED
+    samples_sent: mutable s32 = 0
+    if ptr != null:
+        bytes_len: u32 = audioout_port_buffer_size[pid]
+        if audioout_port_buffer_ptr[pid] == null:
+            mutex_unlock(move g)
             return ORBIS_AUDIO_OUT_ERROR_TRANS_EVENT
-    else:
-        if AudioFFI_AudioOutSDLQueue(pid, ptr as void&, bytes_len) != 0:
-            return ORBIS_AUDIO_OUT_ERROR_TRANS_EVENT
-    audioout_last_time[pid] <- audioout_last_time[pid] + 1u64
-    ch: mutable s32 = 1
-    fmt: u32 = audioout_data_format[pid]
-    if fmt == 1u32 or fmt == 4u32:
-        ch <- 2
-    if fmt == 2u32 or fmt == 5u32 or fmt == 6u32 or fmt == 7u32:
-        ch <- 8
-    ret_frames: u32 = audioout_frames[pid]
+        buf8: mutable heap u8& = ptr.cast[mutable heap u8&]
+        _ = memcpy(buf8.cast[mutable void&], ptr as void&, bytes_len as usize)
+        audioout_port_ready[pid] <- true
+        ch: mutable s32 = 1
+        fmt: u32 = audioout_data_format[pid]
+        if fmt == 1u32 or fmt == 4u32:
+            ch <- 2
+        if fmt == 2u32 or fmt == 5u32 or fmt == 6u32 or fmt == 7u32:
+            ch <- 8
+        samples_sent <- (audioout_frames[pid] as s32) * ch
+    mutex_unlock(move g)
     audioout_emit_u64("audio_output_write_ok", 1u64)
-    return (ret_frames as s32) * ch
+    return samples_sent
 
 def sceAudioOutOutputs(param: void&?, num: u32) -> s32:
     audioout_emit_u64("audio_output_write_attempted", 1u64)
@@ -350,26 +494,42 @@ def sceAudioOutOutputsEx(handles: s32&, buffers: void&?, num: u32) -> s32:
             return ORBIS_AUDIO_OUT_ERROR_NOT_OPENED
         i <- i + 1
 
-    frames: u32 = audioout_frames[audioout_get_port_id(handles[0])]
+    pid0: s32 = audioout_get_port_id(handles[0])
+    frames: u32 = audioout_frames[pid0]
     i <- 0
     while i < num_s32:
         h2: s32 = handles[i]
         pid2: s32 = audioout_get_port_id(h2)
         if audioout_frames[pid2] != frames:
             return ORBIS_AUDIO_OUT_ERROR_INVALID_SIZE
+        i <- i + 1
+
+    i <- 0
+    while i < num_s32:
+        pid3: s32 = audioout_get_port_id(handles[i])
+        g2: mutable MutexGuard[Held] = mutex_lock(audioout_port_mutexes[pid3])
+        while audioout_port_ready[pid3]:
+            g2 <- cond_wait(audioout_port_cvars[pid3], move g2)
+        if audioout_port_stop[pid3] or not audioout_open_mask[pid3]:
+            mutex_unlock(move g2)
+            return ORBIS_AUDIO_OUT_ERROR_NOT_OPENED
+        mutex_unlock(move g2)
+        i <- i + 1
+
+    i <- 0
+    while i < num_s32:
         if buffers != null:
             ptrs: void&?& = buffers as void&?&
             out_ptr: void&? = ptrs[i]
             if out_ptr != null:
-                out_rc: s32 = sceAudioOutOutput(h2, out_ptr as mutable u8&?)
-                if out_rc < 0:
-                    return out_rc
+                _ = sceAudioOutOutput(handles[i], out_ptr as mutable u8&?)
             else:
-                _ = sceAudioOutOutput(h2, null)
+                _ = sceAudioOutOutput(handles[i], null)
+        else:
+            _ = sceAudioOutOutput(handles[i], null)
         i <- i + 1
 
-    frames_s32: s32 = frames as s32
-    return frames_s32
+    return frames as s32
 
 # Default decoder contract:
 # Decode opaque OrbisAudioOutOutputParam array into local parallel handle/pointer arrays.
@@ -595,6 +755,7 @@ def AudioOut_ShutdownBackends() -> void:
     i: mutable s32 = 0
     while i < ORBIS_AUDIO_OUT_NUM_PORTS:
         if audioout_open_mask[i]:
+            audioout_port_shutdown_runtime(i)
             if audioout_backend_is_openal[i]:
                 audioout_openal_close_port(i)
             else:
@@ -604,6 +765,11 @@ def AudioOut_ShutdownBackends() -> void:
         audioout_backend_is_openal[i] <- false
         audioout_data_format[i] <- 0u32
         audioout_frame_bytes[i] <- 0u32
+        audioout_port_buffer_ptr[i] <- null
+        audioout_port_buffer_size[i] <- 0u32
+        audioout_port_ready[i] <- false
+        audioout_port_stop[i] <- false
+        audioout_port_worker_started[i] <- false
         i <- i + 1
     AudioFFI_CloseOpenALProbe()
     AudioFFI_QuitSDL()
