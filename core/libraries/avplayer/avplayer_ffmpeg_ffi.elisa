@@ -679,58 +679,79 @@ def avplayer_ffmpeg_decode_next_ts(handle: i32, stream_index: u32, codec_ctx: vo
 def avplayer_ffmpeg_decode_next_ts_ex(handle: i32, stream_index: u32, codec_ctx: void&?, out_ts: mutable u64&, out_audio_samples: mutable u32&, out_audio_sample_rate: mutable u32&, out_audio_channels: mutable u32&, out_video_width: mutable u32&, out_video_height: mutable u32&, out_video_pitch: mutable u32&, out_video_aspect_num: mutable u32&, out_video_aspect_den: mutable u32&) -> i32:
     return avplayer_ffmpeg_decode_next_ts_copy(handle, stream_index, codec_ctx, out_ts, out_audio_samples, out_audio_sample_rate, out_audio_channels, out_video_width, out_video_height, out_video_pitch, out_video_aspect_num, out_video_aspect_den, null, 0, false)
 
+def avffmpeg_align16(value: u32) -> u32:
+    if value == 0:
+        return 0
+    return (((value + 15u32) / 16u32) * 16u32)
+
 def avffmpeg_copy_decoded_payload(decoded: AVFramePublicPrefix&, payload: mutable u8&?, payload_size: u32, is_video: bool):
     if payload == null or payload_size == 0:
         return
     if is_video:
         if decoded.width <= 0 or decoded.height <= 0 or decoded.data[0] == null:
             return
-        width: u32 = decoded.width.u32()
-        height: u32 = decoded.height.u32()
-        luma_size: u32 = width * height
-        copied_luma: mutable u32 = 0
-        y_stride: mutable u32 = width
+        src_width: u32 = decoded.width.u32()
+        src_height: u32 = decoded.height.u32()
+        dst_width: mutable u32 = src_width
+        dst_height: mutable u32 = src_height
+        aligned_width: u32 = avffmpeg_align16(src_width)
+        aligned_height: u32 = avffmpeg_align16(src_height)
+        aligned_size: u32 = (aligned_width * aligned_height * 3u32) / 2u32
+        if (aligned_width != src_width or aligned_height != src_height) and payload_size >= aligned_size:
+            dst_width <- aligned_width
+            dst_height <- aligned_height
+        target_size: mutable u32 = (dst_width * dst_height * 3u32) / 2u32
+        if target_size > payload_size:
+            target_size <- payload_size
+        z: mutable u32 = 0u32
+        while z < target_size:
+            payload[z.usize()] <- 0u8
+            z <- z + 1u32
+        y_stride: mutable u32 = src_width
         if decoded.linesize[0] > 0:
             y_stride <- decoded.linesize[0].u32()
-        y: mutable u32 = 0
-        while y < height and copied_luma < payload_size:
-            remaining_luma: u32 = payload_size - copied_luma
-            row_copy: mutable u32 = width
+        y: mutable u32 = 0u32
+        while y < src_height:
+            dst_row_off: u32 = y * dst_width
+            if dst_row_off >= payload_size:
+                return
+            remaining_luma: u32 = payload_size - dst_row_off
+            row_copy: mutable u32 = src_width
             if row_copy > remaining_luma:
                 row_copy <- remaining_luma
             src_row: mutable u8&? = decoded.data[0] + (y * y_stride).usize()
-            dst_row: mutable u8& = payload + copied_luma.usize()
+            dst_row: mutable u8& = payload + dst_row_off.usize()
             if src_row == null:
                 return
-            i: mutable u32 = 0
+            i: mutable u32 = 0u32
             while i < row_copy:
                 dst_row[i.usize()] <- src_row[i.usize()]
                 i <- i + 1u32
-            copied_luma <- copied_luma + row_copy
             y <- y + 1u32
-        if decoded.data[1] != null and payload_size > luma_size:
-            copied_chroma: mutable u32 = 0
-            chroma_size: u32 = luma_size / 2
-            uv_rows: u32 = height / 2u32
-            uv_stride: mutable u32 = width
+        if decoded.data[1] != null:
+            uv_plane_off: u32 = dst_width * dst_height
+            uv_rows: u32 = src_height / 2u32
+            uv_stride: mutable u32 = src_width
             if decoded.linesize[1] > 0:
                 uv_stride <- decoded.linesize[1].u32()
-            while copied_chroma < chroma_size and copied_luma + copied_chroma < payload_size and (copied_chroma / width) < uv_rows:
-                remaining_chroma: u32 = payload_size - (copied_luma + copied_chroma)
-                row_chroma_copy: mutable u32 = width
-                if row_chroma_copy > (chroma_size - copied_chroma):
-                    row_chroma_copy <- chroma_size - copied_chroma
+            uv_y: mutable u32 = 0u32
+            while uv_y < uv_rows:
+                dst_uv_off: u32 = uv_plane_off + (uv_y * dst_width)
+                if dst_uv_off >= payload_size:
+                    return
+                remaining_chroma: u32 = payload_size - dst_uv_off
+                row_chroma_copy: mutable u32 = src_width
                 if row_chroma_copy > remaining_chroma:
                     row_chroma_copy <- remaining_chroma
-                src_uv_row: mutable u8&? = decoded.data[1] + ((copied_chroma / width) * uv_stride).usize()
-                dst_uv_row: mutable u8& = payload + (copied_luma + copied_chroma).usize()
+                src_uv_row: mutable u8&? = decoded.data[1] + (uv_y * uv_stride).usize()
+                dst_uv_row: mutable u8& = payload + dst_uv_off.usize()
                 if src_uv_row == null:
                     return
-                i: mutable u32 = 0
+                i: mutable u32 = 0u32
                 while i < row_chroma_copy:
                     dst_uv_row[i.usize()] <- src_uv_row[i.usize()]
                     i <- i + 1u32
-                copied_chroma <- copied_chroma + row_chroma_copy
+                uv_y <- uv_y + 1u32
         return
     if decoded.data[0] == null:
         return

@@ -45,10 +45,10 @@ Current validated prefix structs:
 - `Implemented`: stream count/info, get audio/video data, loop flag, current time
 - `Implemented`: `SetAvSyncMode` now stores sync mode in source state; `None` bypasses video delivery sync gating like C++ source behavior
 - `Implemented`: `SetLooping` now updates both source and controller loop state and fails when no source is attached
-- `Implemented`: `JumpToTime` now performs source seek/queue reset and emits jump-complete warning through controller
-- `Implemented`: `EnableStream`/`DisableStream` now drive source behavior and controller tick processing
-- `Implemented`: `SetTrickSpeed` now drives controller trick-mode/revert-state transitions instead of no-op behavior
-- `Implemented`: `SetLogCallback` now persists callback + user-data values
+- `Implemented`: `JumpToTime` matches current C++ stub behavior (`valid handle -> ORBIS_OK`, no source mutation/event side effects)
+- `Implemented`: `DisableStream` matches current C++ stub behavior (`valid handle -> ORBIS_OK`, no source mutation side effects)
+- `Implemented`: `SetTrickSpeed` matches current C++ stub behavior (`valid handle -> ORBIS_OK`)
+- `Implemented`: `SetLogCallback` matches current C++ stub behavior (`ORBIS_OK` no-op)
 - `Implemented`: subtitle/timed-text streams can participate in auto-start and startup validation
 - `Implemented`: handle validation and basic error returns
 - `Implemented`: timing uses a monotonic playback clock for `CurrentTime`
@@ -105,8 +105,8 @@ Current validated prefix structs:
 - `Implemented`: frame getters now only emit controller EOF when source EOF is terminal; loop-enabled restart windows no longer raise false EOF transitions
 - `Implemented`: source activity (`IsActive`) now includes demux packet queues, preventing false-inactive states while decode work is buffered
 - `Implemented`: source activity queue checks are now filtered by enabled stream types (avoids stale-queue false-active states after stream mode changes)
-- `Implemented`: disabling a stream now clears that stream’s output/demux queues and per-stream timing/EOF markers immediately
-- `Implemented`: stream-disable path now recomputes combined EOF immediately after per-stream clear operations
+- `Implemented`: source stream-enable/disable internals are present for direct source tests, while public `sceAvPlayerDisableStream` intentionally remains C++-stub-compatible no-op at API layer
+- `Implemented`: `CurrentTime` wall-clock behavior matches C++ source timing model (continues advancing while paused until resume applies accumulated pause duration)
 - `Implemented`: add-source paths now reset queue state, stream metadata/timing caches, cadence markers, and playback time anchors before new source lifecycle begins
 - `Implemented`: add-source source-runtime baseline now also resets loop mode to false for deterministic per-source setup
 - `Implemented`: add-source source-runtime baseline now nulls decoder context pointers before next start-time decoder initialization
@@ -130,6 +130,8 @@ Current validated prefix structs:
 - `Implemented`: controller flushes and scrubs pending queued events on hard transitions (`STOP`, explicit `ERROR`, add-source failure to `ERROR`, and `REVERT_STATE`)
 - `Implemented`: add-source entry now hard-flushes queued controller events before scheduling add-source processing
 - `Implemented`: add-source controller flow now re-baselines state to `INITIAL` before entering `ADDING_SOURCE`
+- `Implemented`: warning event payload forwarding is parity-tested for source-side loop-back warning paths
+- `Implemented`: buffering transition event ordering (`PLAY -> BUFFERING -> PLAY`) is parity-tested through controller tick dispatch
 - `Implemented`: controller dispatch now skips callback invocation when the guest did not install an event callback, matching the C++ no-callback behavior instead of calling a dummy Elisa function pointer
 - `Implemented`: started FFmpeg-backed public frame retrieval now opens source codecs, uses a concrete libc clock FFI, enters active playback, and returns decoded video/audio payloads through `sceAvPlayerGetVideoDataEx` and `sceAvPlayerGetAudioData`
 - `Implemented`: `Stop -> Starting -> Play` is now a valid transition so explicit restart from stopped/active paths follows C++ `AvPlayerState::Start`.
@@ -145,7 +147,7 @@ Current validated prefix structs:
 - `Implemented`: decoder EOF drain attempt (flush packet + receive) before signaling terminal EOF
 - `Implemented`: seek/flush accessors for source-level replay handling
 - `Implemented`: ABI prefix layout checks for core structs
-- `Implemented`: swscale/swresample declarations and conversion helper paths are present for non-NV12 video and non-S16 audio; they are covered by binding checks but still need media-fixture runtime coverage
+- `Implemented`: swscale/swresample declarations and conversion helper paths are present for non-NV12 video and non-S16 audio; binding checks and runtime unit tests cover conversion behavior, including aligned NV12 destination payload layout
 
 ## Remaining Gaps To Reach 100% C++ Parity
 
@@ -155,3 +157,4 @@ Current validated prefix structs:
 - Add media-fixture runtime tests for swscale/swresample conversion outputs using files that are not already NV12/S16.
 - Expand parity harness scenarios for EOF/loop, buffering transitions, and
   invalid-state edge behavior.
+- `Implemented`: API validation matrix expanded for invalid handles and C++-stub control entrypoint contracts.

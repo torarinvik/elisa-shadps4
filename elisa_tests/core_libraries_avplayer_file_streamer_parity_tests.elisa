@@ -15,7 +15,9 @@ global mutable g_avp_force_open_fail: bool = false
 global mutable g_avp_video_decode_payload: u8[8388608] = zeroed
 global mutable g_avp_audio_decode_payload: u8[1048576] = zeroed
 global mutable g_avp_event_count: i32 = 0
-global mutable g_avp_event_ids: i32[16] = zeroed
+global mutable g_avp_event_ids: i32[64] = zeroed
+global mutable g_avp_warning_count: i32 = 0
+global mutable g_avp_warning_values: i32[64] = zeroed
 
 def avp_reset_file_probe():
     g_avp_open_calls <- 0
@@ -29,17 +31,27 @@ def avp_reset_file_probe():
 
 def avp_reset_event_probe():
     g_avp_event_count <- 0
+    g_avp_warning_count <- 0
     i: mutable int = 0
-    while i < 16:
+    while i < 64:
         g_avp_event_ids[i] <- 0
+        g_avp_warning_values[i] <- 0
         i <- i + 1
 
 def avp_event_callback(object_ptr: void&?, event_id: i32, source_id: i32, event_data: void&?):
     _ = object_ptr
     _ = source_id
     _ = event_data
-    if g_avp_event_count >= 0 and g_avp_event_count < 16:
+    if g_avp_event_count >= 0 and g_avp_event_count < 64:
         g_avp_event_ids[g_avp_event_count] <- event_id
+    if event_id == AVPLAYER_EVENTS_WARNING_ID and g_avp_warning_count >= 0 and g_avp_warning_count < 64:
+        warning_value: mutable i32 = 0
+        if event_data != null:
+            warning_ptr: i32&? = event_data.cast[i32&?]
+            if warning_ptr != null:
+                warning_value <- warning_ptr[0]
+        g_avp_warning_values[g_avp_warning_count] <- warning_value
+        g_avp_warning_count <- g_avp_warning_count + 1
     g_avp_event_count <- g_avp_event_count + 1
 
 def avp_file_open(obj: void&?, name: i8&?) -> i32:
@@ -206,6 +218,76 @@ def avp_decode_one_fixture_stream_index_into_payload(stream_index: i32, payload_
         return video_width > 0 and video_height > 0
     return audio_samples > 0 and audio_sample_rate > 0
 
+def avp_decode_one_raw_fixture_video_frame(handle: i32, stream_index: i32, codec_ctx: void&?, out_frame: mutable void&?) -> bool:
+    if handle < 0 or stream_index < 0 or codec_ctx == null or out_frame == null:
+        return false
+    ctx: void&? = avplayer_ffmpeg_context(handle)
+    if ctx == null:
+        return false
+    pkt: mutable void&? = av_packet_alloc()
+    if pkt == null:
+        return false
+    i: mutable i32 = 0
+    found: mutable bool = false
+    while i < 512 and not found:
+        read_rc: i32 = av_read_frame(ctx, pkt)
+        if read_rc < 0:
+            i <- 512
+        else:
+            packet_view: AVPacketPublicPrefix& = pkt.cast[AVPacketPublicPrefix&]
+            if packet_view.stream_index == stream_index:
+                send_rc: i32 = avcodec_send_packet(codec_ctx, pkt)
+                if send_rc >= 0:
+                    draining: mutable bool = true
+                    while draining and not found:
+                        recv_rc: i32 = avcodec_receive_frame(codec_ctx, out_frame)
+                        if recv_rc == 0:
+                            found <- true
+                            draining <- false
+                        elif recv_rc == AVERROR_EAGAIN_LINUX or recv_rc == AVERROR_EAGAIN_DARWIN:
+                            draining <- false
+                        else:
+                            draining <- false
+            av_packet_unref(pkt)
+            i <- i + 1
+    avffmpeg_free_packet(pkt)
+    return found
+
+def avp_decode_one_raw_fixture_audio_frame(handle: i32, stream_index: i32, codec_ctx: void&?, out_frame: mutable void&?) -> bool:
+    if handle < 0 or stream_index < 0 or codec_ctx == null or out_frame == null:
+        return false
+    ctx: void&? = avplayer_ffmpeg_context(handle)
+    if ctx == null:
+        return false
+    pkt: mutable void&? = av_packet_alloc()
+    if pkt == null:
+        return false
+    i: mutable i32 = 0
+    found: mutable bool = false
+    while i < 512 and not found:
+        read_rc: i32 = av_read_frame(ctx, pkt)
+        if read_rc < 0:
+            i <- 512
+        else:
+            packet_view: AVPacketPublicPrefix& = pkt.cast[AVPacketPublicPrefix&]
+            if packet_view.stream_index == stream_index:
+                send_rc: i32 = avcodec_send_packet(codec_ctx, pkt)
+                if send_rc >= 0:
+                    draining: mutable bool = true
+                    while draining and not found:
+                        recv_rc: i32 = avcodec_receive_frame(codec_ctx, out_frame)
+                        if recv_rc == 0:
+                            found <- true
+                            draining <- false
+                        elif recv_rc == AVERROR_EAGAIN_LINUX or recv_rc == AVERROR_EAGAIN_DARWIN:
+                            draining <- false
+                        else:
+                            draining <- false
+            av_packet_unref(pkt)
+            i <- i + 1
+    avffmpeg_free_packet(pkt)
+    return found
+
 def avp_decode_one_fixture_stream(wanted_type: u32, payload_is_video: bool) -> bool:
     handle: i32 = avplayer_ffmpeg_open(AVPLAYER_LOCAL_MP4_FIXTURE.cast[i8&?])
     if handle < 0:
@@ -248,7 +330,7 @@ def avp_prepare_fixture_handle() -> AvPlayerHandle:
 
 def avp_event_seen(event_id: i32) -> bool:
     i: mutable int = 0
-    while i < g_avp_event_count and i < 16:
+    while i < g_avp_event_count and i < 64:
         if g_avp_event_ids[i] == event_id:
             return true
         i <- i + 1
@@ -256,11 +338,25 @@ def avp_event_seen(event_id: i32) -> bool:
 
 def avp_event_index(event_id: i32) -> i32:
     i: mutable int = 0
-    while i < g_avp_event_count and i < 16:
+    while i < g_avp_event_count and i < 64:
         if g_avp_event_ids[i] == event_id:
             return i.i32()
         i <- i + 1
     return -1
+
+def avp_warning_seen(warning_id: i32) -> bool:
+    i: mutable int = 0
+    while i < g_avp_warning_count and i < 64:
+        if g_avp_warning_values[i] == warning_id:
+            return true
+        i <- i + 1
+    return false
+
+def avp_spin_wait_ms(ms: i64):
+    start_ns: i64 = high_resolution_now_ns()
+    target_delta: i64 = ms * 1000000
+    while (high_resolution_now_ns() - start_ns) < target_delta:
+        _ = start_ns
 
 @test
 def avplayer_file_replacement_open_close_contract() -> void:
@@ -349,7 +445,7 @@ def avplayer_file_replacement_read_seek_reset_contract() -> void:
         assert sceAvPlayerClose(handle) == ORBIS_OK
 
 @test
-def avplayer_file_replacement_replacing_source_closes_previous_fd() -> void:
+def avplayer_file_replacement_second_source_is_rejected_like_cpp() -> void:
     can Thread.Spawn, Thread.Join, Abort.Panic:
         avp_reset_file_probe()
 
@@ -363,11 +459,12 @@ def avplayer_file_replacement_replacing_source_closes_previous_fd() -> void:
         handle: AvPlayerHandle = sceAvPlayerInit(init_data.ref[mutable AvPlayerInitData&])
         assert handle != 0
         assert sceAvPlayerAddSource(handle, "elisa://first".cast[i8&?]) == ORBIS_OK
-        assert sceAvPlayerAddSource(handle, "elisa://second".cast[i8&?]) == ORBIS_OK
-        assert g_avp_open_calls == 2
-        assert g_avp_close_calls == 1
+        assert sceAvPlayerAddSource(handle, "elisa://second".cast[i8&?]) == ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
+        # C++ keeps the original source alive and does not reopen/close on second add.
+        assert g_avp_open_calls == 1
+        assert g_avp_close_calls == 0
         assert sceAvPlayerClose(handle) == ORBIS_OK
-        assert g_avp_close_calls == 2
+        assert g_avp_close_calls == 1
 
 @test
 def avplayer_ffmpeg_handle_table_contracts() -> void:
@@ -507,6 +604,55 @@ def avplayer_ffmpeg_copy_decoded_payload_respects_nv12_linesize() -> void:
         assert payload[11] == 13u8
 
 @test
+def avplayer_ffmpeg_copy_decoded_payload_supports_aligned_nv12_destination_layout() -> void:
+    can Abort.Panic:
+        frame: mutable AVFramePublicPrefix = zeroed
+        frame.width <- 4
+        frame.height <- 2
+        frame.linesize[0] <- 4
+        frame.linesize[1] <- 4
+
+        y_plane: mutable u8[8] = zeroed
+        uv_plane: mutable u8[4] = zeroed
+        y_plane[0] <- 1u8
+        y_plane[1] <- 2u8
+        y_plane[2] <- 3u8
+        y_plane[3] <- 4u8
+        y_plane[4] <- 5u8
+        y_plane[5] <- 6u8
+        y_plane[6] <- 7u8
+        y_plane[7] <- 8u8
+        uv_plane[0] <- 9u8
+        uv_plane[1] <- 10u8
+        uv_plane[2] <- 11u8
+        uv_plane[3] <- 12u8
+
+        frame.data[0] <- y_plane[0].ref[mutable u8&]
+        frame.data[1] <- uv_plane[0].ref[mutable u8&]
+
+        payload: mutable u8[384] = zeroed
+        avffmpeg_copy_decoded_payload(frame.ref[AVFramePublicPrefix&], payload[0].ref[mutable u8&], 384u32, true)
+
+        # Luma rows are written at aligned (16-byte) row stride.
+        assert payload[0] == 1u8
+        assert payload[1] == 2u8
+        assert payload[2] == 3u8
+        assert payload[3] == 4u8
+        assert payload[16] == 5u8
+        assert payload[17] == 6u8
+        assert payload[18] == 7u8
+        assert payload[19] == 8u8
+
+        # UV plane starts at aligned luma size: 16 * 16 = 256.
+        assert payload[256] == 9u8
+        assert payload[257] == 10u8
+        assert payload[258] == 11u8
+        assert payload[259] == 12u8
+        # Padding remains zeroed.
+        assert payload[4] == 0u8
+        assert payload[20] == 0u8
+
+@test
 def avplayer_ffmpeg_convert_video_to_nv12_converts_yuv420p_frame() -> void:
     can Abort.Panic:
         frame: mutable void&? = av_frame_alloc()
@@ -533,6 +679,48 @@ def avplayer_ffmpeg_convert_video_to_nv12_converts_yuv420p_frame() -> void:
 
         avffmpeg_free_frame(converted)
         avffmpeg_free_frame(frame)
+
+@test
+def avplayer_ffmpeg_real_fixture_video_frame_converts_to_nv12() -> void:
+    can Abort.Panic:
+        handle: i32 = avplayer_ffmpeg_open(AVPLAYER_LOCAL_MP4_FIXTURE.cast[i8&?])
+        assert handle >= 0
+        stream_index: i32 = avp_find_stream_by_type(handle, AVPLAYER_STREAM_TYPE_VIDEO)
+        assert stream_index >= 0
+
+        decoder: mutable void&? = avplayer_ffmpeg_find_decoder_for_stream(handle, stream_index.u32())
+        assert decoder != null
+        codec_ctx: mutable void&? = avcodec_alloc_context3(decoder)
+        assert codec_ctx != null
+        assert avplayer_ffmpeg_copy_stream_params_to_codec_ctx(handle, stream_index.u32(), codec_ctx) == 0
+        options: mutable void&? = null
+        assert avcodec_open2(codec_ctx, decoder, options.ref[mutable void&?&]) == 0
+        _ = avplayer_ffmpeg_start(handle)
+
+        frame: mutable void&? = av_frame_alloc()
+        assert frame != null
+        assert avp_decode_one_raw_fixture_video_frame(handle, stream_index, codec_ctx, frame)
+
+        src: AVFramePublicPrefix& = frame.cast[AVFramePublicPrefix&]
+        assert src.width > 0
+        assert src.height > 0
+        assert src.data[0] != null
+        assert src.format != AV_PIX_FMT_NV12
+
+        converted: mutable void&? = avffmpeg_convert_video_to_nv12(frame)
+        assert converted != null
+        out: AVFramePublicPrefix& = converted.cast[AVFramePublicPrefix&]
+        assert out.format == AV_PIX_FMT_NV12
+        assert out.width == src.width
+        assert out.height == src.height
+        assert out.data[0] != null
+        assert out.data[1] != null
+
+        if converted != frame:
+            avffmpeg_free_frame(converted)
+        avffmpeg_free_frame(frame)
+        avffmpeg_free_codec_context(codec_ctx)
+        avplayer_ffmpeg_close(handle)
 
 @test
 def avplayer_ffmpeg_convert_audio_to_s16_converts_fltp_frame() -> void:
@@ -612,6 +800,46 @@ def avplayer_ffmpeg_copy_frame_metadata_and_payload_converts_fltp_to_s16_bytes()
         assert payload[3] == 0x80u8
 
         avffmpeg_free_frame(frame)
+
+@test
+def avplayer_ffmpeg_real_fixture_audio_frame_converts_to_s16() -> void:
+    can Abort.Panic:
+        handle: i32 = avplayer_ffmpeg_open(AVPLAYER_LOCAL_MP4_FIXTURE.cast[i8&?])
+        assert handle >= 0
+        stream_index: i32 = avp_find_stream_by_type(handle, AVPLAYER_STREAM_TYPE_AUDIO)
+        assert stream_index >= 0
+
+        decoder: mutable void&? = avplayer_ffmpeg_find_decoder_for_stream(handle, stream_index.u32())
+        assert decoder != null
+        codec_ctx: mutable void&? = avcodec_alloc_context3(decoder)
+        assert codec_ctx != null
+        assert avplayer_ffmpeg_copy_stream_params_to_codec_ctx(handle, stream_index.u32(), codec_ctx) == 0
+        options: mutable void&? = null
+        assert avcodec_open2(codec_ctx, decoder, options.ref[mutable void&?&]) == 0
+        _ = avplayer_ffmpeg_start(handle)
+
+        frame: mutable void&? = av_frame_alloc()
+        assert frame != null
+        assert avp_decode_one_raw_fixture_audio_frame(handle, stream_index, codec_ctx, frame)
+
+        src: AVFramePublicPrefix& = frame.cast[AVFramePublicPrefix&]
+        assert src.nb_samples > 0
+        assert src.sample_rate > 0
+        assert src.format != AV_SAMPLE_FMT_S16
+
+        converted: mutable void&? = avffmpeg_convert_audio_to_s16(frame)
+        assert converted != null
+        out: AVFramePublicPrefix& = converted.cast[AVFramePublicPrefix&]
+        assert out.format == AV_SAMPLE_FMT_S16
+        assert out.nb_samples > 0
+        assert out.sample_rate == src.sample_rate
+        assert out.data[0] != null
+
+        if converted != frame:
+            avffmpeg_free_frame(converted)
+        avffmpeg_free_frame(frame)
+        avffmpeg_free_codec_context(codec_ctx)
+        avplayer_ffmpeg_close(handle)
 
 @test
 def avplayer_frame_info_video_metadata_matches_ex() -> void:
@@ -807,6 +1035,184 @@ def avplayer_pause_after_eof_is_success_noop_like_cpp() -> void:
         assert sceAvPlayerClose(handle) == ORBIS_OK
 
 @test
+def avplayer_jump_to_time_is_stubbed_success_like_cpp() -> void:
+    can Thread.Spawn, Thread.Join, Thread.Sleep, Abort.Panic:
+        avp_reset_event_probe()
+        init_data: AvPlayerInitData = build_init_data()
+        init_data.event_replacement.object_ptr <- null
+        init_data.event_replacement.event_callback <- avp_event_callback.cast[void&?]
+        handle: AvPlayerHandle = sceAvPlayerInit(init_data.ref[mutable AvPlayerInitData&])
+        assert handle != 0
+        assert sceAvPlayerAddSource(handle, AVPLAYER_LOCAL_MP4_FIXTURE.cast[i8&?]) == ORBIS_OK
+        assert sceAvPlayerEnableStream(handle, 0) == ORBIS_OK
+        assert sceAvPlayerStart(handle) == ORBIS_OK
+        warning_count_before: i32 = g_avp_warning_count
+        assert sceAvPlayerJumpToTime(handle, 0u64) == ORBIS_OK
+        assert g_avp_warning_count == warning_count_before
+        assert sceAvPlayerClose(handle) == ORBIS_OK
+
+@test
+def avplayer_source_warning_is_forwarded_as_warning_event_payload() -> void:
+    can Thread.Spawn, Thread.Join, Thread.Sleep, Abort.Panic:
+        avp_reset_event_probe()
+        init_data: AvPlayerInitData = build_init_data()
+        init_data.event_replacement.object_ptr <- null
+        init_data.event_replacement.event_callback <- avp_event_callback.cast[void&?]
+        handle: AvPlayerHandle = sceAvPlayerInit(init_data.ref[mutable AvPlayerInitData&])
+        assert handle != 0
+        assert sceAvPlayerAddSource(handle, AVPLAYER_LOCAL_MP4_FIXTURE.cast[i8&?]) == ORBIS_OK
+        assert sceAvPlayerEnableStream(handle, 0) == ORBIS_OK
+        assert sceAvPlayerStart(handle) == ORBIS_OK
+        slot: int = handle - 1
+        avsrc_pending_warning[slot] <- ORBIS_AVPLAYER_ERROR_WAR_LOOPING_BACK
+        video: AvPlayerFrameInfoEx = zeroed
+        assert sceAvPlayerGetVideoDataEx(handle, video.ref[mutable AvPlayerFrameInfoEx&])
+        avplayer_controller_tick(slot)
+        assert avp_event_seen(AVPLAYER_EVENTS_WARNING_ID)
+        assert avp_warning_seen(ORBIS_AVPLAYER_ERROR_WAR_LOOPING_BACK)
+        assert sceAvPlayerClose(handle) == ORBIS_OK
+
+@test
+def avplayer_buffering_transition_emits_buffering_then_play_events() -> void:
+    can Thread.Spawn, Thread.Join, Thread.Sleep, Abort.Panic:
+        avp_reset_event_probe()
+        init_data: AvPlayerInitData = build_init_data()
+        init_data.event_replacement.object_ptr <- null
+        init_data.event_replacement.event_callback <- avp_event_callback.cast[void&?]
+        handle: AvPlayerHandle = sceAvPlayerInit(init_data.ref[mutable AvPlayerInitData&])
+        assert handle != 0
+        assert sceAvPlayerAddSource(handle, AVPLAYER_LOCAL_MP4_FIXTURE.cast[i8&?]) == ORBIS_OK
+        assert sceAvPlayerEnableStream(handle, 0) == ORBIS_OK
+        assert sceAvPlayerStart(handle) == ORBIS_OK
+        slot: int = handle - 1
+        play_index_before: i32 = avp_event_index(AVPLAYER_EVENTS_STATE_PLAY)
+        assert play_index_before >= 0
+
+        avs_update_buffering_state(slot, false, false)
+        avplayer_controller_tick(slot)
+        avs_update_buffering_state(slot, true, true)
+        avplayer_controller_tick(slot)
+
+        buffering_index: mutable i32 = -1
+        play_index_after: mutable i32 = -1
+        i: mutable i32 = 0
+        while i < g_avp_event_count and i < 64:
+            ev: i32 = g_avp_event_ids[i.int()]
+            if i > play_index_before and buffering_index < 0 and ev == AVPLAYER_EVENTS_STATE_BUFFERING:
+                buffering_index <- i
+            if i > play_index_before and buffering_index >= 0 and ev == AVPLAYER_EVENTS_STATE_PLAY:
+                play_index_after <- i
+                i <- g_avp_event_count
+            else:
+                i <- i + 1
+        assert buffering_index > play_index_before
+        assert play_index_after > buffering_index
+        assert sceAvPlayerClose(handle) == ORBIS_OK
+
+@test
+def avplayer_disable_stream_is_stubbed_and_does_not_mutate_source_like_cpp() -> void:
+    can Thread.Spawn, Thread.Join, Thread.Sleep, Abort.Panic:
+        init_data: AvPlayerInitData = build_init_data()
+        handle: AvPlayerHandle = sceAvPlayerInit(init_data.ref[mutable AvPlayerInitData&])
+        assert handle != 0
+        assert sceAvPlayerAddSource(handle, AVPLAYER_LOCAL_MP4_FIXTURE.cast[i8&?]) == ORBIS_OK
+        slot: int = handle - 1
+        ffmpeg_handle: i32 = avsrc_ffmpeg_handle[slot]
+        video_index: i32 = avp_find_stream_by_type(ffmpeg_handle, AVPLAYER_STREAM_TYPE_VIDEO)
+        audio_index: i32 = avp_find_stream_by_type(ffmpeg_handle, AVPLAYER_STREAM_TYPE_AUDIO)
+        assert video_index >= 0
+        assert audio_index >= 0
+        assert sceAvPlayerEnableStream(handle, video_index.u32()) == ORBIS_OK
+        assert sceAvPlayerEnableStream(handle, audio_index.u32()) == ORBIS_OK
+
+        # Seed synthetic queue/eof state for both streams and verify disable is a no-op.
+        avsrc_video_q_size[slot] <- 2
+        avsrc_video_pkt_q_size[slot] <- 1
+        avsrc_video_eof[slot] <- true
+        avsrc_audio_q_size[slot] <- 3
+        avsrc_audio_pkt_q_size[slot] <- 1
+        avsrc_audio_eof[slot] <- true
+
+        assert sceAvPlayerDisableStream(handle, video_index.u32()) == ORBIS_OK
+        assert avsrc_video_enabled[slot]
+        assert avsrc_video_q_size[slot] == 2
+        assert avsrc_video_pkt_q_size[slot] == 1
+        assert avsrc_video_eof[slot]
+        assert avsrc_audio_enabled[slot]
+        assert avsrc_audio_q_size[slot] == 3
+        assert avsrc_audio_pkt_q_size[slot] == 1
+        assert avsrc_audio_eof[slot]
+
+        assert sceAvPlayerClose(handle) == ORBIS_OK
+
+@test
+def avplayer_public_api_invalid_handle_contracts() -> void:
+    can Abort.Panic:
+        bad_handle: AvPlayerHandle = 0
+        assert sceAvPlayerStart(bad_handle) == ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+        assert sceAvPlayerStop(bad_handle) == ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+        assert sceAvPlayerPause(bad_handle) == ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+        assert sceAvPlayerResume(bad_handle) == ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+        assert sceAvPlayerJumpToTime(bad_handle, 0u64) == ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+        assert sceAvPlayerSetLooping(bad_handle, true) == ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+        assert sceAvPlayerEnableStream(bad_handle, 0u32) == ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+        assert sceAvPlayerDisableStream(bad_handle, 0u32) == ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+        assert not sceAvPlayerIsActive(bad_handle)
+        assert sceAvPlayerCurrentTime(bad_handle) == ORBIS_AVPLAYER_ERROR_INVALID_PARAMS.u64()
+
+@test
+def avplayer_stubbed_control_apis_return_success_for_valid_handle_like_cpp() -> void:
+    can Thread.Spawn, Thread.Join, Abort.Panic:
+        handle: AvPlayerHandle = avp_prepare_fixture_handle_for_stream(AVPLAYER_STREAM_TYPE_VIDEO)
+        assert handle != 0
+        assert sceAvPlayerSetTrickSpeed(handle, 3) == ORBIS_OK
+        assert sceAvPlayerSetLogCallback(null, null) == ORBIS_OK
+        assert sceAvPlayerClose(handle) == ORBIS_OK
+
+@test
+def avplayer_set_looping_requires_attached_source() -> void:
+    can Thread.Spawn, Abort.Panic:
+        init_data: AvPlayerInitData = build_init_data()
+        handle: AvPlayerHandle = sceAvPlayerInit(init_data.ref[mutable AvPlayerInitData&])
+        assert handle != 0
+        # C++ shape: valid handle but no source => operation failed.
+        assert sceAvPlayerSetLooping(handle, true) == ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
+        assert sceAvPlayerClose(handle) == ORBIS_OK
+
+@test
+def avplayer_enable_disable_invalid_stream_id_contracts_match_cpp() -> void:
+    can Thread.Spawn, Thread.Join, Abort.Panic:
+        handle: AvPlayerHandle = avp_prepare_fixture_handle_for_stream(AVPLAYER_STREAM_TYPE_VIDEO)
+        assert handle != 0
+        slot: int = handle - 1
+        bad_stream_id: u32 = avsrc_get_stream_count(slot).u32() + 99u32
+        assert sceAvPlayerEnableStream(handle, bad_stream_id) == ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
+        assert sceAvPlayerDisableStream(handle, bad_stream_id) == ORBIS_OK
+        assert sceAvPlayerClose(handle) == ORBIS_OK
+
+@test
+def avplayer_current_time_continues_while_paused_like_cpp() -> void:
+    can Thread.Spawn, Thread.Join, Thread.Sleep, Abort.Panic:
+        handle: AvPlayerHandle = avp_prepare_started_fixture_handle_for_stream(AVPLAYER_STREAM_TYPE_VIDEO)
+        assert handle != 0
+        t0: u64 = sceAvPlayerCurrentTime(handle)
+        avp_spin_wait_ms(15)
+        t1: u64 = sceAvPlayerCurrentTime(handle)
+        assert t1 >= t0
+
+        assert sceAvPlayerPause(handle) == ORBIS_OK
+        p0: u64 = sceAvPlayerCurrentTime(handle)
+        avp_spin_wait_ms(15)
+        p1: u64 = sceAvPlayerCurrentTime(handle)
+        assert p1 >= p0
+
+        assert sceAvPlayerResume(handle) == ORBIS_OK
+        avp_spin_wait_ms(15)
+        r1: u64 = sceAvPlayerCurrentTime(handle)
+        assert r1 >= p1
+        assert sceAvPlayerClose(handle) == ORBIS_OK
+
+@test
 def avplayer_frame_output_struct_layout_matches_cpp() -> void:
     can Abort.Panic:
         assert size_of(AvPlayerStreamDetailsVideo) == 16usize
@@ -822,3 +1228,63 @@ def avplayer_frame_output_struct_layout_matches_cpp() -> void:
         assert size_of(AvPlayerFrameInfo) == 40usize
         assert size_of(AvPlayerStreamInfo) == 40usize
         assert size_of(AvPlayerFrameInfoEx) == 104usize
+
+@test
+def avplayer_post_init_updates_vdec2_mode_for_future_source_only() -> void:
+    can Thread.Spawn, Thread.Join, Abort.Panic:
+        init_data: AvPlayerInitData = build_init_data()
+        handle: AvPlayerHandle = sceAvPlayerInit(init_data.ref[mutable AvPlayerInitData&])
+        assert handle != 0
+        slot: int = handle - 1
+        assert not g_handle_use_vdec2[slot]
+        assert not avsrc_use_vdec2[slot]
+
+        post: AvPlayerPostInitData = zeroed
+        post.video_decoder_init.decoder_type_raw <- AVPLAYER_VIDEO_DECODER_TYPE_SOFTWARE2
+        assert sceAvPlayerPostInit(handle, post.ref[mutable AvPlayerPostInitData&]) == ORBIS_OK
+        assert g_handle_use_vdec2[slot]
+        # No source attached yet, so source-side mode mirrors handle mode.
+        assert avsrc_use_vdec2[slot]
+
+        assert sceAvPlayerAddSource(handle, AVPLAYER_LOCAL_MP4_FIXTURE.cast[i8&?]) == ORBIS_OK
+        assert avsrc_use_vdec2[slot]
+
+        # PostInit after AddSource should not mutate active source mode.
+        post.video_decoder_init.decoder_type_raw <- 0u32
+        assert sceAvPlayerPostInit(handle, post.ref[mutable AvPlayerPostInitData&]) == ORBIS_OK
+        assert not g_handle_use_vdec2[slot]
+        assert avsrc_use_vdec2[slot]
+        assert sceAvPlayerClose(handle) == ORBIS_OK
+
+@test
+def avplayer_post_init_invalid_params() -> void:
+    can Thread.Spawn, Thread.Join, Abort.Panic:
+        post: AvPlayerPostInitData = zeroed
+        assert sceAvPlayerPostInit(0, post.ref[mutable AvPlayerPostInitData&]) == ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+        init_data: AvPlayerInitData = build_init_data()
+        handle: AvPlayerHandle = sceAvPlayerInit(init_data.ref[mutable AvPlayerInitData&])
+        assert handle != 0
+        assert sceAvPlayerPostInit(handle, null) == ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+        assert sceAvPlayerClose(handle) == ORBIS_OK
+
+@test
+def avplayer_init_requires_all_allocators_like_cpp() -> void:
+    can Thread.Spawn, Thread.Join, Abort.Panic:
+        init_data: AvPlayerInitData = build_init_data()
+        init_data.memory_replacement.allocate_texture <- zeroed
+        assert sceAvPlayerInit(init_data.ref[mutable AvPlayerInitData&]) == 0
+
+        init_ex: AvPlayerInitDataEx = zeroed
+        init_ex.memory_replacement.allocate <- harness_alloc
+        init_ex.memory_replacement.deallocate <- harness_dealloc
+        init_ex.memory_replacement.allocate_texture <- harness_alloc
+        init_ex.memory_replacement.deallocate_texture <- harness_dealloc
+        out_handle: mutable AvPlayerHandle = 0
+        assert sceAvPlayerInitEx(init_ex.ref[AvPlayerInitDataEx&], out_handle.ref[mutable AvPlayerHandle&]) == ORBIS_OK
+        assert out_handle != 0
+        assert sceAvPlayerClose(out_handle) == ORBIS_OK
+
+        init_ex.memory_replacement.deallocate_texture <- zeroed
+        out_handle <- 0
+        assert sceAvPlayerInitEx(init_ex.ref[AvPlayerInitDataEx&], out_handle.ref[mutable AvPlayerHandle&]) == ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+        assert out_handle == 0

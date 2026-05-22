@@ -15,6 +15,7 @@ const AVPLAYER_MAX_HANDLES: int = 64
 type AvPlayerHandle = i32
 
 const AVPLAYER_URI_TYPE_SOURCE: u32 = 0
+const AVPLAYER_VIDEO_DECODER_TYPE_SOFTWARE2: u32 = 3u32
 
 struct AvPlayerUri layout c:
     name: i8&?
@@ -110,27 +111,27 @@ type AvPlayerDeallocate = func(void&?, void&?) -> void
 type AvPlayerAllocateTexture = func(void&?, u32, u32) -> void&?
 type AvPlayerDeallocateTexture = func(void&?, void&?) -> void
 
-struct AvPlayerMemAllocator:
+struct AvPlayerMemAllocator layout c:
     object_ptr: mutable void&?
     allocate: mutable AvPlayerAllocate
     deallocate: mutable AvPlayerDeallocate
     allocate_texture: mutable AvPlayerAllocateTexture
     deallocate_texture: mutable AvPlayerDeallocateTexture
 
-struct AvPlayerFileReplacement:
+struct AvPlayerFileReplacement layout c:
     object_ptr: mutable void&?
     open: mutable void&?
     close: mutable void&?
     read_offset: mutable void&?
     size: mutable void&?
 
-struct AvPlayerEventReplacement:
+struct AvPlayerEventReplacement layout c:
     object_ptr: mutable void&?
     event_callback: mutable void&?
 
 type AvPlayerEventCallback = func(void&?, i32, i32, void&?) -> void
 
-struct AvPlayerInitData:
+struct AvPlayerInitData layout c:
     memory_replacement: AvPlayerMemAllocator
     file_replacement: AvPlayerFileReplacement
     event_replacement: AvPlayerEventReplacement
@@ -141,7 +142,7 @@ struct AvPlayerInitData:
     reserved: u8[3]
     default_language: mutable i8&?
 
-struct AvPlayerInitDataEx:
+struct AvPlayerInitDataEx layout c:
     this_size: usize
     memory_replacement: AvPlayerMemAllocator
     file_replacement: AvPlayerFileReplacement
@@ -164,8 +165,20 @@ struct AvPlayerInitDataEx:
     auto_start: bool
     reserved: u8[3]
 
-struct AvPlayerPostInitData:
-    reserved: u8[32]
+struct AvPlayerDecoderInit layout c:
+    decoder_type_raw: mutable u32
+    decoder_params_reserved: mutable u8[28]
+
+struct AvPlayerHTTPCtx layout c:
+    http_context_id: mutable u32
+    ssl_context_id: mutable u32
+
+struct AvPlayerPostInitData layout c:
+    demux_video_buffer_size: mutable u32
+    video_decoder_init: mutable AvPlayerDecoderInit
+    audio_decoder_init: mutable AvPlayerDecoderInit
+    http_context: mutable AvPlayerHTTPCtx
+    reserved: mutable u8[56]
 
 global mutable g_handle_active: bool[AVPLAYER_MAX_HANDLES] = zeroed
 global mutable g_handle_looping: bool[AVPLAYER_MAX_HANDLES] = zeroed
@@ -177,6 +190,7 @@ global mutable g_handle_stream_count: i32[AVPLAYER_MAX_HANDLES] = zeroed
 global mutable g_handle_event_object: void&?[AVPLAYER_MAX_HANDLES] = zeroed
 global mutable g_handle_event_callback: AvPlayerEventCallback[AVPLAYER_MAX_HANDLES] = zeroed
 global mutable g_handle_event_callback_present: bool[AVPLAYER_MAX_HANDLES] = zeroed
+global mutable g_handle_use_vdec2: bool[AVPLAYER_MAX_HANDLES] = zeroed
 global mutable g_handle_mem_object: void&?[AVPLAYER_MAX_HANDLES] = zeroed
 const AVPLAYER_VIDEO_PAYLOAD_POOL_MAX: int = 16
 const AVPLAYER_AUDIO_PAYLOAD_POOL_MAX: int = 8
@@ -242,6 +256,19 @@ def avplayer_store_allocator(slot: int, allocator: AvPlayerMemAllocator&):
     g_handle_mem_deallocate[slot] <- allocator.deallocate
     g_handle_mem_allocate_texture[slot] <- allocator.allocate_texture
     g_handle_mem_deallocate_texture[slot] <- allocator.deallocate_texture
+
+def avplayer_allocators_complete(allocator: AvPlayerMemAllocator&) -> bool:
+    null_alloc: AvPlayerAllocate = zeroed
+    null_dealloc: AvPlayerDeallocate = zeroed
+    null_alloc_tex: AvPlayerAllocateTexture = zeroed
+    null_dealloc_tex: AvPlayerDeallocateTexture = zeroed
+    if allocator.allocate == null_alloc:
+        return false
+    if allocator.deallocate == null_dealloc:
+        return false
+    if allocator.allocate_texture == null_alloc_tex:
+        return false
+    return allocator.deallocate_texture != null_dealloc_tex
 
 def avplayer_video_payload_idx(slot: int, pool_index: int) -> int:
     return (slot * AVPLAYER_VIDEO_PAYLOAD_POOL_MAX) + pool_index
@@ -473,6 +500,7 @@ def avplayer_alloc_handle() -> AvPlayerHandle:
             g_handle_event_object[i] <- null
             g_handle_event_callback[i] <- avplayer_null_event_callback
             g_handle_event_callback_present[i] <- false
+            g_handle_use_vdec2[i] <- false
             g_handle_video_payload_count[i] <- 2
             g_handle_video_payload_cursor[i] <- 0
             g_handle_audio_payload_cursor[i] <- 0
@@ -545,6 +573,7 @@ def avplayer_auto_start_streams(handle: AvPlayerHandle) -> bool:
 def sceAvPlayerAddSource(handle: AvPlayerHandle, filename: i8&?) -> i32:
     if not avplayer_valid_handle(handle):
         return ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+    avsrc_set_use_vdec2(handle - 1, g_handle_use_vdec2[handle - 1])
     if not avsrc_add_source_path(handle - 1, filename):
         return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
     avs_on_add_source(handle - 1)
@@ -562,6 +591,7 @@ def sceAvPlayerAddSourceEx(handle: AvPlayerHandle, uri_type: u32, source_details
     type_res: i32 = avimpl_validate_source_type(source_details.uri.name, source_details.source_type)
     if type_res != ORBIS_OK:
         return type_res
+    avsrc_set_use_vdec2(handle - 1, g_handle_use_vdec2[handle - 1])
     if not avsrc_add_source_path(handle - 1, source_details.uri.name):
         return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
     avs_on_add_source(handle - 1)
@@ -585,6 +615,7 @@ def sceAvPlayerClose(handle: AvPlayerHandle) -> i32:
     g_handle_event_object[handle - 1] <- null
     g_handle_event_callback[handle - 1] <- avplayer_null_event_callback
     g_handle_event_callback_present[handle - 1] <- false
+    g_handle_use_vdec2[handle - 1] <- false
     avplayer_release_payloads(handle - 1)
     g_handle_mem_object[handle - 1] <- null
     if not avplayer_any_handle_active():
@@ -597,11 +628,10 @@ def sceAvPlayerCurrentTime(handle: AvPlayerHandle) -> u64:
     return avsrc_current_time(handle - 1)
 
 def sceAvPlayerDisableStream(handle: AvPlayerHandle, stream_id: u32) -> i32:
+    _ = stream_id
     if not avplayer_valid_handle(handle):
         return ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
-    res: i32 = avimpl_status_from_bool(avsrc_disable_stream(handle - 1, stream_id), ORBIS_OK, ORBIS_AVPLAYER_ERROR_OPERATION_FAILED)
-    avplayer_controller_tick(handle - 1)
-    return res
+    return ORBIS_OK
 
 def sceAvPlayerEnableStream(handle: AvPlayerHandle, stream_id: u32) -> i32:
     if not avplayer_valid_handle(handle):
@@ -748,9 +778,16 @@ def sceAvPlayerGetVideoDataEx(handle: AvPlayerHandle, video_info: mutable AvPlay
 def sceAvPlayerInit(data: mutable AvPlayerInitData&?) -> AvPlayerHandle:
     if data == null:
         return 0
+    if not avplayer_allocators_complete(data.memory_replacement):
+        return 0
     handle: AvPlayerHandle = avplayer_alloc_handle()
     if handle != 0:
-        g_handle_auto_start[handle - 1] <- data.auto_start or data.event_replacement.event_callback == null
+        if data.auto_start:
+            g_handle_auto_start[handle - 1] <- true
+        elif data.event_replacement.event_callback == null:
+            g_handle_auto_start[handle - 1] <- true
+        else:
+            g_handle_auto_start[handle - 1] <- false
         g_handle_default_language[handle - 1] <- data.default_language
         g_handle_event_object[handle - 1] <- data.event_replacement.object_ptr
         if data.event_replacement.event_callback != null:
@@ -771,13 +808,20 @@ def sceAvPlayerInit(data: mutable AvPlayerInitData&?) -> AvPlayerHandle:
         avplayer_controller_thread_start()
     return handle
 
-def sceAvPlayerInitEx(p_data: AvPlayerInitData&?, p_player: mutable AvPlayerHandle&?) -> i32:
+def sceAvPlayerInitEx(p_data: AvPlayerInitDataEx&?, p_player: mutable AvPlayerHandle&?) -> i32:
     if p_data == null or p_player == null:
+        return ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+    if not avplayer_allocators_complete(p_data.memory_replacement):
         return ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
     p_player <- avplayer_alloc_handle()
     if p_player == 0:
         return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
-    g_handle_auto_start[p_player - 1] <- p_data.auto_start or p_data.event_replacement.event_callback == null
+    if p_data.auto_start:
+        g_handle_auto_start[p_player - 1] <- true
+    elif p_data.event_replacement.event_callback == null:
+        g_handle_auto_start[p_player - 1] <- true
+    else:
+        g_handle_auto_start[p_player - 1] <- false
     g_handle_default_language[p_player - 1] <- p_data.default_language
     g_handle_event_object[p_player - 1] <- p_data.event_replacement.object_ptr
     if p_data.event_replacement.event_callback != null:
@@ -804,12 +848,9 @@ def sceAvPlayerIsActive(handle: AvPlayerHandle) -> bool:
     return avsrc_is_active(handle - 1) and g_handle_active_playback[handle - 1]
 
 def sceAvPlayerJumpToTime(handle: AvPlayerHandle, target_time: u64) -> i32:
+    _ = target_time
     if not avplayer_valid_handle(handle):
         return ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
-    if not avsrc_jump_to_time(handle - 1, target_time):
-        return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
-    avs_on_warning(handle - 1, ORBIS_AVPLAYER_ERROR_WAR_JUMP_COMPLETE)
-    avplayer_controller_tick(handle - 1)
     return ORBIS_OK
 
 def sceAvPlayerPause(handle: AvPlayerHandle) -> i32:
@@ -827,6 +868,15 @@ def sceAvPlayerPause(handle: AvPlayerHandle) -> i32:
 def sceAvPlayerPostInit(handle: AvPlayerHandle, data: mutable AvPlayerPostInitData&?) -> i32:
     if not avplayer_valid_handle(handle) or data == null:
         return ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+    slot: int = handle - 1
+    if data.video_decoder_init.decoder_type_raw == AVPLAYER_VIDEO_DECODER_TYPE_SOFTWARE2:
+        g_handle_use_vdec2[slot] <- true
+    else:
+        g_handle_use_vdec2[slot] <- false
+    # C++ applies decoder mode when source is constructed; PostInit after AddSource
+    # updates future source creation intent but does not mutate active source state.
+    if not avsrc_has_source[slot]:
+        avsrc_set_use_vdec2(slot, g_handle_use_vdec2[slot])
     return ORBIS_OK
 
 def sceAvPlayerPrintf(format: i8&?) -> i32:
@@ -851,8 +901,8 @@ def sceAvPlayerSetAvSyncMode(handle: AvPlayerHandle, sync_mode: i32) -> i32:
     return ORBIS_OK
 
 def sceAvPlayerSetLogCallback(log_cb: void&?, user_data: void&?) -> i32:
-    g_avplayer_log_callback <- log_cb
-    g_avplayer_log_user_data <- user_data
+    _ = log_cb
+    _ = user_data
     return ORBIS_OK
 
 def sceAvPlayerSetLooping(handle: AvPlayerHandle, loop_flag: bool) -> i32:
@@ -867,11 +917,9 @@ def sceAvPlayerSetLooping(handle: AvPlayerHandle, loop_flag: bool) -> i32:
     return ORBIS_OK
 
 def sceAvPlayerSetTrickSpeed(handle: AvPlayerHandle, trick_speed: i32) -> i32:
+    _ = trick_speed
     if not avplayer_valid_handle(handle):
         return ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
-    if not avs_set_trick_speed(handle - 1, trick_speed):
-        return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
-    avplayer_controller_tick(handle - 1)
     return ORBIS_OK
 
 def sceAvPlayerStart(handle: AvPlayerHandle) -> i32:
