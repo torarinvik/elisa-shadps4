@@ -28,6 +28,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #if defined(__APPLE__)
+#include <libkern/OSCacheControl.h>
 #include <sys/ucontext.h>
 #if !defined(MAP_ANONYMOUS) && defined(MAP_ANON)
 #define MAP_ANONYMOUS MAP_ANON
@@ -90,6 +91,7 @@ enum {
     ELISA_GUEST_EXEC_PHASE_CHILD_SIGLONGJMP = 223,
     ELISA_GUEST_EXEC_PHASE_CHILD_BEFORE_MAIN_ENTRY = 224,
     ELISA_GUEST_EXEC_PHASE_CHILD_AFTER_MAIN_ENTRY = 225,
+    ELISA_GUEST_EXEC_PHASE_CHILD_ENTRY_SNAPSHOT = 226,
     ELISA_GUEST_EXEC_PHASE_SIGNAL_HANDLER_ENTERED = 300,
     ELISA_GUEST_EXEC_PHASE_ALARM_HANDLER_ENTERED = 310,
     ELISA_GUEST_EXEC_PHASE_PARENT_BRANCH_ENTERED = 400,
@@ -119,10 +121,14 @@ static uintptr_t elisa_guest_exec_expected_stack_word0 = 0;
 static uintptr_t elisa_guest_exec_expected_stack_word1 = 0;
 static uintptr_t elisa_guest_exec_entry_stack_word0 = 0;
 static uintptr_t elisa_guest_exec_entry_stack_word1 = 0;
+static uintptr_t elisa_guest_exec_entry_native_word0 = 0;
+static uintptr_t elisa_guest_exec_entry_native_word1 = 0;
 static uintptr_t elisa_guest_exec_fault_word0 = 0;
 static uintptr_t elisa_guest_exec_fault_word1 = 0;
 static uintptr_t elisa_guest_exec_signal_stack_word0 = 0;
 static uintptr_t elisa_guest_exec_signal_stack_word1 = 0;
+static uint32_t elisa_guest_exec_entry_native_prot = 0xffffffffu;
+static uint32_t elisa_guest_exec_pc_native_prot = 0xffffffffu;
 static int32_t elisa_guest_exec_last_errno = 0;
 static volatile int32_t elisa_guest_exec_last_native_phase = ELISA_GUEST_EXEC_PHASE_NONE;
 static int32_t elisa_guest_exec_boundary_callback_count = 0;
@@ -153,10 +159,14 @@ typedef struct ElisaGuestExecForkReport {
     volatile uintptr_t expected_stack_word1;
     volatile uintptr_t entry_stack_word0;
     volatile uintptr_t entry_stack_word1;
+    volatile uintptr_t entry_native_word0;
+    volatile uintptr_t entry_native_word1;
     volatile uintptr_t fault_word0;
     volatile uintptr_t fault_word1;
     volatile uintptr_t signal_stack_word0;
     volatile uintptr_t signal_stack_word1;
+    volatile uint32_t entry_native_prot;
+    volatile uint32_t pc_native_prot;
     volatile uintptr_t entry_addr;
     volatile int32_t native_phase;
 } ElisaGuestExecForkReport;
@@ -177,6 +187,103 @@ static uint32_t elisa_guest_exec_writable_page_count = 0;
 static void elisa_guest_exec_clear_writable_page_cache(void) {
     memset(elisa_guest_exec_writable_pages, 0, sizeof(elisa_guest_exec_writable_pages));
     elisa_guest_exec_writable_page_count = 0;
+}
+
+typedef struct ElisaGuestExecNativeRegion {
+    uintptr_t base;
+    uint64_t size;
+    uint32_t prot;
+    uint32_t active;
+} ElisaGuestExecNativeRegion;
+
+#define ELISA_GUEST_EXEC_NATIVE_REGION_CACHE 8192u
+static ElisaGuestExecNativeRegion elisa_guest_exec_native_regions[ELISA_GUEST_EXEC_NATIVE_REGION_CACHE];
+static uint32_t elisa_guest_exec_native_region_count = 0;
+
+static int32_t elisa_guest_exec_region_contains(const ElisaGuestExecNativeRegion* region,
+                                                uintptr_t address, uint64_t size) {
+    if (region == NULL || region->base == 0 || region->size == 0 || address < region->base) {
+        return 0;
+    }
+    uint64_t offset = (uint64_t)(address - region->base);
+    return offset <= region->size && size <= (region->size - offset);
+}
+
+static int32_t elisa_guest_exec_find_native_region(uintptr_t address, uint64_t size) {
+    int32_t best = -1;
+    uint64_t best_size = UINT64_MAX;
+    for (uint32_t i = 0; i < elisa_guest_exec_native_region_count; ++i) {
+        ElisaGuestExecNativeRegion* region = &elisa_guest_exec_native_regions[i];
+        if (!region->active || !elisa_guest_exec_region_contains(region, address, size)) {
+            continue;
+        }
+        if (region->size < best_size) {
+            best = (int32_t)i;
+            best_size = region->size;
+        }
+    }
+    return best;
+}
+
+static void elisa_guest_exec_record_native_region(uintptr_t base, uint64_t size, uint32_t prot) {
+    if (base == 0 || size == 0) {
+        return;
+    }
+    int32_t existing = elisa_guest_exec_find_native_region(base, size);
+    if (existing >= 0 && elisa_guest_exec_native_regions[existing].base == base &&
+        elisa_guest_exec_native_regions[existing].size == size) {
+        elisa_guest_exec_native_regions[existing].prot = prot;
+        elisa_guest_exec_native_regions[existing].active = 1;
+        return;
+    }
+    if (elisa_guest_exec_native_region_count >= ELISA_GUEST_EXEC_NATIVE_REGION_CACHE) {
+        return;
+    }
+    ElisaGuestExecNativeRegion* region =
+        &elisa_guest_exec_native_regions[elisa_guest_exec_native_region_count++];
+    region->base = base;
+    region->size = size;
+    region->prot = prot;
+    region->active = 1;
+}
+
+static void elisa_guest_exec_forget_native_region(uintptr_t base, uint64_t size) {
+    for (uint32_t i = 0; i < elisa_guest_exec_native_region_count; ++i) {
+        ElisaGuestExecNativeRegion* region = &elisa_guest_exec_native_regions[i];
+        if (region->active && region->base == base && region->size == size) {
+            region->active = 0;
+            return;
+        }
+    }
+}
+
+static uint32_t elisa_guest_exec_native_prot_at(uintptr_t address, uint64_t size) {
+    int32_t index = elisa_guest_exec_find_native_region(address, size);
+    return index >= 0 ? elisa_guest_exec_native_regions[index].prot : 0xffffffffu;
+}
+
+static uintptr_t elisa_guest_exec_read_native_word(uintptr_t address) {
+    if (address == 0) {
+        return 0;
+    }
+    int32_t index = elisa_guest_exec_find_native_region(address, sizeof(uintptr_t));
+    if (index < 0 || (elisa_guest_exec_native_regions[index].prot & 1u) == 0u) {
+        return 0;
+    }
+    uintptr_t value = 0;
+    memcpy(&value, (const void*)address, sizeof(value));
+    return value;
+}
+
+static void elisa_guest_exec_flush_instruction_cache(uintptr_t address, uint64_t size) {
+    if (address == 0 || size == 0) {
+        return;
+    }
+#if defined(__APPLE__)
+    sys_icache_invalidate((void*)address, (size_t)size);
+#elif defined(__GNUC__) || defined(__clang__)
+    __builtin___clear_cache((char*)address, (char*)(address + (uintptr_t)size));
+#endif
 }
 
 #if !defined(_WIN32)
@@ -292,16 +399,15 @@ static void elisa_guest_exec_signal_handler(int sig, siginfo_t* info, void* uctx
     elisa_guest_exec_last_guest_rsi = elisa_guest_exec_extract_greg(uctx, 1);
     elisa_guest_exec_last_guest_rax = elisa_guest_exec_extract_greg(uctx, 2);
     elisa_guest_exec_last_guest_rbx = elisa_guest_exec_extract_greg(uctx, 3);
-    if (elisa_guest_exec_last_guest_pc != 0) {
-        volatile uintptr_t* pc_words = (volatile uintptr_t*)elisa_guest_exec_last_guest_pc;
-        elisa_guest_exec_fault_word0 = pc_words[0];
-        elisa_guest_exec_fault_word1 = pc_words[1];
-    }
-    if (elisa_guest_exec_last_guest_sp != 0) {
-        volatile uintptr_t* sp_words = (volatile uintptr_t*)elisa_guest_exec_last_guest_sp;
-        elisa_guest_exec_signal_stack_word0 = sp_words[0];
-        elisa_guest_exec_signal_stack_word1 = sp_words[1];
-    }
+    elisa_guest_exec_pc_native_prot =
+        elisa_guest_exec_native_prot_at(elisa_guest_exec_last_guest_pc, sizeof(uintptr_t));
+    elisa_guest_exec_fault_word0 = elisa_guest_exec_read_native_word(elisa_guest_exec_last_guest_pc);
+    elisa_guest_exec_fault_word1 =
+        elisa_guest_exec_read_native_word(elisa_guest_exec_last_guest_pc + sizeof(uintptr_t));
+    elisa_guest_exec_signal_stack_word0 =
+        elisa_guest_exec_read_native_word(elisa_guest_exec_last_guest_sp);
+    elisa_guest_exec_signal_stack_word1 =
+        elisa_guest_exec_read_native_word(elisa_guest_exec_last_guest_sp + sizeof(uintptr_t));
     if (elisa_guest_exec_fork_report != NULL) {
         elisa_guest_exec_fork_report->status = elisa_guest_exec_last_status;
         elisa_guest_exec_fork_report->signal = sig;
@@ -322,6 +428,7 @@ static void elisa_guest_exec_signal_handler(int sig, siginfo_t* info, void* uctx
         elisa_guest_exec_fork_report->fault_word1 = elisa_guest_exec_fault_word1;
         elisa_guest_exec_fork_report->signal_stack_word0 = elisa_guest_exec_signal_stack_word0;
         elisa_guest_exec_fork_report->signal_stack_word1 = elisa_guest_exec_signal_stack_word1;
+        elisa_guest_exec_fork_report->pc_native_prot = elisa_guest_exec_pc_native_prot;
         if (elisa_guest_exec_fork_report->execution_stage < 6) {
             elisa_guest_exec_fork_report->execution_stage = 6;
         }
@@ -570,6 +677,11 @@ static void __attribute__((unused)) elisa_guest_exec_absorb_fork_report(void) {
         elisa_guest_exec_entry_stack_word0 = elisa_guest_exec_fork_report->entry_stack_word0;
         elisa_guest_exec_entry_stack_word1 = elisa_guest_exec_fork_report->entry_stack_word1;
     }
+    if (elisa_guest_exec_fork_report->entry_native_word0 != 0 ||
+        elisa_guest_exec_fork_report->entry_native_word1 != 0) {
+        elisa_guest_exec_entry_native_word0 = elisa_guest_exec_fork_report->entry_native_word0;
+        elisa_guest_exec_entry_native_word1 = elisa_guest_exec_fork_report->entry_native_word1;
+    }
     if (elisa_guest_exec_fork_report->fault_word0 != 0 ||
         elisa_guest_exec_fork_report->fault_word1 != 0) {
         elisa_guest_exec_fault_word0 = elisa_guest_exec_fork_report->fault_word0;
@@ -579,6 +691,12 @@ static void __attribute__((unused)) elisa_guest_exec_absorb_fork_report(void) {
         elisa_guest_exec_fork_report->signal_stack_word1 != 0) {
         elisa_guest_exec_signal_stack_word0 = elisa_guest_exec_fork_report->signal_stack_word0;
         elisa_guest_exec_signal_stack_word1 = elisa_guest_exec_fork_report->signal_stack_word1;
+    }
+    if (elisa_guest_exec_fork_report->entry_native_prot != 0) {
+        elisa_guest_exec_entry_native_prot = elisa_guest_exec_fork_report->entry_native_prot;
+    }
+    if (elisa_guest_exec_fork_report->pc_native_prot != 0) {
+        elisa_guest_exec_pc_native_prot = elisa_guest_exec_fork_report->pc_native_prot;
     }
     if (elisa_guest_exec_fork_report->native_phase != 0) {
         elisa_guest_exec_last_native_phase = elisa_guest_exec_fork_report->native_phase;
@@ -660,7 +778,22 @@ static void __attribute__((noreturn)) elisa_guest_exec_jump_main_entry(ElisaGues
     if (exit_func == NULL) {
         exit_func = elisa_guest_exec_default_exit;
     }
-    elisa_guest_exec_enter_main_entry_asm(params, exit_func);
+    void* entry = (void*)params->entry_addr;
+    __asm__ volatile(
+        "movq %[entry], %%r11\n"
+        "movq %[params], %%r10\n"
+        "movq %[exit_func], %%r9\n"
+        "andq $-16, %%rsp\n"
+        "subq $8, %%rsp\n"
+        "pushq 8(%%r10)\n"
+        "pushq 0(%%r10)\n"
+        "movq %%r10, %%rdi\n"
+        "movq %%r9, %%rsi\n"
+        "jmp *%%r11\n"
+        :
+        : [entry] "r"(entry), [params] "r"(params), [exit_func] "r"(exit_func)
+        : "rax", "r9", "r10", "r11", "rsi", "rdi", "memory");
+    __builtin_unreachable();
 }
 
 static void __attribute__((noreturn)) elisa_guest_exec_run_child_main_entry(
@@ -676,16 +809,25 @@ static void __attribute__((noreturn)) elisa_guest_exec_run_child_main_entry(
         elisa_guest_exec_expected_stack_word1 = (uintptr_t)params->argv[0];
         elisa_guest_exec_entry_stack_word0 = elisa_guest_exec_expected_stack_word0;
         elisa_guest_exec_entry_stack_word1 = elisa_guest_exec_expected_stack_word1;
+        elisa_guest_exec_entry_native_word0 = elisa_guest_exec_read_native_word(params->entry_addr);
+        elisa_guest_exec_entry_native_word1 =
+            elisa_guest_exec_read_native_word(params->entry_addr + sizeof(uintptr_t));
+        elisa_guest_exec_entry_native_prot =
+            elisa_guest_exec_native_prot_at(params->entry_addr, sizeof(uintptr_t));
         elisa_guest_exec_fork_report->expected_entry_params = elisa_guest_exec_expected_entry_params;
         elisa_guest_exec_fork_report->expected_stack_word0 = elisa_guest_exec_expected_stack_word0;
         elisa_guest_exec_fork_report->expected_stack_word1 = elisa_guest_exec_expected_stack_word1;
         elisa_guest_exec_fork_report->entry_stack_word0 = elisa_guest_exec_entry_stack_word0;
         elisa_guest_exec_fork_report->entry_stack_word1 = elisa_guest_exec_entry_stack_word1;
+        elisa_guest_exec_fork_report->entry_native_word0 = elisa_guest_exec_entry_native_word0;
+        elisa_guest_exec_fork_report->entry_native_word1 = elisa_guest_exec_entry_native_word1;
+        elisa_guest_exec_fork_report->entry_native_prot = elisa_guest_exec_entry_native_prot;
         elisa_guest_exec_fork_report->entry_addr = params->entry_addr;
         if (elisa_guest_exec_fork_report->execution_stage < 4) {
             elisa_guest_exec_fork_report->execution_stage = 4;
         }
     }
+    elisa_guest_exec_set_native_phase(ELISA_GUEST_EXEC_PHASE_CHILD_ENTRY_SNAPSHOT);
     elisa_guest_exec_set_native_phase(ELISA_GUEST_EXEC_PHASE_CHILD_BEFORE_SIGSETJMP);
     if (sigsetjmp(elisa_guest_exec_jmp, 1) != 0) {
         elisa_guest_exec_set_native_phase(ELISA_GUEST_EXEC_PHASE_CHILD_SIGLONGJMP);
@@ -908,6 +1050,14 @@ uintptr_t ElisaGuestExec_EntryStackWord1(void) {
     return elisa_guest_exec_entry_stack_word1;
 }
 
+uintptr_t ElisaGuestExec_EntryNativeWord0(void) {
+    return elisa_guest_exec_entry_native_word0;
+}
+
+uintptr_t ElisaGuestExec_EntryNativeWord1(void) {
+    return elisa_guest_exec_entry_native_word1;
+}
+
 uintptr_t ElisaGuestExec_FaultWord0(void) {
     return elisa_guest_exec_fault_word0;
 }
@@ -922,6 +1072,32 @@ uintptr_t ElisaGuestExec_SignalStackWord0(void) {
 
 uintptr_t ElisaGuestExec_SignalStackWord1(void) {
     return elisa_guest_exec_signal_stack_word1;
+}
+
+uint32_t ElisaGuestExec_EntryNativeProt(void) {
+    return elisa_guest_exec_entry_native_prot;
+}
+
+uint32_t ElisaGuestExec_LastPCNativeProt(void) {
+    return elisa_guest_exec_pc_native_prot;
+}
+
+uint32_t ElisaGuestExec_NativeRegionCount(void) {
+    uint32_t active = 0;
+    for (uint32_t i = 0; i < elisa_guest_exec_native_region_count; ++i) {
+        if (elisa_guest_exec_native_regions[i].active) {
+            active++;
+        }
+    }
+    return active;
+}
+
+uint32_t ElisaGuestExec_AddressNativeProt(uintptr_t address) {
+    return elisa_guest_exec_native_prot_at(address, sizeof(uintptr_t));
+}
+
+uintptr_t ElisaGuestExec_ReadNativeU64(uintptr_t address) {
+    return elisa_guest_exec_read_native_word(address);
 }
 
 void ElisaGuestExec_ResetCrashState(void) {
@@ -942,10 +1118,14 @@ void ElisaGuestExec_ResetCrashState(void) {
     elisa_guest_exec_expected_stack_word1 = 0;
     elisa_guest_exec_entry_stack_word0 = 0;
     elisa_guest_exec_entry_stack_word1 = 0;
+    elisa_guest_exec_entry_native_word0 = 0;
+    elisa_guest_exec_entry_native_word1 = 0;
     elisa_guest_exec_fault_word0 = 0;
     elisa_guest_exec_fault_word1 = 0;
     elisa_guest_exec_signal_stack_word0 = 0;
     elisa_guest_exec_signal_stack_word1 = 0;
+    elisa_guest_exec_entry_native_prot = 0xffffffffu;
+    elisa_guest_exec_pc_native_prot = 0xffffffffu;
     elisa_guest_exec_boundary_callback_count = 0;
     elisa_guest_exec_boundary_callback_reason = 0;
     elisa_guest_exec_synthetic_observed_argc = 0;
@@ -974,7 +1154,11 @@ int32_t ElisaGuestExec_MapRegion(uintptr_t address, uint64_t size, uint32_t prot
         protect = PAGE_READONLY;
     }
     void* result = VirtualAlloc((void*)address, (SIZE_T)size, MEM_RESERVE | MEM_COMMIT, protect);
-    return result == (void*)address ? 0 : -1;
+    if (result == (void*)address) {
+        elisa_guest_exec_record_native_region(address, size, prot);
+        return 0;
+    }
+    return -1;
 #else
     int native_prot = PROT_NONE;
     if ((prot & 1u) != 0u) native_prot |= PROT_READ;
@@ -995,12 +1179,20 @@ int32_t ElisaGuestExec_MapRegion(uintptr_t address, uint64_t size, uint32_t prot
              * that as EEXIST; promote the existing subrange instead of leaving
              * it PROT_NONE.
              */
-            return mprotect((void*)address, (size_t)size, native_prot) == 0 ? 0 : -1;
+            if (mprotect((void*)address, (size_t)size, native_prot) == 0) {
+                elisa_guest_exec_record_native_region(address, size, prot);
+                return 0;
+            }
+            return -1;
         }
 #endif
         return -1;
     }
-    return result == (void*)address ? 0 : -1;
+    if (result == (void*)address) {
+        elisa_guest_exec_record_native_region(address, size, prot);
+        return 0;
+    }
+    return -1;
 #endif
 }
 
@@ -1019,13 +1211,21 @@ int32_t ElisaGuestExec_ProtectRegion(uintptr_t address, uint64_t size, uint32_t 
     } else if ((prot & 1u) != 0u) {
         protect = PAGE_READONLY;
     }
-    return VirtualProtect((void*)address, (SIZE_T)size, protect, &old_protect) ? 0 : -1;
+    if (VirtualProtect((void*)address, (SIZE_T)size, protect, &old_protect)) {
+        elisa_guest_exec_record_native_region(address, size, prot);
+        return 0;
+    }
+    return -1;
 #else
     int native_prot = PROT_NONE;
     if ((prot & 1u) != 0u) native_prot |= PROT_READ;
     if ((prot & 2u) != 0u) native_prot |= PROT_WRITE;
     if ((prot & 4u) != 0u) native_prot |= PROT_EXEC;
-    return mprotect((void*)address, (size_t)size, native_prot) == 0 ? 0 : -1;
+    if (mprotect((void*)address, (size_t)size, native_prot) == 0) {
+        elisa_guest_exec_record_native_region(address, size, prot);
+        return 0;
+    }
+    return -1;
 #endif
 }
 
@@ -1035,9 +1235,17 @@ int32_t ElisaGuestExec_UnmapRegion(uintptr_t address, uint64_t size) {
     }
 #if defined(_WIN32)
     (void)size;
-    return VirtualFree((void*)address, 0, MEM_RELEASE) ? 0 : -1;
+    if (VirtualFree((void*)address, 0, MEM_RELEASE)) {
+        elisa_guest_exec_forget_native_region(address, size);
+        return 0;
+    }
+    return -1;
 #else
-    return munmap((void*)address, (size_t)size) == 0 ? 0 : -1;
+    if (munmap((void*)address, (size_t)size) == 0) {
+        elisa_guest_exec_forget_native_region(address, size);
+        return 0;
+    }
+    return -1;
 #endif
 }
 
@@ -1055,6 +1263,9 @@ uintptr_t ElisaGuestExec_AllocateRegion(uint64_t size, uint32_t prot) {
         protect = PAGE_READONLY;
     }
     void* result = VirtualAlloc(NULL, (SIZE_T)size, MEM_RESERVE | MEM_COMMIT, protect);
+    if (result != NULL) {
+        elisa_guest_exec_record_native_region((uintptr_t)result, size, prot);
+    }
     return (uintptr_t)result;
 #else
     int native_prot = PROT_NONE;
@@ -1065,6 +1276,7 @@ uintptr_t ElisaGuestExec_AllocateRegion(uint64_t size, uint32_t prot) {
     if (result == MAP_FAILED) {
         return 0;
     }
+    elisa_guest_exec_record_native_region((uintptr_t)result, size, prot);
     return (uintptr_t)result;
 #endif
 }
@@ -1128,6 +1340,7 @@ int32_t ElisaGuestExec_WriteBytes(uintptr_t address, const void* data, uint64_t 
             return -1;
         }
         memcpy((void*)address, data, (size_t)size);
+        elisa_guest_exec_flush_instruction_cache(address, size);
     }
     return 0;
 }
@@ -1140,6 +1353,7 @@ int32_t ElisaGuestExec_WriteU64(uintptr_t address, uint64_t value) {
         return -1;
     }
     memcpy((void*)address, &value, sizeof(value));
+    elisa_guest_exec_flush_instruction_cache(address, sizeof(value));
     return 0;
 }
 
