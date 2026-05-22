@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import os
 import platform
+import json
 import shutil
 import subprocess
 import sys
+import argparse
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -57,13 +59,32 @@ CHECKS = [
 ]
 
 
-def run_check(check: AbiCheck, target_triple: str) -> tuple[bool, str]:
+def check_slug(check: AbiCheck) -> str:
+    out = []
+    for ch in check.name.lower():
+        if ch.isalnum():
+            out.append(ch)
+        else:
+            out.append("_")
+    return "".join(out).strip("_")
+
+
+def manifest_path(root: Path, check: AbiCheck, target_triple: str) -> Path:
+    safe_target = target_triple.replace("-", "_").replace(".", "_")
+    return root / f"{safe_target}__{check_slug(check)}.json"
+
+
+def stable_manifest(manifest: dict[str, object]) -> str:
+    return json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+
+
+def run_check(check: AbiCheck, target_triple: str) -> tuple[bool, str, dict[str, object] | None]:
     go = shutil.which("go")
     if go is None:
-        return False, "go missing"
+        return False, "go missing", None
     source = ROOT / check.source
     if not source.exists():
-        return False, f"source missing: {check.source}"
+        return False, f"source missing: {check.source}", None
     env = os.environ.copy()
     # Keep the project include path relative to the compiler cwd so paths with
     # spaces do not get split by CPPFLAGS parsing.
@@ -77,28 +98,87 @@ def run_check(check: AbiCheck, target_triple: str) -> tuple[bool, str]:
         "run",
         "./src",
         "-emit",
-        "c-bind-check",
+        "c-bind-check-json",
         "-target-triple",
         target_triple,
         str(source),
     ]
     proc = subprocess.run(cmd, cwd=COMPILER_DIR, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=180)
-    return proc.returncode == 0, proc.stdout.strip()
+    output = proc.stdout.strip()
+    if proc.returncode != 0:
+        return False, output, None
+    json_start = output.find("{")
+    json_end = output.rfind("}")
+    json_payload = output[json_start:json_end + 1] if json_start >= 0 and json_end >= json_start else output
+    try:
+        manifest = json.loads(json_payload)
+    except json.JSONDecodeError as exc:
+        return False, f"invalid JSON manifest: {exc}\n{output}", None
+    if manifest.get("target_triple") != target_triple:
+        return False, f"target mismatch: manifest={manifest.get('target_triple')} expected={target_triple}", manifest
+    structs = manifest.get("structs")
+    if not isinstance(structs, list) or not structs:
+        return False, "manifest contains no checked structs", manifest
+    for struct in structs:
+        if not isinstance(struct, dict):
+            return False, "manifest contains non-object struct entry", manifest
+        elisa_layout = struct.get("elisa")
+        c_layout = struct.get("c")
+        fields = struct.get("fields")
+        if not isinstance(elisa_layout, dict) or not isinstance(c_layout, dict) or not isinstance(fields, list):
+            return False, f"manifest has malformed layout for {struct.get('elisa_name')}", manifest
+        if not struct.get("prefix"):
+            if elisa_layout.get("size") != c_layout.get("size") or elisa_layout.get("align") != c_layout.get("align"):
+                return False, f"layout mismatch for {struct.get('elisa_name')}", manifest
+        for field in fields:
+            if isinstance(field, dict) and field.get("elisa_offset") != field.get("c_offset"):
+                return False, f"field offset mismatch for {struct.get('elisa_name')}.{field.get('name')}", manifest
+    return True, output, manifest
 
 
 def main() -> int:
-    target_triple = sys.argv[1] if len(sys.argv) > 1 else default_target_triple()
+    parser = argparse.ArgumentParser(description="Verify emulator FFI DTO layouts against C headers for a target triple.")
+    parser.add_argument("target_triple", nargs="?", default=default_target_triple())
+    parser.add_argument("--write-manifests", type=Path, help="Write checked ABI manifests to this directory.")
+    parser.add_argument("--golden-dir", type=Path, help="Compare checked ABI manifests with this directory.")
+    args = parser.parse_args()
+    target_triple = args.target_triple
     failures: list[str] = []
     for check in CHECKS:
-        ok, output = run_check(check, target_triple)
+        ok, output, manifest = run_check(check, target_triple)
         status = "PASS" if ok else ("SKIP" if check.optional else "FAIL")
         print(f"EMULATOR_ABI_SMOKE {status} name={check.name!r} target={target_triple}")
-        if output:
-            for line in output.splitlines():
-                if "c-bind-check:" in line or "error:" in line:
+        if ok and manifest is not None:
+            structs = manifest.get("structs", [])
+            print(f"  manifest structs={len(structs)}")
+            if isinstance(structs, list):
+                for struct in structs[:6]:
+                    if isinstance(struct, dict):
+                        print(f"  c-bind-check-json: {struct.get('elisa_name')} matches {struct.get('c_name')}")
+                if len(structs) > 6:
+                    print(f"  ... {len(structs) - 6} more structs")
+        elif output:
+            for line in output.splitlines()[:12]:
+                if "error:" in line or "mismatch" in line or "failed" in line:
                     print(f"  {line}")
         if not ok and not check.optional:
             failures.append(check.name)
+        if ok and manifest is not None and args.write_manifests is not None:
+            args.write_manifests.mkdir(parents=True, exist_ok=True)
+            manifest_path(args.write_manifests, check, target_triple).write_text(stable_manifest(manifest))
+        if ok and manifest is not None and args.golden_dir is not None:
+            path = manifest_path(args.golden_dir, check, target_triple)
+            if not path.exists():
+                print(f"  missing golden manifest: {path}")
+                if not check.optional:
+                    failures.append(check.name + ":missing-golden")
+            else:
+                expected = path.read_text()
+                actual = stable_manifest(manifest)
+                if expected != actual:
+                    print(f"  golden manifest mismatch: {path}")
+                    if not check.optional:
+                        failures.append(check.name + ":golden-mismatch")
     if failures:
         print("EMULATOR_ABI_SMOKE status=failed failures=" + ",".join(failures))
         return 1
