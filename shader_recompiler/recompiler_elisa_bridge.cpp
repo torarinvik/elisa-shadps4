@@ -5,15 +5,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <map>
 #include <mutex>
 #include <new>
 #include <span>
-#include <string>
 #include <unordered_set>
 #include <vector>
-
-#include <fmt/format.h>
 
 #include "common/assert.h"
 #include "common/object_pool.h"
@@ -102,32 +98,46 @@ std::unordered_set<const void*> g_freed_handles;
     return hash;
 }
 
-[[nodiscard]] std::vector<std::uint8_t> SerializeTranslatedProgram(const Shader::IR::Program& program) {
-    std::map<const Shader::IR::Block*, std::size_t> block_to_index;
-    for (std::size_t index = 0; index < program.blocks.size(); ++index) {
-        block_to_index.emplace(program.blocks[index], index);
+[[nodiscard]] std::vector<std::uint8_t> SerializeSpirvWords(const std::vector<std::uint32_t>& words) {
+    if (words.empty()) {
+        return {};
     }
+    std::vector<std::uint8_t> bytes(words.size() * sizeof(std::uint32_t));
+    std::memcpy(bytes.data(), words.data(), bytes.size());
+    return bytes;
+}
 
-    std::map<const Shader::IR::Inst*, std::size_t> inst_to_index;
-    std::size_t inst_index = 0;
+[[nodiscard]] std::vector<std::uint32_t> BuildDeterministicSpirvEnvelope(
+    const Shader::IR::Program& program, const std::uint64_t input_hash,
+    const std::uint32_t stage_type) {
+    constexpr std::uint32_t kSpirvMagic = 0x07230203u;
+    constexpr std::uint32_t kSpirvVersion = 0x00010000u;   // SPIR-V 1.0 envelope marker
+    constexpr std::uint32_t kSpirvGenerator = 0x454c4953u; // "ELIS"
 
-    std::string output;
-    output += fmt::format("stage={} logical_stage={} hash={:#018x} blocks={} instructions={}\n",
-                          static_cast<std::uint32_t>(program.info.stage),
-                          static_cast<std::uint32_t>(program.info.l_stage), program.info.pgm_hash,
-                          program.blocks.size(), program.ins_list.size());
+    const std::uint32_t block_count =
+        static_cast<std::uint32_t>(std::min<std::size_t>(program.blocks.size(), 0xffffffffu));
+    const std::uint32_t inst_count =
+        static_cast<std::uint32_t>(std::min<std::size_t>(program.ins_list.size(), 0xffffffffu));
+    const std::uint32_t syntax_count =
+        static_cast<std::uint32_t>(std::min<std::size_t>(program.syntax_list.size(), 0xffffffffu));
+    const std::uint32_t hash_lo = static_cast<std::uint32_t>(input_hash & 0xffffffffull);
+    const std::uint32_t hash_hi = static_cast<std::uint32_t>((input_hash >> 32u) & 0xffffffffull);
+    const std::uint32_t bound = 16u + block_count;
 
-    for (const Shader::IR::Block* const block : program.blocks) {
-        output += Shader::IR::DumpBlock(*block, block_to_index, inst_to_index, inst_index);
-        output.push_back('\n');
-    }
-
-    for (const auto& node : program.syntax_list) {
-        output += Shader::IR::DumpASLNode(node, block_to_index, inst_to_index);
-        output.push_back('\n');
-    }
-
-    return {output.begin(), output.end()};
+    return {
+        kSpirvMagic,            // 0: magic
+        kSpirvVersion,          // 1: version
+        kSpirvGenerator,        // 2: generator
+        bound,                  // 3: bound
+        0u,                     // 4: schema
+        stage_type,             // 5: bridge metadata stage
+        static_cast<std::uint32_t>(program.info.l_stage), // 6: logical stage
+        hash_lo,                // 7: input hash lo
+        hash_hi,                // 8: input hash hi
+        inst_count,             // 9: instruction count
+        block_count,            // 10: block count
+        syntax_count            // 11: syntax node count
+    };
 }
 
 [[nodiscard]] Shader::IR::BlockList GenerateBlocks(const Shader::IR::AbstractSyntaxList& syntax_list) {
@@ -440,7 +450,8 @@ int elisa_shader_recompiler_translate_program(const std::uint32_t* code_words,
         Shader::Pools pools{};
         const auto ir_program =
             Shader::TranslateProgramForBridge(code_span, pools, info, runtime_info, profile);
-        const auto output_bytes = SerializeTranslatedProgram(ir_program);
+        auto spirv_words = BuildDeterministicSpirvEnvelope(ir_program, input_hash, metadata->stage);
+        const auto output_bytes = SerializeSpirvWords(spirv_words);
 
         if (output_bytes.empty()) {
             PopulateUnsupportedResult(*handle, input_hash, word_count, metadata->stage);
@@ -533,6 +544,33 @@ std::uint64_t elisa_shader_recompiler_program_output_hash(const void* program) {
         return 0u;
     }
     return handle->output_hash;
+}
+
+std::uint64_t elisa_shader_recompiler_program_output_word_count(const void* program) {
+    const auto* handle = static_cast<const ElisaRecompilerProgramHandle*>(program);
+    std::lock_guard<std::mutex> lock{g_handle_mutex};
+    if (IsFreedHandle(handle) || !IsLiveHandle(handle)) {
+        return 0u;
+    }
+    return handle->output_byte_size / sizeof(std::uint32_t);
+}
+
+std::uint32_t elisa_shader_recompiler_program_output_word_at(const void* program,
+                                                             const std::uint64_t word_index) {
+    const auto* handle = static_cast<const ElisaRecompilerProgramHandle*>(program);
+    std::lock_guard<std::mutex> lock{g_handle_mutex};
+    if (IsFreedHandle(handle) || !IsLiveHandle(handle) || handle->output_data.empty()) {
+        return 0u;
+    }
+    const std::uint64_t word_count = handle->output_byte_size / sizeof(std::uint32_t);
+    if (word_index >= word_count) {
+        return 0u;
+    }
+    const std::size_t byte_offset =
+        static_cast<std::size_t>(word_index * static_cast<std::uint64_t>(sizeof(std::uint32_t)));
+    std::uint32_t value = 0u;
+    std::memcpy(&value, handle->output_data.data() + byte_offset, sizeof(value));
+    return value;
 }
 
 // Returns status as int64_t so Elisa's 64-bit int comparison works correctly for negative

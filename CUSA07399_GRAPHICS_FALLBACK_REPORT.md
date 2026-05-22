@@ -56,6 +56,7 @@ Shader artifact:
 - `shader_translate_attempted`
 - `shader_translate_path_bridge`
 - `shader_translate_result_ok`
+- `shader_translate_spirv_magic`
 
 Bridge metadata accessors:
 
@@ -64,6 +65,8 @@ Bridge metadata accessors:
 - input word count
 - stage type availability
 - output byte size
+- output word count
+- output word-at-index accessor
 - status
 
 ## Bridge policy status
@@ -71,11 +74,11 @@ Bridge metadata accessors:
 - Guest-facing APIs in this path are exposed in Elisa.
 - C++ internals remain bridge-backed where Vulkan/runtime ABI modeling is not yet complete.
 - Bridge usage is surfaced explicitly via artifact counters and submit-path keys above.
-- The shader bridge still lacks a surfaced SPIR-V payload in this entrypoint, so the bridge is metadata-rich but not yet a native replacement.
+- The shader bridge now surfaces a deterministic SPIR-V envelope payload (including SPIR-V magic) via output word accessors, but remains a bridge-owned path rather than a native Elisa SPIR-V backend replacement.
 
 ## Current blocker summary to first real frame
 
 - Core videoout lifecycle path is active and staged.
 - GNM submit/submit+flip path is active and staged.
 - Renderer init is visible via artifact.
-- Shader bridge now emits a success artifact and exposes structured handle metadata, but the payload path is still bridge-owned.
+- Shader bridge now emits success plus SPIR-V payload-shape artifacts and exposes structured output metadata/word accessors, but the payload path is still bridge-owned.
