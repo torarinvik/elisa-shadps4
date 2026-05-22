@@ -55,11 +55,14 @@ typedef struct ElisaGuestEntryParams {
 
 typedef void (*ElisaGuestExitFunc)(int32_t);
 typedef uint64_t (*ElisaGuestExecTestFunc)(uint64_t, uint64_t);
+typedef void (*ElisaGuestExecBoundaryFunc)(uint64_t);
 
 static int32_t elisa_guest_exec_last_status = 0;
 static int32_t elisa_guest_exec_last_signal = 0;
 static uintptr_t elisa_guest_exec_last_fault_address = 0;
 static uintptr_t elisa_guest_exec_last_guest_pc = 0;
+static int32_t elisa_guest_exec_boundary_callback_count = 0;
+static uint64_t elisa_guest_exec_boundary_callback_reason = 0;
 
 #if !defined(_WIN32)
 static sigjmp_buf elisa_guest_exec_jmp;
@@ -274,6 +277,8 @@ void ElisaGuestExec_ResetCrashState(void) {
     elisa_guest_exec_last_signal = 0;
     elisa_guest_exec_last_fault_address = 0;
     elisa_guest_exec_last_guest_pc = 0;
+    elisa_guest_exec_boundary_callback_count = 0;
+    elisa_guest_exec_boundary_callback_reason = 0;
 #if !defined(_WIN32)
     elisa_guest_exec_timeout_fired = 0;
 #endif
@@ -506,6 +511,23 @@ void ElisaGuestExec_SyntheticMainReturn(ElisaGuestEntryParams* params, ElisaGues
     elisa_guest_exec_last_status = 1;
 }
 
+void ElisaGuestExec_SyntheticBoundaryCallback(uint64_t reason) {
+    elisa_guest_exec_boundary_callback_count++;
+    elisa_guest_exec_boundary_callback_reason = reason;
+    elisa_guest_exec_last_status = 2;
+}
+
+void ElisaGuestExec_SyntheticMainCallBoundary(ElisaGuestEntryParams* params,
+                                              ElisaGuestExitFunc exit_func) {
+    (void)exit_func;
+    if (params == NULL || params->argc != 88 || params->argv == NULL) {
+        elisa_guest_exec_last_status = -5;
+        return;
+    }
+    ElisaGuestExecBoundaryFunc boundary = (ElisaGuestExecBoundaryFunc)params->argv;
+    boundary(0xB000000000000042ull);
+}
+
 uintptr_t ElisaGuestExec_GetSyntheticAddAddress(void) {
     return (uintptr_t)&ElisaGuestExec_SyntheticAdd;
 }
@@ -520,6 +542,22 @@ uintptr_t ElisaGuestExec_GetSyntheticSpinAddress(void) {
 
 uintptr_t ElisaGuestExec_GetSyntheticMainReturnAddress(void) {
     return (uintptr_t)&ElisaGuestExec_SyntheticMainReturn;
+}
+
+uintptr_t ElisaGuestExec_GetSyntheticMainCallBoundaryAddress(void) {
+    return (uintptr_t)&ElisaGuestExec_SyntheticMainCallBoundary;
+}
+
+uintptr_t ElisaGuestExec_GetSyntheticBoundaryCallbackAddress(void) {
+    return (uintptr_t)&ElisaGuestExec_SyntheticBoundaryCallback;
+}
+
+int32_t ElisaGuestExec_BoundaryCallbackCount(void) {
+    return elisa_guest_exec_boundary_callback_count;
+}
+
+uint64_t ElisaGuestExec_BoundaryCallbackReason(void) {
+    return elisa_guest_exec_boundary_callback_reason;
 }
 
 #if defined(__x86_64__) || defined(_M_X64)
@@ -688,3 +726,71 @@ void ElisaGuestExec_EmitCusaArtifactKV(const char* key, uint64_t value) {
             (unsigned long long)value);
     fflush(stdout);
 }
+
+#if defined(ELISA_GUEST_EXEC_STANDALONE_TEST)
+static int elisa_guest_exec_expect_u64(const char* name, uint64_t got, uint64_t want) {
+    if (got != want) {
+        fprintf(stderr, "%s: got=%llu want=%llu\n", name,
+                (unsigned long long)got, (unsigned long long)want);
+        return 1;
+    }
+    return 0;
+}
+
+static int elisa_guest_exec_expect_s32(const char* name, int32_t got, int32_t want) {
+    if (got != want) {
+        fprintf(stderr, "%s: got=%d want=%d\n", name, got, want);
+        return 1;
+    }
+    return 0;
+}
+
+int main(void) {
+    int failed = 0;
+    if (ElisaGuestExec_IsSupported() != 1) {
+        fprintf(stderr, "guest exec runtime is not supported in standalone x64 helper\n");
+        return 2;
+    }
+    failed |= elisa_guest_exec_expect_u64(
+        "synthetic-add",
+        ElisaGuestExec_RunSyntheticFunction(ElisaGuestExec_GetSyntheticAddAddress(), 40u, 2u),
+        0x125Eu);
+    failed |= elisa_guest_exec_expect_s32("synthetic-add-status",
+                                          ElisaGuestExec_LastStatus(), 1);
+
+    failed |= elisa_guest_exec_expect_u64(
+        "synthetic-timeout",
+        ElisaGuestExec_RunSyntheticFunctionWithTimeout(
+            ElisaGuestExec_GetSyntheticSpinAddress(), 1u, 2u, 10u),
+        UINT64_MAX - 3u);
+    failed |= elisa_guest_exec_expect_s32("synthetic-timeout-status",
+                                          ElisaGuestExec_LastStatus(), -3);
+
+    ElisaGuestEntryParams params;
+    memset(&params, 0, sizeof(params));
+    params.argc = 77;
+    params.entry_addr = ElisaGuestExec_GetSyntheticMainReturnAddress();
+    int32_t guarded_status = ElisaGuestExec_RunMainEntryGuarded(&params, 100u);
+    failed |= elisa_guest_exec_expect_s32("guarded-main-status", guarded_status, 1);
+    failed |= elisa_guest_exec_expect_s32("guarded-main-last-status",
+                                          ElisaGuestExec_LastStatus(), 1);
+
+    memset(&params, 0, sizeof(params));
+    params.argc = 88;
+    params.entry_addr = ElisaGuestExec_GetSyntheticMainCallBoundaryAddress();
+    params.argv = (void*)ElisaGuestExec_GetSyntheticBoundaryCallbackAddress();
+    guarded_status = ElisaGuestExec_RunMainEntryGuarded(&params, 100u);
+    failed |= elisa_guest_exec_expect_s32("guarded-boundary-status", guarded_status, 1);
+    failed |= elisa_guest_exec_expect_s32("guarded-boundary-callback-count",
+                                          ElisaGuestExec_BoundaryCallbackCount(), 1);
+    failed |= elisa_guest_exec_expect_u64("guarded-boundary-callback-reason",
+                                          ElisaGuestExec_BoundaryCallbackReason(),
+                                          0xB000000000000042ull);
+    if (failed != 0) {
+        return 1;
+    }
+    printf("ELISA_GUEST_EXEC_X64_STANDALONE_OK arch=%s mode=%s\n",
+           ElisaGuestExec_HostArchitecture(), ElisaGuestExec_HostMode());
+    return 0;
+}
+#endif

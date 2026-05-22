@@ -8,6 +8,7 @@ extern snprintf(buf: mutable u8&?, bufsize: usize, fmt: u8&, ...) -> int effects
 const REAL_GAME_BOOT_ROOT: static u8& = "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/shadPS4/Games/CUSA07399"
 const REAL_GAME_BOOT_EBOOT: static u8& = "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/shadPS4/Games/CUSA07399/eboot.bin"
 const REAL_GAME_BOOT_ARTIFACT_PATH: static u8& = "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/elisa-shad-ps4-from-scratch/cusa07399_artifacts.txt"
+const REAL_GAME_BOOT_HANDOFF_MANIFEST_PATH: static u8& = "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/elisa-shad-ps4-from-scratch/cusa07399_handoff_manifest.txt"
 
 def RealGameBoot_Check(cond: bool, message: static u8&) -> void:
     if not cond:
@@ -99,6 +100,29 @@ def RealGameBoot_EmitArtifactLastHle(file: mutable IOFile&, module: static u8&?,
         symbol_text: static u8& = symbol if symbol != null else ""
         written: int = snprintf(line[0].ref[mutable u8&], 256usize, "CUSA07399_ARTIFACT last_hle_module=%s last_hle_symbol=%s", module_text, symbol_text)
         RealGameBoot_WriteLine(file, line[0].ref[mutable u8&], written)
+
+def RealGameBoot_EmitHandoffManifest(linker: Linker&) -> void:
+    can Memory.Allocate, Console.Format:
+        file: mutable IOFile = IOFile_opened(REAL_GAME_BOOT_HANDOFF_MANIFEST_PATH, FileAccessMode.Create, FileType.TextFile)
+        if linker.modules.count == 0:
+            IOFile_Close(file)
+            return
+        main: Module = linker.modules[0]
+        line: mutable u8[512] = zeroed
+        written: int = snprintf(line[0].ref[mutable u8&], 512usize, "CUSA07399_HANDOFF_MANIFEST version=1 module_count=%llu entry=0x%llx main_entry=0x%llx base=0x%llx image_base=0x%llx image_size=0x%llx aligned_base_size=0x%llx executable_segments=%llu mapped_segments=%llu imports=%llu resolved_imports=%llu patched_import_relocations=%llu", linker.modules.count.u64(), main.last_start_entry_addr.u64(), guest_exec_last_main_entry_addr.u64(), main.base_virtual_addr.u64(), main.image_virtual_base, main.image_virtual_size, main.aligned_base_size, main.executable_segment_count.u64(), main.mapped_segment_count.u64(), Module_GetImportSymbolCount(main).u64(), Module_GetResolvedImportSymbolCount(main).u64(), main.patched_import_relocation_count.u64())
+        RealGameBoot_WriteLine(file, line[0].ref[mutable u8&], written)
+        i: mutable usize = 0
+        limit: mutable usize = linker.modules.count
+        if limit > 8:
+            limit <- 8
+        while i < limit:
+            mod_ref: Module = linker.modules[i]
+            module_line: mutable u8[512] = zeroed
+            written_mod: int = snprintf(module_line[0].ref[mutable u8&], 512usize, "CUSA07399_HANDOFF_MODULE index=%llu file=%s host=%s shared=%d base=0x%llx entry=0x%llx image_base=0x%llx image_size=0x%llx executable_segments=%llu mapped_segments=%llu imports=%llu resolved_imports=%llu", i.u64(), mod_ref.file, mod_ref.host_file, 1 if mod_ref.is_shared_lib else 0, mod_ref.base_virtual_addr.u64(), mod_ref.last_start_entry_addr.u64(), mod_ref.image_virtual_base, mod_ref.image_virtual_size, mod_ref.executable_segment_count.u64(), mod_ref.mapped_segment_count.u64(), Module_GetImportSymbolCount(mod_ref).u64(), Module_GetResolvedImportSymbolCount(mod_ref).u64())
+            RealGameBoot_WriteLine(file, module_line[0].ref[mutable u8&], written_mod)
+            i <- i + 1
+        _ = IOFile_Flush(file)
+        IOFile_Close(file)
 
 def RealGameBoot_ResetRuntime() -> void:
     Emulator_Reset()
@@ -198,6 +222,8 @@ def RealGameBoot_EmitArtifacts(linker: Linker&, guarded_status: s32) -> void:
                         subsystem <- "audio_input_service"
                     elif Linker_StringHasPrefix(rec.library, "libSceGnm") or Linker_StringHasPrefix(rec.library, "libSceVideo") or Linker_StringHasPrefix(rec.library, "libSceFont"):
                         subsystem <- "graphics"
+                    elif Linker_StringHasPrefix(rec.library, "libSceSaveData") or Linker_StringHasPrefix(rec.library, "libSceSaveDataDialog") or Linker_StringHasPrefix(rec.library, "libSceCommonDialog") or Linker_StringHasPrefix(rec.library, "libSceWebBrowserDialog") or Linker_StringHasPrefix(rec.library, "libSceSigninDialog"):
+                        subsystem <- "save_dialog_misc"
                     elif Linker_StringHasPrefix(rec.library, "libSceAudio") or Linker_StringHasPrefix(rec.library, "libSceAjm") or Linker_StringHasPrefix(rec.library, "libSceCommonDialog"):
                         subsystem <- "audio_input_service"
                     elif Linker_StringHasPrefix(rec.library, "libSceAppContent") or Linker_StringHasPrefix(rec.library, "libSceContentExport"):
@@ -206,6 +232,7 @@ def RealGameBoot_EmitArtifacts(linker: Linker&, guarded_status: s32) -> void:
         RealGameBoot_EmitArtifactLastHle(file.ref[mutable IOFile&], GuestExec_LastHleModule(), GuestExec_LastHleSymbol())
         _ = IOFile_Flush(file)
         IOFile_Close(file)
+        RealGameBoot_EmitHandoffManifest(linker)
 
 @test
 def emulator_real_game_boot_smoke_loads_cusa07399_eboot() -> void:

@@ -53,6 +53,7 @@ static int g_launch_window_live = 0;
 static int g_launch_renderer_live = 0;
 static int g_launch_imgui_context_live = 0;
 static int g_launch_settings_open_count = 0;
+static const char* g_launch_window_title = "";
 static int g_launch_queued_events[64];
 static int g_launch_event_head = 0;
 static int g_launch_event_count = 0;
@@ -117,6 +118,7 @@ void ImguiBigPictureBridge_Reset(void) {
     g_launch_renderer_live = 0;
     g_launch_imgui_context_live = 0;
     g_launch_settings_open_count = 0;
+    g_launch_window_title = "";
     g_launch_event_head = 0;
     g_launch_event_count = 0;
     memset(g_launch_queued_events, 0, sizeof(g_launch_queued_events));
@@ -411,6 +413,7 @@ void ImguiBigPictureBridge_LaunchCreateWindowAndRenderer(void) {
     }
     g_launch_window_live = 1;
     g_launch_renderer_live = 1;
+    g_launch_window_title = "elisa_shadps4";
 }
 
 void ImguiBigPictureBridge_LaunchDestroyWindowAndRenderer(void) {
@@ -500,6 +503,7 @@ int ImguiBigPictureBridge_GetLaunchPollEventCalls(void) { return g_launch_poll_e
 int ImguiBigPictureBridge_GetLaunchRenderPresentCalls(void) { return g_launch_render_present_calls; }
 int ImguiBigPictureBridge_GetLaunchActive(void) { return g_launch_active; }
 int ImguiBigPictureBridge_GetLaunchWindowLive(void) { return g_launch_window_live; }
+const char* ImguiBigPictureBridge_GetLaunchWindowTitle(void) { return g_launch_window_title; }
 int ImguiBigPictureBridge_GetLaunchRendererLive(void) { return g_launch_renderer_live; }
 int ImguiBigPictureBridge_GetLaunchImGuiContextLive(void) { return g_launch_imgui_context_live; }
 int ImguiBigPictureBridge_GetLaunchSettingsOpenCount(void) { return g_launch_settings_open_count; }

@@ -1,9 +1,9 @@
 # Emulator C++ Parity Gate
 
-Passed: 15
+Passed: 22
 Failed: 0
 
-Summary score: 20/20
+Summary score: 27/27
 Per-subsystem counts:
 - External-C-ABI: 11
 - Native-Elisa: 248
@@ -31,6 +31,7 @@ CUSA07399 stage:
 - guest exec host mode: macOS
 - guest exec supported native execution: 0
 - guest exec x64 subprocess available: 1
+- guest exec x64 subprocess smoke: PASS
 - guest exec probe only: 1
 - guest exec started: 1
 - guest exec entry reached: 1
@@ -52,8 +53,8 @@ CUSA07399 stage:
   - VIDEO_STAGE_first_frame_candidate=0
 CUSA07399 artifact metrics:
 - CUSA module count: 4
-- imports total: 1150
-- native HLE count: 839
+- imports total: 1149
+- native HLE count: 838
 - PRX export count: 311
 - AeroLib fallback count: 0
 - unresolved count: 0
@@ -79,6 +80,14 @@ Real CUSA runtime service signals:
 - current execution stage: 4 (guarded-entry)
 - last HLE call: module=libc symbol=RpQJJVKTiFM
 - current video/audio/input stage: graphics=0 audio-input-service=0
+- current save/dialog/misc fallback stage: save-dialog-misc=0
+Save/Dialog/Misc parity test signals:
+- save data parity tests: PASS
+- save data dialog parity tests: PASS
+- web browser dialog parity tests: PASS
+- signin dialog parity tests: PASS
+- playgo parity tests: PASS
+- ime dialog parity tests: PASS
 Top 50 fallback symbols:
 - none
 Top blockers:
@@ -92,6 +101,8 @@ Failing scenario ids:
 ### graphics_fallbacks
 - none
 ### audio_input_service_fallbacks
+- none
+### save_dialog_misc_fallbacks
 - none
 ### loader_guest_exec_blockers
 - none
@@ -110,6 +121,7 @@ Failing scenario ids:
 - PASS: elisacore test core-libraries-audio-parity-tests
 - PASS: elisacore test core-libraries-np-parity-tests
 - PASS: native guest_exec_runtime warnings
+- PASS: guest exec x64 subprocess smoke
 - PASS: native kernel_threads_runtime warnings
 - PASS: elisacore test emulator-core-boot-smoke
 - PASS: elisacore test real-self-loader-tests
@@ -117,3 +129,9 @@ Failing scenario ids:
 - PASS: elisacore test emulator-runtime-services-smoke
 - PASS: elisacore test emulator-guest-exec-runtime-tests
 - PASS: elisacore test emulator-renderer-first-frame-smoke
+- PASS: elisacore run elisa_tests/core_libraries_save_data_parity_tests.elisa
+- PASS: elisacore run elisa_tests/core_libraries_save_data_dialog_pure_tests.elisa
+- PASS: elisacore run elisa_tests/core_libraries_web_browser_dialog_pure_tests.elisa
+- PASS: elisacore run elisa_tests/core_libraries_signin_dialog_pure_tests.elisa
+- PASS: elisacore run elisa_tests/core_libraries_playgo_pure_tests.elisa
+- PASS: elisacore run elisa_tests/core_libraries_ime_dialog_parity_tests.elisa

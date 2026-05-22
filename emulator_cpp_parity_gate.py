@@ -102,6 +102,11 @@ def all_steps() -> list[Step]:
             category="native",
         ),
         Step(
+            "guest exec x64 subprocess smoke",
+            [sys.executable, "guest_exec_x64_subprocess_smoke.py"],
+            category="guest-exec",
+        ),
+        Step(
             "native kernel_threads_runtime warnings",
             ["clang", "-Wall", "-Wextra", "-Werror", "-pthread", "-c", "native/kernel_threads_runtime.c", "-o", str(TMP_DIR / "kernel_threads_runtime.o")],
             category="native",
@@ -117,6 +122,12 @@ def all_steps() -> list[Step]:
         compiler_test("video-core-multi-level-page-table-tests", slow=True, category="graphics"),
         compiler_test("core-libraries-avplayer", slow=True, category="audio-input-system"),
         compiler_test("core-libraries-pad-tests", slow=True, category="audio-input-system"),
+        compiler_test_source("elisa_tests/core_libraries_save_data_parity_tests.elisa", category="save-dialog-misc"),
+        compiler_test_source("elisa_tests/core_libraries_save_data_dialog_pure_tests.elisa", category="save-dialog-misc"),
+        compiler_test_source("elisa_tests/core_libraries_web_browser_dialog_pure_tests.elisa", category="save-dialog-misc"),
+        compiler_test_source("elisa_tests/core_libraries_signin_dialog_pure_tests.elisa", category="save-dialog-misc"),
+        compiler_test_source("elisa_tests/core_libraries_playgo_pure_tests.elisa", category="save-dialog-misc"),
+        compiler_test_source("elisa_tests/core_libraries_ime_dialog_parity_tests.elisa", category="save-dialog-misc"),
     ]
     if host_audio_backends_present():
         steps.append(compiler_test_source("elisa_tests/core_libraries_audioout_isolated.elisa", slow=True, category="audio"))
@@ -367,6 +378,8 @@ def subsystem_guess(library: str, module: str, nid: str) -> str:
         return "graphics"
     if "audio" in probe:
         return "audio_input_service"
+    if "savedata" in probe or "commondialog" in probe or "webbrowserdialog" in probe or "signindialog" in probe:
+        return "save_dialog_misc"
     if "pad" in probe or "controller" in probe or "hmd" in probe or "ime" in probe:
         return "audio_input_service"
     if "kernel" in probe or "loader" in probe or "exec" in probe:
@@ -473,6 +486,10 @@ def cusa_stage_summary(results: list[Result], cusa: dict[str, int | str]) -> dic
         "frame": frame,
         "frame_ladder": frame_ladder,
     }
+
+
+def step_passed(results: list[Result], name: str) -> bool:
+    return any(r.step.name == name and r.passed for r in results)
 
 
 def host_exec_note() -> str:
@@ -588,6 +605,7 @@ def build_fallback_queues(rows: list[dict[str, str | int]]) -> dict[str, list[di
         "kernel_fallbacks": [],
         "graphics_fallbacks": [],
         "audio_input_service_fallbacks": [],
+        "save_dialog_misc_fallbacks": [],
         "loader_guest_exec_blockers": [],
     }
     for row in rows:
@@ -596,6 +614,8 @@ def build_fallback_queues(rows: list[dict[str, str | int]]) -> dict[str, list[di
             queues["graphics_fallbacks"].append(row)
         elif subsystem == "audio_input_service":
             queues["audio_input_service_fallbacks"].append(row)
+        elif subsystem == "save_dialog_misc":
+            queues["save_dialog_misc_fallbacks"].append(row)
         elif subsystem == "loader_guest_exec":
             queues["loader_guest_exec_blockers"].append(row)
         else:
@@ -670,6 +690,7 @@ def summarize_progress(results: list[Result], require_first_boundary: bool = Fal
     lines.append(f"- guest exec host mode: {cusa['guest_exec_host_mode']}")
     lines.append(f"- guest exec supported native execution: {cusa['guest_exec_supported_native_execution']}")
     lines.append(f"- guest exec x64 subprocess available: {cusa['guest_exec_x64_subprocess_available']}")
+    lines.append(f"- guest exec x64 subprocess smoke: {'PASS' if step_passed(results, 'guest exec x64 subprocess smoke') else 'FAIL'}")
     lines.append(f"- guest exec probe only: {cusa['guest_exec_probe_only']}")
     lines.append(f"- guest exec started: {cusa['guest_exec_started']}")
     lines.append(f"- guest exec entry reached: {cusa['guest_exec_entry_reached']}")
@@ -725,6 +746,14 @@ def summarize_progress(results: list[Result], require_first_boundary: bool = Fal
     lines.append(f"- current execution stage: {cusa['execution_stage']} ({stage_name(int(cusa['execution_stage']))})")
     lines.append(f"- last HLE call: module={cusa['last_hle_module']} symbol={cusa['last_hle_symbol']}")
     lines.append(f"- current video/audio/input stage: graphics={len(queues['graphics_fallbacks'])} audio-input-service={len(queues['audio_input_service_fallbacks'])}")
+    lines.append(f"- current save/dialog/misc fallback stage: save-dialog-misc={len(queues['save_dialog_misc_fallbacks'])}")
+    lines.append("Save/Dialog/Misc parity test signals:")
+    lines.append(f"- save data parity tests: {'PASS' if step_passed(results, 'elisacore run elisa_tests/core_libraries_save_data_parity_tests.elisa') else 'FAIL'}")
+    lines.append(f"- save data dialog parity tests: {'PASS' if step_passed(results, 'elisacore run elisa_tests/core_libraries_save_data_dialog_pure_tests.elisa') else 'FAIL'}")
+    lines.append(f"- web browser dialog parity tests: {'PASS' if step_passed(results, 'elisacore run elisa_tests/core_libraries_web_browser_dialog_pure_tests.elisa') else 'FAIL'}")
+    lines.append(f"- signin dialog parity tests: {'PASS' if step_passed(results, 'elisacore run elisa_tests/core_libraries_signin_dialog_pure_tests.elisa') else 'FAIL'}")
+    lines.append(f"- playgo parity tests: {'PASS' if step_passed(results, 'elisacore run elisa_tests/core_libraries_playgo_pure_tests.elisa') else 'FAIL'}")
+    lines.append(f"- ime dialog parity tests: {'PASS' if step_passed(results, 'elisacore run elisa_tests/core_libraries_ime_dialog_parity_tests.elisa') else 'FAIL'}")
 
     lines.append("Top 50 fallback symbols:")
     for item in fallback_rows[:50]:
