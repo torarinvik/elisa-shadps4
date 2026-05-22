@@ -4,15 +4,25 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
+#include <cerrno>
 #include <mutex>
 #include <new>
 #include <span>
 #include <unordered_set>
 #include <vector>
 
+#if !defined(_WIN32)
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
+
 #include "common/assert.h"
 #include "common/object_pool.h"
+#include "shader_recompiler/backend/bindings.h"
+#include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/frontend/control_flow_graph.h"
 #include "shader_recompiler/frontend/decode.h"
 #include "shader_recompiler/frontend/structured_control_flow.h"
@@ -45,6 +55,9 @@ constexpr std::int32_t kElisaRecompilerProgramStatusFailedWithDiagnostic = 4;
 constexpr std::int32_t kElisaRecompilerDiagnosticNone = 0;
 constexpr std::int32_t kElisaRecompilerDiagnosticUnsupported = 1;
 constexpr std::int32_t kElisaRecompilerDiagnosticException = 2;
+constexpr std::uint32_t kElisaRecompilerPayloadKindNone = 0u;
+constexpr std::uint32_t kElisaRecompilerPayloadKindDeterministicEnvelope = 1u;
+constexpr std::uint32_t kElisaRecompilerPayloadKindRealSpirv = 2u;
 
 struct ElisaRecompilerTranslateMetadata {
     std::uint32_t stage;
@@ -61,6 +74,7 @@ struct ElisaRecompilerProgramHandle {
     std::uint64_t output_hash;
     std::int32_t status;
     std::int32_t diagnostic_code;
+    std::uint32_t payload_kind;
     // Owned SPIR-V output bytes. Empty when translation is unsupported or failed.
     std::vector<std::uint8_t> output_data;
 };
@@ -106,6 +120,146 @@ std::unordered_set<const void*> g_freed_handles;
     std::memcpy(bytes.data(), words.data(), bytes.size());
     return bytes;
 }
+
+[[nodiscard]] bool ShouldAttemptRealSpirvEmission() {
+    static const bool enabled = []() {
+        const char* value = std::getenv("ELISA_SHADER_BRIDGE_REAL_SPIRV");
+        if (!value) {
+            return false;
+        }
+        return value[0] == '1' || value[0] == 'y' || value[0] == 'Y' || value[0] == 't' ||
+               value[0] == 'T';
+    }();
+    return enabled;
+}
+
+[[nodiscard]] bool TryEmitRealSpirvWords(const Shader::Profile& profile,
+                                         const Shader::RuntimeInfo& runtime_info,
+                                         const Shader::IR::Program& program,
+                                         std::vector<std::uint32_t>& out_words) {
+    try {
+        Shader::Backend::Bindings bindings{};
+        out_words = Shader::Backend::SPIRV::EmitSPIRV(profile, runtime_info, program, bindings);
+        return !out_words.empty();
+    } catch (...) {
+        out_words.clear();
+        return false;
+    }
+}
+
+#if !defined(_WIN32)
+[[nodiscard]] bool WriteAll(const int fd, const void* data, const std::size_t size) {
+    const auto* bytes = static_cast<const std::uint8_t*>(data);
+    std::size_t offset = 0;
+    while (offset < size) {
+        const ssize_t written = write(fd, bytes + offset, size - offset);
+        if (written < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return false;
+        }
+        if (written == 0) {
+            return false;
+        }
+        offset += static_cast<std::size_t>(written);
+    }
+    return true;
+}
+
+[[nodiscard]] bool ReadAll(const int fd, void* data, const std::size_t size) {
+    auto* bytes = static_cast<std::uint8_t*>(data);
+    std::size_t offset = 0;
+    while (offset < size) {
+        const ssize_t read_size = read(fd, bytes + offset, size - offset);
+        if (read_size < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return false;
+        }
+        if (read_size == 0) {
+            return false;
+        }
+        offset += static_cast<std::size_t>(read_size);
+    }
+    return true;
+}
+
+[[nodiscard]] bool TryEmitRealSpirvWordsIsolated(const Shader::Profile& profile,
+                                                 const Shader::RuntimeInfo& runtime_info,
+                                                 const Shader::IR::Program& program,
+                                                 std::vector<std::uint32_t>& out_words) {
+    out_words.clear();
+
+    int pipe_fds[2]{};
+    if (pipe(pipe_fds) != 0) {
+        return false;
+    }
+
+    const pid_t pid = fork();
+    if (pid < 0) {
+        close(pipe_fds[0]);
+        close(pipe_fds[1]);
+        return false;
+    }
+
+    if (pid == 0) {
+        close(pipe_fds[0]);
+        std::vector<std::uint32_t> child_words;
+        const bool ok = TryEmitRealSpirvWords(profile, runtime_info, program, child_words);
+        const std::uint64_t word_count = ok ? static_cast<std::uint64_t>(child_words.size()) : 0u;
+        bool wrote = WriteAll(pipe_fds[1], &word_count, sizeof(word_count));
+        if (wrote && word_count > 0u) {
+            wrote = WriteAll(pipe_fds[1], child_words.data(),
+                             child_words.size() * sizeof(std::uint32_t));
+        }
+        close(pipe_fds[1]);
+        _exit(ok && wrote ? 0 : 1);
+    }
+
+    close(pipe_fds[1]);
+
+    std::uint64_t word_count = 0u;
+    bool read_ok = ReadAll(pipe_fds[0], &word_count, sizeof(word_count));
+    constexpr std::uint64_t kMaxIsolatedSpirvWords = 16u * 1024u * 1024u;
+    if (read_ok && word_count > 0u && word_count <= kMaxIsolatedSpirvWords) {
+        out_words.resize(static_cast<std::size_t>(word_count));
+        read_ok = ReadAll(pipe_fds[0], out_words.data(), out_words.size() * sizeof(std::uint32_t));
+    } else if (word_count == 0u) {
+        out_words.clear();
+    } else {
+        read_ok = false;
+        out_words.clear();
+    }
+    close(pipe_fds[0]);
+
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno == EINTR) {
+            continue;
+        }
+        return false;
+    }
+
+    if (!read_ok || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        out_words.clear();
+        return false;
+    }
+    return !out_words.empty();
+}
+#else
+[[nodiscard]] bool TryEmitRealSpirvWordsIsolated(const Shader::Profile& profile,
+                                                 const Shader::RuntimeInfo& runtime_info,
+                                                 const Shader::IR::Program& program,
+                                                 std::vector<std::uint32_t>& out_words) {
+    (void)profile;
+    (void)runtime_info;
+    (void)program;
+    out_words.clear();
+    return false;
+}
+#endif
 
 [[nodiscard]] std::vector<std::uint32_t> BuildDeterministicSpirvEnvelope(
     const Shader::IR::Program& program, const std::uint64_t input_hash,
@@ -285,13 +439,15 @@ void PopulateUnsupportedResult(ElisaRecompilerProgramHandle& handle,
     handle.output_hash = 0u;
     handle.status = kElisaRecompilerProgramStatusFailedWithDiagnostic;
     handle.diagnostic_code = kElisaRecompilerDiagnosticUnsupported;
+    handle.payload_kind = kElisaRecompilerPayloadKindNone;
     handle.output_data.clear();
 }
 
 void PopulateTranslatedResult(ElisaRecompilerProgramHandle& handle,
                               const std::uint64_t input_hash, const std::uint64_t word_count,
                               const std::uint32_t stage_type,
-                              const std::vector<std::uint8_t>& output_bytes) {
+                              const std::vector<std::uint8_t>& output_bytes,
+                              const std::uint32_t payload_kind) {
     handle.input_hash = input_hash;
     handle.word_count = word_count;
     handle.stage_type = stage_type;
@@ -301,6 +457,7 @@ void PopulateTranslatedResult(ElisaRecompilerProgramHandle& handle,
     handle.output_hash = FnvHash64Bytes(handle.output_data.data(), handle.output_data.size());
     handle.status = kElisaRecompilerProgramStatusTranslated;
     handle.diagnostic_code = kElisaRecompilerDiagnosticNone;
+    handle.payload_kind = payload_kind;
 }
 
 [[nodiscard]] bool IsLiveHandle(const ElisaRecompilerProgramHandle* handle) {
@@ -450,14 +607,21 @@ int elisa_shader_recompiler_translate_program(const std::uint32_t* code_words,
         Shader::Pools pools{};
         const auto ir_program =
             Shader::TranslateProgramForBridge(code_span, pools, info, runtime_info, profile);
-        auto spirv_words = BuildDeterministicSpirvEnvelope(ir_program, input_hash, metadata->stage);
+        std::uint32_t payload_kind = kElisaRecompilerPayloadKindDeterministicEnvelope;
+        std::vector<std::uint32_t> spirv_words{};
+        if (ShouldAttemptRealSpirvEmission() &&
+            TryEmitRealSpirvWordsIsolated(profile, runtime_info, ir_program, spirv_words)) {
+            payload_kind = kElisaRecompilerPayloadKindRealSpirv;
+        } else {
+            spirv_words = BuildDeterministicSpirvEnvelope(ir_program, input_hash, metadata->stage);
+        }
         const auto output_bytes = SerializeSpirvWords(spirv_words);
 
         if (output_bytes.empty()) {
             PopulateUnsupportedResult(*handle, input_hash, word_count, metadata->stage);
         } else {
-            PopulateTranslatedResult(*handle, input_hash, word_count, metadata->stage,
-                                     output_bytes);
+            PopulateTranslatedResult(*handle, input_hash, word_count, metadata->stage, output_bytes,
+                                     payload_kind);
         }
     } catch (...) {
         PopulateUnsupportedResult(*handle, input_hash, word_count, metadata->stage);
@@ -553,6 +717,15 @@ std::uint64_t elisa_shader_recompiler_program_output_word_count(const void* prog
         return 0u;
     }
     return handle->output_byte_size / sizeof(std::uint32_t);
+}
+
+std::uint32_t elisa_shader_recompiler_program_payload_kind(const void* program) {
+    const auto* handle = static_cast<const ElisaRecompilerProgramHandle*>(program);
+    std::lock_guard<std::mutex> lock{g_handle_mutex};
+    if (IsFreedHandle(handle) || !IsLiveHandle(handle)) {
+        return kElisaRecompilerPayloadKindNone;
+    }
+    return handle->payload_kind;
 }
 
 std::uint32_t elisa_shader_recompiler_program_output_word_at(const void* program,

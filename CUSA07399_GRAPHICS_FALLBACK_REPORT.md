@@ -57,6 +57,7 @@ Shader artifact:
 - `shader_translate_path_bridge`
 - `shader_translate_result_ok`
 - `shader_translate_spirv_magic`
+- `shader_translate_payload_kind`
 
 Bridge metadata accessors:
 
@@ -75,10 +76,12 @@ Bridge metadata accessors:
 - C++ internals remain bridge-backed where Vulkan/runtime ABI modeling is not yet complete.
 - Bridge usage is surfaced explicitly via artifact counters and submit-path keys above.
 - The shader bridge now surfaces a deterministic SPIR-V envelope payload (including SPIR-V magic) via output word accessors, but remains a bridge-owned path rather than a native Elisa SPIR-V backend replacement.
+- Opt-in real SPIR-V emission is guarded by `ELISA_SHADER_BRIDGE_REAL_SPIRV=1`. POSIX hosts run the real emitter in a child process so backend crashes fall back to the deterministic envelope instead of taking down the Elisa runtime. Windows keeps the safe envelope fallback until a Windows process-isolation shim is added.
 
 ## Current blocker summary to first real frame
 
 - Core videoout lifecycle path is active and staged.
 - GNM submit/submit+flip path is active and staged.
 - Renderer init is visible via artifact.
-- Shader bridge now emits success plus SPIR-V payload-shape artifacts and exposes structured output metadata/word accessors, but the payload path is still bridge-owned.
+- Shader bridge now emits success plus SPIR-V payload-shape artifacts and exposes structured output metadata/word accessors, but the default payload path is still bridge-owned deterministic envelope output.
+- Real SPIR-V backend emission is now probe-safe on POSIX, but it is not stable enough to make the required/default shader payload yet.
