@@ -57,7 +57,11 @@ def validate_handoff_manifest() -> int:
     entry = to_int(summary.get("entry"))
     main_entry = to_int(summary.get("main_entry"))
     base = to_int(summary.get("base"))
+    entry_offset = to_int(summary.get("entry_offset"))
     image_size = to_int(summary.get("image_size"))
+    aligned_base_size = to_int(summary.get("aligned_base_size"))
+    entry_word0 = to_int(summary.get("entry_word0"))
+    entry_word1 = to_int(summary.get("entry_word1"))
     executable_segments = to_int(summary.get("executable_segments"))
     imports = to_int(summary.get("imports"))
     resolved_imports = to_int(summary.get("resolved_imports"))
@@ -71,8 +75,14 @@ def validate_handoff_manifest() -> int:
     if entry != main_entry:
         print("CUSA07399_HANDOFF_X64_MANIFEST status=entry-mismatch")
         return 1
-    if not (base <= entry < base + image_size):
-        print("CUSA07399_HANDOFF_X64_MANIFEST status=entry-outside-image")
+    if entry_offset != entry - base:
+        print("CUSA07399_HANDOFF_X64_MANIFEST status=entry-offset-mismatch")
+        return 1
+    if not (base <= entry < base + aligned_base_size):
+        print("CUSA07399_HANDOFF_X64_MANIFEST status=entry-outside-reserved-range")
+        return 1
+    if entry_word0 == 0 and entry_word1 == 0:
+        print("CUSA07399_HANDOFF_X64_MANIFEST status=entry-bytes-empty")
         return 1
     if executable_segments <= 0:
         print("CUSA07399_HANDOFF_X64_MANIFEST status=no-executable-segments")
@@ -86,7 +96,8 @@ def validate_handoff_manifest() -> int:
     print(
         "CUSA07399_HANDOFF_X64_MANIFEST "
         f"status=ok module_count={module_count} entry=0x{entry:x} "
-        f"base=0x{base:x} image_size=0x{image_size:x} "
+        f"base=0x{base:x} entry_offset=0x{entry_offset:x} "
+        f"image_size=0x{image_size:x} entry_word0=0x{entry_word0:x} "
         f"executable_segments={executable_segments} imports={imports}"
     )
     return 0
