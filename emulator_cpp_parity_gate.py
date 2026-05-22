@@ -120,7 +120,7 @@ def all_steps() -> list[Step]:
         ),
         Step(
             "emulator ABI smoke x64",
-            [sys.executable, "emulator_abi_smoke.py", target_triple_for_x64_host()],
+            [sys.executable, "emulator_abi_smoke.py", target_triple_for_x64_host(), "--golden-dir", "abi_manifests"],
             category="guest-exec",
         ),
         Step(
@@ -277,6 +277,8 @@ def parse_cusa_metrics(results: list[Result]) -> dict[str, int | str]:
         "guest_exec_first_boundary_reached": 0,
         "guest_exec_boundary_reason": 0,
         "guest_exec_last_pc": 0,
+        "guest_exec_last_sp": 0,
+        "guest_exec_last_bp": 0,
         "guest_exec_last_signal": 0,
         "video_stage_opened": 0,
         "video_stage_buffers_registered": 0,
@@ -360,6 +362,10 @@ def parse_cusa_metrics(results: list[Result]) -> dict[str, int | str]:
             summary["guest_exec_boundary_reason"] = to_int(row.get("guest_exec_boundary_reason"))
         if row.get("guest_exec_last_pc") is not None:
             summary["guest_exec_last_pc"] = max(int(summary["guest_exec_last_pc"]), to_int(row.get("guest_exec_last_pc")))
+        if row.get("guest_exec_last_sp") is not None:
+            summary["guest_exec_last_sp"] = max(int(summary["guest_exec_last_sp"]), to_int(row.get("guest_exec_last_sp")))
+        if row.get("guest_exec_last_bp") is not None:
+            summary["guest_exec_last_bp"] = max(int(summary["guest_exec_last_bp"]), to_int(row.get("guest_exec_last_bp")))
         if row.get("guest_exec_last_signal") is not None:
             summary["guest_exec_last_signal"] = max(int(summary["guest_exec_last_signal"]), to_int(row.get("guest_exec_last_signal")))
         if row_has_kv(row, "VIDEO_STAGE_opened"):
@@ -767,6 +773,10 @@ def summarize_progress(results: list[Result], require_first_boundary: bool = Fal
         lines.append(f"- CUSA07399 x64 boundary status: {x64_exec.get('boundary_status')}")
     if x64_exec.get("last_pc"):
         lines.append(f"- CUSA07399 x64 last pc: {x64_exec.get('last_pc')}")
+    if x64_exec.get("last_sp"):
+        lines.append(f"- CUSA07399 x64 last sp: {x64_exec.get('last_sp')}")
+    if x64_exec.get("last_bp"):
+        lines.append(f"- CUSA07399 x64 last bp: {x64_exec.get('last_bp')}")
     lines.append(f"- guest exec probe only: {cusa['guest_exec_probe_only']}")
     lines.append(f"- guest exec started: {cusa['guest_exec_started']}")
     lines.append(f"- guest exec entry reached: {cusa['guest_exec_entry_reached']}")
@@ -774,6 +784,8 @@ def summarize_progress(results: list[Result], require_first_boundary: bool = Fal
     lines.append(f"- guest exec boundary reason: {cusa['guest_exec_boundary_reason']} ({cusa['guest_exec_boundary_reason_name']})")
     lines.append(f"- guest exec boundary reason name: {cusa['guest_exec_boundary_reason_name']}")
     lines.append(f"- guest exec last pc: 0x{int(cusa['guest_exec_last_pc']):x}")
+    lines.append(f"- guest exec last sp: 0x{int(cusa['guest_exec_last_sp']):x}")
+    lines.append(f"- guest exec last bp: 0x{int(cusa['guest_exec_last_bp']):x}")
     lines.append(f"- guest exec last signal: {cusa['guest_exec_last_signal']}")
     lines.append(f"- guest exec last module: {cusa['guest_exec_last_module']}")
     lines.append(f"- guest exec last symbol: {cusa['guest_exec_last_symbol']}")

@@ -145,6 +145,7 @@ def validate_artifacts(artifacts: dict[str, str]) -> list[str]:
     boundary_status = to_int(artifact_get(artifacts, "boundary_status"))
     execution_stage = to_int(artifact_get(artifacts, "execution_stage"))
     last_pc = to_int(artifact_get(artifacts, "guest_exec_last_pc", "last_guest_pc"))
+    last_sp = to_int(artifact_get(artifacts, "guest_exec_last_sp", "last_guest_sp"))
     last_signal = to_int(artifact_get(artifacts, "guest_exec_last_signal", "last_signal"))
     accepted_boundary = boundary_status in {1, 2, 3, 4}
     accepted_captured_fault = boundary_status == -10 and execution_stage >= 6 and last_signal != 0
@@ -153,6 +154,8 @@ def validate_artifacts(artifacts: dict[str, str]) -> list[str]:
         errors.append(f"bad-boundary-status-{boundary_status}")
     if boundary_status == -10 and last_pc == 0:
         errors.append("missing-crash-pc")
+    if boundary_status == -10 and last_sp == 0:
+        errors.append("missing-crash-sp")
     if execution_stage < 4:
         errors.append("execution-stage-before-guarded-entry")
     return errors
@@ -212,6 +215,8 @@ def main() -> int:
             execution_stage=artifact_get(artifacts, "execution_stage"),
             native_phase=artifact_get(artifacts, "guest_exec_native_phase"),
             last_pc=artifact_get(artifacts, "guest_exec_last_pc", "last_guest_pc"),
+            last_sp=artifact_get(artifacts, "guest_exec_last_sp", "last_guest_sp"),
+            last_bp=artifact_get(artifacts, "guest_exec_last_bp", "last_guest_bp"),
             fault=artifact_get(artifacts, "guest_exec_fault_address", "fault"),
             last_signal=artifact_get(artifacts, "guest_exec_last_signal", "last_signal"),
             last_hle_module=artifact_get(artifacts, "last_hle_module", default=""),
@@ -228,6 +233,8 @@ def main() -> int:
         execution_stage=artifact_get(artifacts, "execution_stage"),
         native_phase=artifact_get(artifacts, "guest_exec_native_phase"),
         last_pc=artifact_get(artifacts, "guest_exec_last_pc", "last_guest_pc"),
+        last_sp=artifact_get(artifacts, "guest_exec_last_sp", "last_guest_sp"),
+        last_bp=artifact_get(artifacts, "guest_exec_last_bp", "last_guest_bp"),
         fault=artifact_get(artifacts, "guest_exec_fault_address", "fault"),
         last_signal=artifact_get(artifacts, "guest_exec_last_signal", "last_signal"),
         last_hle_module=artifact_get(artifacts, "last_hle_module", default=""),
