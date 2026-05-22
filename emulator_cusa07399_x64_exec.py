@@ -179,9 +179,13 @@ def diagnose_artifacts(artifacts: dict[str, str]) -> str:
     child_native_word0 = to_int(artifact_get(artifacts, "guest_exec_entry_native_word0"))
     child_native_word1 = to_int(artifact_get(artifacts, "guest_exec_entry_native_word1"))
     pc_native_prot = to_int(artifact_get(artifacts, "guest_exec_last_pc_native_prot"))
+    prejump_rdi = to_int(artifact_get(artifacts, "guest_exec_prejump_rdi"))
+    pc_was_fallback = to_int(artifact_get(artifacts, "guest_exec_last_pc_was_fallback"))
     argc = to_int(artifact_get(artifacts, "guest_exec_last_argc", "last_argc"))
     if boundary_status == -10 and expected_params != 0 and last_rdi != expected_params:
         notes.append("guest-entry-rdi-not-entryparams")
+    if boundary_status == -10 and expected_params != 0 and prejump_rdi != expected_params:
+        notes.append("prejump-rdi-not-entryparams")
     if boundary_status == -10 and (
         expected_stack0 != entry_stack0 or expected_stack1 != entry_stack1
     ):
@@ -202,6 +206,8 @@ def diagnose_artifacts(artifacts: dict[str, str]) -> str:
         notes.append("last-pc-not-in-native-region")
     elif boundary_status == -10 and (pc_native_prot & 1) == 0:
         notes.append("last-pc-not-readable")
+    if boundary_status == -10 and pc_was_fallback != 0:
+        notes.append("last-pc-was-fallback")
     if boundary_status == -10 and artifact_get(artifacts, "last_hle_symbol", default="") != "":
         notes.append("last-hle-recorded-before-crash")
     return ",".join(notes) if notes else "none"
@@ -305,7 +311,11 @@ def main() -> int:
             entry_native_word0=artifact_get(artifacts, "guest_exec_entry_native_word0"),
             entry_native_word1=artifact_get(artifacts, "guest_exec_entry_native_word1"),
             entry_native_prot=artifact_get(artifacts, "guest_exec_entry_native_prot"),
+            prejump_rdi=artifact_get(artifacts, "guest_exec_prejump_rdi"),
+            prejump_rsi=artifact_get(artifacts, "guest_exec_prejump_rsi"),
+            prejump_rsp=artifact_get(artifacts, "guest_exec_prejump_rsp"),
             last_pc_native_prot=artifact_get(artifacts, "guest_exec_last_pc_native_prot"),
+            last_pc_was_fallback=artifact_get(artifacts, "guest_exec_last_pc_was_fallback"),
             fault_word0=artifact_get(artifacts, "guest_exec_fault_word0"),
             fault_word1=artifact_get(artifacts, "guest_exec_fault_word1"),
             signal_stack_word0=artifact_get(artifacts, "guest_exec_signal_stack_word0"),
@@ -345,7 +355,11 @@ def main() -> int:
         entry_native_word0=artifact_get(artifacts, "guest_exec_entry_native_word0"),
         entry_native_word1=artifact_get(artifacts, "guest_exec_entry_native_word1"),
         entry_native_prot=artifact_get(artifacts, "guest_exec_entry_native_prot"),
+        prejump_rdi=artifact_get(artifacts, "guest_exec_prejump_rdi"),
+        prejump_rsi=artifact_get(artifacts, "guest_exec_prejump_rsi"),
+        prejump_rsp=artifact_get(artifacts, "guest_exec_prejump_rsp"),
         last_pc_native_prot=artifact_get(artifacts, "guest_exec_last_pc_native_prot"),
+        last_pc_was_fallback=artifact_get(artifacts, "guest_exec_last_pc_was_fallback"),
         fault_word0=artifact_get(artifacts, "guest_exec_fault_word0"),
         fault_word1=artifact_get(artifacts, "guest_exec_fault_word1"),
         signal_stack_word0=artifact_get(artifacts, "guest_exec_signal_stack_word0"),

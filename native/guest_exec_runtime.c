@@ -127,8 +127,12 @@ static uintptr_t elisa_guest_exec_fault_word0 = 0;
 static uintptr_t elisa_guest_exec_fault_word1 = 0;
 static uintptr_t elisa_guest_exec_signal_stack_word0 = 0;
 static uintptr_t elisa_guest_exec_signal_stack_word1 = 0;
+static uintptr_t elisa_guest_exec_prejump_rdi = 0;
+static uintptr_t elisa_guest_exec_prejump_rsi = 0;
+static uintptr_t elisa_guest_exec_prejump_rsp = 0;
 static uint32_t elisa_guest_exec_entry_native_prot = 0xffffffffu;
 static uint32_t elisa_guest_exec_pc_native_prot = 0xffffffffu;
+static int32_t elisa_guest_exec_last_pc_was_fallback = 0;
 static int32_t elisa_guest_exec_last_errno = 0;
 static volatile int32_t elisa_guest_exec_last_native_phase = ELISA_GUEST_EXEC_PHASE_NONE;
 static int32_t elisa_guest_exec_boundary_callback_count = 0;
@@ -165,10 +169,14 @@ typedef struct ElisaGuestExecForkReport {
     volatile uintptr_t fault_word1;
     volatile uintptr_t signal_stack_word0;
     volatile uintptr_t signal_stack_word1;
+    volatile uintptr_t prejump_rdi;
+    volatile uintptr_t prejump_rsi;
+    volatile uintptr_t prejump_rsp;
     volatile uint32_t entry_native_prot;
     volatile uint32_t pc_native_prot;
     volatile uintptr_t entry_addr;
     volatile int32_t native_phase;
+    volatile int32_t pc_was_fallback;
 } ElisaGuestExecForkReport;
 
 static ElisaGuestExecForkReport* elisa_guest_exec_fork_report = NULL;
@@ -428,6 +436,10 @@ static void elisa_guest_exec_signal_handler(int sig, siginfo_t* info, void* uctx
         elisa_guest_exec_fork_report->fault_word1 = elisa_guest_exec_fault_word1;
         elisa_guest_exec_fork_report->signal_stack_word0 = elisa_guest_exec_signal_stack_word0;
         elisa_guest_exec_fork_report->signal_stack_word1 = elisa_guest_exec_signal_stack_word1;
+        elisa_guest_exec_fork_report->prejump_rdi = elisa_guest_exec_prejump_rdi;
+        elisa_guest_exec_fork_report->prejump_rsi = elisa_guest_exec_prejump_rsi;
+        elisa_guest_exec_fork_report->prejump_rsp = elisa_guest_exec_prejump_rsp;
+        elisa_guest_exec_fork_report->pc_was_fallback = elisa_guest_exec_last_pc_was_fallback;
         elisa_guest_exec_fork_report->pc_native_prot = elisa_guest_exec_pc_native_prot;
         if (elisa_guest_exec_fork_report->execution_stage < 6) {
             elisa_guest_exec_fork_report->execution_stage = 6;
@@ -626,12 +638,14 @@ static void __attribute__((unused)) elisa_guest_exec_absorb_fork_report(void) {
         elisa_guest_exec_fork_report->status = -11;
         if (elisa_guest_exec_fork_report->guest_pc == 0) {
             elisa_guest_exec_fork_report->guest_pc = elisa_guest_exec_fork_report->entry_addr;
+            elisa_guest_exec_fork_report->pc_was_fallback = 1;
         }
     }
     if (elisa_guest_exec_fork_report->status < 0 &&
         elisa_guest_exec_fork_report->guest_pc == 0 &&
         elisa_guest_exec_fork_report->entry_addr != 0) {
         elisa_guest_exec_fork_report->guest_pc = elisa_guest_exec_fork_report->entry_addr;
+        elisa_guest_exec_fork_report->pc_was_fallback = 1;
     }
     if (elisa_guest_exec_fork_report->status != 0) {
         elisa_guest_exec_last_status = elisa_guest_exec_fork_report->status;
@@ -677,6 +691,13 @@ static void __attribute__((unused)) elisa_guest_exec_absorb_fork_report(void) {
         elisa_guest_exec_entry_stack_word0 = elisa_guest_exec_fork_report->entry_stack_word0;
         elisa_guest_exec_entry_stack_word1 = elisa_guest_exec_fork_report->entry_stack_word1;
     }
+    if (elisa_guest_exec_fork_report->prejump_rdi != 0 ||
+        elisa_guest_exec_fork_report->prejump_rsi != 0 ||
+        elisa_guest_exec_fork_report->prejump_rsp != 0) {
+        elisa_guest_exec_prejump_rdi = elisa_guest_exec_fork_report->prejump_rdi;
+        elisa_guest_exec_prejump_rsi = elisa_guest_exec_fork_report->prejump_rsi;
+        elisa_guest_exec_prejump_rsp = elisa_guest_exec_fork_report->prejump_rsp;
+    }
     if (elisa_guest_exec_fork_report->entry_native_word0 != 0 ||
         elisa_guest_exec_fork_report->entry_native_word1 != 0) {
         elisa_guest_exec_entry_native_word0 = elisa_guest_exec_fork_report->entry_native_word0;
@@ -697,6 +718,9 @@ static void __attribute__((unused)) elisa_guest_exec_absorb_fork_report(void) {
     }
     if (elisa_guest_exec_fork_report->pc_native_prot != 0) {
         elisa_guest_exec_pc_native_prot = elisa_guest_exec_fork_report->pc_native_prot;
+    }
+    if (elisa_guest_exec_fork_report->pc_was_fallback != 0) {
+        elisa_guest_exec_last_pc_was_fallback = 1;
     }
     if (elisa_guest_exec_fork_report->native_phase != 0) {
         elisa_guest_exec_last_native_phase = elisa_guest_exec_fork_report->native_phase;
@@ -778,7 +802,16 @@ static void __attribute__((noreturn)) elisa_guest_exec_jump_main_entry(ElisaGues
     if (exit_func == NULL) {
         exit_func = elisa_guest_exec_default_exit;
     }
+    elisa_guest_exec_prejump_rdi = (uintptr_t)params;
+    elisa_guest_exec_prejump_rsi = (uintptr_t)exit_func;
+    elisa_guest_exec_prejump_rsp = elisa_guest_exec_current_stack_pointer();
+    if (elisa_guest_exec_fork_report != NULL) {
+        elisa_guest_exec_fork_report->prejump_rdi = elisa_guest_exec_prejump_rdi;
+        elisa_guest_exec_fork_report->prejump_rsi = elisa_guest_exec_prejump_rsi;
+        elisa_guest_exec_fork_report->prejump_rsp = elisa_guest_exec_prejump_rsp;
+    }
     void* entry = (void*)params->entry_addr;
+    /* ELISA_ABI_LINT_ALLOW(guest-entry-jump-not-noreturn): this helper is noreturn and ends in an explicit jmp + unreachable. */
     __asm__ volatile(
         "movq %[entry], %%r11\n"
         "movq %[params], %%r10\n"
@@ -1058,6 +1091,18 @@ uintptr_t ElisaGuestExec_EntryNativeWord1(void) {
     return elisa_guest_exec_entry_native_word1;
 }
 
+uintptr_t ElisaGuestExec_PreJumpRDI(void) {
+    return elisa_guest_exec_prejump_rdi;
+}
+
+uintptr_t ElisaGuestExec_PreJumpRSI(void) {
+    return elisa_guest_exec_prejump_rsi;
+}
+
+uintptr_t ElisaGuestExec_PreJumpRSP(void) {
+    return elisa_guest_exec_prejump_rsp;
+}
+
 uintptr_t ElisaGuestExec_FaultWord0(void) {
     return elisa_guest_exec_fault_word0;
 }
@@ -1080,6 +1125,10 @@ uint32_t ElisaGuestExec_EntryNativeProt(void) {
 
 uint32_t ElisaGuestExec_LastPCNativeProt(void) {
     return elisa_guest_exec_pc_native_prot;
+}
+
+int32_t ElisaGuestExec_LastPCWasFallback(void) {
+    return elisa_guest_exec_last_pc_was_fallback;
 }
 
 uint32_t ElisaGuestExec_NativeRegionCount(void) {
@@ -1120,12 +1169,16 @@ void ElisaGuestExec_ResetCrashState(void) {
     elisa_guest_exec_entry_stack_word1 = 0;
     elisa_guest_exec_entry_native_word0 = 0;
     elisa_guest_exec_entry_native_word1 = 0;
+    elisa_guest_exec_prejump_rdi = 0;
+    elisa_guest_exec_prejump_rsi = 0;
+    elisa_guest_exec_prejump_rsp = 0;
     elisa_guest_exec_fault_word0 = 0;
     elisa_guest_exec_fault_word1 = 0;
     elisa_guest_exec_signal_stack_word0 = 0;
     elisa_guest_exec_signal_stack_word1 = 0;
     elisa_guest_exec_entry_native_prot = 0xffffffffu;
     elisa_guest_exec_pc_native_prot = 0xffffffffu;
+    elisa_guest_exec_last_pc_was_fallback = 0;
     elisa_guest_exec_boundary_callback_count = 0;
     elisa_guest_exec_boundary_callback_reason = 0;
     elisa_guest_exec_synthetic_observed_argc = 0;
