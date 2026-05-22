@@ -108,6 +108,11 @@ def all_steps() -> list[Step]:
             category="guest-exec",
         ),
         Step(
+            "guest exec ABI smoke x64",
+            [sys.executable, "emulator_guest_exec_abi_smoke.py", target_triple_for_x64_host()],
+            category="guest-exec",
+        ),
+        Step(
             "CUSA07399 x64 real execution lane",
             [sys.executable, "emulator_cusa07399_x64_exec.py"],
             category="guest-exec",
