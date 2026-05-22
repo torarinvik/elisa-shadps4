@@ -38,10 +38,13 @@ const KERNEL_FILE_KIND_REGULAR: int = 0
 const KERNEL_FILE_KIND_DIRECTORY: int = 1
 const KERNEL_FILE_REGULAR_MODE: u32 = 0x81ff
 const KERNEL_FILE_DIRECTORY_MODE: u32 = 0x41ff
+const KERNEL_FILE_DIRENT_ALIGN: usize = 8
+const KERNEL_FILE_DIRENT_BASE_SIZE: usize = 24
 
 global mutable g_kernel_file_mount_host: u8&? = null
 global mutable g_kernel_file_mount_guest: u8&? = null
 global mutable g_kernel_file_mount_read_only: bool = false
+global mutable g_kernel_file_dir_fileno_pool: u32 = 10
 
 struct OrbisKernelStat:
     st_mode: mutable u32
@@ -85,11 +88,88 @@ def KernelFile_SceErrorFromErrno() -> int:
         return ORBIS_KERNEL_ERROR_UNKNOWN
     return ErrnoToSceKernelError(err_ref[0])
 
+def KernelFile_DirentNextFileno() -> u32:
+    g_kernel_file_dir_fileno_pool <- g_kernel_file_dir_fileno_pool + 1
+    return g_kernel_file_dir_fileno_pool
+
+def KernelFile_DirentAlign(n: usize) -> usize:
+    return ((n + KERNEL_FILE_DIRENT_ALIGN - 1) / KERNEL_FILE_DIRENT_ALIGN) * KERNEL_FILE_DIRENT_ALIGN
+
+def KernelFile_DirentReclen(name: static u8&) -> usize:
+    name_len: usize = runtime_strlen(name)
+    return KernelFile_DirentAlign(KERNEL_FILE_DIRENT_BASE_SIZE + name_len + 1)
+
+def KernelFile_DirentPushU8(out: mutable darray[u8]&, value: u8) -> void:
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            out.push(value)
+
+def KernelFile_DirentPushU16LE(out: mutable darray[u8]&, value: u16) -> void:
+    KernelFile_DirentPushU8(out, (value & 0xff).u8())
+    KernelFile_DirentPushU8(out, ((value >> 8) & 0xff).u8())
+
+def KernelFile_DirentPushU32LE(out: mutable darray[u8]&, value: u32) -> void:
+    for i in 0..<4:
+        KernelFile_DirentPushU8(out, ((value >> (i * 8)) & 0xff).u8())
+
+def KernelFile_DirentPushU64LE(out: mutable darray[u8]&, value: u64) -> void:
+    for i in 0..<8:
+        KernelFile_DirentPushU8(out, ((value >> (i * 8)) & 0xff).u8())
+
+def KernelFile_DirentEntryLess(a: mutable ElisaFsDirEntry&, b: mutable ElisaFsDirEntry&) -> bool:
+    a_name: static u8& = a.name if a.name != "" else "?"
+    b_name: static u8& = b.name if b.name != "" else "?"
+    a_len: usize = runtime_strlen(a_name)
+    b_len: usize = runtime_strlen(b_name)
+    n: usize = a_len if a_len < b_len else b_len
+    for i in 0..<n:
+        if a_name[i] < b_name[i]:
+            return true
+        if a_name[i] > b_name[i]:
+            return false
+    return a_len < b_len
+
+def KernelFile_DirentEmit(out: mutable darray[u8]&, entry: mutable ElisaFsDirEntry&, index: usize) -> void:
+    name: static u8& = entry.name if entry.name != "" else "?"
+    name_len: usize = runtime_strlen(name)
+    rec_len: usize = KernelFile_DirentReclen(name)
+    fileno: u32 = entry.fileno.u32() if entry.fileno != 0 else KernelFile_DirentNextFileno()
+    dtype: u8 = entry.dtype if entry.dtype != 0 else (8.u8() if entry.is_file != 0 else 4.u8())
+    KernelFile_DirentPushU32LE(out, fileno)
+    KernelFile_DirentPushU16LE(out, rec_len.u16())
+    KernelFile_DirentPushU8(out, dtype)
+    KernelFile_DirentPushU8(out, name_len.u8())
+    KernelFile_DirentPushU64LE(out, (index + 1).u64())
+    for i in 0..<name_len:
+        KernelFile_DirentPushU8(out, name[i])
+    KernelFile_DirentPushU8(out, 0)
+    pad: usize = rec_len - KERNEL_FILE_DIRENT_BASE_SIZE - name_len - 1
+    for i in 0..<pad:
+        KernelFile_DirentPushU8(out, 0)
+
+def KernelFile_DirentBuildCache(guest_path: static u8&) -> darray[u8]:
+    can Memory.Allocate, Abort.Panic:
+        entries: mutable array[ElisaFsDirEntry, 512] = zeroed
+        count: usize = elisa_filesys_iterate_directory(guest_path, entries[0].ref[mutable ElisaFsDirEntry&], 512)
+        for i in 0..<count:
+            for j in (i + 1)..<count:
+                if KernelFile_DirentEntryLess(entries[j].ref[mutable ElisaFsDirEntry&], entries[i].ref[mutable ElisaFsDirEntry&]):
+                    tmp: ElisaFsDirEntry = entries[i]
+                    entries[i] <- entries[j]
+                    entries[j] <- tmp
+        out: mutable darray[u8] = []
+        for i in 0..<count:
+            KernelFile_DirentEmit(out, entries[i].ref[mutable ElisaFsDirEntry&], i)
+        return out
+    return []
+
 def KernelFile_ResetForTest() -> void:
     can Memory.Allocate, Abort.Panic:
         g_kernel_file_mount_host <- null
         g_kernel_file_mount_guest <- null
         g_kernel_file_mount_read_only <- false
+        g_kernel_file_dir_fileno_pool <- 10
         for i in 0..<KERNEL_FILE_MAX_FDS:
             g_kernel_file_handles[i] <- KernelFileHandle_new()
 
@@ -753,8 +833,16 @@ def sceKernelGetdents(fd: int, buf: u8&?, nbytes: u64) -> i64:
     return result
 
 def KernelFile_Getdirentries(fd: int, buf: u8&?, nbytes: u64, basep: void&?) -> i64:
-    _ = basep
-    return posix_getdents(fd, buf, nbytes)
+    result: i64 = posix_getdents(fd, buf, nbytes)
+    if result < 0:
+        return result
+    if basep != null:
+        h: mutable KernelFileHandle&? = KernelFile_GetHandle(fd)
+        if h != null:
+            out_basep: mutable i64&? = basep as mutable i64&?
+            if out_basep != null:
+                out_basep[0] <- h.offset
+    return result
 
 def posix_getdents(fd: int, buf: u8&?, nbytes: u64) -> i64:
     if buf == null:
@@ -767,7 +855,20 @@ def posix_getdents(fd: int, buf: u8&?, nbytes: u64) -> i64:
     handle: mutable KernelFileHandle& = h
     if handle.kind != KERNEL_FILE_KIND_DIRECTORY:
         return KernelFile_PosixFail64(POSIX_EINVAL)
-    return 0
+    cache: darray[u8] = KernelFile_DirentBuildCache(handle.path)
+    if handle.offset < 0:
+        handle.offset <- 0
+    if handle.offset >= cache.count.i64():
+        return 0
+    remaining: i64 = cache.count.i64() - handle.offset
+    to_copy: mutable i64 = remaining
+    if to_copy > nbytes.i64():
+        to_copy <- nbytes.i64()
+    out_raw: mutable u8& = buf
+    for i in 0..<to_copy:
+        out_raw[i.usize()] <- cache[(handle.offset + i).usize()]
+    handle.offset <- handle.offset + to_copy
+    return to_copy
 
 def sceKernelGetdirentries(fd: int, buf: u8&?, nbytes: u64, basep: void&?) -> i64:
     result: i64 = KernelFile_Getdirentries(fd, buf, nbytes, basep)

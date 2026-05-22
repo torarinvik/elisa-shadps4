@@ -159,6 +159,44 @@ def kernel_file_sys_directory_open_close() -> void:
         assert sceKernelClose(dir_fd) == ORBIS_OK
 
 @test
+def kernel_file_sys_getdirentries_emits_dirents_and_updates_basep() -> void:
+    can Abort.Panic, Memory.Allocate:
+        KernelFile_ResetForTest()
+        KernelFile_MountForTest("/tmp", "/app0", false)
+
+        dir_guest: static u8& = "/app0/elisa_fs_getdents_dir"
+        file_guest: static u8& = "/app0/elisa_fs_getdents_dir/item.txt"
+        dir_host: static u8& = KernelFile_ResolveHostPath(dir_guest, null)
+        file_host: static u8& = KernelFile_ResolveHostPath(file_guest, null)
+        if fs_exists(file_host):
+            _ = posix_unlink(file_guest.cast[u8&?])
+        if fs_exists(dir_host):
+            _ = posix_rmdir(dir_guest.cast[u8&?])
+
+        assert posix_mkdir(dir_guest.cast[u8&?], 0x1ff) == ORBIS_OK
+        item_fd: int = sceKernelOpen(file_guest.cast[u8&?], ORBIS_KERNEL_O_RDWR | ORBIS_KERNEL_O_CREAT, null)
+        assert item_fd >= 3
+        assert sceKernelClose(item_fd) == ORBIS_OK
+
+        dir_fd: int = sceKernelOpen(dir_guest.cast[u8&?], ORBIS_KERNEL_O_RDONLY | ORBIS_KERNEL_O_DIRECTORY, null)
+        assert dir_fd >= 3
+        out: mutable array[u8, 2048] = zeroed
+        basep: mutable i64 = 0
+        first: i64 = sceKernelGetdirentries(dir_fd, out[0].ref[mutable u8&], 2048, basep.ref[mutable i64&].cast[void&])
+        assert first > 0
+        assert basep > 0
+        reclen: u16 = (out[4].u16() | (out[5].u16() << 8)).u16()
+        assert reclen >= 24
+        prev_basep: i64 = basep
+        second: i64 = sceKernelGetdirentries(dir_fd, out[0].ref[mutable u8&], 2048, basep.ref[mutable i64&].cast[void&])
+        assert second >= 0
+        assert basep >= prev_basep
+        assert sceKernelClose(dir_fd) == ORBIS_OK
+
+        assert posix_unlink(file_guest.cast[u8&?]) == ORBIS_OK
+        assert posix_rmdir(dir_guest.cast[u8&?]) == ORBIS_OK
+
+@test
 def kernel_file_sys_mkdir_rename_unlink_rmdir_cycle() -> void:
     can Abort.Panic, Memory.Allocate:
         KernelFile_ResetForTest()
