@@ -65,6 +65,18 @@ static uintptr_t elisa_guest_exec_last_guest_pc = 0;
 static int32_t elisa_guest_exec_boundary_callback_count = 0;
 static uint64_t elisa_guest_exec_boundary_callback_reason = 0;
 
+typedef struct ElisaGuestExecForkReport {
+    volatile int32_t boundary_reached;
+    volatile int32_t boundary_reason;
+    volatile int32_t execution_stage;
+    volatile int32_t status;
+    volatile int32_t signal;
+    volatile uintptr_t fault_address;
+    volatile uintptr_t guest_pc;
+} ElisaGuestExecForkReport;
+
+static ElisaGuestExecForkReport* elisa_guest_exec_fork_report = NULL;
+
 #define ELISA_GUEST_EXEC_WRITABLE_PAGE_CACHE 65536u
 static uintptr_t elisa_guest_exec_writable_pages[ELISA_GUEST_EXEC_WRITABLE_PAGE_CACHE];
 static uint32_t elisa_guest_exec_writable_page_count = 0;
@@ -111,6 +123,12 @@ static void elisa_guest_exec_signal_handler(int sig, siginfo_t* info, void* uctx
     elisa_guest_exec_last_signal = sig;
     elisa_guest_exec_last_fault_address = info != NULL ? (uintptr_t)info->si_addr : 0;
     elisa_guest_exec_last_guest_pc = elisa_guest_exec_extract_pc(uctx);
+    if (elisa_guest_exec_fork_report != NULL) {
+        elisa_guest_exec_fork_report->status = elisa_guest_exec_last_status;
+        elisa_guest_exec_fork_report->signal = sig;
+        elisa_guest_exec_fork_report->fault_address = elisa_guest_exec_last_fault_address;
+        elisa_guest_exec_fork_report->guest_pc = elisa_guest_exec_last_guest_pc;
+    }
     if (elisa_guest_exec_guard_active) {
         siglongjmp(elisa_guest_exec_jmp, 1);
     }
@@ -121,6 +139,10 @@ static void elisa_guest_exec_alarm_handler(int sig) {
     elisa_guest_exec_timeout_fired = 1;
     elisa_guest_exec_last_status = -3;
     elisa_guest_exec_last_signal = SIGALRM;
+    if (elisa_guest_exec_fork_report != NULL) {
+        elisa_guest_exec_fork_report->status = -3;
+        elisa_guest_exec_fork_report->signal = SIGALRM;
+    }
     if (elisa_guest_exec_guard_active) {
         siglongjmp(elisa_guest_exec_jmp, 1);
     }
@@ -194,6 +216,54 @@ static void __attribute__((unused)) elisa_guest_exec_start_watchdog(uint32_t tim
     }
 }
 #endif
+
+static void elisa_guest_exec_reset_fork_report(void) {
+    if (elisa_guest_exec_fork_report != NULL) {
+        memset((void*)elisa_guest_exec_fork_report, 0, sizeof(*elisa_guest_exec_fork_report));
+    }
+}
+
+static int32_t __attribute__((unused)) elisa_guest_exec_ensure_fork_report(void) {
+#if defined(_WIN32)
+    return 0;
+#else
+    if (elisa_guest_exec_fork_report != NULL) {
+        elisa_guest_exec_reset_fork_report();
+        return 0;
+    }
+    void* mapped = mmap(NULL, sizeof(ElisaGuestExecForkReport), PROT_READ | PROT_WRITE,
+                        MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (mapped == MAP_FAILED) {
+        elisa_guest_exec_fork_report = NULL;
+        return -1;
+    }
+    elisa_guest_exec_fork_report = (ElisaGuestExecForkReport*)mapped;
+    elisa_guest_exec_reset_fork_report();
+    return 0;
+#endif
+}
+
+void ElisaGuestExec_ReportFirstBoundary(int32_t reason) {
+    if (elisa_guest_exec_fork_report != NULL) {
+        elisa_guest_exec_fork_report->boundary_reached = 1;
+        if (elisa_guest_exec_fork_report->boundary_reason == 0) {
+            elisa_guest_exec_fork_report->boundary_reason = reason;
+        }
+        elisa_guest_exec_fork_report->execution_stage = 5;
+    }
+}
+
+int32_t ElisaGuestExec_ReportedBoundaryReached(void) {
+    return elisa_guest_exec_fork_report != NULL ? elisa_guest_exec_fork_report->boundary_reached : 0;
+}
+
+int32_t ElisaGuestExec_ReportedBoundaryReason(void) {
+    return elisa_guest_exec_fork_report != NULL ? elisa_guest_exec_fork_report->boundary_reason : 0;
+}
+
+int32_t ElisaGuestExec_ReportedExecutionStage(void) {
+    return elisa_guest_exec_fork_report != NULL ? elisa_guest_exec_fork_report->execution_stage : 0;
+}
 
 static void __attribute__((unused)) elisa_guest_exec_default_exit(int32_t code) {
     (void)code;
@@ -378,7 +448,15 @@ int32_t ElisaGuestExec_MapRegion(uintptr_t address, uint64_t size, uint32_t prot
     void* result = mmap((void*)address, (size_t)size, native_prot, flags, -1, 0);
     if (result == MAP_FAILED) {
 #if defined(MAP_FIXED_NOREPLACE)
-        if (errno == EEXIST) return 0;
+        if (errno == EEXIST) {
+            /*
+             * Module images are reserved first and then PT_LOAD slices are
+             * committed inside that reservation. MAP_FIXED_NOREPLACE reports
+             * that as EEXIST; promote the existing subrange instead of leaving
+             * it PROT_NONE.
+             */
+            return mprotect((void*)address, (size_t)size, native_prot) == 0 ? 0 : -1;
+        }
 #endif
         return -1;
     }
@@ -653,6 +731,13 @@ void ElisaGuestExec_SyntheticMainCallBoundary(ElisaGuestEntryParams* params,
     boundary(0xB000000000000042ull);
 }
 
+void ElisaGuestExec_NonSyntheticMainReportBoundary(ElisaGuestEntryParams* params,
+                                                   ElisaGuestExitFunc exit_func) {
+    (void)params;
+    (void)exit_func;
+    ElisaGuestExec_ReportFirstBoundary(1);
+}
+
 uintptr_t ElisaGuestExec_GetSyntheticAddAddress(void) {
     return (uintptr_t)&ElisaGuestExec_SyntheticAdd;
 }
@@ -762,6 +847,10 @@ int32_t ElisaGuestExec_RunMainEntryGuarded(ElisaGuestEntryParams* params, uint32
         elisa_guest_exec_last_status = 1;
         return 1;
     }
+    if (elisa_guest_exec_ensure_fork_report() != 0) {
+        elisa_guest_exec_last_status = -1;
+        return -1;
+    }
     pid_t child = fork();
     if (child < 0) {
         elisa_guest_exec_last_status = -1;
@@ -781,11 +870,18 @@ int32_t ElisaGuestExec_RunMainEntryGuarded(ElisaGuestEntryParams* params, uint32
                 int sig = WTERMSIG(status);
                 elisa_guest_exec_last_status = -sig;
                 elisa_guest_exec_last_signal = sig;
+                if (elisa_guest_exec_fork_report != NULL) {
+                    elisa_guest_exec_fork_report->status = elisa_guest_exec_last_status;
+                    elisa_guest_exec_fork_report->signal = sig;
+                }
                 return elisa_guest_exec_last_status;
             }
             if (WIFEXITED(status)) {
                 int code = WEXITSTATUS(status);
                 elisa_guest_exec_last_status = code == 0 ? -11 : -code;
+                if (elisa_guest_exec_fork_report != NULL) {
+                    elisa_guest_exec_fork_report->status = elisa_guest_exec_last_status;
+                }
                 return elisa_guest_exec_last_status;
             }
             elisa_guest_exec_last_status = -1;
@@ -801,6 +897,10 @@ int32_t ElisaGuestExec_RunMainEntryGuarded(ElisaGuestEntryParams* params, uint32
             elisa_guest_exec_timeout_fired = 1;
             elisa_guest_exec_last_status = -3;
             elisa_guest_exec_last_signal = SIGALRM;
+            if (elisa_guest_exec_fork_report != NULL) {
+                elisa_guest_exec_fork_report->status = -3;
+                elisa_guest_exec_fork_report->signal = SIGALRM;
+            }
             return -3;
         }
         usleep((useconds_t)sleep_step_ms * 1000u);
@@ -964,6 +1064,17 @@ int main(void) {
     failed |= elisa_guest_exec_expect_u64("guarded-boundary-callback-reason",
                                           ElisaGuestExec_BoundaryCallbackReason(),
                                           0xB000000000000042ull);
+
+    memset(&params, 0, sizeof(params));
+    params.argc = 89;
+    params.entry_addr = (uintptr_t)&ElisaGuestExec_NonSyntheticMainReportBoundary;
+    guarded_status = ElisaGuestExec_RunMainEntryGuarded(&params, 100u);
+    failed |= elisa_guest_exec_expect_s32("guarded-fork-boundary-status",
+                                          guarded_status, -11);
+    failed |= elisa_guest_exec_expect_s32("guarded-fork-boundary-reached",
+                                          ElisaGuestExec_ReportedBoundaryReached(), 1);
+    failed |= elisa_guest_exec_expect_s32("guarded-fork-boundary-reason",
+                                          ElisaGuestExec_ReportedBoundaryReason(), 1);
     if (failed != 0) {
         return 1;
     }

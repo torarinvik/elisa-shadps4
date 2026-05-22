@@ -78,6 +78,18 @@ extern c_GuestExec_BoundaryCallbackCount() -> s32
 @link_name(ElisaGuestExec_BoundaryCallbackReason)
 extern c_GuestExec_BoundaryCallbackReason() -> u64
 
+@link_name(ElisaGuestExec_ReportFirstBoundary)
+extern c_GuestExec_ReportFirstBoundary(reason: s32) -> void
+
+@link_name(ElisaGuestExec_ReportedBoundaryReached)
+extern c_GuestExec_ReportedBoundaryReached() -> s32
+
+@link_name(ElisaGuestExec_ReportedBoundaryReason)
+extern c_GuestExec_ReportedBoundaryReason() -> s32
+
+@link_name(ElisaGuestExec_ReportedExecutionStage)
+extern c_GuestExec_ReportedExecutionStage() -> s32
+
 @link_name(ElisaGuestExec_LastStatus)
 extern c_GuestExec_LastStatus() -> s32
 
@@ -318,6 +330,7 @@ def GuestExec_RunMainEntryGuarded(entry_addr: VAddr, argc: int, argv: void&?, ti
     params: mutable GuestEntryParams = GuestEntryParams(argc, 0, entry_addr, argv)
     status: s32 = c_GuestExec_RunMainEntryGuarded(params.ref[mutable GuestEntryParams&], timeout_ms)
     guest_exec_last_game_execution_status <- status
+    GuestExec_AbsorbNativeBoundaryReport()
     if not guest_exec_first_boundary_reached:
         if status == -3:
             guest_exec_first_boundary_reason <- GUEST_EXEC_BOUNDARY_REASON_TIMEOUT
@@ -395,6 +408,20 @@ def GuestExec_RecordFirstBoundary(reason: s32) -> void:
     if guest_exec_first_boundary_reason == GUEST_EXEC_BOUNDARY_REASON_NONE:
         guest_exec_first_boundary_reason <- reason
     guest_exec_execution_stage <- GUEST_EXEC_STAGE_FIRST_BOUNDARY
+    c_GuestExec_ReportFirstBoundary(reason)
+
+def GuestExec_AbsorbNativeBoundaryReport() -> void:
+    if c_GuestExec_ReportedBoundaryReached() == 0:
+        return
+    guest_exec_first_boundary_reached <- true
+    reported_reason: s32 = c_GuestExec_ReportedBoundaryReason()
+    if guest_exec_first_boundary_reason == GUEST_EXEC_BOUNDARY_REASON_NONE and reported_reason != GUEST_EXEC_BOUNDARY_REASON_NONE:
+        guest_exec_first_boundary_reason <- reported_reason
+    reported_stage: s32 = c_GuestExec_ReportedExecutionStage()
+    if reported_stage > guest_exec_execution_stage:
+        guest_exec_execution_stage <- reported_stage
+    if guest_exec_execution_stage < GUEST_EXEC_STAGE_FIRST_BOUNDARY:
+        guest_exec_execution_stage <- GUEST_EXEC_STAGE_FIRST_BOUNDARY
 
 def GuestExec_RecordLastHle(module: static u8&, symbol: static u8&) -> void:
     guest_exec_last_hle_module <- module

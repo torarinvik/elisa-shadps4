@@ -111,7 +111,14 @@ def MemoryManager_New() -> MemoryManager:
 def Memory_Instance() -> mutable MemoryManager&:
     return memory_singleton.ref[mutable MemoryManager&]
 
+def MemoryManager_ResetNativeMappings(self: mutable MemoryManager&) -> void:
+    if not GuestExec_IsSupported():
+        return
+    for i in 0..<self.vma_areas.count:
+        _ = GuestExec_UnmapRegion(self.vma_areas[i].base, self.vma_areas[i].size)
+
 def Memory_Reset() -> void:
+    MemoryManager_ResetNativeMappings(memory_singleton.ref[mutable MemoryManager&])
     memory_singleton <- MemoryManager_New()
 
 def MemoryManager_GetAddressSpace(self: mutable MemoryManager&) -> mutable AddressSpace&:
@@ -148,6 +155,35 @@ def VirtualMemoryArea_Overlaps(self: VirtualMemoryArea&, addr: VAddr, size: u64)
     a_end: VAddr = addr + size.uintptr()
     b_end: VAddr = self.base + self.size.uintptr()
     return addr < b_end and self.base < a_end
+
+def MemoryProt_NormalizeCpu(prot: MemoryProt) -> MemoryProt:
+    normalized: mutable MemoryProt = prot
+    if (normalized & MemoryProt_CpuWrite) != 0u32:
+        normalized <- normalized | MemoryProt_CpuRead
+    return normalized
+
+def MemoryManager_OverlapsMappedArea(self: MemoryManager&, virtual_addr: VAddr, size: u64, allow_reserved: bool) -> bool:
+    for i in 0..<self.vma_areas.count:
+        area: VirtualMemoryArea = self.vma_areas[i]
+        if VirtualMemoryArea_Overlaps(area, virtual_addr, size):
+            if allow_reserved and area.vma_type == VMAType_Reserved:
+                continue
+            return true
+    return false
+
+def MemoryManager_FindBestVmaIndex(self: MemoryManager&, addr: VAddr, size: u64) -> s32:
+    best_index: mutable s32 = -1
+    best_size: mutable u64 = 0xFFFFFFFFFFFFFFFF.u64()
+    for i in 0..<self.vma_areas.count:
+        area: VirtualMemoryArea = self.vma_areas[i]
+        if not VirtualMemoryArea_Contains(area, addr, size):
+            continue
+        if area.base == addr and area.size == size:
+            return i.s32()
+        if best_index < 0 or area.size < best_size:
+            best_index <- i.s32()
+            best_size <- area.size
+    return best_index
 
 def MemoryManager_IsValidMapping(self: MemoryManager&, virtual_addr: VAddr, size: u64) -> bool:
     if size == 0:
@@ -241,28 +277,38 @@ def MemoryManager_Free(self: mutable MemoryManager&, phys_addr: PAddr, size: u64
     return -1
 
 def MemoryManager_MapMemory(self: mutable MemoryManager&, out_addr: mutable VAddr&, virtual_addr: VAddr, size: u64, prot: MemoryProt, flags: MemoryMapFlags, vma_type: VMAType, name: static u8&, validate_dmem: bool, phys_addr: PAddr, alignment: u64) -> s32:
-    _ = flags
     _ = validate_dmem
     _ = phys_addr
     _ = alignment
-    mapped: VAddr = AddressSpace_Map(self.address_space.ref[mutable AddressSpace&], virtual_addr, size, 0.uintptr(), false)
+    if (flags & MemoryMapFlags_NoOverwrite) != 0u32 and MemoryManager_OverlapsMappedArea(self, virtual_addr, size, false):
+        out_addr <- 0.uintptr()
+        return -1
+    effective_prot: MemoryProt = MemoryProt_NormalizeCpu(prot)
+    mapped: VAddr = AddressSpace_Map(self.address_space.ref[mutable AddressSpace&], virtual_addr, size, 0.uintptr(), (effective_prot & MemoryProt_CpuExec) != 0u32)
     out_addr <- mapped
-    if GuestExec_IsEnabled() and GuestExec_IsSupported() and not GuestExec_MapRegion(mapped, size, prot):
+    if mapped == 0.uintptr():
+        return -1
+    if GuestExec_IsEnabled() and GuestExec_IsSupported() and not GuestExec_MapRegion(mapped, size, effective_prot):
         return -1
     arena: Arena = zeroed
     in arena:
-        self.vma_areas.push(VirtualMemoryArea(mapped, size, vma_type, prot, name, 0, false))
+        self.vma_areas.push(VirtualMemoryArea(mapped, size, vma_type, effective_prot, name, 0, false))
     if vma_type != VMAType_Reserved:
         MemoryManager_AddBacking(self.ref[mutable MemoryManager&], mapped, size)
     return 0
 
 def MemoryManager_MapFile(self: mutable MemoryManager&, out_addr: mutable VAddr&, virtual_addr: VAddr, size: u64, prot: MemoryProt, flags: MemoryMapFlags, fd: s32, phys_addr: s64) -> s32:
     _ = flags
-    mapped: VAddr = AddressSpace_MapFile(self.address_space.ref[mutable AddressSpace&], virtual_addr, size, phys_addr.u64(), prot, fd.uintptr())
+    effective_prot: MemoryProt = MemoryProt_NormalizeCpu(prot)
+    mapped: VAddr = AddressSpace_MapFile(self.address_space.ref[mutable AddressSpace&], virtual_addr, size, phys_addr.u64(), effective_prot, fd.uintptr())
     out_addr <- mapped
+    if mapped == 0.uintptr():
+        return -1
+    if GuestExec_IsEnabled() and GuestExec_IsSupported() and not GuestExec_MapRegion(mapped, size, effective_prot):
+        return -1
     arena: Arena = zeroed
     in arena:
-        self.vma_areas.push(VirtualMemoryArea(mapped, size, VMAType_File, prot, "file", fd, false))
+        self.vma_areas.push(VirtualMemoryArea(mapped, size, VMAType_File, effective_prot, "file", fd, false))
     MemoryManager_AddBacking(self.ref[mutable MemoryManager&], mapped, size)
     return 0
 
@@ -270,6 +316,8 @@ def MemoryManager_PoolDecommit(self: mutable MemoryManager&, virtual_addr: VAddr
     return MemoryManager_UnmapMemory(self.ref[mutable MemoryManager&], virtual_addr, size)
 
 def MemoryManager_UnmapMemory(self: mutable MemoryManager&, virtual_addr: VAddr, size: u64) -> s32:
+    if GuestExec_IsEnabled() and GuestExec_IsSupported():
+        _ = GuestExec_UnmapRegion(virtual_addr, size)
     AddressSpace_Unmap(self.address_space.ref[mutable AddressSpace&], virtual_addr, size)
     MemoryManager_RemoveBacking(self.ref[mutable MemoryManager&], virtual_addr, size)
     for i in 0..<self.vma_areas.count:
@@ -283,25 +331,37 @@ def MemoryManager_UnmapMemory(self: mutable MemoryManager&, virtual_addr: VAddr,
     return -1
 
 def MemoryManager_QueryProtection(self: MemoryManager&, addr: VAddr, start: mutable VAddr&, end: mutable VAddr&, prot: mutable u32&) -> s32:
-    for i in 0..<self.vma_areas.count:
-        if VirtualMemoryArea_Contains(self.vma_areas[i], addr, 1):
-            start <- self.vma_areas[i].base
-            end <- self.vma_areas[i].base + self.vma_areas[i].size.uintptr()
-            prot <- self.vma_areas[i].prot
-            return 0
+    index: s32 = MemoryManager_FindBestVmaIndex(self, addr, 1)
+    if index >= 0:
+        start <- self.vma_areas[index.usize()].base
+        end <- self.vma_areas[index.usize()].base + self.vma_areas[index.usize()].size.uintptr()
+        prot <- self.vma_areas[index.usize()].prot
+        return 0
     return -1
 
 def MemoryManager_Protect(self: mutable MemoryManager&, addr: VAddr, size: u64, prot: MemoryProt) -> s32:
     if size == 0:
         return 0
-    AddressSpace_Protect(self.address_space.ref[mutable AddressSpace&], addr, size, prot)
-    if GuestExec_IsEnabled() and GuestExec_IsSupported() and not GuestExec_ProtectRegion(addr, size, prot):
+    effective_prot: MemoryProt = MemoryProt_NormalizeCpu(prot)
+    AddressSpace_Protect(self.address_space.ref[mutable AddressSpace&], addr, size, effective_prot)
+    if GuestExec_IsEnabled() and GuestExec_IsSupported() and not GuestExec_ProtectRegion(addr, size, effective_prot):
         return -1
-    for i in 0..<self.vma_areas.count:
-        if VirtualMemoryArea_Contains(self.vma_areas[i], addr, size):
-            self.vma_areas[i].prot <- prot
-            return 0
+    index: s32 = MemoryManager_FindBestVmaIndex(self, addr, size)
+    if index >= 0:
+        self.vma_areas[index.usize()].prot <- effective_prot
+        return 0
     return -1
+
+def MemoryManager_RestoreNativeProtectionAfterWrite(self: mutable MemoryManager&, addr: VAddr, size: u64) -> bool:
+    if size == 0 or not GuestExec_IsEnabled() or not GuestExec_IsSupported():
+        return true
+    index: s32 = MemoryManager_FindBestVmaIndex(self, addr, size)
+    if index < 0:
+        return true
+    area: VirtualMemoryArea = self.vma_areas[index.usize()]
+    if (area.prot & MemoryProt_CpuWrite) != 0u32:
+        return true
+    return GuestExec_ProtectRegion(area.base, area.size, area.prot)
 
 def MemoryManager_NameVirtualRange(self: mutable MemoryManager&, virtual_addr: VAddr, size: u64, name: static u8&) -> void:
     for i in 0..<self.vma_areas.count:
@@ -351,11 +411,13 @@ def MemoryManager_WriteU8(self: mutable MemoryManager&, addr: VAddr, value: u8) 
     index: s32 = MemoryManager_FindBackingIndex(self, addr, 1)
     if index < 0:
         return false
-    offset: usize = (addr - self.mapped_bytes[index.usize()].base).usize()
-    self.mapped_bytes[index.usize()].bytes[offset] <- value
     if GuestExec_IsEnabled() and GuestExec_IsSupported():
         if not GuestExec_WriteBytes(addr, value.ref[u8&].cast[void&?], 1):
             return false
+        if not MemoryManager_RestoreNativeProtectionAfterWrite(self, addr, 1.u64()):
+            return false
+    offset: usize = (addr - self.mapped_bytes[index.usize()].base).usize()
+    self.mapped_bytes[index.usize()].bytes[offset] <- value
     return true
 
 def MemoryManager_ReadU8(self: MemoryManager&, addr: VAddr) -> u8:
@@ -369,24 +431,28 @@ def MemoryManager_WriteBytes(self: mutable MemoryManager&, addr: VAddr, data: u8
     index: s32 = MemoryManager_FindBackingIndex(self, addr, size)
     if index < 0:
         return false
-    base_offset: usize = (addr - self.mapped_bytes[index.usize()].base).usize()
-    for i in 0..<size.usize():
-        self.mapped_bytes[index.usize()].bytes[base_offset + i] <- data[i]
     if GuestExec_IsEnabled() and GuestExec_IsSupported():
         if not GuestExec_WriteBytes(addr, data.cast[void&?], size):
             return false
+        if not MemoryManager_RestoreNativeProtectionAfterWrite(self, addr, size):
+            return false
+    base_offset: usize = (addr - self.mapped_bytes[index.usize()].base).usize()
+    for i in 0..<size.usize():
+        self.mapped_bytes[index.usize()].bytes[base_offset + i] <- data[i]
     return true
 
 def MemoryManager_WriteU64(self: mutable MemoryManager&, addr: VAddr, value: u64) -> bool:
     index: s32 = MemoryManager_FindBackingIndex(self, addr, 8)
     if index < 0:
         return false
-    base_offset: usize = (addr - self.mapped_bytes[index.usize()].base).usize()
-    for i in 0..<8:
-        self.mapped_bytes[index.usize()].bytes[base_offset + i] <- ((value >> (i.u64() * 8)) & 0xff).u8()
     if GuestExec_IsEnabled() and GuestExec_IsSupported():
         if not GuestExec_WriteU64(addr, value):
             return false
+        if not MemoryManager_RestoreNativeProtectionAfterWrite(self, addr, 8.u64()):
+            return false
+    base_offset: usize = (addr - self.mapped_bytes[index.usize()].base).usize()
+    for i in 0..<8:
+        self.mapped_bytes[index.usize()].bytes[base_offset + i] <- ((value >> (i.u64() * 8)) & 0xff).u8()
     return true
 
 def MemoryManager_ReadU64(self: MemoryManager&, addr: VAddr) -> u64:

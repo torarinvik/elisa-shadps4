@@ -282,6 +282,12 @@ def parse_cusa_metrics(results: list[Result]) -> dict[str, int | str]:
         if row.get("key") == key and to_int(row.get("value")) > 0:
             return True
         return False
+    def set_last_int(key: str, value: str | None) -> None:
+        if value is None:
+            return
+        parsed = to_int(value)
+        if parsed != 0 or int(summary[key]) == 0:
+            summary[key] = parsed
     for row in rows:
         summary["module_count"] = max(int(summary["module_count"]), to_int(row.get("module_count")))
         summary["total_imports"] = max(int(summary["total_imports"]), to_int(row.get("total_imports")))
@@ -300,7 +306,7 @@ def parse_cusa_metrics(results: list[Result]) -> dict[str, int | str]:
         summary["pad_opened"] = max(int(summary["pad_opened"]), to_int(row.get("pad_opened")))
         summary["pad_no_controller"] = max(int(summary["pad_no_controller"]), to_int(row.get("pad_no_controller")))
         summary["pad_read_attempted"] = max(int(summary["pad_read_attempted"]), to_int(row.get("pad_read_attempted")))
-        summary["pad_read_rc"] = max(int(summary["pad_read_rc"]), to_int(row.get("pad_read_rc")))
+        set_last_int("pad_read_rc", row.get("pad_read_rc"))
         summary["pad_closed"] = max(int(summary["pad_closed"]), to_int(row.get("pad_closed")))
         summary["audio_output_attempted"] = max(int(summary["audio_output_attempted"]), to_int(row.get("audio_output_attempted")))
         summary["audio_output_opened"] = max(int(summary["audio_output_opened"]), to_int(row.get("audio_output_opened")))
@@ -310,12 +316,12 @@ def parse_cusa_metrics(results: list[Result]) -> dict[str, int | str]:
         summary["audio_input_attempted"] = max(int(summary["audio_input_attempted"]), to_int(row.get("audio_input_attempted")))
         summary["audio_input_opened"] = max(int(summary["audio_input_opened"]), to_int(row.get("audio_input_opened")))
         summary["audio_input_read_attempted"] = max(int(summary["audio_input_read_attempted"]), to_int(row.get("audio_input_read_attempted")))
-        summary["audio_input_read_rc"] = max(int(summary["audio_input_read_rc"]), to_int(row.get("audio_input_read_rc")))
+        set_last_int("audio_input_read_rc", row.get("audio_input_read_rc"))
         summary["audio_input_silent_state"] = max(int(summary["audio_input_silent_state"]), to_int(row.get("audio_input_silent_state")))
         summary["audio_input_closed"] = max(int(summary["audio_input_closed"]), to_int(row.get("audio_input_closed")))
         summary["relocation_count"] = max(int(summary["relocation_count"]), to_int(row.get("relocated_imports")))
         summary["execution_stage"] = max(int(summary["execution_stage"]), to_int(row.get("execution_stage")))
-        summary["boundary_status"] = max(int(summary["boundary_status"]), to_int(row.get("boundary_status")))
+        set_last_int("boundary_status", row.get("boundary_status"))
         if row.get("guest_exec_boundary_reason_name"):
             summary["guest_exec_boundary_reason_name"] = row.get("guest_exec_boundary_reason_name", "")
         if row.get("guest_exec_host_arch"):
@@ -429,7 +435,7 @@ def fallback_symbols(results: list[Result]) -> list[dict[str, str | int]]:
     for row in rows:
         if row.get("resolution") != "3":
             continue
-        if row.get("fallback_import") is None and row.get("fallback_import") != "1":
+        if row.get("fallback_import") != "1":
             continue
         nid = row.get("nid", "")
         library = row.get("library", "")

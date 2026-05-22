@@ -32,6 +32,32 @@ def kernel_memory_mmap_protect_unmap_stateful_contracts() -> void:
         km_check(sceKernelMunmap(mapped, 0x4000u64) < 0, "munmap should reject duplicate unmap")
 
 @test
+def kernel_memory_nested_reserved_segment_query_prefers_specific_vma() -> void:
+    can Abort.Panic:
+        Memory_Reset()
+        mem: mutable MemoryManager& = Memory_Instance()
+        reserved: mutable VAddr = 0x800000000.uintptr()
+        segment: mutable VAddr = reserved + 0x1000.uintptr()
+        km_check(MemoryManager_MapMemory(mem, reserved.ref[mutable VAddr&], reserved, 0x4000u64, MemoryProt_NoAccess, MemoryMapFlags_NoFlags, VMAType_Reserved, "reserved", false, 0.uintptr(), 0x1000u64) == 0, "reserved image range should map")
+        km_check(MemoryManager_MapMemory(mem, segment.ref[mutable VAddr&], segment, 0x1000u64, MemoryProt_CpuReadWrite, MemoryMapFlags_Fixed, VMAType_Code, "code", false, 0.uintptr(), 0x1000u64) == 0, "fixed segment inside reserved range should map")
+
+        start: mutable VAddr = 0.uintptr()
+        end: mutable VAddr = 0.uintptr()
+        prot: mutable u32 = 0u32
+        km_check(MemoryManager_QueryProtection(mem, segment, start.ref[mutable VAddr&], end.ref[mutable VAddr&], prot.ref[mutable u32&]) == 0, "query should find nested segment")
+        km_check(start == segment, "query should prefer the specific segment over the reserved parent")
+        km_check(end == segment + 0x1000.uintptr(), "query should report the nested segment extent")
+        km_check(prot == MemoryProt_CpuReadWrite, "query should report nested segment protection")
+
+        km_check(MemoryManager_Protect(mem, segment, 0x1000u64, MemoryProt_CpuRead | MemoryProt_CpuExec) == 0, "protect should update nested segment")
+        km_check(MemoryManager_QueryProtection(mem, segment, start.ref[mutable VAddr&], end.ref[mutable VAddr&], prot.ref[mutable u32&]) == 0, "query should find protected nested segment")
+        km_check(prot == (MemoryProt_CpuRead | MemoryProt_CpuExec), "query should report updated nested segment protection")
+
+        km_check(MemoryManager_QueryProtection(mem, reserved, start.ref[mutable VAddr&], end.ref[mutable VAddr&], prot.ref[mutable u32&]) == 0, "query should still find reserved parent")
+        km_check(start == reserved, "reserved parent start should remain intact")
+        km_check(prot == MemoryProt_NoAccess, "reserved parent protection should remain intact")
+
+@test
 def kernel_memory_invalid_pointer_ordering_and_direct_flexible_maps() -> void:
     can Abort.Panic:
         Memory_Reset()

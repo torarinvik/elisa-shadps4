@@ -331,6 +331,11 @@ def Module_LoadElfSegments(self: mutable Module&, elf: mutable Elf&, memory: mut
         if phdr.p_type == PT_GNU_EH_FRAME:
             self.eh_frame_hdr_addr <- phdr.p_vaddr.uintptr()
             self.eh_frame_hdr_size <- phdr.p_memsz.u32()
+    for i in 0..<elf.elf_header_value.e_phnum.usize():
+        phdr: elf_program_header& = Elf_GetProgramHeader(elf, i)
+        if (phdr.p_type == PT_LOAD or phdr.p_type == PT_SCE_RELRO) and phdr.p_memsz > 0:
+            if not Module_ProtectImageSegment(self.ref[mutable Module&], memory, phdr):
+                return false
     return loaded_dynamic
 
 def Module_AlignUp(value: u64, alignment: u64) -> u64:
@@ -374,6 +379,11 @@ def Module_MapImageSegment(self: mutable Module&, memory: mutable MemoryManager&
     self.mapped_segment_count <- self.mapped_segment_count + 1
     self.info.num_segments <- self.mapped_segment_count
     return true
+
+def Module_ProtectImageSegment(self: mutable Module&, memory: mutable MemoryManager&, phdr: elf_program_header&) -> bool:
+    segment_vaddr: VAddr = self.base_virtual_addr + phdr.p_vaddr.uintptr()
+    segment_size: u64 = Module_GetAlignedProgramHeaderSize(phdr)
+    return MemoryManager_Protect(memory, segment_vaddr, segment_size, Module_PflagsToMemoryProt(phdr.p_flags)) == 0
 
 def Module_PrepareLoadImage(self: mutable Module&, elf: mutable Elf&) -> void:
     min_vaddr: mutable u64 = 0
@@ -724,7 +734,7 @@ def Module_LoadSymbols(self: mutable Module&) -> void:
         sym: elf_symbol& = Module_SymbolAt(self, sym_offset.usize())
         bind: u8 = ElfSymbol_GetBind(sym)
         typ: u8 = ElfSymbol_GetType(sym)
-        imported: bool = sym.st_value == 0
+        imported: bool = sym.st_shndx == ELF_SHN_UNDEF
         supported_bind: bool = bind == STB_GLOBAL or bind == STB_WEAK
         supported_type: bool = typ == STT_FUN or typ == STT_OBJECT or typ == STT_NOTYPE or typ == STT_SCE
         if imported and supported_bind and supported_type and sym.st_name != 0:
@@ -777,14 +787,14 @@ def Module_FindDefinedSymbolAddress(self: mutable Module&, name: static u8&, out
         sym: elf_symbol& = Module_SymbolAt(self, sym_offset.usize())
         bind: u8 = ElfSymbol_GetBind(sym)
         typ: u8 = ElfSymbol_GetType(sym)
-        defined: bool = sym.st_value != 0 and sym.st_shndx != ELF_SHN_UNDEF
+        defined: bool = sym.st_shndx != ELF_SHN_UNDEF
         supported_bind: bool = bind == STB_GLOBAL or bind == STB_WEAK
         supported_type: bool = typ == STT_FUN or typ == STT_OBJECT or typ == STT_NOTYPE or typ == STT_SCE
         if defined and supported_bind and supported_type and sym.st_name != 0:
             symbol_name: mutable static u8& = ""
             nid: mutable static u8& = ""
             _ = Module_SymbolNameAndNidAt(self.ref[Module&], (self.dynamic_info.str_table_offset + sym.st_name.u64()).u32(), symbol_name.ref[mutable static u8&], nid.ref[mutable static u8&])
-            if streq(nid, name) == 1:
+            if streq(nid, name) == 1 or streq(symbol_name, name) == 1:
                 out_virtual_address <- self.base_virtual_addr.u64() + sym.st_value
                 return true
         sym_offset <- sym_offset + entry_size
