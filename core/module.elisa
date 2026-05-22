@@ -300,18 +300,23 @@ def Module_LoadElfSegments(self: mutable Module&, elf: mutable Elf&, memory: mut
     Module_PrepareLoadImage(self.ref[mutable Module&], elf)
     if self.aligned_base_size > 0:
         out_addr: mutable VAddr = self.base_virtual_addr
-        _ = MemoryManager_MapMemory(memory, out_addr.ref[mutable VAddr&], self.base_virtual_addr, self.aligned_base_size + MODULE_TRAMPOLINE_SIZE, MemoryProt_NoAccess, MemoryMapFlags_NoFlags, VMAType_Reserved, self.name, false, 0.uintptr(), MODULE_BLOCK_ALIGN)
+        if MemoryManager_MapMemory(memory, out_addr.ref[mutable VAddr&], self.base_virtual_addr, self.aligned_base_size + MODULE_TRAMPOLINE_SIZE, MemoryProt_NoAccess, MemoryMapFlags_NoFlags, VMAType_Reserved, self.name, false, 0.uintptr(), MODULE_BLOCK_ALIGN) != 0:
+            return false
         self.base_virtual_addr <- out_addr
         self.trampoline_virtual_addr <- self.base_virtual_addr + self.aligned_base_size.uintptr()
         tramp_addr: mutable VAddr = self.trampoline_virtual_addr
-        _ = MemoryManager_MapMemory(memory, tramp_addr.ref[mutable VAddr&], self.trampoline_virtual_addr, MODULE_TRAMPOLINE_SIZE, MemoryProt_CpuRead | MemoryProt_CpuWrite | MemoryProt_CpuExec, MemoryMapFlags_Fixed, VMAType_Code, self.name, false, 0.uintptr(), MODULE_BLOCK_ALIGN)
+        if MemoryManager_MapMemory(memory, tramp_addr.ref[mutable VAddr&], self.trampoline_virtual_addr, MODULE_TRAMPOLINE_SIZE, MemoryProt_CpuRead | MemoryProt_CpuWrite | MemoryProt_CpuExec, MemoryMapFlags_Fixed, VMAType_Code, self.name, false, 0.uintptr(), MODULE_BLOCK_ALIGN) != 0:
+            return false
     for i in 0..<elf.elf_header_value.e_phnum.usize():
         phdr: elf_program_header& = Elf_GetProgramHeader(elf, i)
         if phdr.p_type == PT_LOAD and phdr.p_memsz > 0:
-            Module_MapImageSegment(self.ref[mutable Module&], memory, phdr)
-            _ = Module_LoadImageSegment(self.ref[mutable Module&], elf, memory, phdr)
+            if not Module_MapImageSegment(self.ref[mutable Module&], memory, phdr, true):
+                return false
+            if not Module_LoadImageSegment(self.ref[mutable Module&], elf, memory, phdr):
+                return false
         if phdr.p_type == PT_SCE_RELRO and phdr.p_memsz > 0:
-            Module_MapImageSegment(self.ref[mutable Module&], memory, phdr)
+            if not Module_MapImageSegment(self.ref[mutable Module&], memory, phdr, false):
+                return false
         if phdr.p_type == PT_DYNAMIC and phdr.p_filesz > 0:
             loaded_dynamic <- Elf_LoadSegmentBytes(elf, self.dynamic_segment.ref[mutable darray[u8]&], phdr.p_offset, phdr.p_filesz.usize())
         if phdr.p_type == PT_SCE_DYNLIBDATA and phdr.p_filesz > 0:
@@ -346,14 +351,18 @@ def Module_PflagsToMemoryProt(flags: u32) -> MemoryProt:
         prot <- prot | MemoryProt_CpuExec
     return prot
 
-def Module_MapImageSegment(self: mutable Module&, memory: mutable MemoryManager&, phdr: elf_program_header&) -> void:
+def Module_MapImageSegment(self: mutable Module&, memory: mutable MemoryManager&, phdr: elf_program_header&, load_writable: bool) -> bool:
     segment_vaddr: VAddr = self.base_virtual_addr + phdr.p_vaddr.uintptr()
     segment_size: u64 = Module_GetAlignedProgramHeaderSize(phdr)
     segment_addr: mutable VAddr = segment_vaddr
     vma_type: mutable VMAType = VMAType_Flexible
     if phdr.p_type == PT_LOAD and (phdr.p_flags & PF_EXEC) != 0:
         vma_type <- VMAType_Code
-    _ = MemoryManager_MapMemory(memory, segment_addr.ref[mutable VAddr&], segment_vaddr, segment_size, Module_PflagsToMemoryProt(phdr.p_flags), MemoryMapFlags_Fixed, vma_type, self.name, false, 0.uintptr(), phdr.p_align)
+    map_prot: mutable MemoryProt = Module_PflagsToMemoryProt(phdr.p_flags)
+    if load_writable:
+        map_prot <- map_prot | MemoryProt_CpuWrite
+    if MemoryManager_MapMemory(memory, segment_addr.ref[mutable VAddr&], segment_vaddr, segment_size, map_prot, MemoryMapFlags_Fixed, vma_type, self.name, false, 0.uintptr(), phdr.p_align) != 0:
+        return false
     if phdr.p_type == PT_LOAD and (phdr.p_flags & PF_EXEC) != 0:
         if self.executable_segment_count == 0:
             self.first_executable_segment_addr <- segment_vaddr
@@ -364,6 +373,7 @@ def Module_MapImageSegment(self: mutable Module&, memory: mutable MemoryManager&
             self.executable_segment_permission_mismatch_count <- self.executable_segment_permission_mismatch_count + 1
     self.mapped_segment_count <- self.mapped_segment_count + 1
     self.info.num_segments <- self.mapped_segment_count
+    return true
 
 def Module_PrepareLoadImage(self: mutable Module&, elf: mutable Elf&) -> void:
     min_vaddr: mutable u64 = 0
@@ -404,7 +414,8 @@ def Module_LoadImageSegment(self: mutable Module&, elf: mutable Elf&, memory: mu
         return false
     for i in 0..<segment.count:
         self.image[(offset.usize() + i)] <- segment[i]
-        _ = MemoryManager_WriteU8(memory, self.base_virtual_addr + phdr.p_vaddr.uintptr() + i.uintptr(), segment[i])
+    if segment.count > 0:
+        return MemoryManager_WriteBytes(memory, self.base_virtual_addr + phdr.p_vaddr.uintptr(), segment[0].ref[u8&], segment.count.u64())
     return true
 
 def Module_ResizeBytes(out: mutable darray[u8]&, size: usize) -> void:

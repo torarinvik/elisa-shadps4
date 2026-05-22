@@ -107,6 +107,12 @@ def all_steps() -> list[Step]:
             category="guest-exec",
         ),
         Step(
+            "CUSA07399 x64 real execution lane",
+            [sys.executable, "emulator_cusa07399_x64_exec.py"],
+            category="guest-exec",
+            timeout_seconds=360,
+        ),
+        Step(
             "native kernel_threads_runtime warnings",
             ["clang", "-Wall", "-Wextra", "-Werror", "-pthread", "-c", "native/kernel_threads_runtime.c", "-o", str(TMP_DIR / "kernel_threads_runtime.o")],
             category="native",
@@ -368,6 +374,36 @@ def parse_audio_skip_reason(results: list[Result]) -> str:
     return ""
 
 
+def parse_prefixed_kv_line(line: str, prefix: str) -> dict[str, str]:
+    text = line.strip()
+    if not text.startswith(prefix):
+        return {}
+    payload = text.removeprefix(prefix).strip()
+    row: dict[str, str] = {}
+    for token in payload.split():
+        if "=" not in token:
+            continue
+        key, value = token.split("=", 1)
+        row[key.strip()] = value.strip()
+    return row
+
+
+def parse_x64_exec_status(results: list[Result]) -> dict[str, str]:
+    for r in results:
+        if r.step.name != "CUSA07399 x64 real execution lane":
+            continue
+        last: dict[str, str] = {}
+        for line in r.output.splitlines():
+            row = parse_prefixed_kv_line(line, "CUSA07399_X64_EXEC")
+            if row:
+                last = row
+        if last:
+            last["step_returncode"] = str(r.returncode)
+            return last
+        return {"status": "missing-output", "step_returncode": str(r.returncode)}
+    return {"status": "not-run", "step_returncode": "0"}
+
+
 def subsystem_guess(library: str, module: str, nid: str) -> str:
     probe = f"{library} {module} {nid}".lower()
     if "ajm" in probe:
@@ -555,7 +591,7 @@ def failing_scenario_ids(results: list[Result]) -> list[str]:
     return ids
 
 
-def validate_rules(results: list[Result], cusa: dict[str, int | str], fallback_rows: list[dict[str, str | int]], require_first_boundary: bool) -> list[str]:
+def validate_rules(results: list[Result], cusa: dict[str, int | str], fallback_rows: list[dict[str, str | int]], require_first_boundary: bool, require_x64_real_exec: bool) -> list[str]:
     errors: list[str] = []
 
     workqueue = load_workqueue_rows()
@@ -568,8 +604,11 @@ def validate_rules(results: list[Result], cusa: dict[str, int | str], fallback_r
     if require_first_boundary:
         boundary_status = int(cusa.get("boundary_status", 0))
         first_boundary_reached = int(cusa.get("guest_exec_first_boundary_reached", 0))
-        if boundary_status not in (1, -2) and first_boundary_reached == 0:
+        if boundary_status != 1 and first_boundary_reached == 0:
             errors.append("First-boundary probe requested but CUSA07399 did not reach the first guarded boundary")
+    x64_exec = parse_x64_exec_status(results)
+    if require_x64_real_exec and x64_exec.get("status") != "ok":
+        errors.append(f"CUSA07399 x64 real execution requested but lane status is {x64_exec.get('status', 'unknown')}")
 
     ledger_raw = load_json(LEDGER_PATH)
     if isinstance(ledger_raw, dict):
@@ -644,14 +683,15 @@ def score_summary(results: list[Result], cusa: dict[str, int | str], errors: lis
     return passed, total
 
 
-def summarize_progress(results: list[Result], require_first_boundary: bool = False) -> tuple[str, dict[str, list[dict[str, str | int]]], dict[str, int | str], list[str], list[dict[str, str | int]]]:
+def summarize_progress(results: list[Result], require_first_boundary: bool = False, require_x64_real_exec: bool = False) -> tuple[str, dict[str, list[dict[str, str | int]]], dict[str, int | str], list[str], list[dict[str, str | int]]]:
     lines: list[str] = []
     ledger_counts = count_ledger_statuses()
     cusa = parse_cusa_metrics(results)
     fallback_rows = fallback_symbols(results)
     queues = build_fallback_queues(fallback_rows)
-    rules = validate_rules(results, cusa, fallback_rows, require_first_boundary)
+    rules = validate_rules(results, cusa, fallback_rows, require_first_boundary, require_x64_real_exec)
     stages = cusa_stage_summary(results, cusa)
+    x64_exec = parse_x64_exec_status(results)
 
     passed_score, total_score = score_summary(results, cusa, rules)
     native_count = ledger_counts.get("Native-Elisa", 0)
@@ -691,6 +731,15 @@ def summarize_progress(results: list[Result], require_first_boundary: bool = Fal
     lines.append(f"- guest exec supported native execution: {cusa['guest_exec_supported_native_execution']}")
     lines.append(f"- guest exec x64 subprocess available: {cusa['guest_exec_x64_subprocess_available']}")
     lines.append(f"- guest exec x64 subprocess smoke: {'PASS' if step_passed(results, 'guest exec x64 subprocess smoke') else 'FAIL'}")
+    lines.append(f"- CUSA07399 x64 real execution lane: {x64_exec.get('status', 'not-run')}")
+    if x64_exec.get("mode"):
+        lines.append(f"- CUSA07399 x64 execution mode: {x64_exec.get('mode')}")
+    if x64_exec.get("reason"):
+        lines.append(f"- CUSA07399 x64 execution reason: {x64_exec.get('reason')}")
+    if x64_exec.get("boundary_status"):
+        lines.append(f"- CUSA07399 x64 boundary status: {x64_exec.get('boundary_status')}")
+    if x64_exec.get("last_pc"):
+        lines.append(f"- CUSA07399 x64 last pc: {x64_exec.get('last_pc')}")
     lines.append(f"- guest exec probe only: {cusa['guest_exec_probe_only']}")
     lines.append(f"- guest exec started: {cusa['guest_exec_started']}")
     lines.append(f"- guest exec entry reached: {cusa['guest_exec_entry_reached']}")
@@ -901,6 +950,7 @@ def main() -> int:
     parser.add_argument("--write-report", type=Path, help="Write report path.")
     parser.add_argument("--no-milestones", action="store_true", help="Do not append milestones.")
     parser.add_argument("--require-first-boundary", action="store_true", help="Fail when CUSA07399 does not reach the first guarded guest boundary.")
+    parser.add_argument("--require-x64-real-exec", action="store_true", help="Fail unless CUSA07399 runs in an x86_64 Elisa emulator process past handoff.")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose command output.")
     args = parser.parse_args()
 
@@ -932,7 +982,7 @@ def main() -> int:
             if args.fail_fast:
                 break
 
-    progress, queues, cusa, rules, fallback_rows = summarize_progress(results, args.require_first_boundary)
+    progress, queues, cusa, rules, fallback_rows = summarize_progress(results, args.require_first_boundary, args.require_x64_real_exec)
     passed = sum(1 for r in results if r.passed)
     failed = len(results) - passed
 

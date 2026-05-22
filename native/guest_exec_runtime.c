@@ -22,6 +22,7 @@
 #else
 #include <errno.h>
 #include <signal.h>
+#include <pthread.h>
 #include <sys/mman.h>
 #include <sys/time.h>
 #include <sys/wait.h>
@@ -64,6 +65,15 @@ static uintptr_t elisa_guest_exec_last_guest_pc = 0;
 static int32_t elisa_guest_exec_boundary_callback_count = 0;
 static uint64_t elisa_guest_exec_boundary_callback_reason = 0;
 
+#define ELISA_GUEST_EXEC_WRITABLE_PAGE_CACHE 65536u
+static uintptr_t elisa_guest_exec_writable_pages[ELISA_GUEST_EXEC_WRITABLE_PAGE_CACHE];
+static uint32_t elisa_guest_exec_writable_page_count = 0;
+
+static void elisa_guest_exec_clear_writable_page_cache(void) {
+    memset(elisa_guest_exec_writable_pages, 0, sizeof(elisa_guest_exec_writable_pages));
+    elisa_guest_exec_writable_page_count = 0;
+}
+
 #if !defined(_WIN32)
 static sigjmp_buf elisa_guest_exec_jmp;
 static volatile sig_atomic_t elisa_guest_exec_guard_active = 0;
@@ -72,7 +82,9 @@ static struct sigaction elisa_guest_exec_old_segv;
 static struct sigaction elisa_guest_exec_old_bus;
 static struct sigaction elisa_guest_exec_old_ill;
 static struct sigaction elisa_guest_exec_old_fpe;
+static struct sigaction elisa_guest_exec_old_trap;
 static struct sigaction elisa_guest_exec_old_alrm;
+static pthread_t elisa_guest_exec_guard_target_thread;
 
 static uintptr_t elisa_guest_exec_extract_pc(void* uctx) {
     if (uctx == NULL) return 0;
@@ -124,6 +136,7 @@ static void __attribute__((unused)) elisa_guest_exec_install_guards(void) {
     sigaction(SIGBUS, &sa, &elisa_guest_exec_old_bus);
     sigaction(SIGILL, &sa, &elisa_guest_exec_old_ill);
     sigaction(SIGFPE, &sa, &elisa_guest_exec_old_fpe);
+    sigaction(SIGTRAP, &sa, &elisa_guest_exec_old_trap);
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = elisa_guest_exec_alarm_handler;
     sa.sa_flags = 0;
@@ -136,7 +149,49 @@ static void __attribute__((unused)) elisa_guest_exec_restore_guards(void) {
     sigaction(SIGBUS, &elisa_guest_exec_old_bus, NULL);
     sigaction(SIGILL, &elisa_guest_exec_old_ill, NULL);
     sigaction(SIGFPE, &elisa_guest_exec_old_fpe, NULL);
+    sigaction(SIGTRAP, &elisa_guest_exec_old_trap, NULL);
     sigaction(SIGALRM, &elisa_guest_exec_old_alrm, NULL);
+}
+
+typedef struct ElisaGuestExecWatchdogArgs {
+    uint32_t timeout_ms;
+    pthread_t target;
+} ElisaGuestExecWatchdogArgs;
+
+static void* elisa_guest_exec_watchdog_main(void* raw) {
+    ElisaGuestExecWatchdogArgs* args = (ElisaGuestExecWatchdogArgs*)raw;
+    if (args == NULL) {
+        return NULL;
+    }
+    uint32_t timeout_ms = args->timeout_ms;
+    pthread_t target = args->target;
+    free(args);
+    if (timeout_ms == 0) {
+        return NULL;
+    }
+    usleep((useconds_t)timeout_ms * 1000u);
+    if (elisa_guest_exec_guard_active) {
+        pthread_kill(target, SIGALRM);
+    }
+    return NULL;
+}
+
+static void __attribute__((unused)) elisa_guest_exec_start_watchdog(uint32_t timeout_ms) {
+    if (timeout_ms == 0) {
+        return;
+    }
+    ElisaGuestExecWatchdogArgs* args = (ElisaGuestExecWatchdogArgs*)malloc(sizeof(ElisaGuestExecWatchdogArgs));
+    if (args == NULL) {
+        return;
+    }
+    args->timeout_ms = timeout_ms;
+    args->target = elisa_guest_exec_guard_target_thread;
+    pthread_t watchdog;
+    if (pthread_create(&watchdog, NULL, elisa_guest_exec_watchdog_main, args) == 0) {
+        pthread_detach(watchdog);
+    } else {
+        free(args);
+    }
 }
 #endif
 
@@ -149,6 +204,16 @@ static void __attribute__((unused)) elisa_guest_exec_default_exit(int32_t code) 
         pause();
 #endif
     }
+}
+
+static void __attribute__((unused)) elisa_guest_exec_guarded_exit(int32_t code) {
+    (void)code;
+    elisa_guest_exec_last_status = -11;
+#if !defined(_WIN32)
+    if (elisa_guest_exec_guard_active) {
+        siglongjmp(elisa_guest_exec_jmp, 1);
+    }
+#endif
 }
 
 #if defined(__x86_64__) && !defined(_WIN32)
@@ -288,6 +353,7 @@ int32_t ElisaGuestExec_MapRegion(uintptr_t address, uint64_t size, uint32_t prot
     if (address == 0 || size == 0) {
         return -1;
     }
+    elisa_guest_exec_clear_writable_page_cache();
 #if defined(_WIN32)
     DWORD protect = PAGE_NOACCESS;
     if ((prot & 4u) != 0u) {
@@ -324,6 +390,7 @@ int32_t ElisaGuestExec_ProtectRegion(uintptr_t address, uint64_t size, uint32_t 
     if (address == 0 || size == 0) {
         return -1;
     }
+    elisa_guest_exec_clear_writable_page_cache();
 #if defined(_WIN32)
     DWORD protect = PAGE_NOACCESS;
     DWORD old_protect = 0;
@@ -384,11 +451,64 @@ uintptr_t ElisaGuestExec_AllocateRegion(uint64_t size, uint32_t prot) {
 #endif
 }
 
+static uintptr_t elisa_guest_exec_page_size(void) {
+#if defined(_WIN32)
+    SYSTEM_INFO info;
+    GetSystemInfo(&info);
+    return (uintptr_t)info.dwPageSize;
+#else
+    long raw_page_size = sysconf(_SC_PAGESIZE);
+    return raw_page_size > 0 ? (uintptr_t)raw_page_size : 4096u;
+#endif
+}
+
+static int32_t elisa_guest_exec_page_cached_writable(uintptr_t page) {
+    uint32_t slot = (uint32_t)((page >> 12u) % ELISA_GUEST_EXEC_WRITABLE_PAGE_CACHE);
+    return elisa_guest_exec_writable_pages[slot] == page;
+}
+
+static void elisa_guest_exec_cache_writable_page(uintptr_t page) {
+    uint32_t slot = (uint32_t)((page >> 12u) % ELISA_GUEST_EXEC_WRITABLE_PAGE_CACHE);
+    if (elisa_guest_exec_writable_pages[slot] == 0) {
+        elisa_guest_exec_writable_page_count++;
+    }
+    elisa_guest_exec_writable_pages[slot] = page;
+}
+
+static int32_t elisa_guest_exec_make_writable_cached(uintptr_t address, uint64_t size) {
+    if (address == 0 || size == 0) {
+        return 0;
+    }
+    uintptr_t page_size = elisa_guest_exec_page_size();
+    uintptr_t start = address & ~(page_size - 1u);
+    uintptr_t end = (address + (uintptr_t)size + page_size - 1u) & ~(page_size - 1u);
+    for (uintptr_t page = start; page < end; page += page_size) {
+        if (elisa_guest_exec_page_cached_writable(page)) {
+            continue;
+        }
+#if defined(_WIN32)
+        DWORD old_protect = 0;
+        if (!VirtualProtect((void*)page, (SIZE_T)page_size, PAGE_EXECUTE_READWRITE, &old_protect)) {
+            return -1;
+        }
+#else
+        if (mprotect((void*)page, (size_t)page_size, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+            return -1;
+        }
+#endif
+        elisa_guest_exec_cache_writable_page(page);
+    }
+    return 0;
+}
+
 int32_t ElisaGuestExec_WriteBytes(uintptr_t address, const void* data, uint64_t size) {
     if (address == 0 || (data == NULL && size != 0)) {
         return -1;
     }
     if (size != 0) {
+        if (elisa_guest_exec_make_writable_cached(address, size) != 0) {
+            return -1;
+        }
         memcpy((void*)address, data, (size_t)size);
     }
     return 0;
@@ -396,6 +516,9 @@ int32_t ElisaGuestExec_WriteBytes(uintptr_t address, const void* data, uint64_t 
 
 int32_t ElisaGuestExec_WriteU64(uintptr_t address, uint64_t value) {
     if (address == 0) {
+        return -1;
+    }
+    if (elisa_guest_exec_make_writable_cached(address, sizeof(value)) != 0) {
         return -1;
     }
     memcpy((void*)address, &value, sizeof(value));
@@ -447,6 +570,8 @@ uint64_t ElisaGuestExec_RunSyntheticFunctionWithTimeout(uintptr_t entry_addr, ui
     ElisaGuestExec_ResetCrashState();
     elisa_guest_exec_install_guards();
     elisa_guest_exec_guard_active = 1;
+    elisa_guest_exec_guard_target_thread = pthread_self();
+    elisa_guest_exec_start_watchdog(timeout_ms);
     if (timeout_ms != 0) {
         struct itimerval timer;
         memset(&timer, 0, sizeof(timer));
@@ -552,6 +677,11 @@ uintptr_t ElisaGuestExec_GetSyntheticBoundaryCallbackAddress(void) {
     return (uintptr_t)&ElisaGuestExec_SyntheticBoundaryCallback;
 }
 
+static int32_t __attribute__((unused)) elisa_guest_exec_is_synthetic_main_entry(uintptr_t entry_addr) {
+    return entry_addr == (uintptr_t)&ElisaGuestExec_SyntheticMainReturn ||
+           entry_addr == (uintptr_t)&ElisaGuestExec_SyntheticMainCallBoundary;
+}
+
 int32_t ElisaGuestExec_BoundaryCallbackCount(void) {
     return elisa_guest_exec_boundary_callback_count;
 }
@@ -600,34 +730,82 @@ int32_t ElisaGuestExec_RunMainEntryGuarded(ElisaGuestEntryParams* params, uint32
     }
 #if defined(__x86_64__) && !defined(_WIN32)
     ElisaGuestExec_ResetCrashState();
-    elisa_guest_exec_install_guards();
-    elisa_guest_exec_guard_active = 1;
-    if (timeout_ms != 0) {
-        struct itimerval timer;
-        memset(&timer, 0, sizeof(timer));
-        timer.it_value.tv_sec = timeout_ms / 1000u;
-        timer.it_value.tv_usec = (timeout_ms % 1000u) * 1000u;
-        setitimer(ITIMER_REAL, &timer, NULL);
-    }
-    if (sigsetjmp(elisa_guest_exec_jmp, 1) != 0) {
+    if (elisa_guest_exec_is_synthetic_main_entry(params->entry_addr)) {
+        elisa_guest_exec_install_guards();
+        elisa_guest_exec_guard_active = 1;
+        elisa_guest_exec_guard_target_thread = pthread_self();
+        elisa_guest_exec_start_watchdog(timeout_ms);
+        if (timeout_ms != 0) {
+            struct itimerval timer;
+            memset(&timer, 0, sizeof(timer));
+            timer.it_value.tv_sec = timeout_ms / 1000u;
+            timer.it_value.tv_usec = (timeout_ms % 1000u) * 1000u;
+            setitimer(ITIMER_REAL, &timer, NULL);
+        }
+        if (sigsetjmp(elisa_guest_exec_jmp, 1) != 0) {
+            struct itimerval timer_off;
+            memset(&timer_off, 0, sizeof(timer_off));
+            setitimer(ITIMER_REAL, &timer_off, NULL);
+            elisa_guest_exec_guard_active = 0;
+            elisa_guest_exec_restore_guards();
+            if (elisa_guest_exec_timeout_fired) {
+                elisa_guest_exec_last_status = -3;
+            }
+            return elisa_guest_exec_last_status;
+        }
+        elisa_guest_exec_call_main_entry(params, elisa_guest_exec_guarded_exit);
         struct itimerval timer_off;
         memset(&timer_off, 0, sizeof(timer_off));
         setitimer(ITIMER_REAL, &timer_off, NULL);
         elisa_guest_exec_guard_active = 0;
         elisa_guest_exec_restore_guards();
-        if (elisa_guest_exec_timeout_fired) {
-            elisa_guest_exec_last_status = -3;
-        }
-        return elisa_guest_exec_last_status;
+        elisa_guest_exec_last_status = 1;
+        return 1;
     }
-    elisa_guest_exec_call_main_entry(params, elisa_guest_exec_default_exit);
-    struct itimerval timer_off;
-    memset(&timer_off, 0, sizeof(timer_off));
-    setitimer(ITIMER_REAL, &timer_off, NULL);
-    elisa_guest_exec_guard_active = 0;
-    elisa_guest_exec_restore_guards();
-    elisa_guest_exec_last_status = 1;
-    return 1;
+    pid_t child = fork();
+    if (child < 0) {
+        elisa_guest_exec_last_status = -1;
+        return -1;
+    }
+    if (child == 0) {
+        elisa_guest_exec_call_main_entry(params, elisa_guest_exec_default_exit);
+        _exit(0);
+    }
+    uint32_t waited_ms = 0;
+    uint32_t sleep_step_ms = 1;
+    int status = 0;
+    for (;;) {
+        pid_t result = waitpid(child, &status, WNOHANG);
+        if (result == child) {
+            if (WIFSIGNALED(status)) {
+                int sig = WTERMSIG(status);
+                elisa_guest_exec_last_status = -sig;
+                elisa_guest_exec_last_signal = sig;
+                return elisa_guest_exec_last_status;
+            }
+            if (WIFEXITED(status)) {
+                int code = WEXITSTATUS(status);
+                elisa_guest_exec_last_status = code == 0 ? -11 : -code;
+                return elisa_guest_exec_last_status;
+            }
+            elisa_guest_exec_last_status = -1;
+            return -1;
+        }
+        if (result < 0) {
+            elisa_guest_exec_last_status = -1;
+            return -1;
+        }
+        if (timeout_ms != 0 && waited_ms >= timeout_ms) {
+            kill(child, SIGKILL);
+            (void)waitpid(child, &status, 0);
+            elisa_guest_exec_timeout_fired = 1;
+            elisa_guest_exec_last_status = -3;
+            elisa_guest_exec_last_signal = SIGALRM;
+            return -3;
+        }
+        usleep((useconds_t)sleep_step_ms * 1000u);
+        waited_ms += sleep_step_ms;
+    }
 #else
     (void)timeout_ms;
     ElisaGuestExec_ResetCrashState();

@@ -1,0 +1,221 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import os
+import platform
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+COMPILER_DIR = ROOT.parent / "compiler"
+ARTIFACT_PATH = ROOT / "cusa07399_artifacts.txt"
+HANDOFF_MANIFEST_PATH = ROOT / "cusa07399_handoff_manifest.txt"
+CUSA_PATH = ROOT.parent / "shadPS4" / "Games" / "CUSA07399"
+
+
+def run(cmd: list[str], cwd: Path = ROOT, timeout: int = 120) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        cmd,
+        cwd=cwd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=timeout,
+    )
+
+
+def emit(status: str, **fields: object) -> None:
+    payload = [f"status={status}"]
+    for key, value in fields.items():
+        text = str(value).replace(" ", "_")
+        payload.append(f"{key}={text}")
+    print("CUSA07399_X64_EXEC " + " ".join(payload))
+
+
+def parse_kv_line(line: str) -> dict[str, str]:
+    row: dict[str, str] = {}
+    for token in line.split():
+        if "=" not in token:
+            continue
+        key, value = token.split("=", 1)
+        row[key.strip()] = value.strip()
+    return row
+
+
+def parse_artifacts() -> dict[str, str]:
+    summary: dict[str, str] = {}
+    if ARTIFACT_PATH.exists():
+        for line in ARTIFACT_PATH.read_text().splitlines():
+            if "CUSA07399_ARTIFACT" not in line:
+                continue
+            summary.update(parse_kv_line(line.split("CUSA07399_ARTIFACT", 1)[1].strip()))
+    if HANDOFF_MANIFEST_PATH.exists():
+        for line in HANDOFF_MANIFEST_PATH.read_text().splitlines():
+            if line.startswith("CUSA07399_HANDOFF_MANIFEST"):
+                for key, value in parse_kv_line(line).items():
+                    summary[f"handoff_{key}"] = value
+                break
+    return summary
+
+
+def to_int(value: str | None) -> int:
+    if value is None or value == "":
+        return 0
+    try:
+        return int(value, 16) if value.lower().startswith("0x") else int(value)
+    except ValueError:
+        return 0
+
+
+def rosetta_available() -> bool:
+    arch = Path("/usr/bin/arch")
+    uname = Path("/usr/bin/uname")
+    if not arch.exists() or not uname.exists():
+        return False
+    try:
+        proc = run([str(arch), "-x86_64", str(uname), "-m"], timeout=10)
+    except Exception:
+        return False
+    return proc.returncode == 0 and proc.stdout.strip() == "x86_64"
+
+
+def select_mode() -> tuple[bool, str]:
+    machine = platform.machine().lower()
+    if machine in {"x86_64", "amd64"}:
+        return True, "native-x86_64"
+    if sys.platform == "darwin" and machine in {"arm64", "aarch64"}:
+        if rosetta_available():
+            return True, "cross-emit-rosetta-x86_64"
+        return False, "rosetta-unavailable"
+    return False, f"unsupported-host-{platform.system()}-{platform.machine()}"
+
+
+def go_available() -> tuple[bool, str, str]:
+    go = shutil.which("go")
+    if go is None:
+        return False, "go-missing", ""
+    try:
+        proc = run([go, "env", "GOARCH"], cwd=COMPILER_DIR, timeout=20)
+    except Exception as exc:
+        return False, "go-env-failed", str(exc)
+    arch = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else ""
+    if proc.returncode != 0:
+        return False, "go-env-failed", proc.stdout.strip()
+    return True, go, arch
+
+
+def target_triple_for_host() -> str:
+    if sys.platform == "darwin":
+        return "x86_64-apple-darwin"
+    if sys.platform.startswith("linux"):
+        return "x86_64-unknown-linux-gnu"
+    if sys.platform == "win32":
+        return "x86_64-pc-windows-msvc"
+    return "x86_64-unknown-unknown"
+
+
+def validate_artifacts(artifacts: dict[str, str]) -> list[str]:
+    errors: list[str] = []
+    if to_int(artifacts.get("unresolved_imports")) != 0:
+        errors.append("unresolved-imports")
+    if to_int(artifacts.get("aerolib_fallback")) != 0:
+        errors.append("aerolib-fallbacks")
+    if to_int(artifacts.get("guest_exec_supported_native_execution")) != 1:
+        errors.append("unsupported-native-exec")
+    if to_int(artifacts.get("guest_exec_probe_only")) != 0:
+        errors.append("probe-only")
+    if to_int(artifacts.get("entry")) == 0 or to_int(artifacts.get("main_entry")) == 0:
+        errors.append("missing-entry")
+    if to_int(artifacts.get("handoff_entry_word0")) == 0 and to_int(artifacts.get("handoff_entry_word1")) == 0:
+        errors.append("zero-entry-bytes")
+    if to_int(artifacts.get("handoff_entry_in_exec")) != 1:
+        errors.append("entry-outside-exec-segment")
+    boundary_status = to_int(artifacts.get("boundary_status"))
+    execution_stage = to_int(artifacts.get("execution_stage"))
+    last_pc = to_int(artifacts.get("guest_exec_last_pc"))
+    last_signal = to_int(artifacts.get("guest_exec_last_signal"))
+    accepted_boundary = boundary_status in {1, 2, 3, 4}
+    accepted_captured_fault = boundary_status == -10 and execution_stage >= 6 and last_signal != 0
+    accepted_timeout = boundary_status == -3 and execution_stage >= 4
+    if not (accepted_boundary or accepted_captured_fault or accepted_timeout):
+        errors.append(f"bad-boundary-status-{boundary_status}")
+    if execution_stage < 4:
+        errors.append("execution-stage-before-guarded-entry")
+    return errors
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Run the real CUSA07399 guest-entry gate in an x86_64 Elisa emulator process when possible.")
+    parser.add_argument("--strict", action="store_true", help="Fail when the x86_64 lane is unavailable or does not pass.")
+    parser.add_argument("--verbose", action="store_true", help="Print the underlying test output.")
+    args = parser.parse_args()
+
+    if not CUSA_PATH.exists():
+        emit("skipped", reason="cusa07399-missing")
+        return 1 if args.strict else 0
+    if not COMPILER_DIR.exists():
+        emit("skipped", reason="compiler-missing")
+        return 1 if args.strict else 0
+
+    supported, mode = select_mode()
+    if not supported:
+        emit("skipped", reason=mode)
+        return 1 if args.strict else 0
+
+    ok, go_or_reason, detail = go_available()
+    if not ok:
+        emit("toolchain-unavailable", mode=mode, reason=go_or_reason, detail=detail or "none")
+        return 1 if args.strict else 0
+
+    cmd = [
+        go_or_reason,
+        "run",
+        "./src",
+        "test",
+        "emulator-cusa07399-x64-exec",
+        "--project",
+        "../elisa-shad-ps4-from-scratch",
+        "-target-triple",
+        target_triple_for_host(),
+    ]
+    proc = run(cmd, cwd=COMPILER_DIR, timeout=300)
+    if args.verbose or proc.returncode != 0:
+        print(proc.stdout, end="")
+    if proc.returncode != 0:
+        emit("failed", mode=mode, reason="target-failed", returncode=proc.returncode)
+        return 1
+
+    artifacts = parse_artifacts()
+    errors = validate_artifacts(artifacts)
+    if errors:
+        emit(
+            "failed",
+            mode=mode,
+            reason=",".join(errors),
+            boundary_status=artifacts.get("boundary_status", "0"),
+            execution_stage=artifacts.get("execution_stage", "0"),
+            last_pc=artifacts.get("guest_exec_last_pc", "0"),
+            last_signal=artifacts.get("guest_exec_last_signal", "0"),
+        )
+        return 1
+
+    emit(
+        "ok",
+        mode=mode,
+        boundary_status=artifacts.get("boundary_status", "0"),
+        boundary_reason=artifacts.get("guest_exec_boundary_reason_name", "unknown"),
+        execution_stage=artifacts.get("execution_stage", "0"),
+        last_pc=artifacts.get("guest_exec_last_pc", "0"),
+        last_signal=artifacts.get("guest_exec_last_signal", "0"),
+        last_hle_module=artifacts.get("last_hle_module", ""),
+        last_hle_symbol=artifacts.get("last_hle_symbol", ""),
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
