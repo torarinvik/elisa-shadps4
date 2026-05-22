@@ -161,6 +161,56 @@ def validate_artifacts(artifacts: dict[str, str]) -> list[str]:
     return errors
 
 
+def diagnose_artifacts(artifacts: dict[str, str]) -> str:
+    notes: list[str] = []
+    boundary_status = to_int(artifact_get(artifacts, "boundary_status"))
+    main_entry = to_int(artifact_get(artifacts, "main_entry"))
+    last_pc = to_int(artifact_get(artifacts, "guest_exec_last_pc", "last_guest_pc"))
+    last_rdi = to_int(artifact_get(artifacts, "guest_exec_last_rdi", "last_guest_rdi"))
+    expected_params = to_int(artifact_get(artifacts, "guest_exec_expected_entry_params"))
+    expected_stack0 = to_int(artifact_get(artifacts, "guest_exec_expected_stack_word0"))
+    expected_stack1 = to_int(artifact_get(artifacts, "guest_exec_expected_stack_word1"))
+    entry_stack0 = to_int(artifact_get(artifacts, "guest_exec_entry_stack_word0"))
+    entry_stack1 = to_int(artifact_get(artifacts, "guest_exec_entry_stack_word1"))
+    argc = to_int(artifact_get(artifacts, "guest_exec_last_argc", "last_argc"))
+    if boundary_status == -10 and expected_params != 0 and last_rdi != expected_params:
+        notes.append("guest-entry-rdi-not-entryparams")
+    if boundary_status == -10 and (
+        expected_stack0 != entry_stack0 or expected_stack1 != entry_stack1
+    ):
+        notes.append("guest-entry-stack-copy-mismatch")
+    if boundary_status == -10 and main_entry != 0 and last_pc == main_entry and argc != 0 and last_rdi == argc:
+        notes.append("entry-rdi-equals-argc")
+    elif boundary_status == -10 and main_entry != 0 and last_pc == main_entry and 0 < last_rdi <= 64:
+        notes.append("entry-rdi-is-small-integer")
+    if boundary_status == -10 and artifact_get(artifacts, "last_hle_symbol", default="") != "":
+        notes.append("last-hle-recorded-before-crash")
+    return ",".join(notes) if notes else "none"
+
+
+def run_abi_lint(go: str, mode: str, strict: bool, verbose: bool) -> bool:
+    cmd = [
+        go,
+        "run",
+        "./src",
+        "project",
+        "abi-lint",
+        "emulator-cusa07399-x64-exec",
+        "--project",
+        "../elisa-shad-ps4-from-scratch",
+        "-target-triple",
+        target_triple_for_host(),
+        "--strict-contracts",
+    ]
+    proc = run(cmd, cwd=COMPILER_DIR, timeout=120)
+    if verbose or proc.returncode != 0:
+        print(proc.stdout, end="")
+    if proc.returncode == 0:
+        return True
+    emit("failed", mode=mode, reason="abi-lint-failed", returncode=proc.returncode)
+    return not strict
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the real CUSA07399 guest-entry gate in an x86_64 Elisa emulator process when possible.")
     parser.add_argument("--strict", action="store_true", help="Fail when the x86_64 lane is unavailable or does not pass.")
@@ -183,6 +233,9 @@ def main() -> int:
     if not ok:
         emit("toolchain-unavailable", mode=mode, reason=go_or_reason, detail=detail or "none")
         return 1 if args.strict else 0
+
+    if not run_abi_lint(go_or_reason, mode, args.strict, args.verbose):
+        return 1
 
     cmd = [
         go_or_reason,
@@ -217,10 +270,24 @@ def main() -> int:
             last_pc=artifact_get(artifacts, "guest_exec_last_pc", "last_guest_pc"),
             last_sp=artifact_get(artifacts, "guest_exec_last_sp", "last_guest_sp"),
             last_bp=artifact_get(artifacts, "guest_exec_last_bp", "last_guest_bp"),
+            last_rdi=artifact_get(artifacts, "guest_exec_last_rdi", "last_guest_rdi"),
+            last_rsi=artifact_get(artifacts, "guest_exec_last_rsi", "last_guest_rsi"),
+            last_rax=artifact_get(artifacts, "guest_exec_last_rax", "last_guest_rax"),
+            last_rbx=artifact_get(artifacts, "guest_exec_last_rbx", "last_guest_rbx"),
+            expected_entry_params=artifact_get(artifacts, "guest_exec_expected_entry_params"),
+            expected_stack_word0=artifact_get(artifacts, "guest_exec_expected_stack_word0"),
+            expected_stack_word1=artifact_get(artifacts, "guest_exec_expected_stack_word1"),
+            entry_stack_word0=artifact_get(artifacts, "guest_exec_entry_stack_word0"),
+            entry_stack_word1=artifact_get(artifacts, "guest_exec_entry_stack_word1"),
+            fault_word0=artifact_get(artifacts, "guest_exec_fault_word0"),
+            fault_word1=artifact_get(artifacts, "guest_exec_fault_word1"),
+            signal_stack_word0=artifact_get(artifacts, "guest_exec_signal_stack_word0"),
+            signal_stack_word1=artifact_get(artifacts, "guest_exec_signal_stack_word1"),
             fault=artifact_get(artifacts, "guest_exec_fault_address", "fault"),
             last_signal=artifact_get(artifacts, "guest_exec_last_signal", "last_signal"),
             last_hle_module=artifact_get(artifacts, "last_hle_module", default=""),
             last_hle_symbol=artifact_get(artifacts, "last_hle_symbol", default=""),
+            diagnostic=diagnose_artifacts(artifacts),
         )
         return 1
 
@@ -235,10 +302,24 @@ def main() -> int:
         last_pc=artifact_get(artifacts, "guest_exec_last_pc", "last_guest_pc"),
         last_sp=artifact_get(artifacts, "guest_exec_last_sp", "last_guest_sp"),
         last_bp=artifact_get(artifacts, "guest_exec_last_bp", "last_guest_bp"),
+        last_rdi=artifact_get(artifacts, "guest_exec_last_rdi", "last_guest_rdi"),
+        last_rsi=artifact_get(artifacts, "guest_exec_last_rsi", "last_guest_rsi"),
+        last_rax=artifact_get(artifacts, "guest_exec_last_rax", "last_guest_rax"),
+        last_rbx=artifact_get(artifacts, "guest_exec_last_rbx", "last_guest_rbx"),
+        expected_entry_params=artifact_get(artifacts, "guest_exec_expected_entry_params"),
+        expected_stack_word0=artifact_get(artifacts, "guest_exec_expected_stack_word0"),
+        expected_stack_word1=artifact_get(artifacts, "guest_exec_expected_stack_word1"),
+        entry_stack_word0=artifact_get(artifacts, "guest_exec_entry_stack_word0"),
+        entry_stack_word1=artifact_get(artifacts, "guest_exec_entry_stack_word1"),
+        fault_word0=artifact_get(artifacts, "guest_exec_fault_word0"),
+        fault_word1=artifact_get(artifacts, "guest_exec_fault_word1"),
+        signal_stack_word0=artifact_get(artifacts, "guest_exec_signal_stack_word0"),
+        signal_stack_word1=artifact_get(artifacts, "guest_exec_signal_stack_word1"),
         fault=artifact_get(artifacts, "guest_exec_fault_address", "fault"),
         last_signal=artifact_get(artifacts, "guest_exec_last_signal", "last_signal"),
         last_hle_module=artifact_get(artifacts, "last_hle_module", default=""),
         last_hle_symbol=artifact_get(artifacts, "last_hle_symbol", default=""),
+        diagnostic=diagnose_artifacts(artifacts),
     )
     return 0
 

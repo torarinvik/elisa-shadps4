@@ -3,6 +3,7 @@
 
 include "../common/types.elisa"
 include "../fixtures/boot/tiny_eboot_elf.elisa"
+include "./cpu_patches.elisa"
 include "./loader/elf.elisa"
 include "./memory.elisa"
 include "./guest_exec.elisa"
@@ -307,6 +308,7 @@ def Module_LoadElfSegments(self: mutable Module&, elf: mutable Elf&, memory: mut
         tramp_addr: mutable VAddr = self.trampoline_virtual_addr
         if MemoryManager_MapMemory(memory, tramp_addr.ref[mutable VAddr&], self.trampoline_virtual_addr, MODULE_TRAMPOLINE_SIZE, MemoryProt_CpuRead | MemoryProt_CpuWrite | MemoryProt_CpuExec, MemoryMapFlags_Fixed, VMAType_Code, self.name, false, 0.uintptr(), MODULE_BLOCK_ALIGN) != 0:
             return false
+        RegisterPatchModule(self.base_virtual_addr.cast[void&?], self.aligned_base_size, self.trampoline_virtual_addr.cast[void&?], MODULE_TRAMPOLINE_SIZE)
     for i in 0..<elf.elf_header_value.e_phnum.usize():
         phdr: elf_program_header& = Elf_GetProgramHeader(elf, i)
         if phdr.p_type == PT_LOAD and phdr.p_memsz > 0:
@@ -373,6 +375,7 @@ def Module_MapImageSegment(self: mutable Module&, memory: mutable MemoryManager&
             self.first_executable_segment_addr <- segment_vaddr
             self.first_executable_segment_size <- segment_size
         self.executable_segment_count <- self.executable_segment_count + 1
+        PrePatchInstructions(segment_vaddr.u64(), phdr.p_filesz)
         prot_intent: MemoryProt = Module_PflagsToMemoryProt(phdr.p_flags)
         if vma_type != VMAType_Code or (prot_intent & MemoryProt_CpuExec) == 0u32:
             self.executable_segment_permission_mismatch_count <- self.executable_segment_permission_mismatch_count + 1

@@ -49,6 +49,8 @@
 
 #define ELISA_GUEST_EXEC_MAX_ARGS 33
 
+/* ELISA_ABI_CONTRACT guest_entry x86_64 ps4_process_entry noreturn */
+
 typedef struct ElisaGuestEntryParams {
     int32_t argc;
     uint32_t padding;
@@ -63,6 +65,11 @@ _Static_assert(sizeof(ElisaGuestEntryParams) == 280, "EntryParams size");
 typedef void (*ElisaGuestExitFunc)(int32_t);
 typedef uint64_t (*ElisaGuestExecTestFunc)(uint64_t, uint64_t);
 typedef void (*ElisaGuestExecBoundaryFunc)(uint64_t);
+
+#if defined(__x86_64__) && !defined(_WIN32)
+__attribute__((noreturn)) static void elisa_guest_exec_enter_main_entry_asm(
+    ElisaGuestEntryParams* params, ElisaGuestExitFunc exit_func);
+#endif
 
 enum {
     ELISA_GUEST_EXEC_PHASE_NONE = 0,
@@ -103,6 +110,19 @@ static uintptr_t elisa_guest_exec_last_fault_address = 0;
 static uintptr_t elisa_guest_exec_last_guest_pc = 0;
 static uintptr_t elisa_guest_exec_last_guest_sp = 0;
 static uintptr_t elisa_guest_exec_last_guest_bp = 0;
+static uintptr_t elisa_guest_exec_last_guest_rdi = 0;
+static uintptr_t elisa_guest_exec_last_guest_rsi = 0;
+static uintptr_t elisa_guest_exec_last_guest_rax = 0;
+static uintptr_t elisa_guest_exec_last_guest_rbx = 0;
+static uintptr_t elisa_guest_exec_expected_entry_params = 0;
+static uintptr_t elisa_guest_exec_expected_stack_word0 = 0;
+static uintptr_t elisa_guest_exec_expected_stack_word1 = 0;
+static uintptr_t elisa_guest_exec_entry_stack_word0 = 0;
+static uintptr_t elisa_guest_exec_entry_stack_word1 = 0;
+static uintptr_t elisa_guest_exec_fault_word0 = 0;
+static uintptr_t elisa_guest_exec_fault_word1 = 0;
+static uintptr_t elisa_guest_exec_signal_stack_word0 = 0;
+static uintptr_t elisa_guest_exec_signal_stack_word1 = 0;
 static int32_t elisa_guest_exec_last_errno = 0;
 static volatile int32_t elisa_guest_exec_last_native_phase = ELISA_GUEST_EXEC_PHASE_NONE;
 static int32_t elisa_guest_exec_boundary_callback_count = 0;
@@ -124,6 +144,19 @@ typedef struct ElisaGuestExecForkReport {
     volatile uintptr_t guest_pc;
     volatile uintptr_t guest_sp;
     volatile uintptr_t guest_bp;
+    volatile uintptr_t guest_rdi;
+    volatile uintptr_t guest_rsi;
+    volatile uintptr_t guest_rax;
+    volatile uintptr_t guest_rbx;
+    volatile uintptr_t expected_entry_params;
+    volatile uintptr_t expected_stack_word0;
+    volatile uintptr_t expected_stack_word1;
+    volatile uintptr_t entry_stack_word0;
+    volatile uintptr_t entry_stack_word1;
+    volatile uintptr_t fault_word0;
+    volatile uintptr_t fault_word1;
+    volatile uintptr_t signal_stack_word0;
+    volatile uintptr_t signal_stack_word1;
     volatile uintptr_t entry_addr;
     volatile int32_t native_phase;
 } ElisaGuestExecForkReport;
@@ -215,6 +248,37 @@ static uintptr_t elisa_guest_exec_extract_bp(void* uctx) {
 #endif
 }
 
+static uintptr_t elisa_guest_exec_extract_greg(void* uctx, int reg) {
+    if (uctx == NULL) return 0;
+#if defined(__x86_64__)
+#if defined(__APPLE__)
+    ucontext_t* uc = (ucontext_t*)uctx;
+    switch (reg) {
+    case 0: return (uintptr_t)uc->uc_mcontext->__ss.__rdi;
+    case 1: return (uintptr_t)uc->uc_mcontext->__ss.__rsi;
+    case 2: return (uintptr_t)uc->uc_mcontext->__ss.__rax;
+    case 3: return (uintptr_t)uc->uc_mcontext->__ss.__rbx;
+    default: return 0;
+    }
+#elif defined(__linux__)
+    ucontext_t* uc = (ucontext_t*)uctx;
+    switch (reg) {
+    case 0: return (uintptr_t)uc->uc_mcontext.gregs[REG_RDI];
+    case 1: return (uintptr_t)uc->uc_mcontext.gregs[REG_RSI];
+    case 2: return (uintptr_t)uc->uc_mcontext.gregs[REG_RAX];
+    case 3: return (uintptr_t)uc->uc_mcontext.gregs[REG_RBX];
+    default: return 0;
+    }
+#else
+    (void)reg;
+    return 0;
+#endif
+#else
+    (void)reg;
+    return 0;
+#endif
+}
+
 static void elisa_guest_exec_signal_handler(int sig, siginfo_t* info, void* uctx) {
     (void)uctx;
     elisa_guest_exec_set_native_phase(ELISA_GUEST_EXEC_PHASE_SIGNAL_HANDLER_ENTERED);
@@ -224,6 +288,20 @@ static void elisa_guest_exec_signal_handler(int sig, siginfo_t* info, void* uctx
     elisa_guest_exec_last_guest_pc = elisa_guest_exec_extract_pc(uctx);
     elisa_guest_exec_last_guest_sp = elisa_guest_exec_extract_sp(uctx);
     elisa_guest_exec_last_guest_bp = elisa_guest_exec_extract_bp(uctx);
+    elisa_guest_exec_last_guest_rdi = elisa_guest_exec_extract_greg(uctx, 0);
+    elisa_guest_exec_last_guest_rsi = elisa_guest_exec_extract_greg(uctx, 1);
+    elisa_guest_exec_last_guest_rax = elisa_guest_exec_extract_greg(uctx, 2);
+    elisa_guest_exec_last_guest_rbx = elisa_guest_exec_extract_greg(uctx, 3);
+    if (elisa_guest_exec_last_guest_pc != 0) {
+        volatile uintptr_t* pc_words = (volatile uintptr_t*)elisa_guest_exec_last_guest_pc;
+        elisa_guest_exec_fault_word0 = pc_words[0];
+        elisa_guest_exec_fault_word1 = pc_words[1];
+    }
+    if (elisa_guest_exec_last_guest_sp != 0) {
+        volatile uintptr_t* sp_words = (volatile uintptr_t*)elisa_guest_exec_last_guest_sp;
+        elisa_guest_exec_signal_stack_word0 = sp_words[0];
+        elisa_guest_exec_signal_stack_word1 = sp_words[1];
+    }
     if (elisa_guest_exec_fork_report != NULL) {
         elisa_guest_exec_fork_report->status = elisa_guest_exec_last_status;
         elisa_guest_exec_fork_report->signal = sig;
@@ -231,6 +309,19 @@ static void elisa_guest_exec_signal_handler(int sig, siginfo_t* info, void* uctx
         elisa_guest_exec_fork_report->guest_pc = elisa_guest_exec_last_guest_pc;
         elisa_guest_exec_fork_report->guest_sp = elisa_guest_exec_last_guest_sp;
         elisa_guest_exec_fork_report->guest_bp = elisa_guest_exec_last_guest_bp;
+        elisa_guest_exec_fork_report->guest_rdi = elisa_guest_exec_last_guest_rdi;
+        elisa_guest_exec_fork_report->guest_rsi = elisa_guest_exec_last_guest_rsi;
+        elisa_guest_exec_fork_report->guest_rax = elisa_guest_exec_last_guest_rax;
+        elisa_guest_exec_fork_report->guest_rbx = elisa_guest_exec_last_guest_rbx;
+        elisa_guest_exec_fork_report->expected_entry_params = elisa_guest_exec_expected_entry_params;
+        elisa_guest_exec_fork_report->expected_stack_word0 = elisa_guest_exec_expected_stack_word0;
+        elisa_guest_exec_fork_report->expected_stack_word1 = elisa_guest_exec_expected_stack_word1;
+        elisa_guest_exec_fork_report->entry_stack_word0 = elisa_guest_exec_entry_stack_word0;
+        elisa_guest_exec_fork_report->entry_stack_word1 = elisa_guest_exec_entry_stack_word1;
+        elisa_guest_exec_fork_report->fault_word0 = elisa_guest_exec_fault_word0;
+        elisa_guest_exec_fork_report->fault_word1 = elisa_guest_exec_fault_word1;
+        elisa_guest_exec_fork_report->signal_stack_word0 = elisa_guest_exec_signal_stack_word0;
+        elisa_guest_exec_fork_report->signal_stack_word1 = elisa_guest_exec_signal_stack_word1;
         if (elisa_guest_exec_fork_report->execution_stage < 6) {
             elisa_guest_exec_fork_report->execution_stage = 6;
         }
@@ -454,6 +545,41 @@ static void __attribute__((unused)) elisa_guest_exec_absorb_fork_report(void) {
     if (elisa_guest_exec_fork_report->guest_bp != 0) {
         elisa_guest_exec_last_guest_bp = elisa_guest_exec_fork_report->guest_bp;
     }
+    if (elisa_guest_exec_fork_report->guest_rdi != 0) {
+        elisa_guest_exec_last_guest_rdi = elisa_guest_exec_fork_report->guest_rdi;
+    }
+    if (elisa_guest_exec_fork_report->guest_rsi != 0) {
+        elisa_guest_exec_last_guest_rsi = elisa_guest_exec_fork_report->guest_rsi;
+    }
+    if (elisa_guest_exec_fork_report->guest_rax != 0) {
+        elisa_guest_exec_last_guest_rax = elisa_guest_exec_fork_report->guest_rax;
+    }
+    if (elisa_guest_exec_fork_report->guest_rbx != 0) {
+        elisa_guest_exec_last_guest_rbx = elisa_guest_exec_fork_report->guest_rbx;
+    }
+    if (elisa_guest_exec_fork_report->expected_entry_params != 0) {
+        elisa_guest_exec_expected_entry_params = elisa_guest_exec_fork_report->expected_entry_params;
+    }
+    if (elisa_guest_exec_fork_report->expected_stack_word0 != 0 ||
+        elisa_guest_exec_fork_report->expected_stack_word1 != 0) {
+        elisa_guest_exec_expected_stack_word0 = elisa_guest_exec_fork_report->expected_stack_word0;
+        elisa_guest_exec_expected_stack_word1 = elisa_guest_exec_fork_report->expected_stack_word1;
+    }
+    if (elisa_guest_exec_fork_report->entry_stack_word0 != 0 ||
+        elisa_guest_exec_fork_report->entry_stack_word1 != 0) {
+        elisa_guest_exec_entry_stack_word0 = elisa_guest_exec_fork_report->entry_stack_word0;
+        elisa_guest_exec_entry_stack_word1 = elisa_guest_exec_fork_report->entry_stack_word1;
+    }
+    if (elisa_guest_exec_fork_report->fault_word0 != 0 ||
+        elisa_guest_exec_fork_report->fault_word1 != 0) {
+        elisa_guest_exec_fault_word0 = elisa_guest_exec_fork_report->fault_word0;
+        elisa_guest_exec_fault_word1 = elisa_guest_exec_fork_report->fault_word1;
+    }
+    if (elisa_guest_exec_fork_report->signal_stack_word0 != 0 ||
+        elisa_guest_exec_fork_report->signal_stack_word1 != 0) {
+        elisa_guest_exec_signal_stack_word0 = elisa_guest_exec_fork_report->signal_stack_word0;
+        elisa_guest_exec_signal_stack_word1 = elisa_guest_exec_fork_report->signal_stack_word1;
+    }
     if (elisa_guest_exec_fork_report->native_phase != 0) {
         elisa_guest_exec_last_native_phase = elisa_guest_exec_fork_report->native_phase;
     }
@@ -487,23 +613,54 @@ static void __attribute__((unused)) elisa_guest_exec_guarded_exit(int32_t code) 
 }
 
 #if defined(__x86_64__) && !defined(_WIN32)
+__attribute__((naked, noreturn)) static void elisa_guest_exec_enter_main_entry_asm(
+    ElisaGuestEntryParams* params, ElisaGuestExitFunc exit_func) {
+    /* ELISA_ABI_LINT_ALLOW(inline-asm-stack-without-memory-clobber): naked guest-entry trampoline cannot use extended-asm clobbers. */
+    __asm__(
+        "movq 272(%rdi), %r11\n"
+        "movq %rdi, %r10\n"
+        "movq %rsi, %r9\n"
+        "andq $-16, %rsp\n"
+        "subq $8, %rsp\n"
+        "pushq 8(%r10)\n"
+        "pushq 0(%r10)\n"
+        "movq %r10, %rdi\n"
+        "movq %r9, %rsi\n"
+        "jmp *%r11\n"
+    );
+}
+
 static void elisa_guest_exec_call_main_entry(ElisaGuestEntryParams* params,
                                              ElisaGuestExitFunc exit_func) {
+    /* ELISA_ABI_LINT_ALLOW(guest-entry-call-mangles-stack): synthetic guarded tests need to return. */
     if (exit_func == NULL) {
         exit_func = elisa_guest_exec_default_exit;
     }
+    void* entry = (void*)params->entry_addr;
     __asm__ volatile(
+        "movq %[entry], %%r11\n"
+        "movq %[params], %%r10\n"
+        "movq %[exit_func], %%r9\n"
         "andq $-16, %%rsp\n"
         "subq $8, %%rsp\n"
-        "pushq 8(%1)\n"
-        "pushq 0(%1)\n"
-        "movq %1, %%rdi\n"
-        "movq %2, %%rsi\n"
-        "call *%0\n"
+        "movq %%r10, %%rdi\n"
+        "movq %%r9, %%rsi\n"
+        "pushq 8(%%r10)\n"
+        "pushq 0(%%r10)\n"
+        "call *%%r11\n"
         "addq $24, %%rsp\n"
         :
-        : "r"((void*)params->entry_addr), "r"(params), "r"(exit_func)
-        : "rax", "rsi", "rdi", "memory");
+        : [entry] "r"(entry), [params] "r"(params), [exit_func] "r"(exit_func)
+        : "rax", "r9", "r10", "r11", "rsi", "rdi", "memory");
+}
+
+
+static void __attribute__((noreturn)) elisa_guest_exec_jump_main_entry(ElisaGuestEntryParams* params,
+                                                                    ElisaGuestExitFunc exit_func) {
+    if (exit_func == NULL) {
+        exit_func = elisa_guest_exec_default_exit;
+    }
+    elisa_guest_exec_enter_main_entry_asm(params, exit_func);
 }
 
 static void __attribute__((noreturn)) elisa_guest_exec_run_child_main_entry(
@@ -514,6 +671,16 @@ static void __attribute__((noreturn)) elisa_guest_exec_run_child_main_entry(
     elisa_guest_exec_guard_target_thread = pthread_self();
     elisa_guest_exec_set_native_phase(ELISA_GUEST_EXEC_PHASE_CHILD_GUARDS_INSTALLED);
     if (elisa_guest_exec_fork_report != NULL) {
+        elisa_guest_exec_expected_entry_params = (uintptr_t)params;
+        elisa_guest_exec_expected_stack_word0 = (uintptr_t)(uint32_t)params->argc;
+        elisa_guest_exec_expected_stack_word1 = (uintptr_t)params->argv[0];
+        elisa_guest_exec_entry_stack_word0 = elisa_guest_exec_expected_stack_word0;
+        elisa_guest_exec_entry_stack_word1 = elisa_guest_exec_expected_stack_word1;
+        elisa_guest_exec_fork_report->expected_entry_params = elisa_guest_exec_expected_entry_params;
+        elisa_guest_exec_fork_report->expected_stack_word0 = elisa_guest_exec_expected_stack_word0;
+        elisa_guest_exec_fork_report->expected_stack_word1 = elisa_guest_exec_expected_stack_word1;
+        elisa_guest_exec_fork_report->entry_stack_word0 = elisa_guest_exec_entry_stack_word0;
+        elisa_guest_exec_fork_report->entry_stack_word1 = elisa_guest_exec_entry_stack_word1;
         elisa_guest_exec_fork_report->entry_addr = params->entry_addr;
         if (elisa_guest_exec_fork_report->execution_stage < 4) {
             elisa_guest_exec_fork_report->execution_stage = 4;
@@ -548,12 +715,7 @@ static void __attribute__((noreturn)) elisa_guest_exec_run_child_main_entry(
         _exit(1);
     }
     elisa_guest_exec_set_native_phase(ELISA_GUEST_EXEC_PHASE_CHILD_BEFORE_MAIN_ENTRY);
-    elisa_guest_exec_call_main_entry(params, elisa_guest_exec_guarded_exit);
-    elisa_guest_exec_set_native_phase(ELISA_GUEST_EXEC_PHASE_CHILD_AFTER_MAIN_ENTRY);
-    if (elisa_guest_exec_fork_report != NULL && elisa_guest_exec_fork_report->status == 0) {
-        elisa_guest_exec_fork_report->status = -11;
-    }
-    _exit(0);
+    elisa_guest_exec_jump_main_entry(params, elisa_guest_exec_guarded_exit);
 }
 #endif
 
@@ -710,6 +872,58 @@ uintptr_t ElisaGuestExec_LastGuestBP(void) {
     return elisa_guest_exec_last_guest_bp;
 }
 
+uintptr_t ElisaGuestExec_LastGuestRDI(void) {
+    return elisa_guest_exec_last_guest_rdi;
+}
+
+uintptr_t ElisaGuestExec_LastGuestRSI(void) {
+    return elisa_guest_exec_last_guest_rsi;
+}
+
+uintptr_t ElisaGuestExec_LastGuestRAX(void) {
+    return elisa_guest_exec_last_guest_rax;
+}
+
+uintptr_t ElisaGuestExec_LastGuestRBX(void) {
+    return elisa_guest_exec_last_guest_rbx;
+}
+
+uintptr_t ElisaGuestExec_ExpectedEntryParams(void) {
+    return elisa_guest_exec_expected_entry_params;
+}
+
+uintptr_t ElisaGuestExec_ExpectedStackWord0(void) {
+    return elisa_guest_exec_expected_stack_word0;
+}
+
+uintptr_t ElisaGuestExec_ExpectedStackWord1(void) {
+    return elisa_guest_exec_expected_stack_word1;
+}
+
+uintptr_t ElisaGuestExec_EntryStackWord0(void) {
+    return elisa_guest_exec_entry_stack_word0;
+}
+
+uintptr_t ElisaGuestExec_EntryStackWord1(void) {
+    return elisa_guest_exec_entry_stack_word1;
+}
+
+uintptr_t ElisaGuestExec_FaultWord0(void) {
+    return elisa_guest_exec_fault_word0;
+}
+
+uintptr_t ElisaGuestExec_FaultWord1(void) {
+    return elisa_guest_exec_fault_word1;
+}
+
+uintptr_t ElisaGuestExec_SignalStackWord0(void) {
+    return elisa_guest_exec_signal_stack_word0;
+}
+
+uintptr_t ElisaGuestExec_SignalStackWord1(void) {
+    return elisa_guest_exec_signal_stack_word1;
+}
+
 void ElisaGuestExec_ResetCrashState(void) {
     elisa_guest_exec_last_status = 0;
     elisa_guest_exec_last_signal = 0;
@@ -719,6 +933,19 @@ void ElisaGuestExec_ResetCrashState(void) {
     elisa_guest_exec_last_guest_pc = 0;
     elisa_guest_exec_last_guest_sp = 0;
     elisa_guest_exec_last_guest_bp = 0;
+    elisa_guest_exec_last_guest_rdi = 0;
+    elisa_guest_exec_last_guest_rsi = 0;
+    elisa_guest_exec_last_guest_rax = 0;
+    elisa_guest_exec_last_guest_rbx = 0;
+    elisa_guest_exec_expected_entry_params = 0;
+    elisa_guest_exec_expected_stack_word0 = 0;
+    elisa_guest_exec_expected_stack_word1 = 0;
+    elisa_guest_exec_entry_stack_word0 = 0;
+    elisa_guest_exec_entry_stack_word1 = 0;
+    elisa_guest_exec_fault_word0 = 0;
+    elisa_guest_exec_fault_word1 = 0;
+    elisa_guest_exec_signal_stack_word0 = 0;
+    elisa_guest_exec_signal_stack_word1 = 0;
     elisa_guest_exec_boundary_callback_count = 0;
     elisa_guest_exec_boundary_callback_reason = 0;
     elisa_guest_exec_synthetic_observed_argc = 0;
@@ -1137,18 +1364,10 @@ int32_t ElisaGuestExec_RunMainEntry(ElisaGuestEntryParams* params, ElisaGuestExi
 #else
 __attribute__((noreturn)) void ElisaGuestExec_RunMainEntry(ElisaGuestEntryParams* params,
                                                            ElisaGuestExitFunc exit_func) {
-    __asm__ volatile(
-        "andq $-16, %%rsp\n"
-        "subq $8, %%rsp\n"
-        "pushq 8(%1)\n"
-        "pushq 0(%1)\n"
-        "movq %1, %%rdi\n"
-        "movq %2, %%rsi\n"
-        "jmp *%0\n"
-        :
-        : "r"((void*)params->entry_addr), "r"(params), "r"(exit_func)
-        : "rax", "rsi", "rdi");
-    __builtin_unreachable();
+    if (exit_func == NULL) {
+        exit_func = elisa_guest_exec_default_exit;
+    }
+    elisa_guest_exec_enter_main_entry_asm(params, exit_func);
 }
 #endif
 #else

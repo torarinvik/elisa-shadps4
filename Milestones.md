@@ -363,3 +363,11 @@ cd "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/eli
 - Result: `passed=26 failed=0 selected=26`
 - What improved: all 26 selected gate steps passed
 - Next blocker: promote execute/boundary/frame stages deeper into runtime coverage
+
+## 2026-05-22: Emulator Parity Gate Run
+
+- Date: 2026-05-22
+- Command run: `./emulator-cpp-parity --quick`
+- Result: `passed=27 failed=0 selected=27`
+- What improved: all 27 selected gate steps passed
+- Next blocker: promote execute/boundary/frame stages deeper into runtime coverage

@@ -93,6 +93,25 @@ def all_steps() -> list[Step]:
         Step("parity ledger", [sys.executable, "parity_ledger_check.py", "--summary"], category="ledger"),
         Step("parity ABI guard", [sys.executable, "parity_abi_check.py", "--summary"], category="ledger"),
         Step("emulator ABI smoke", [sys.executable, "emulator_abi_smoke.py"], category="validation"),
+        Step(
+            "strict native ABI contracts",
+            [
+                "go",
+                "run",
+                "./src",
+                "project",
+                "abi-lint",
+                "emulator-cusa07399-x64-exec",
+                "--project",
+                "../elisa-shad-ps4-from-scratch",
+                "-target-triple",
+                target_triple_for_x64_host(),
+                "--strict-contracts",
+            ],
+            cwd=COMPILER_DIR,
+            category="guest-exec",
+            timeout_seconds=120,
+        ),
         Step("parity workqueue summary", [sys.executable, "parity_workqueue.py", "--fail-missing"], category="ledger"),
         Step("bridge syntax", [sys.executable, "check_elisa_bridges.py"], category="bridge"),
         compiler_test("core-libraries-audio-parity-tests", category="audio"),
@@ -286,6 +305,16 @@ def parse_cusa_metrics(results: list[Result]) -> dict[str, int | str]:
         "guest_exec_last_pc": 0,
         "guest_exec_last_sp": 0,
         "guest_exec_last_bp": 0,
+        "guest_exec_last_rdi": 0,
+        "guest_exec_expected_entry_params": 0,
+        "guest_exec_expected_stack_word0": 0,
+        "guest_exec_expected_stack_word1": 0,
+        "guest_exec_entry_stack_word0": 0,
+        "guest_exec_entry_stack_word1": 0,
+        "guest_exec_fault_word0": 0,
+        "guest_exec_fault_word1": 0,
+        "guest_exec_signal_stack_word0": 0,
+        "guest_exec_signal_stack_word1": 0,
         "guest_exec_last_signal": 0,
         "video_stage_opened": 0,
         "video_stage_buffers_registered": 0,
@@ -373,6 +402,26 @@ def parse_cusa_metrics(results: list[Result]) -> dict[str, int | str]:
             summary["guest_exec_last_sp"] = max(int(summary["guest_exec_last_sp"]), to_int(row.get("guest_exec_last_sp")))
         if row.get("guest_exec_last_bp") is not None:
             summary["guest_exec_last_bp"] = max(int(summary["guest_exec_last_bp"]), to_int(row.get("guest_exec_last_bp")))
+        if row.get("guest_exec_last_rdi") is not None:
+            summary["guest_exec_last_rdi"] = max(int(summary["guest_exec_last_rdi"]), to_int(row.get("guest_exec_last_rdi")))
+        if row.get("guest_exec_expected_entry_params") is not None:
+            summary["guest_exec_expected_entry_params"] = max(int(summary["guest_exec_expected_entry_params"]), to_int(row.get("guest_exec_expected_entry_params")))
+        if row.get("guest_exec_expected_stack_word0") is not None:
+            summary["guest_exec_expected_stack_word0"] = max(int(summary["guest_exec_expected_stack_word0"]), to_int(row.get("guest_exec_expected_stack_word0")))
+        if row.get("guest_exec_expected_stack_word1") is not None:
+            summary["guest_exec_expected_stack_word1"] = max(int(summary["guest_exec_expected_stack_word1"]), to_int(row.get("guest_exec_expected_stack_word1")))
+        if row.get("guest_exec_entry_stack_word0") is not None:
+            summary["guest_exec_entry_stack_word0"] = max(int(summary["guest_exec_entry_stack_word0"]), to_int(row.get("guest_exec_entry_stack_word0")))
+        if row.get("guest_exec_entry_stack_word1") is not None:
+            summary["guest_exec_entry_stack_word1"] = max(int(summary["guest_exec_entry_stack_word1"]), to_int(row.get("guest_exec_entry_stack_word1")))
+        if row.get("guest_exec_fault_word0") is not None:
+            summary["guest_exec_fault_word0"] = max(int(summary["guest_exec_fault_word0"]), to_int(row.get("guest_exec_fault_word0")))
+        if row.get("guest_exec_fault_word1") is not None:
+            summary["guest_exec_fault_word1"] = max(int(summary["guest_exec_fault_word1"]), to_int(row.get("guest_exec_fault_word1")))
+        if row.get("guest_exec_signal_stack_word0") is not None:
+            summary["guest_exec_signal_stack_word0"] = max(int(summary["guest_exec_signal_stack_word0"]), to_int(row.get("guest_exec_signal_stack_word0")))
+        if row.get("guest_exec_signal_stack_word1") is not None:
+            summary["guest_exec_signal_stack_word1"] = max(int(summary["guest_exec_signal_stack_word1"]), to_int(row.get("guest_exec_signal_stack_word1")))
         if row.get("guest_exec_last_signal") is not None:
             summary["guest_exec_last_signal"] = max(int(summary["guest_exec_last_signal"]), to_int(row.get("guest_exec_last_signal")))
         if row_has_kv(row, "VIDEO_STAGE_opened"):
@@ -784,6 +833,20 @@ def summarize_progress(results: list[Result], require_first_boundary: bool = Fal
         lines.append(f"- CUSA07399 x64 last sp: {x64_exec.get('last_sp')}")
     if x64_exec.get("last_bp"):
         lines.append(f"- CUSA07399 x64 last bp: {x64_exec.get('last_bp')}")
+    if x64_exec.get("last_rdi"):
+        lines.append(f"- CUSA07399 x64 last rdi: {x64_exec.get('last_rdi')}")
+    if x64_exec.get("expected_entry_params"):
+        lines.append(f"- CUSA07399 x64 expected EntryParams: {x64_exec.get('expected_entry_params')}")
+    if x64_exec.get("expected_stack_word0") or x64_exec.get("expected_stack_word1"):
+        lines.append(f"- CUSA07399 x64 expected stack words: {x64_exec.get('expected_stack_word0', '0')}, {x64_exec.get('expected_stack_word1', '0')}")
+    if x64_exec.get("entry_stack_word0") or x64_exec.get("entry_stack_word1"):
+        lines.append(f"- CUSA07399 x64 entry stack words: {x64_exec.get('entry_stack_word0', '0')}, {x64_exec.get('entry_stack_word1', '0')}")
+    if x64_exec.get("fault_word0") or x64_exec.get("fault_word1"):
+        lines.append(f"- CUSA07399 x64 fault words: {x64_exec.get('fault_word0', '0')}, {x64_exec.get('fault_word1', '0')}")
+    if x64_exec.get("signal_stack_word0") or x64_exec.get("signal_stack_word1"):
+        lines.append(f"- CUSA07399 x64 signal stack words: {x64_exec.get('signal_stack_word0', '0')}, {x64_exec.get('signal_stack_word1', '0')}")
+    if x64_exec.get("diagnostic"):
+        lines.append(f"- CUSA07399 x64 diagnostic: {x64_exec.get('diagnostic')}")
     lines.append(f"- guest exec probe only: {cusa['guest_exec_probe_only']}")
     lines.append(f"- guest exec started: {cusa['guest_exec_started']}")
     lines.append(f"- guest exec entry reached: {cusa['guest_exec_entry_reached']}")
@@ -793,6 +856,12 @@ def summarize_progress(results: list[Result], require_first_boundary: bool = Fal
     lines.append(f"- guest exec last pc: 0x{int(cusa['guest_exec_last_pc']):x}")
     lines.append(f"- guest exec last sp: 0x{int(cusa['guest_exec_last_sp']):x}")
     lines.append(f"- guest exec last bp: 0x{int(cusa['guest_exec_last_bp']):x}")
+    lines.append(f"- guest exec last rdi: 0x{int(cusa['guest_exec_last_rdi']):x}")
+    lines.append(f"- guest exec expected EntryParams: 0x{int(cusa['guest_exec_expected_entry_params']):x}")
+    lines.append(f"- guest exec expected stack words: 0x{int(cusa['guest_exec_expected_stack_word0']):x}, 0x{int(cusa['guest_exec_expected_stack_word1']):x}")
+    lines.append(f"- guest exec entry stack words: 0x{int(cusa['guest_exec_entry_stack_word0']):x}, 0x{int(cusa['guest_exec_entry_stack_word1']):x}")
+    lines.append(f"- guest exec fault words: 0x{int(cusa['guest_exec_fault_word0']):x}, 0x{int(cusa['guest_exec_fault_word1']):x}")
+    lines.append(f"- guest exec signal stack words: 0x{int(cusa['guest_exec_signal_stack_word0']):x}, 0x{int(cusa['guest_exec_signal_stack_word1']):x}")
     lines.append(f"- guest exec last signal: {cusa['guest_exec_last_signal']}")
     lines.append(f"- guest exec last module: {cusa['guest_exec_last_module']}")
     lines.append(f"- guest exec last symbol: {cusa['guest_exec_last_symbol']}")
@@ -800,6 +869,13 @@ def summarize_progress(results: list[Result], require_first_boundary: bool = Fal
         lines.append(f"- first boundary blocker: probe-only host ({cusa['guest_exec_host_arch']} {cusa['guest_exec_host_mode']})")
     elif int(cusa["guest_exec_supported_native_execution"]) == 0:
         lines.append(f"- first boundary blocker: unsupported host ({cusa['guest_exec_host_arch']} {cusa['guest_exec_host_mode']})")
+    elif int(cusa["guest_exec_expected_entry_params"]) != 0 and int(cusa["guest_exec_last_rdi"]) != int(cusa["guest_exec_expected_entry_params"]):
+        lines.append("- first boundary blocker: guest-entry-rdi-not-entryparams")
+    elif (
+        int(cusa["guest_exec_expected_stack_word0"]) != int(cusa["guest_exec_entry_stack_word0"])
+        or int(cusa["guest_exec_expected_stack_word1"]) != int(cusa["guest_exec_entry_stack_word1"])
+    ):
+        lines.append("- first boundary blocker: guest-entry-stack-copy-mismatch")
     lines.append("- first frame gate signals:")
     lines.append(f"  - shader_translate_attempted={cusa['shader_translate_attempted']}")
     lines.append(f"  - shader_path_bridge={cusa['shader_translate_path_bridge']} shader_path_native={cusa['shader_translate_path_native']}")

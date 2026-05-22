@@ -13,8 +13,13 @@ struct CpuPatchRange:
     segment_addr: mutable u64
     segment_size: mutable u64
 
-global mutable cpu_patch_modules: darray[CpuPatchModule] = []
-global mutable cpu_patch_ranges: darray[CpuPatchRange] = []
+const CPU_PATCH_MAX_MODULES: usize = 64
+const CPU_PATCH_MAX_RANGES: usize = 512
+
+global mutable cpu_patch_modules: CpuPatchModule[64] = zeroed
+global mutable cpu_patch_ranges: CpuPatchRange[512] = zeroed
+global mutable cpu_patch_module_count: usize = 0
+global mutable cpu_patch_range_count: usize = 0
 
 def RegisterPatchModule(module_ptr: void&?, module_size: u64, trampoline_area_ptr: void&?, trampoline_area_size: u64) -> void:
     if module_ptr == null or trampoline_area_ptr == null:
@@ -23,29 +28,35 @@ def RegisterPatchModule(module_ptr: void&?, module_size: u64, trampoline_area_pt
         return
     module_addr: u64 = module_ptr.cast[u64]
     trampoline_addr: u64 = trampoline_area_ptr.cast[u64]
-    for i in 0..<cpu_patch_modules.count:
+    for i in 0..<cpu_patch_module_count:
         current: CpuPatchModule = cpu_patch_modules[i]
         if current.module_ptr == module_addr:
             cpu_patch_modules[i] <- CpuPatchModule(module_addr, module_size, trampoline_addr, trampoline_area_size)
             return
-    cpu_patch_modules.push(CpuPatchModule(module_addr, module_size, trampoline_addr, trampoline_area_size))
+    if cpu_patch_module_count >= CPU_PATCH_MAX_MODULES:
+        return
+    cpu_patch_modules[cpu_patch_module_count] <- CpuPatchModule(module_addr, module_size, trampoline_addr, trampoline_area_size)
+    cpu_patch_module_count <- cpu_patch_module_count + 1
 
 def PrePatchInstructions(segment_addr: u64, segment_size: u64) -> void:
     if segment_size == 0:
         return
-    cpu_patch_ranges.push(CpuPatchRange(segment_addr, segment_size))
+    if cpu_patch_range_count >= CPU_PATCH_MAX_RANGES:
+        return
+    cpu_patch_ranges[cpu_patch_range_count] <- CpuPatchRange(segment_addr, segment_size)
+    cpu_patch_range_count <- cpu_patch_range_count + 1
 
 def CpuPatches_Reset() -> void:
-    cpu_patch_modules.clear()
-    cpu_patch_ranges.clear()
+    cpu_patch_module_count <- 0
+    cpu_patch_range_count <- 0
 
 def CpuPatches_ModuleCount() -> usize:
-    return cpu_patch_modules.count
+    return cpu_patch_module_count
 
 def CpuPatches_PrePatchCount() -> usize:
-    return cpu_patch_ranges.count
+    return cpu_patch_range_count
 
 def CpuPatches_LastPrePatchRange() -> CpuPatchRange:
-    if cpu_patch_ranges.count == 0:
+    if cpu_patch_range_count == 0:
         return CpuPatchRange(0, 0)
-    return cpu_patch_ranges[cpu_patch_ranges.count - 1]
+    return cpu_patch_ranges[cpu_patch_range_count - 1]
