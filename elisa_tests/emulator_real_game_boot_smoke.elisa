@@ -64,6 +64,34 @@ def RealGameBoot_EmitArtifactImport(file: mutable IOFile&, source: static u8&?, 
         written: int = snprintf(line[0].ref[mutable u8&], 512usize, "CUSA07399_ARTIFACT fallback_import=1 source=%s nid=%s library=%s module=%s subsystem=%s status=AeroLibFallback resolution=%llu count=1", source_text, nid_text, library_text, module_text, subsystem_text, resolution)
         RealGameBoot_WriteLine(file, line[0].ref[mutable u8&], written)
 
+def RealGameBoot_CountLoginUsers(list: OrbisUserServiceLoginUserIdList) -> u64:
+    i: mutable int = 0
+    count: mutable u64 = 0u64
+    while i < ORBIS_USER_SERVICE_MAX_LOGIN_USERS:
+        if list.user_id[i.usize()] != ORBIS_USER_SERVICE_USER_ID_INVALID:
+            count <- count + 1u64
+        i <- i + 1
+    return count
+
+def RealGameBoot_EmitUserServiceArtifacts(file: mutable IOFile&) -> void:
+    init_rc: int = sceUserServiceInitialize(null)
+    RealGameBoot_EmitArtifactKV(file, "user_service_initialized", 1u64 if init_rc == ORBIS_OK else 0u64)
+    if init_rc != ORBIS_OK:
+        return
+    initial_user: mutable int = ORBIS_USER_SERVICE_USER_ID_INVALID
+    initial_rc: int = sceUserServiceGetInitialUser(initial_user.ref[mutable int&])
+    if initial_rc == ORBIS_OK:
+        RealGameBoot_EmitArtifactSignedKV(file, "user_service_initial_user", initial_user.s32())
+    else:
+        RealGameBoot_EmitArtifactKV(file, "user_service_initial_user", 0u64)
+    login_users: mutable OrbisUserServiceLoginUserIdList = zeroed
+    login_rc: int = sceUserServiceGetLoginUserIdList(login_users.ref[mutable void&])
+    if login_rc == ORBIS_OK:
+        RealGameBoot_EmitArtifactKV(file, "user_service_login_user_count", RealGameBoot_CountLoginUsers(login_users))
+    else:
+        RealGameBoot_EmitArtifactKV(file, "user_service_login_user_count", 0u64)
+    _ = sceUserServiceTerminate()
+
 def RealGameBoot_EmitArtifactLastHle(file: mutable IOFile&, module: static u8&?, symbol: static u8&?) -> void:
     can Memory.Allocate, Console.Format:
         line: mutable u8[256] = zeroed
@@ -123,12 +151,14 @@ def RealGameBoot_EmitArtifacts(linker: Linker&, guarded_status: s32) -> void:
         RealGameBoot_EmitArtifactStringKV(file.ref[mutable IOFile&], "guest_exec_host_arch", GuestExec_HostArchitecture())
         RealGameBoot_EmitArtifactStringKV(file.ref[mutable IOFile&], "guest_exec_host_mode", GuestExec_HostMode())
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "guest_exec_supported_native_execution", 1 if GuestExec_SupportedNativeExecution() else 0)
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "guest_exec_x64_subprocess_available", 1 if GuestExec_HostCanRunX64Subprocess() else 0)
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "guest_exec_probe_only", 1 if GuestExec_IsProbeOnly() else 0)
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "guest_exec_last_pc", GuestExec_LastGuestPC().u64())
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "guest_exec_last_signal", GuestExec_LastSignal().i64().u64())
         RealGameBoot_EmitArtifactStringKV(file.ref[mutable IOFile&], "guest_exec_last_module", GuestExec_LastModule())
         RealGameBoot_EmitArtifactStringKV(file.ref[mutable IOFile&], "guest_exec_last_symbol", GuestExec_LastSymbol())
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "malformed_imports", linker.last_malformed_import_count.u64())
+        RealGameBoot_EmitUserServiceArtifacts(file.ref[mutable IOFile&])
         i: mutable usize = 0
         limit: mutable usize = linker.modules.count
         if limit > 8:
@@ -305,6 +335,10 @@ def emulator_real_game_boot_smoke_guarded_game_entry_reports_host_status() -> vo
             RealGameBoot_Check(streq(GuestExec_FirstBoundaryReasonName(), "unsupported-host") == 1, "expected unsupported host boundary reason name")
             RealGameBoot_Check(GuestExec_HostArchitecture() != null, "expected host architecture to be reported")
             RealGameBoot_Check(GuestExec_HostMode() != null, "expected host mode to be reported")
+            if streq(GuestExec_HostMode(), "macOS") == 1 and streq(GuestExec_HostArchitecture(), "arm64") == 1:
+                x64_probe_first: bool = GuestExec_HostCanRunX64Subprocess()
+                x64_probe_second: bool = GuestExec_HostCanRunX64Subprocess()
+                RealGameBoot_Check(x64_probe_first == x64_probe_second, "expected x64 subprocess capability probe to be deterministic")
             RealGameBoot_Check(GuestExec_IsProbeOnly(), "expected probe-only mode on unsupported host")
             RealGameBoot_Check(stage_code == GUEST_EXEC_STAGE_GUARDED_ENTRY, "expected unsupported host guarded run to report guarded-entry stage")
         can Memory.Allocate, Abort.Panic, Console:

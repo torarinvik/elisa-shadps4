@@ -5,13 +5,12 @@ Failed: 0
 
 Summary score: 20/20
 Per-subsystem counts:
-- External-C-ABI: 9
-- Native-Elisa: 247
+- External-C-ABI: 11
+- Native-Elisa: 248
 - Stub-Parity: 30
-- Temporary-Cpp-Bridge: 3
 Parity gate counts (native/bridge/fallback/unresolved):
-- native: 247
-- bridge: 3
+- native: 248
+- bridge: 0
 - fallback: 0
 - unresolved: 0
 Ledger risk counts (missing/unverified):
@@ -31,6 +30,7 @@ CUSA07399 stage:
 - guest exec host arch: arm64
 - guest exec host mode: macOS
 - guest exec supported native execution: 0
+- guest exec x64 subprocess available: 1
 - guest exec probe only: 1
 - guest exec started: 1
 - guest exec entry reached: 1
@@ -61,9 +61,9 @@ CUSA07399 artifact metrics:
 - audio SDL available: 0
 - audio OpenAL available: 0
 Real CUSA runtime service signals:
-- real CUSA user service initialized: 0
-- user service initial user: 0
-- user service login user count: 0
+- real CUSA user service initialized: 1
+- user service initial user: 1
+- user service login user count: 2
 - real CUSA pad initialized: 0
 - pad open attempted/opened: 0/0
 - pad no controller: 0
