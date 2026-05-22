@@ -37,6 +37,7 @@ Current validated prefix structs:
 ### Public API wiring (`avplayer.elisa`)
 
 - `Implemented`: init/initEx/addSource/addSourceEx/start/stop/pause/resume/close
+- `Implemented`: `AddSourceEx` now treats URI input as `name + length` (length-bounded copy) before type validation/open, matching C++ `std::string_view(name, length)` behavior.
 - `Implemented`: `Start` now matches C++ restart semantics for already-active playback by stopping the source first, publishing `Stop`, then entering `Starting`/`Play` again.
 - `Implemented`: `Stop` now follows the C++ ordering: source/workers are stopped before the public `Stop` state/event is emitted.
 - `Implemented`: `Pause` is a success no-op when the player is already at EOF, matching `AvPlayerState::Pause`.
@@ -134,10 +135,12 @@ Current validated prefix structs:
 - `Implemented`: buffering transition event ordering (`PLAY -> BUFFERING -> PLAY`) is parity-tested through controller tick dispatch
 - `Implemented`: controller dispatch now skips callback invocation when the guest did not install an event callback, matching the C++ no-callback behavior instead of calling a dummy Elisa function pointer
 - `Implemented`: controller tick now forwards pending source warnings and queues EOF transitions before dispatching guest events, matching C++ controller signaling paths without introducing unsynchronized source-thread races.
+- `Implemented`: controller tick now performs quiet-tick buffering transitions using source readiness thresholds (`has_frames(0/10)`), including C++ `Jump`-state event suppression and trick-mode resume preference.
+- `Implemented`: controller tick now opportunistically pre-fills decode output queues while playback is active, reducing guest-call-coupled decode behavior and moving closer to C++ worker-thread flow.
 - `Implemented`: started FFmpeg-backed public frame retrieval now opens source codecs, uses a concrete libc clock FFI, enters active playback, and returns decoded video/audio payloads through `sceAvPlayerGetVideoDataEx` and `sceAvPlayerGetAudioData`
 - `Implemented`: `Stop -> Starting -> Play` is now a valid transition so explicit restart from stopped/active paths follows C++ `AvPlayerState::Start`.
 - `Implemented`: init starts a host-backed controller tick thread, mirroring C++ constructor lifecycle.
-- `Partial`: controller thread is currently limited to event/buffering ticks; full C++ source worker-thread demux/decode queues are still pending, so background frame decoding is intentionally not performed from the controller thread.
+- `Partial`: controller/runtime now has active prefill, but still does not expose one-to-one demux/video/audio dedicated host threads with the same queue ownership split as C++.
 
 ### FFI layer (`avplayer_ffmpeg_ffi.elisa`)
 
@@ -154,7 +157,7 @@ Current validated prefix structs:
 
 - Port full source pipeline behaviors from `avplayer_source.cpp`:
   demux loop, decoder loops, frame buffering, and frame conversion metadata parity.
-- Port controller-thread event processing behavior from `avplayer_state.cpp`.
+- Continue tightening controller-thread event processing toward C++ one-to-one queue/worker ownership boundaries.
 - Add media-fixture runtime tests for swscale/swresample conversion outputs using files that are not already NV12/S16.
 - Expand parity harness scenarios for EOF/loop, buffering transitions, and
   invalid-state edge behavior.
