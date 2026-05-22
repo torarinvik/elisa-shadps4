@@ -54,8 +54,8 @@ CUSA07399 stage:
 CUSA07399 artifact metrics:
 - CUSA module count: 4
 - imports total: 1150
-- native HLE count: 840
-- PRX export count: 310
+- native HLE count: 839
+- PRX export count: 311
 - AeroLib fallback count: 0
 - unresolved count: 0
 - malformed count: 0

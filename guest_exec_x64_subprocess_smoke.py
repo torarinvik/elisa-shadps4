@@ -63,6 +63,9 @@ def validate_handoff_manifest() -> int:
     entry_word0 = to_int(summary.get("entry_word0"))
     entry_word1 = to_int(summary.get("entry_word1"))
     executable_segments = to_int(summary.get("executable_segments"))
+    first_exec = to_int(summary.get("first_exec"))
+    first_exec_size = to_int(summary.get("first_exec_size"))
+    entry_in_exec = to_int(summary.get("entry_in_exec"))
     imports = to_int(summary.get("imports"))
     resolved_imports = to_int(summary.get("resolved_imports"))
     patched_import_relocations = to_int(summary.get("patched_import_relocations"))
@@ -86,6 +89,12 @@ def validate_handoff_manifest() -> int:
         return 1
     if executable_segments <= 0:
         print("CUSA07399_HANDOFF_X64_MANIFEST status=no-executable-segments")
+        return 1
+    if entry_in_exec != 1:
+        print("CUSA07399_HANDOFF_X64_MANIFEST status=entry-not-in-executable-segment")
+        return 1
+    if not (first_exec <= entry < first_exec + first_exec_size):
+        print("CUSA07399_HANDOFF_X64_MANIFEST status=entry-exec-range-mismatch")
         return 1
     if imports <= 0 or resolved_imports != imports:
         print("CUSA07399_HANDOFF_X64_MANIFEST status=import-resolution-mismatch")
