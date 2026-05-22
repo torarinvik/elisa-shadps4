@@ -3,20 +3,19 @@
 Passed: 15
 Failed: 0
 
-Summary score: 19/20
+Summary score: 20/20
 Per-subsystem counts:
 - External-C-ABI: 9
-- Missing: 1
 - Native-Elisa: 247
 - Stub-Parity: 30
-- Temporary-Cpp-Bridge: 2
+- Temporary-Cpp-Bridge: 3
 Parity gate counts (native/bridge/fallback/unresolved):
 - native: 247
-- bridge: 2
+- bridge: 3
 - fallback: 0
 - unresolved: 0
 Ledger risk counts (missing/unverified):
-- missing: 1
+- missing: 0
 - unverified: 30
 CUSA07399 stage:
 - execution stage raw: 4
@@ -24,7 +23,7 @@ CUSA07399 stage:
 - link: PASS
 - handoff: PASS
 - execute stage: guarded-entry
-- first boundary: PENDING
+- first boundary: PASS
 - synthetic renderer smoke: PASS
 - real CUSA first frame: PENDING
 - first frame ladder: none
@@ -54,8 +53,8 @@ CUSA07399 stage:
 CUSA07399 artifact metrics:
 - CUSA module count: 4
 - imports total: 1151
-- native HLE count: 841
-- PRX export count: 310
+- native HLE count: 839
+- PRX export count: 312
 - AeroLib fallback count: 0
 - unresolved count: 0
 - malformed count: 0

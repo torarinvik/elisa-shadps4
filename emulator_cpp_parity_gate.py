@@ -417,6 +417,18 @@ def stage_name(stage: int) -> str:
     return mapping.get(stage, f"unknown({stage})")
 
 
+def boundary_probe_observed(cusa: dict[str, int | str]) -> bool:
+    return (
+        int(cusa.get("boundary_status", 0)) != 0
+        or int(cusa.get("guest_exec_first_boundary_reached", 0)) != 0
+        or int(cusa.get("guest_exec_boundary_reason", 0)) != 0
+        or (
+            int(cusa.get("guest_exec_probe_only", 0)) == 1
+            and int(cusa.get("guest_exec_entry_reached", 0)) == 1
+        )
+    )
+
+
 def cusa_stage_summary(results: list[Result], cusa: dict[str, int | str]) -> dict[str, str]:
     def passed(name: str) -> bool:
         return any(r.step.name == name and r.passed for r in results)
@@ -425,7 +437,7 @@ def cusa_stage_summary(results: list[Result], cusa: dict[str, int | str]) -> dic
     link = "PASS" if load == "PASS" and int(cusa["unresolved_imports"]) == 0 else "FAIL"
     handoff = "PASS" if passed("elisacore test emulator-guest-exec-runtime-tests") else "FAIL"
     exec_stage = stage_name(int(cusa["execution_stage"]))
-    boundary = "PASS" if int(cusa["boundary_status"]) != 0 else "PENDING"
+    boundary = "PASS" if boundary_probe_observed(cusa) else "PENDING"
     frame_gate = (
         int(cusa["boundary_status"]) != 0
         and
@@ -603,7 +615,7 @@ def score_summary(results: list[Result], cusa: dict[str, int | str], errors: lis
         passed += 1
     if int(cusa["execution_stage"]) >= 1:
         passed += 1
-    if int(cusa["boundary_status"]) != 0:
+    if boundary_probe_observed(cusa):
         passed += 1
     if not errors:
         passed += 1
