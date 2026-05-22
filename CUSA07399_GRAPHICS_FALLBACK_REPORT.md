@@ -58,6 +58,7 @@ Shader artifact:
 - `shader_translate_result_ok`
 - `shader_translate_spirv_magic`
 - `shader_translate_payload_kind`
+- `shader_translate_real_spirv_status`
 
 Bridge metadata accessors:
 
@@ -68,6 +69,8 @@ Bridge metadata accessors:
 - output byte size
 - output word count
 - output word-at-index accessor
+- payload kind
+- real SPIR-V attempt status
 - status
 
 ## Bridge policy status

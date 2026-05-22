@@ -58,6 +58,10 @@ constexpr std::int32_t kElisaRecompilerDiagnosticException = 2;
 constexpr std::uint32_t kElisaRecompilerPayloadKindNone = 0u;
 constexpr std::uint32_t kElisaRecompilerPayloadKindDeterministicEnvelope = 1u;
 constexpr std::uint32_t kElisaRecompilerPayloadKindRealSpirv = 2u;
+constexpr std::uint32_t kElisaRecompilerRealSpirvStatusNotRequested = 0u;
+constexpr std::uint32_t kElisaRecompilerRealSpirvStatusSucceeded = 1u;
+constexpr std::uint32_t kElisaRecompilerRealSpirvStatusFailed = 2u;
+constexpr std::uint32_t kElisaRecompilerRealSpirvStatusUnavailable = 3u;
 
 struct ElisaRecompilerTranslateMetadata {
     std::uint32_t stage;
@@ -75,6 +79,7 @@ struct ElisaRecompilerProgramHandle {
     std::int32_t status;
     std::int32_t diagnostic_code;
     std::uint32_t payload_kind;
+    std::uint32_t real_spirv_status;
     // Owned SPIR-V output bytes. Empty when translation is unsupported or failed.
     std::vector<std::uint8_t> output_data;
 };
@@ -131,6 +136,14 @@ std::unordered_set<const void*> g_freed_handles;
                value[0] == 'T';
     }();
     return enabled;
+}
+
+[[nodiscard]] bool RealSpirvIsolationAvailable() {
+#if defined(_WIN32)
+    return false;
+#else
+    return true;
+#endif
 }
 
 [[nodiscard]] bool TryEmitRealSpirvWords(const Shader::Profile& profile,
@@ -440,6 +453,7 @@ void PopulateUnsupportedResult(ElisaRecompilerProgramHandle& handle,
     handle.status = kElisaRecompilerProgramStatusFailedWithDiagnostic;
     handle.diagnostic_code = kElisaRecompilerDiagnosticUnsupported;
     handle.payload_kind = kElisaRecompilerPayloadKindNone;
+    handle.real_spirv_status = kElisaRecompilerRealSpirvStatusNotRequested;
     handle.output_data.clear();
 }
 
@@ -447,7 +461,8 @@ void PopulateTranslatedResult(ElisaRecompilerProgramHandle& handle,
                               const std::uint64_t input_hash, const std::uint64_t word_count,
                               const std::uint32_t stage_type,
                               const std::vector<std::uint8_t>& output_bytes,
-                              const std::uint32_t payload_kind) {
+                              const std::uint32_t payload_kind,
+                              const std::uint32_t real_spirv_status) {
     handle.input_hash = input_hash;
     handle.word_count = word_count;
     handle.stage_type = stage_type;
@@ -458,6 +473,7 @@ void PopulateTranslatedResult(ElisaRecompilerProgramHandle& handle,
     handle.status = kElisaRecompilerProgramStatusTranslated;
     handle.diagnostic_code = kElisaRecompilerDiagnosticNone;
     handle.payload_kind = payload_kind;
+    handle.real_spirv_status = real_spirv_status;
 }
 
 [[nodiscard]] bool IsLiveHandle(const ElisaRecompilerProgramHandle* handle) {
@@ -608,11 +624,20 @@ int elisa_shader_recompiler_translate_program(const std::uint32_t* code_words,
         const auto ir_program =
             Shader::TranslateProgramForBridge(code_span, pools, info, runtime_info, profile);
         std::uint32_t payload_kind = kElisaRecompilerPayloadKindDeterministicEnvelope;
+        std::uint32_t real_spirv_status = kElisaRecompilerRealSpirvStatusNotRequested;
         std::vector<std::uint32_t> spirv_words{};
-        if (ShouldAttemptRealSpirvEmission() &&
-            TryEmitRealSpirvWordsIsolated(profile, runtime_info, ir_program, spirv_words)) {
-            payload_kind = kElisaRecompilerPayloadKindRealSpirv;
-        } else {
+        if (ShouldAttemptRealSpirvEmission()) {
+            if (RealSpirvIsolationAvailable()) {
+                real_spirv_status = kElisaRecompilerRealSpirvStatusFailed;
+                if (TryEmitRealSpirvWordsIsolated(profile, runtime_info, ir_program, spirv_words)) {
+                    payload_kind = kElisaRecompilerPayloadKindRealSpirv;
+                    real_spirv_status = kElisaRecompilerRealSpirvStatusSucceeded;
+                }
+            } else {
+                real_spirv_status = kElisaRecompilerRealSpirvStatusUnavailable;
+            }
+        }
+        if (payload_kind != kElisaRecompilerPayloadKindRealSpirv) {
             spirv_words = BuildDeterministicSpirvEnvelope(ir_program, input_hash, metadata->stage);
         }
         const auto output_bytes = SerializeSpirvWords(spirv_words);
@@ -621,7 +646,7 @@ int elisa_shader_recompiler_translate_program(const std::uint32_t* code_words,
             PopulateUnsupportedResult(*handle, input_hash, word_count, metadata->stage);
         } else {
             PopulateTranslatedResult(*handle, input_hash, word_count, metadata->stage, output_bytes,
-                                     payload_kind);
+                                     payload_kind, real_spirv_status);
         }
     } catch (...) {
         PopulateUnsupportedResult(*handle, input_hash, word_count, metadata->stage);
@@ -726,6 +751,15 @@ std::uint32_t elisa_shader_recompiler_program_payload_kind(const void* program) 
         return kElisaRecompilerPayloadKindNone;
     }
     return handle->payload_kind;
+}
+
+std::uint32_t elisa_shader_recompiler_program_real_spirv_status(const void* program) {
+    const auto* handle = static_cast<const ElisaRecompilerProgramHandle*>(program);
+    std::lock_guard<std::mutex> lock{g_handle_mutex};
+    if (IsFreedHandle(handle) || !IsLiveHandle(handle)) {
+        return kElisaRecompilerRealSpirvStatusNotRequested;
+    }
+    return handle->real_spirv_status;
 }
 
 std::uint32_t elisa_shader_recompiler_program_output_word_at(const void* program,
