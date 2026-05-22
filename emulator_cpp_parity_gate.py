@@ -92,6 +92,7 @@ def all_steps() -> list[Step]:
         Step("project.json syntax", [sys.executable, "-m", "json.tool", str(PROJECT_PATH)], category="validation"),
         Step("parity ledger", [sys.executable, "parity_ledger_check.py", "--summary"], category="ledger"),
         Step("parity ABI guard", [sys.executable, "parity_abi_check.py", "--summary"], category="ledger"),
+        Step("emulator ABI smoke", [sys.executable, "emulator_abi_smoke.py"], category="validation"),
         Step("parity workqueue summary", [sys.executable, "parity_workqueue.py", "--fail-missing"], category="ledger"),
         Step("bridge syntax", [sys.executable, "check_elisa_bridges.py"], category="bridge"),
         compiler_test("core-libraries-audio-parity-tests", category="audio"),
@@ -111,6 +112,11 @@ def all_steps() -> list[Step]:
             [sys.executable, "emulator_cusa07399_x64_exec.py"],
             category="guest-exec",
             timeout_seconds=360,
+        ),
+        Step(
+            "emulator ABI smoke x64",
+            [sys.executable, "emulator_abi_smoke.py", target_triple_for_x64_host()],
+            category="guest-exec",
         ),
         Step(
             "native kernel_threads_runtime warnings",
@@ -543,6 +549,16 @@ def host_exec_note() -> str:
     if machine in {"x86_64", "amd64"}:
         return f"x86_64 host can attempt guarded guest execution on {platform.system()}"
     return f"probe-only on {platform.system()} {platform.machine()}"
+
+
+def target_triple_for_x64_host() -> str:
+    if sys.platform == "darwin":
+        return "x86_64-apple-darwin"
+    if sys.platform.startswith("linux"):
+        return "x86_64-unknown-linux-gnu"
+    if sys.platform == "win32":
+        return "x86_64-pc-windows-msvc"
+    return "x86_64-unknown-unknown"
 
 
 def load_workqueue_rows() -> list[dict[str, str]]:
