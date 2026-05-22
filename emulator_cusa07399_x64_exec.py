@@ -62,6 +62,14 @@ def parse_artifacts() -> dict[str, str]:
     return summary
 
 
+def artifact_get(artifacts: dict[str, str], *keys: str, default: str = "0") -> str:
+    for key in keys:
+        value = artifacts.get(key)
+        if value not in (None, ""):
+            return value
+    return default
+
+
 def to_int(value: str | None) -> int:
     if value is None or value == "":
         return 0
@@ -134,15 +142,17 @@ def validate_artifacts(artifacts: dict[str, str]) -> list[str]:
         errors.append("zero-entry-bytes")
     if to_int(artifacts.get("handoff_entry_in_exec")) != 1:
         errors.append("entry-outside-exec-segment")
-    boundary_status = to_int(artifacts.get("boundary_status"))
-    execution_stage = to_int(artifacts.get("execution_stage"))
-    last_pc = to_int(artifacts.get("guest_exec_last_pc"))
-    last_signal = to_int(artifacts.get("guest_exec_last_signal"))
+    boundary_status = to_int(artifact_get(artifacts, "boundary_status"))
+    execution_stage = to_int(artifact_get(artifacts, "execution_stage"))
+    last_pc = to_int(artifact_get(artifacts, "guest_exec_last_pc", "last_guest_pc"))
+    last_signal = to_int(artifact_get(artifacts, "guest_exec_last_signal", "last_signal"))
     accepted_boundary = boundary_status in {1, 2, 3, 4}
     accepted_captured_fault = boundary_status == -10 and execution_stage >= 6 and last_signal != 0
     accepted_timeout = boundary_status == -3 and execution_stage >= 4
     if not (accepted_boundary or accepted_captured_fault or accepted_timeout):
         errors.append(f"bad-boundary-status-{boundary_status}")
+    if boundary_status == -10 and last_pc == 0:
+        errors.append("missing-crash-pc")
     if execution_stage < 4:
         errors.append("execution-stage-before-guarded-entry")
     return errors
@@ -196,23 +206,30 @@ def main() -> int:
             "failed",
             mode=mode,
             reason=",".join(errors),
-            boundary_status=artifacts.get("boundary_status", "0"),
-            execution_stage=artifacts.get("execution_stage", "0"),
-            last_pc=artifacts.get("guest_exec_last_pc", "0"),
-            last_signal=artifacts.get("guest_exec_last_signal", "0"),
+            guarded_status=artifact_get(artifacts, "guarded_status"),
+            boundary_status=artifact_get(artifacts, "boundary_status"),
+            boundary_reason=artifact_get(artifacts, "guest_exec_boundary_reason_name", "boundary_reason", default="unknown"),
+            execution_stage=artifact_get(artifacts, "execution_stage"),
+            last_pc=artifact_get(artifacts, "guest_exec_last_pc", "last_guest_pc"),
+            fault=artifact_get(artifacts, "guest_exec_fault_address", "fault"),
+            last_signal=artifact_get(artifacts, "guest_exec_last_signal", "last_signal"),
+            last_hle_module=artifact_get(artifacts, "last_hle_module", default=""),
+            last_hle_symbol=artifact_get(artifacts, "last_hle_symbol", default=""),
         )
         return 1
 
     emit(
         "ok",
         mode=mode,
-        boundary_status=artifacts.get("boundary_status", "0"),
-        boundary_reason=artifacts.get("guest_exec_boundary_reason_name", "unknown"),
-        execution_stage=artifacts.get("execution_stage", "0"),
-        last_pc=artifacts.get("guest_exec_last_pc", "0"),
-        last_signal=artifacts.get("guest_exec_last_signal", "0"),
-        last_hle_module=artifacts.get("last_hle_module", ""),
-        last_hle_symbol=artifacts.get("last_hle_symbol", ""),
+        guarded_status=artifact_get(artifacts, "guarded_status"),
+        boundary_status=artifact_get(artifacts, "boundary_status"),
+        boundary_reason=artifact_get(artifacts, "guest_exec_boundary_reason_name", "boundary_reason", default="unknown"),
+        execution_stage=artifact_get(artifacts, "execution_stage"),
+        last_pc=artifact_get(artifacts, "guest_exec_last_pc", "last_guest_pc"),
+        fault=artifact_get(artifacts, "guest_exec_fault_address", "fault"),
+        last_signal=artifact_get(artifacts, "guest_exec_last_signal", "last_signal"),
+        last_hle_module=artifact_get(artifacts, "last_hle_module", default=""),
+        last_hle_symbol=artifact_get(artifacts, "last_hle_symbol", default=""),
     )
     return 0
 

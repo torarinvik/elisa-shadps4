@@ -3,11 +3,13 @@
 
 include "../common/types.elisa"
 
+const GUEST_EXEC_MAX_ARGS: usize = 33
+
 struct GuestEntryParams:
     argc: mutable int
     padding: mutable u32
+    argv: mutable static u8&?[33]
     entry_addr: mutable VAddr
-    argv: mutable void&?
 
 @link_name(ElisaGuestExec_IsSupported)
 extern c_GuestExec_IsSupported() -> s32
@@ -72,6 +74,9 @@ extern c_GuestExec_GetSyntheticMainCallBoundaryAddress() -> uintptr
 @link_name(ElisaGuestExec_GetSyntheticBoundaryCallbackAddress)
 extern c_GuestExec_GetSyntheticBoundaryCallbackAddress() -> uintptr
 
+@link_name(ElisaGuestExec_GetNonSyntheticMainReportBoundaryAddress)
+extern c_GuestExec_GetNonSyntheticMainReportBoundaryAddress() -> uintptr
+
 @link_name(ElisaGuestExec_BoundaryCallbackCount)
 extern c_GuestExec_BoundaryCallbackCount() -> s32
 
@@ -90,11 +95,26 @@ extern c_GuestExec_ReportedBoundaryReason() -> s32
 @link_name(ElisaGuestExec_ReportedExecutionStage)
 extern c_GuestExec_ReportedExecutionStage() -> s32
 
+@link_name(ElisaGuestExec_ReportedStatus)
+extern c_GuestExec_ReportedStatus() -> s32
+
+@link_name(ElisaGuestExec_ReportedSignal)
+extern c_GuestExec_ReportedSignal() -> s32
+
+@link_name(ElisaGuestExec_ReportedFaultAddress)
+extern c_GuestExec_ReportedFaultAddress() -> uintptr
+
+@link_name(ElisaGuestExec_ReportedGuestPC)
+extern c_GuestExec_ReportedGuestPC() -> uintptr
+
 @link_name(ElisaGuestExec_LastStatus)
 extern c_GuestExec_LastStatus() -> s32
 
 @link_name(ElisaGuestExec_LastSignal)
 extern c_GuestExec_LastSignal() -> s32
+
+@link_name(ElisaGuestExec_LastErrno)
+extern c_GuestExec_LastErrno() -> s32
 
 @link_name(ElisaGuestExec_LastFaultAddress)
 extern c_GuestExec_LastFaultAddress() -> uintptr
@@ -327,16 +347,23 @@ def GuestExec_RunMainEntryGuarded(entry_addr: VAddr, argc: int, argv: void&?, ti
         guest_exec_last_game_execution_status <- -2
         guest_exec_first_boundary_reason <- GUEST_EXEC_BOUNDARY_REASON_UNSUPPORTED_HOST
         return -2
-    params: mutable GuestEntryParams = GuestEntryParams(argc, 0, entry_addr, argv)
+    params: mutable GuestEntryParams = zeroed
+    params.argc <- argc
+    params.padding <- 0
+    params.entry_addr <- entry_addr
+    if argv != null:
+        params.argv[0] <- argv.cast[static u8&?]
     status: s32 = c_GuestExec_RunMainEntryGuarded(params.ref[mutable GuestEntryParams&], timeout_ms)
     guest_exec_last_game_execution_status <- status
     GuestExec_AbsorbNativeBoundaryReport()
     if not guest_exec_first_boundary_reached:
         if status == -3:
             guest_exec_first_boundary_reason <- GUEST_EXEC_BOUNDARY_REASON_TIMEOUT
+        elif status == -11 and GuestExec_LastSignal() == 0:
+            guest_exec_first_boundary_reason <- GUEST_EXEC_BOUNDARY_REASON_EXITED_BEFORE_BOUNDARY
         elif status < 0:
             guest_exec_first_boundary_reason <- GUEST_EXEC_BOUNDARY_REASON_HOST_CRASH
-            if c_GuestExec_LastSignal() != 0:
+            if GuestExec_LastSignal() != 0:
                 guest_exec_execution_stage <- GUEST_EXEC_STAGE_CRASH_CAPTURED
         else:
             guest_exec_first_boundary_reason <- GUEST_EXEC_BOUNDARY_REASON_EXITED_BEFORE_BOUNDARY
@@ -362,6 +389,9 @@ def GuestExec_GetSyntheticMainCallBoundaryAddress() -> VAddr:
 def GuestExec_GetSyntheticBoundaryCallbackAddress() -> VAddr:
     return c_GuestExec_GetSyntheticBoundaryCallbackAddress()
 
+def GuestExec_GetNonSyntheticMainReportBoundaryAddress() -> VAddr:
+    return c_GuestExec_GetNonSyntheticMainReportBoundaryAddress()
+
 def GuestExec_BoundaryCallbackCount() -> s32:
     return c_GuestExec_BoundaryCallbackCount()
 
@@ -378,19 +408,46 @@ def GuestExec_RunSyntheticFunctionWithTimeout(entry_addr: VAddr, arg0: u64, arg1
         return 0xFFFFFFFFFFFFFFFF.u64()
     return c_GuestExec_RunSyntheticFunctionWithTimeout(entry_addr, arg0, arg1, timeout_ms)
 
+def GuestExec_ReportedStatus() -> s32:
+    return c_GuestExec_ReportedStatus()
+
+def GuestExec_ReportedSignal() -> s32:
+    return c_GuestExec_ReportedSignal()
+
+def GuestExec_ReportedFaultAddress() -> VAddr:
+    return c_GuestExec_ReportedFaultAddress()
+
+def GuestExec_ReportedGuestPC() -> VAddr:
+    return c_GuestExec_ReportedGuestPC()
+
 def GuestExec_LastStatus() -> s32:
+    reported: s32 = c_GuestExec_ReportedStatus()
+    if reported != 0:
+        return reported
     return c_GuestExec_LastStatus()
 
 def GuestExec_LastSignal() -> s32:
+    reported: s32 = c_GuestExec_ReportedSignal()
+    if reported != 0:
+        return reported
     return c_GuestExec_LastSignal()
 
+def GuestExec_LastErrno() -> s32:
+    return c_GuestExec_LastErrno()
+
 def GuestExec_LastFaultAddress() -> VAddr:
+    reported: VAddr = c_GuestExec_ReportedFaultAddress()
+    if reported != 0.uintptr():
+        return reported
     return c_GuestExec_LastFaultAddress()
 
 def GuestExec_ResetCrashState() -> void:
     c_GuestExec_ResetCrashState()
 
 def GuestExec_LastGuestPC() -> VAddr:
+    reported: VAddr = c_GuestExec_ReportedGuestPC()
+    if reported != 0.uintptr():
+        return reported
     return c_GuestExec_LastGuestPC()
 
 def GuestExec_RecordLoad() -> void:
@@ -411,15 +468,15 @@ def GuestExec_RecordFirstBoundary(reason: s32) -> void:
     c_GuestExec_ReportFirstBoundary(reason)
 
 def GuestExec_AbsorbNativeBoundaryReport() -> void:
+    reported_stage: s32 = c_GuestExec_ReportedExecutionStage()
+    if reported_stage > guest_exec_execution_stage:
+        guest_exec_execution_stage <- reported_stage
     if c_GuestExec_ReportedBoundaryReached() == 0:
         return
     guest_exec_first_boundary_reached <- true
     reported_reason: s32 = c_GuestExec_ReportedBoundaryReason()
     if guest_exec_first_boundary_reason == GUEST_EXEC_BOUNDARY_REASON_NONE and reported_reason != GUEST_EXEC_BOUNDARY_REASON_NONE:
         guest_exec_first_boundary_reason <- reported_reason
-    reported_stage: s32 = c_GuestExec_ReportedExecutionStage()
-    if reported_stage > guest_exec_execution_stage:
-        guest_exec_execution_stage <- reported_stage
     if guest_exec_execution_stage < GUEST_EXEC_STAGE_FIRST_BOUNDARY:
         guest_exec_execution_stage <- GUEST_EXEC_STAGE_FIRST_BOUNDARY
 
@@ -495,6 +552,8 @@ def GuestExec_ClassifyFirstBoundary() -> s32:
         status <- GuestExec_LastStatus()
     if status == -3:
         return GUEST_EXEC_BOUNDARY_TIMEOUT
+    if status == -11 and GuestExec_LastSignal() == 0:
+        return GUEST_EXEC_BOUNDARY_EXITED_BEFORE_BOUNDARY
     if status < 0:
         return GUEST_EXEC_BOUNDARY_PRE_BOUNDARY_FAULT
     return GUEST_EXEC_BOUNDARY_EXITED_BEFORE_BOUNDARY
