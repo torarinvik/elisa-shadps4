@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 # SPDX-License-Identifier: GPL-2.0-or-later
 
+include "../../user_settings.elisa"
+
 const ORBIS_NP_MANAGER_REQUEST_LIMIT: s32 = 0x20
 const ORBIS_NP_MANAGER_REQUEST_ID_OFFSET: s32 = 0x20000000
 const ORBIS_NP_STATE_UNKNOWN: u32 = 0
@@ -11,6 +13,11 @@ const ORBIS_NP_REACHABILITY_STATE_AVAILABLE: u32 = 1
 const ORBIS_NP_REACHABILITY_STATE_REACHABLE: u32 = 2
 const ORBIS_NP_GAME_PRESENCE_STATUS_OFFLINE: u32 = 0
 const ORBIS_NP_GAME_PRESENCE_STATUS_ONLINE: u32 = 1
+
+const NP_MANAGER_REQUEST_NONE: u8 = 0
+const NP_MANAGER_REQUEST_READY: u8 = 1
+const NP_MANAGER_REQUEST_ABORTED: u8 = 2
+const NP_MANAGER_REQUEST_COMPLETE: u8 = 3
 
 @fixed_layout
 struct OrbisNpCountryCode:
@@ -69,8 +76,14 @@ struct OrbisNpCreateAsyncRequestParameter:
     thread_priority: mutable s32
     padding: mutable u8[4]
 
+@fixed_layout
+struct NpManagerRequest:
+    state: mutable u8
+    async_: mutable bool
+    result: mutable s32
+
 global mutable g_np_manager_active_requests: s32 = 0
-global mutable g_np_manager_request_used: bool[32] = zeroed
+global mutable g_np_manager_requests: NpManagerRequest[32] = zeroed
 
 def NpManagerReqIndex(req_id: s32) -> s32:
     return req_id - ORBIS_NP_MANAGER_REQUEST_ID_OFFSET - 1
@@ -78,206 +91,353 @@ def NpManagerReqIndex(req_id: s32) -> s32:
 def NpManagerValidIndex(index: s32) -> bool:
     return index >= 0 and index < ORBIS_NP_MANAGER_REQUEST_LIMIT
 
-def NpManagerCreateRequest() -> s32:
+def NpManagerIsShadNetEnabled() -> bool:
+    settings: mutable UserSettingsImpl& = UserSettings_GetInstance()
+    _ = UserSettings_Load(settings)
+    user_mgr: mutable UserManager& = UserSettings_GetUserManager(settings)
+    default_user: User = UserManager_GetDefaultUser(user_mgr)
+    return default_user.shadnet_enabled
+
+def NpManagerGetActiveRequestIndex(req_id: s32) -> s32:
+    index: s32 = NpManagerReqIndex(req_id)
+    if not NpManagerValidIndex(index):
+        return -1
+    if g_np_manager_requests[index].state == NP_MANAGER_REQUEST_NONE:
+        return -1
+    return index
+
+def NpManagerProcessRequest(index: s32) -> int:
+    if g_np_manager_requests[index].state == NP_MANAGER_REQUEST_COMPLETE:
+        g_np_manager_requests[index].result <- ORBIS_NP_ERROR_INVALID_ARGUMENT
+        return ORBIS_NP_ERROR_INVALID_ARGUMENT
+    if g_np_manager_requests[index].state == NP_MANAGER_REQUEST_ABORTED:
+        g_np_manager_requests[index].result <- ORBIS_NP_ERROR_ABORTED
+        return ORBIS_NP_ERROR_ABORTED
+    g_np_manager_requests[index].state <- NP_MANAGER_REQUEST_COMPLETE
+    return ORBIS_OK
+
+def NpManagerCompleteSignedOut(index: s32) -> int:
+    g_np_manager_requests[index].result <- ORBIS_NP_ERROR_SIGNED_OUT
+    if g_np_manager_requests[index].async_:
+        return ORBIS_OK
+    return ORBIS_NP_ERROR_SIGNED_OUT
+
+def NpManagerCreateRequest(async_: bool) -> s32:
     if g_np_manager_active_requests == ORBIS_NP_MANAGER_REQUEST_LIMIT:
         return ORBIS_NP_ERROR_REQUEST_MAX
     for i in 0..<ORBIS_NP_MANAGER_REQUEST_LIMIT:
-        if not g_np_manager_request_used[i]:
-            g_np_manager_request_used[i] <- true
+        if g_np_manager_requests[i].state == NP_MANAGER_REQUEST_NONE:
+            g_np_manager_requests[i].state <- NP_MANAGER_REQUEST_READY
+            g_np_manager_requests[i].async_ <- async_
+            g_np_manager_requests[i].result <- 0
             g_np_manager_active_requests <- g_np_manager_active_requests + 1
             return ORBIS_NP_MANAGER_REQUEST_ID_OFFSET + i + 1
     return ORBIS_NP_ERROR_REQUEST_MAX
 
 def sceNpCreateRequest() -> s32:
-    return NpManagerCreateRequest()
+    return NpManagerCreateRequest(false)
 
 def sceNpCreateAsyncRequest(param: OrbisNpCreateAsyncRequestParameter&?) -> s32:
     if param == null:
         return ORBIS_NP_ERROR_INVALID_ARGUMENT
     if param.size != size_of(OrbisNpCreateAsyncRequestParameter).u64():
         return ORBIS_NP_ERROR_INVALID_SIZE
-    return NpManagerCreateRequest()
-
-def NpManagerValidateRequest(req_id: s32) -> int:
-    index: s32 = NpManagerReqIndex(req_id)
-    if not NpManagerValidIndex(index) or not g_np_manager_request_used[index]:
-        return ORBIS_NP_ERROR_REQUEST_NOT_FOUND
-    return ORBIS_OK
+    return NpManagerCreateRequest(true)
 
 def sceNpCheckNpAvailability(req_id: s32, online_id: mutable OrbisNpOnlineId&?) -> int:
-    _ = online_id
-    ok: int = NpManagerValidateRequest(req_id)
-    if ok != ORBIS_OK:
-        return ok
-    return ORBIS_NP_ERROR_SIGNED_OUT
+    if online_id == null:
+        return ORBIS_NP_ERROR_INVALID_ARGUMENT
+    index: s32 = NpManagerGetActiveRequestIndex(req_id)
+    if index < 0:
+        return ORBIS_NP_ERROR_REQUEST_NOT_FOUND
+    request_status: int = NpManagerProcessRequest(index)
+    if request_status != ORBIS_OK:
+        return request_status
+    if not NpManagerIsShadNetEnabled():
+        return NpManagerCompleteSignedOut(index)
+    g_np_manager_requests[index].result <- ORBIS_OK
+    return ORBIS_OK
 
 def sceNpCheckNpAvailabilityA(req_id: s32, user_id: s32) -> int:
     _ = user_id
-    ok: int = NpManagerValidateRequest(req_id)
-    if ok != ORBIS_OK:
-        return ok
-    return ORBIS_NP_ERROR_SIGNED_OUT
+    index: s32 = NpManagerGetActiveRequestIndex(req_id)
+    if index < 0:
+        return ORBIS_NP_ERROR_REQUEST_NOT_FOUND
+    request_status: int = NpManagerProcessRequest(index)
+    if request_status != ORBIS_OK:
+        return request_status
+    if not NpManagerIsShadNetEnabled():
+        return NpManagerCompleteSignedOut(index)
+    g_np_manager_requests[index].result <- ORBIS_OK
+    return ORBIS_OK
 
 def sceNpCheckNpReachability(req_id: s32, user_id: s32, state: mutable u32&?) -> int:
     _ = user_id
-    ok: int = NpManagerValidateRequest(req_id)
-    if ok != ORBIS_OK:
-        return ok
+    index: s32 = NpManagerGetActiveRequestIndex(req_id)
+    if index < 0:
+        return ORBIS_NP_ERROR_REQUEST_NOT_FOUND
+    request_status: int = NpManagerProcessRequest(index)
+    if request_status != ORBIS_OK:
+        return request_status
+    if not NpManagerIsShadNetEnabled():
+        if state != null:
+            state <- ORBIS_NP_REACHABILITY_STATE_UNAVAILABLE
+        return NpManagerCompleteSignedOut(index)
     if state != null:
-        state <- ORBIS_NP_REACHABILITY_STATE_UNAVAILABLE
+        state <- ORBIS_NP_REACHABILITY_STATE_REACHABLE
+    g_np_manager_requests[index].result <- ORBIS_OK
     return ORBIS_OK
 
 def sceNpCheckPlus(req_id: s32, param: OrbisNpCheckPlusParameter&?, result: mutable OrbisNpCheckPlusResult&?) -> int:
-    ok: int = NpManagerValidateRequest(req_id)
-    if ok != ORBIS_OK:
-        return ok
-    if param == null or result == null:
+    if req_id == 0 or param == null or result == null:
         return ORBIS_NP_ERROR_INVALID_ARGUMENT
-    result.authorized <- false
+    if param.size != size_of(OrbisNpCheckPlusParameter).u64():
+        return ORBIS_NP_ERROR_INVALID_SIZE
+    if param.features < 1u64 or param.features > 3u64:
+        return ORBIS_NP_ERROR_INVALID_ARGUMENT
+    index: s32 = NpManagerGetActiveRequestIndex(req_id)
+    if index < 0:
+        return ORBIS_NP_ERROR_REQUEST_NOT_FOUND
+    request_status: int = NpManagerProcessRequest(index)
+    if request_status != ORBIS_OK:
+        return request_status
+    if not NpManagerIsShadNetEnabled():
+        result.authorized <- false
+        return NpManagerCompleteSignedOut(index)
+    result.authorized <- true
+    g_np_manager_requests[index].result <- ORBIS_OK
     return ORBIS_OK
 
 def sceNpGetAccountLanguage(req_id: s32, online_id: mutable OrbisNpOnlineId&?, lang_code: mutable OrbisNpLanguageCode&?) -> int:
-    _ = online_id
-    ok: int = NpManagerValidateRequest(req_id)
-    if ok != ORBIS_OK:
-        return ok
-    if lang_code == null:
+    if online_id == null or lang_code == null:
         return ORBIS_NP_ERROR_INVALID_ARGUMENT
-    lang_code.code[0] <- 'e'
-    lang_code.code[1] <- 'n'
+    index: s32 = NpManagerGetActiveRequestIndex(req_id)
+    if index < 0:
+        return ORBIS_NP_ERROR_REQUEST_NOT_FOUND
+    request_status: int = NpManagerProcessRequest(index)
+    if request_status != ORBIS_OK:
+        return request_status
+    if not NpManagerIsShadNetEnabled():
+        return NpManagerCompleteSignedOut(index)
+    lang_code.code[0] <- 0
+    lang_code.code[1] <- 0
     lang_code.code[2] <- 0
+    g_np_manager_requests[index].result <- ORBIS_OK
     return ORBIS_OK
 
 def sceNpGetAccountLanguageA(req_id: s32, user_id: s32, lang_code: mutable OrbisNpLanguageCode&?) -> int:
     _ = user_id
-    return sceNpGetAccountLanguage(req_id, null, lang_code)
+    if lang_code == null:
+        return ORBIS_NP_ERROR_INVALID_ARGUMENT
+    index: s32 = NpManagerGetActiveRequestIndex(req_id)
+    if index < 0:
+        return ORBIS_NP_ERROR_REQUEST_NOT_FOUND
+    request_status: int = NpManagerProcessRequest(index)
+    if request_status != ORBIS_OK:
+        return request_status
+    if not NpManagerIsShadNetEnabled():
+        return NpManagerCompleteSignedOut(index)
+    lang_code.code[0] <- 0
+    lang_code.code[1] <- 0
+    lang_code.code[2] <- 0
+    g_np_manager_requests[index].result <- ORBIS_OK
+    return ORBIS_OK
 
 def sceNpGetParentalControlInfo(req_id: s32, online_id: mutable OrbisNpOnlineId&?, age: mutable s8&?, info: mutable OrbisNpParentalControlInfo&?) -> int:
-    _ = online_id
-    ok: int = NpManagerValidateRequest(req_id)
-    if ok != ORBIS_OK:
-        return ok
-    if age == null or info == null:
+    if online_id == null or age == null or info == null:
         return ORBIS_NP_ERROR_INVALID_ARGUMENT
-    age <- 0
+    index: s32 = NpManagerGetActiveRequestIndex(req_id)
+    if index < 0:
+        return ORBIS_NP_ERROR_REQUEST_NOT_FOUND
+    request_status: int = NpManagerProcessRequest(index)
+    if request_status != ORBIS_OK:
+        return request_status
+    if not NpManagerIsShadNetEnabled():
+        age <- 13
+        info.content_restriction <- false
+        info.chat_restriction <- false
+        info.user_generated_content_restriction <- false
+        return NpManagerCompleteSignedOut(index)
+    age <- 13
     info.content_restriction <- false
     info.chat_restriction <- false
     info.user_generated_content_restriction <- false
+    g_np_manager_requests[index].result <- ORBIS_OK
     return ORBIS_OK
 
 def sceNpGetParentalControlInfoA(req_id: s32, user_id: s32, age: mutable s8&?, info: mutable OrbisNpParentalControlInfo&?) -> int:
     _ = user_id
-    return sceNpGetParentalControlInfo(req_id, null, age, info)
+    if age == null or info == null:
+        return ORBIS_NP_ERROR_INVALID_ARGUMENT
+    index: s32 = NpManagerGetActiveRequestIndex(req_id)
+    if index < 0:
+        return ORBIS_NP_ERROR_REQUEST_NOT_FOUND
+    request_status: int = NpManagerProcessRequest(index)
+    if request_status != ORBIS_OK:
+        return request_status
+    if not NpManagerIsShadNetEnabled():
+        age <- 13
+        info.content_restriction <- false
+        info.chat_restriction <- false
+        info.user_generated_content_restriction <- false
+        return NpManagerCompleteSignedOut(index)
+    age <- 13
+    info.content_restriction <- false
+    info.chat_restriction <- false
+    info.user_generated_content_restriction <- false
+    g_np_manager_requests[index].result <- ORBIS_OK
+    return ORBIS_OK
 
 def sceNpGetGamePresenceStatus(online_id: mutable OrbisNpOnlineId&?, status: mutable u32&?) -> int:
-    _ = online_id
-    if status == null:
+    if online_id == null or status == null:
         return ORBIS_NP_ERROR_INVALID_ARGUMENT
-    status <- ORBIS_NP_GAME_PRESENCE_STATUS_OFFLINE
+    status <- ORBIS_NP_GAME_PRESENCE_STATUS_ONLINE if NpManagerIsShadNetEnabled() else ORBIS_NP_GAME_PRESENCE_STATUS_OFFLINE
     return ORBIS_OK
 
 def sceNpGetGamePresenceStatusA(user_id: s32, status: mutable u32&?) -> int:
     _ = user_id
-    return sceNpGetGamePresenceStatus(null, status)
+    if status == null:
+        return ORBIS_NP_ERROR_INVALID_ARGUMENT
+    status <- ORBIS_NP_GAME_PRESENCE_STATUS_ONLINE if NpManagerIsShadNetEnabled() else ORBIS_NP_GAME_PRESENCE_STATUS_OFFLINE
+    return ORBIS_OK
 
 def sceNpAbortRequest(req_id: s32) -> int:
-    return NpManagerValidateRequest(req_id)
+    index: s32 = NpManagerGetActiveRequestIndex(req_id)
+    if index < 0:
+        return ORBIS_NP_ERROR_REQUEST_NOT_FOUND
+    if g_np_manager_requests[index].state != NP_MANAGER_REQUEST_COMPLETE:
+        g_np_manager_requests[index].state <- NP_MANAGER_REQUEST_ABORTED
+    return ORBIS_OK
 
 def sceNpWaitAsync(req_id: s32, result: mutable s32&?) -> int:
     if result == null:
         return ORBIS_NP_ERROR_INVALID_ARGUMENT
-    ok: int = NpManagerValidateRequest(req_id)
-    if ok != ORBIS_OK:
-        return ok
-    result <- ORBIS_NP_ERROR_SIGNED_OUT
+    index: s32 = NpManagerGetActiveRequestIndex(req_id)
+    if index < 0:
+        return ORBIS_NP_ERROR_REQUEST_NOT_FOUND
+    if not g_np_manager_requests[index].async_ or g_np_manager_requests[index].state == NP_MANAGER_REQUEST_READY:
+        return ORBIS_NP_ERROR_INVALID_ID
+    result <- g_np_manager_requests[index].result
     return ORBIS_OK
 
 def sceNpPollAsync(req_id: s32, result: mutable s32&?) -> int:
     return sceNpWaitAsync(req_id, result)
 
 def sceNpDeleteRequest(req_id: s32) -> int:
-    index: s32 = NpManagerReqIndex(req_id)
-    if not NpManagerValidIndex(index) or not g_np_manager_request_used[index]:
+    index: s32 = NpManagerGetActiveRequestIndex(req_id)
+    if index < 0:
         return ORBIS_NP_ERROR_REQUEST_NOT_FOUND
-    g_np_manager_request_used[index] <- false
+    g_np_manager_requests[index].state <- NP_MANAGER_REQUEST_NONE
+    g_np_manager_requests[index].async_ <- false
+    g_np_manager_requests[index].result <- 0
     g_np_manager_active_requests <- g_np_manager_active_requests - 1
     return ORBIS_OK
 
 def sceNpGetAccountCountry(online_id: mutable OrbisNpOnlineId&?, country_code: mutable OrbisNpCountryCode&?) -> int:
-    _ = online_id
-    if country_code == null:
+    if online_id == null or country_code == null:
         return ORBIS_NP_ERROR_INVALID_ARGUMENT
-    country_code.country_code[0] <- 'U'
-    country_code.country_code[1] <- 'S'
+    if not NpManagerIsShadNetEnabled():
+        return ORBIS_NP_ERROR_SIGNED_OUT
+    country_code.country_code[0] <- 'u'.u8()
+    country_code.country_code[1] <- 's'.u8()
     country_code.end <- 0
     return ORBIS_OK
 
 def sceNpGetAccountCountryA(user_id: s32, country_code: mutable OrbisNpCountryCode&?) -> int:
     _ = user_id
-    return sceNpGetAccountCountry(null, country_code)
+    if country_code == null:
+        return ORBIS_NP_ERROR_INVALID_ARGUMENT
+    if not NpManagerIsShadNetEnabled():
+        return ORBIS_NP_ERROR_SIGNED_OUT
+    country_code.country_code[0] <- 'u'.u8()
+    country_code.country_code[1] <- 's'.u8()
+    country_code.end <- 0
+    return ORBIS_OK
 
 def sceNpGetAccountDateOfBirth(online_id: mutable OrbisNpOnlineId&?, date: mutable OrbisNpDate&?) -> int:
-    _ = online_id
-    if date == null:
+    if online_id == null or date == null:
         return ORBIS_NP_ERROR_INVALID_ARGUMENT
-    date.year <- 1970
+    if not NpManagerIsShadNetEnabled():
+        return ORBIS_NP_ERROR_SIGNED_OUT
+    date.year <- 2000
     date.month <- 1
     date.day <- 1
     return ORBIS_OK
 
 def sceNpGetAccountDateOfBirthA(user_id: s32, date: mutable OrbisNpDate&?) -> int:
     _ = user_id
-    return sceNpGetAccountDateOfBirth(null, date)
+    if date == null:
+        return ORBIS_NP_ERROR_INVALID_ARGUMENT
+    if not NpManagerIsShadNetEnabled():
+        return ORBIS_NP_ERROR_SIGNED_OUT
+    date.year <- 2000
+    date.month <- 1
+    date.day <- 1
+    return ORBIS_OK
 
 def sceNpGetAccountId(online_id: mutable OrbisNpOnlineId&?, account_id: mutable u64&?) -> int:
-    _ = online_id
-    if account_id == null:
+    if online_id == null or account_id == null:
         return ORBIS_NP_ERROR_INVALID_ARGUMENT
-    return ORBIS_NP_ERROR_SIGNED_OUT
+    if not NpManagerIsShadNetEnabled():
+        account_id <- 0u64
+        return ORBIS_NP_ERROR_SIGNED_OUT
+    account_id <- 0xFEEDFACEu64
+    return ORBIS_OK
 
 def sceNpGetAccountIdA(user_id: s32, account_id: mutable u64&?) -> int:
     _ = user_id
     if account_id == null:
         return ORBIS_NP_ERROR_INVALID_ARGUMENT
-    return ORBIS_NP_ERROR_SIGNED_OUT
+    if not NpManagerIsShadNetEnabled():
+        account_id <- 0u64
+        return ORBIS_NP_ERROR_SIGNED_OUT
+    account_id <- 0xFEEDFACEu64
+    return ORBIS_OK
 
 def sceNpGetNpId(user_id: s32, np_id: mutable OrbisNpId&?) -> int:
     _ = user_id
     if np_id == null:
         return ORBIS_NP_ERROR_INVALID_ARGUMENT
-    return ORBIS_NP_ERROR_SIGNED_OUT
+    if not NpManagerIsShadNetEnabled():
+        return ORBIS_NP_ERROR_SIGNED_OUT
+    return ORBIS_OK
 
 def sceNpGetOnlineId(user_id: s32, online_id: mutable OrbisNpOnlineId&?) -> int:
     _ = user_id
     if online_id == null:
         return ORBIS_NP_ERROR_INVALID_ARGUMENT
-    return ORBIS_NP_ERROR_SIGNED_OUT
+    if not NpManagerIsShadNetEnabled():
+        return ORBIS_NP_ERROR_SIGNED_OUT
+    return ORBIS_OK
 
 def sceNpGetNpReachabilityState(user_id: s32, state: mutable u32&?) -> int:
     _ = user_id
     if state == null:
         return ORBIS_NP_ERROR_INVALID_ARGUMENT
-    state <- ORBIS_NP_REACHABILITY_STATE_UNAVAILABLE
+    state <- ORBIS_NP_REACHABILITY_STATE_REACHABLE if NpManagerIsShadNetEnabled() else ORBIS_NP_REACHABILITY_STATE_UNAVAILABLE
     return ORBIS_OK
 
 def sceNpGetState(user_id: s32, state: mutable u32&?) -> int:
     _ = user_id
     if state == null:
         return ORBIS_NP_ERROR_INVALID_ARGUMENT
-    state <- ORBIS_NP_STATE_SIGNED_OUT
+    state <- ORBIS_NP_STATE_SIGNED_IN if NpManagerIsShadNetEnabled() else ORBIS_NP_STATE_SIGNED_OUT
     return ORBIS_OK
 
 def sceNpGetUserIdByAccountId(account_id: u64, user_id: mutable s32&?) -> int:
     _ = account_id
     if user_id == null:
         return ORBIS_NP_ERROR_INVALID_ARGUMENT
-    return ORBIS_NP_ERROR_SIGNED_OUT
+    if not NpManagerIsShadNetEnabled():
+        return ORBIS_NP_ERROR_SIGNED_OUT
+    user_id <- 1
+    return ORBIS_OK
 
 def sceNpHasSignedUp(user_id: s32, result: mutable bool&?) -> int:
     _ = user_id
     if result == null:
         return ORBIS_NP_ERROR_INVALID_ARGUMENT
-    result <- false
+    result <- NpManagerIsShadNetEnabled()
     return ORBIS_OK
 
 def sceNpSetContentRestriction(restriction: OrbisNpContentRestriction&?) -> int:
@@ -285,11 +445,14 @@ def sceNpSetContentRestriction(restriction: OrbisNpContentRestriction&?) -> int:
         return ORBIS_NP_ERROR_INVALID_ARGUMENT
     if restriction.size != size_of(OrbisNpContentRestriction).u64():
         return ORBIS_NP_ERROR_INVALID_SIZE
+    if restriction.default_age_restriction < 0 or restriction.age_restriction_count > 0x100:
+        return ORBIS_NP_ERROR_INVALID_ARGUMENT
+    if restriction.age_restriction_count > 0 and restriction.age_restriction == null:
+        return ORBIS_NP_ERROR_INVALID_ARGUMENT
     return ORBIS_OK
 
 def sceNpSetNpTitleId(title_id: OrbisNpTitleId&?, title_secret: OrbisNpTitleSecret&?) -> int:
-    _ = title_secret
-    if title_id == null:
+    if title_id == null or title_secret == null:
         return ORBIS_NP_ERROR_INVALID_ARGUMENT
     return ORBIS_OK
 
@@ -302,19 +465,19 @@ def sceNpCheckCallbackForLib() -> int:
 def sceNpRegisterStateCallback(callback: void&?, userdata: void&?) -> s32:
     _ = callback
     _ = userdata
-    return 1
+    return 0
 
 def sceNpRegisterStateCallbackA(callback: void&?, userdata: void&?) -> s32:
     _ = callback
     _ = userdata
-    return 1
+    return 0
 
 def sceNpRegisterNpReachabilityStateCallback(callback: void&?, userdata: void&?) -> s32:
     _ = callback
     _ = userdata
-    return 1
+    return 0
 
 def sceNpRegisterStateCallbackForToolkit(callback: void&?, userdata: void&?) -> s32:
     _ = callback
     _ = userdata
-    return 1
+    return 0

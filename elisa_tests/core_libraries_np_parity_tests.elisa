@@ -80,7 +80,11 @@ def np_registered_elisa_contracts_match_cpp() -> void:
 
         req_id: mutable s32 = sceNpCreateAsyncRequest(request_param)
         np_assert(req_id > ORBIS_NP_MANAGER_REQUEST_ID_OFFSET)
-        np_assert(sceNpCheckNpAvailability(req_id, null) == ORBIS_NP_ERROR_SIGNED_OUT)
+        online_id: mutable OrbisNpOnlineId = zeroed
+        np_assert(sceNpCheckNpAvailability(req_id, online_id.ref[mutable OrbisNpOnlineId&]) == ORBIS_OK)
+        async_result: mutable s32 = 0
+        np_assert(sceNpWaitAsync(req_id, async_result.ref[mutable s32&]) == ORBIS_OK)
+        np_assert(async_result == ORBIS_NP_ERROR_SIGNED_OUT)
         np_assert(sceNpDeleteRequest(req_id) == ORBIS_OK)
 
         np_assert(sceNpCommerceDialogInitialize() == ORBIS_OK)
@@ -88,6 +92,45 @@ def np_registered_elisa_contracts_match_cpp() -> void:
         np_assert(sceNpCommerceDialogTerminate() == ORBIS_OK)
 
         np_assert(sceNpTrophyCreateHandle(null) == ORBIS_NP_TROPHY_ERROR_INVALID_ARGUMENT)
+
+@test
+def np_manager_request_state_machine_matches_cpp() -> void:
+    can Abort.Panic:
+        online_id: mutable OrbisNpOnlineId = zeroed
+        async_param: OrbisNpCreateAsyncRequestParameter = zeroed
+        async_param.size <- size_of(OrbisNpCreateAsyncRequestParameter).u64()
+        async_param.cpu_affinity_mask <- 1u64
+        async_param.thread_priority <- 0
+
+        async_req: s32 = sceNpCreateAsyncRequest(async_param)
+        np_assert(async_req > ORBIS_NP_MANAGER_REQUEST_ID_OFFSET)
+        np_assert(sceNpCheckNpAvailability(async_req, online_id.ref[mutable OrbisNpOnlineId&]) == ORBIS_OK)
+        wait_result: mutable s32 = 0
+        np_assert(sceNpWaitAsync(async_req, wait_result.ref[mutable s32&]) == ORBIS_OK)
+        np_assert(wait_result == ORBIS_NP_ERROR_SIGNED_OUT)
+        np_assert(sceNpPollAsync(async_req, wait_result.ref[mutable s32&]) == ORBIS_OK)
+        np_assert(wait_result == ORBIS_NP_ERROR_SIGNED_OUT)
+        np_assert(sceNpCheckNpAvailability(async_req, online_id.ref[mutable OrbisNpOnlineId&]) == ORBIS_NP_ERROR_INVALID_ARGUMENT)
+        np_assert(sceNpAbortRequest(async_req) == ORBIS_OK)
+        np_assert(sceNpDeleteRequest(async_req) == ORBIS_OK)
+        np_assert(sceNpDeleteRequest(async_req) == ORBIS_NP_ERROR_REQUEST_NOT_FOUND)
+
+        sync_req: s32 = sceNpCreateRequest()
+        np_assert(sync_req > ORBIS_NP_MANAGER_REQUEST_ID_OFFSET)
+        np_assert(sceNpCheckNpAvailability(sync_req, online_id.ref[mutable OrbisNpOnlineId&]) == ORBIS_NP_ERROR_SIGNED_OUT)
+        np_assert(sceNpWaitAsync(sync_req, wait_result.ref[mutable s32&]) == ORBIS_NP_ERROR_INVALID_ID)
+        np_assert(sceNpAbortRequest(sync_req) == ORBIS_OK)
+        np_assert(sceNpDeleteRequest(sync_req) == ORBIS_OK)
+
+@test
+def np_manager_argument_ordering_matches_cpp() -> void:
+    can Abort.Panic:
+        req: s32 = sceNpCreateRequest()
+        np_assert(req > ORBIS_NP_MANAGER_REQUEST_ID_OFFSET)
+        np_assert(sceNpCheckNpAvailability(req, null) == ORBIS_NP_ERROR_INVALID_ARGUMENT)
+        np_assert(sceNpGetAccountCountry(null, null) == ORBIS_NP_ERROR_INVALID_ARGUMENT)
+        np_assert(sceNpGetAccountDateOfBirth(null, null) == ORBIS_NP_ERROR_INVALID_ARGUMENT)
+        np_assert(sceNpDeleteRequest(req) == ORBIS_OK)
 
 @test
 def np_manager_signed_out_contracts_match_cpp_defaults() -> void:
@@ -100,3 +143,24 @@ def np_manager_signed_out_contracts_match_cpp_defaults() -> void:
         np_assert(sceNpHasSignedUp(1, null) == ORBIS_NP_ERROR_INVALID_ARGUMENT)
         np_assert(sceNpHasSignedUp(1, signed_up.ref[mutable bool&]) == ORBIS_OK)
         np_assert(signed_up == false)
+
+@test
+def np_signed_in_paths_toggle_with_user_setting() -> void:
+    can Abort.Panic:
+        settings: mutable UserSettingsImpl& = UserSettings_GetInstance()
+        _ = UserSettings_Load(settings)
+        user_mgr: mutable UserManager& = UserSettings_GetUserManager(settings)
+        user_ref: mutable User&? = UserManager_GetUserByID(user_mgr, user_mgr.default_user_id)
+        np_assert(user_ref != null)
+        if user_ref == null:
+            return
+
+        prev: bool = user_ref.shadnet_enabled
+        user_ref.shadnet_enabled <- true
+
+        state: mutable u32 = ORBIS_NP_STATE_UNKNOWN
+        np_assert(sceNpGetState(1, state.ref[mutable u32&]) == ORBIS_OK)
+        np_assert(state == ORBIS_NP_STATE_SIGNED_IN)
+        np_assert(sceNpWebApi2SendRequest() == ORBIS_OK)
+
+        user_ref.shadnet_enabled <- prev
