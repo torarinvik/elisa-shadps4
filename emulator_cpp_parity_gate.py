@@ -120,7 +120,14 @@ def all_steps() -> list[Step]:
         ),
         Step(
             "emulator ABI smoke x64",
-            [sys.executable, "emulator_abi_smoke.py", target_triple_for_x64_host(), "--golden-dir", "abi_manifests"],
+            [
+                sys.executable,
+                "emulator_abi_smoke.py",
+                target_triple_for_x64_host(),
+                "--golden-dir",
+                "abi_manifests",
+                "--strict",
+            ],
             category="guest-exec",
         ),
         Step(

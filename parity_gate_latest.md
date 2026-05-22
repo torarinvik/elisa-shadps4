@@ -1,9 +1,9 @@
 # Emulator C++ Parity Gate
 
-Passed: 22
+Passed: 26
 Failed: 0
 
-Summary score: 27/27
+Summary score: 31/31
 Per-subsystem counts:
 - External-C-ABI: 11
 - Native-Elisa: 248
@@ -32,6 +32,12 @@ CUSA07399 stage:
 - guest exec supported native execution: 0
 - guest exec x64 subprocess available: 1
 - guest exec x64 subprocess smoke: PASS
+- CUSA07399 x64 real execution lane: ok
+- CUSA07399 x64 execution mode: cross-emit-rosetta-x86_64
+- CUSA07399 x64 boundary status: -10
+- CUSA07399 x64 last pc: 34359746608
+- CUSA07399 x64 last sp: 13107612000
+- CUSA07399 x64 last bp: 13107612152
 - guest exec probe only: 1
 - guest exec started: 1
 - guest exec entry reached: 1
@@ -39,6 +45,8 @@ CUSA07399 stage:
 - guest exec boundary reason: 7 (unsupported-host)
 - guest exec boundary reason name: unsupported-host
 - guest exec last pc: 0x0
+- guest exec last sp: 0x0
+- guest exec last bp: 0x0
 - guest exec last signal: 0
 - guest exec last module: libc
 - guest exec last symbol: RpQJJVKTiFM
@@ -53,9 +61,9 @@ CUSA07399 stage:
   - VIDEO_STAGE_first_frame_candidate=0
 CUSA07399 artifact metrics:
 - CUSA module count: 4
-- imports total: 1150
+- imports total: 1151
 - native HLE count: 839
-- PRX export count: 311
+- PRX export count: 312
 - AeroLib fallback count: 0
 - unresolved count: 0
 - malformed count: 0
@@ -116,12 +124,16 @@ Failing scenario ids:
 - PASS: project.json syntax
 - PASS: parity ledger
 - PASS: parity ABI guard
+- PASS: emulator ABI smoke
 - PASS: parity workqueue summary
 - PASS: bridge syntax
 - PASS: elisacore test core-libraries-audio-parity-tests
 - PASS: elisacore test core-libraries-np-parity-tests
 - PASS: native guest_exec_runtime warnings
 - PASS: guest exec x64 subprocess smoke
+- PASS: guest exec ABI smoke x64
+- PASS: CUSA07399 x64 real execution lane
+- PASS: emulator ABI smoke x64
 - PASS: native kernel_threads_runtime warnings
 - PASS: elisacore test emulator-core-boot-smoke
 - PASS: elisacore test real-self-loader-tests

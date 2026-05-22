@@ -107,6 +107,12 @@ static int32_t elisa_guest_exec_last_errno = 0;
 static volatile int32_t elisa_guest_exec_last_native_phase = ELISA_GUEST_EXEC_PHASE_NONE;
 static int32_t elisa_guest_exec_boundary_callback_count = 0;
 static uint64_t elisa_guest_exec_boundary_callback_reason = 0;
+static int32_t elisa_guest_exec_synthetic_observed_argc = 0;
+static uintptr_t elisa_guest_exec_synthetic_observed_argv0 = 0;
+static uintptr_t elisa_guest_exec_synthetic_observed_entry = 0;
+static uintptr_t elisa_guest_exec_synthetic_observed_params = 0;
+static uintptr_t elisa_guest_exec_synthetic_observed_exit_func = 0;
+static uintptr_t elisa_guest_exec_synthetic_observed_stack = 0;
 
 typedef struct ElisaGuestExecForkReport {
     volatile int32_t boundary_reached;
@@ -320,6 +326,20 @@ static void __attribute__((unused)) elisa_guest_exec_start_watchdog(uint32_t tim
     }
 }
 #endif
+
+static uintptr_t elisa_guest_exec_current_stack_pointer(void) {
+#if defined(__x86_64__) || defined(_M_X64)
+    uintptr_t sp = 0;
+#if defined(_MSC_VER)
+    sp = (uintptr_t)_AddressOfReturnAddress();
+#else
+    __asm__ volatile("movq %%rsp, %0" : "=r"(sp));
+#endif
+    return sp;
+#else
+    return 0;
+#endif
+}
 
 static void elisa_guest_exec_reset_fork_report(void) {
     if (elisa_guest_exec_fork_report != NULL) {
@@ -701,6 +721,12 @@ void ElisaGuestExec_ResetCrashState(void) {
     elisa_guest_exec_last_guest_bp = 0;
     elisa_guest_exec_boundary_callback_count = 0;
     elisa_guest_exec_boundary_callback_reason = 0;
+    elisa_guest_exec_synthetic_observed_argc = 0;
+    elisa_guest_exec_synthetic_observed_argv0 = 0;
+    elisa_guest_exec_synthetic_observed_entry = 0;
+    elisa_guest_exec_synthetic_observed_params = 0;
+    elisa_guest_exec_synthetic_observed_exit_func = 0;
+    elisa_guest_exec_synthetic_observed_stack = 0;
 #if !defined(_WIN32)
     elisa_guest_exec_timeout_fired = 0;
 #endif
@@ -993,7 +1019,14 @@ uint64_t ElisaGuestExec_SyntheticSpin(uint64_t arg0, uint64_t arg1) {
 }
 
 void ElisaGuestExec_SyntheticMainReturn(ElisaGuestEntryParams* params, ElisaGuestExitFunc exit_func) {
-    (void)exit_func;
+    elisa_guest_exec_synthetic_observed_stack = elisa_guest_exec_current_stack_pointer();
+    elisa_guest_exec_synthetic_observed_params = (uintptr_t)params;
+    elisa_guest_exec_synthetic_observed_exit_func = (uintptr_t)exit_func;
+    if (params != NULL) {
+        elisa_guest_exec_synthetic_observed_argc = params->argc;
+        elisa_guest_exec_synthetic_observed_argv0 = (uintptr_t)params->argv[0];
+        elisa_guest_exec_synthetic_observed_entry = params->entry_addr;
+    }
     if (params == NULL || params->argc != 77) {
         elisa_guest_exec_last_status = -4;
         return;
@@ -1064,6 +1097,34 @@ int32_t ElisaGuestExec_BoundaryCallbackCount(void) {
 
 uint64_t ElisaGuestExec_BoundaryCallbackReason(void) {
     return elisa_guest_exec_boundary_callback_reason;
+}
+
+int32_t ElisaGuestExec_SyntheticObservedArgc(void) {
+    return elisa_guest_exec_synthetic_observed_argc;
+}
+
+uintptr_t ElisaGuestExec_SyntheticObservedArgv0(void) {
+    return elisa_guest_exec_synthetic_observed_argv0;
+}
+
+uintptr_t ElisaGuestExec_SyntheticObservedEntry(void) {
+    return elisa_guest_exec_synthetic_observed_entry;
+}
+
+uintptr_t ElisaGuestExec_SyntheticObservedParams(void) {
+    return elisa_guest_exec_synthetic_observed_params;
+}
+
+uintptr_t ElisaGuestExec_SyntheticObservedExitFunc(void) {
+    return elisa_guest_exec_synthetic_observed_exit_func;
+}
+
+uintptr_t ElisaGuestExec_SyntheticObservedStack(void) {
+    return elisa_guest_exec_synthetic_observed_stack;
+}
+
+uint64_t ElisaGuestExec_SyntheticObservedStackMod16(void) {
+    return (uint64_t)(elisa_guest_exec_synthetic_observed_stack & 0xFull);
 }
 
 #if defined(__x86_64__) || defined(_M_X64)
@@ -1396,11 +1457,30 @@ int main(void) {
     ElisaGuestEntryParams params;
     memset(&params, 0, sizeof(params));
     params.argc = 77;
+    params.argv[0] = (const char*)0x12345678ull;
     params.entry_addr = ElisaGuestExec_GetSyntheticMainReturnAddress();
     int32_t guarded_status = ElisaGuestExec_RunMainEntryGuarded(&params, 100u);
     failed |= elisa_guest_exec_expect_s32("guarded-main-status", guarded_status, 1);
     failed |= elisa_guest_exec_expect_s32("guarded-main-last-status",
                                           ElisaGuestExec_LastStatus(), 1);
+    failed |= elisa_guest_exec_expect_s32("guarded-main-observed-argc",
+                                          ElisaGuestExec_SyntheticObservedArgc(), 77);
+    failed |= elisa_guest_exec_expect_u64("guarded-main-observed-argv0",
+                                          (uint64_t)ElisaGuestExec_SyntheticObservedArgv0(),
+                                          0x12345678ull);
+    failed |= elisa_guest_exec_expect_u64("guarded-main-observed-entry",
+                                          (uint64_t)ElisaGuestExec_SyntheticObservedEntry(),
+                                          (uint64_t)params.entry_addr);
+    if (ElisaGuestExec_SyntheticObservedParams() == 0 ||
+        ElisaGuestExec_SyntheticObservedExitFunc() == 0 ||
+        ElisaGuestExec_SyntheticObservedStack() == 0) {
+        fprintf(stderr,
+                "guarded-main-observed-abi: params=0x%llx exit=0x%llx stack=0x%llx\n",
+                (unsigned long long)ElisaGuestExec_SyntheticObservedParams(),
+                (unsigned long long)ElisaGuestExec_SyntheticObservedExitFunc(),
+                (unsigned long long)ElisaGuestExec_SyntheticObservedStack());
+        failed = 1;
+    }
 
     memset(&params, 0, sizeof(params));
     params.argc = 88;

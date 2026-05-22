@@ -141,8 +141,14 @@ def main() -> int:
     parser.add_argument("target_triple", nargs="?", default=default_target_triple())
     parser.add_argument("--write-manifests", type=Path, help="Write checked ABI manifests to this directory.")
     parser.add_argument("--golden-dir", type=Path, help="Compare checked ABI manifests with this directory.")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Fail optional checks and missing optional golden manifests instead of treating them as best-effort.",
+    )
     args = parser.parse_args()
     target_triple = args.target_triple
+    strict = args.strict or os.environ.get("ELISA_STRICT_FFI") == "1"
     failures: list[str] = []
     for check in CHECKS:
         ok, output, manifest = run_check(check, target_triple)
@@ -161,7 +167,7 @@ def main() -> int:
             for line in output.splitlines()[:12]:
                 if "error:" in line or "mismatch" in line or "failed" in line:
                     print(f"  {line}")
-        if not ok and not check.optional:
+        if not ok and (strict or not check.optional):
             failures.append(check.name)
         if ok and manifest is not None and args.write_manifests is not None:
             args.write_manifests.mkdir(parents=True, exist_ok=True)
@@ -170,14 +176,14 @@ def main() -> int:
             path = manifest_path(args.golden_dir, check, target_triple)
             if not path.exists():
                 print(f"  missing golden manifest: {path}")
-                if not check.optional:
+                if strict or not check.optional:
                     failures.append(check.name + ":missing-golden")
             else:
                 expected = path.read_text()
                 actual = stable_manifest(manifest)
                 if expected != actual:
                     print(f"  golden manifest mismatch: {path}")
-                    if not check.optional:
+                    if strict or not check.optional:
                         failures.append(check.name + ":golden-mismatch")
     if failures:
         print("EMULATOR_ABI_SMOKE status=failed failures=" + ",".join(failures))
