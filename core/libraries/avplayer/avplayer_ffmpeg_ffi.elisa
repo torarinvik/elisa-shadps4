@@ -820,6 +820,42 @@ def avffmpeg_convert_audio_to_s16(frame: mutable void&?) -> mutable void&?:
     avffmpeg_free_swr(swr_ctx)
     return dst_frame
 
+def avffmpeg_frame_channels(frame: AVFramePublicPrefix&) -> u32:
+    if frame.ch_layout.nb_channels > 0:
+        return frame.ch_layout.nb_channels.u32()
+    return 0u32
+
+def avffmpeg_copy_frame_metadata_and_payload(frame: mutable void&?, payload: mutable u8&?, payload_size: u32, payload_is_video: bool, out_audio_samples: mutable u32&, out_audio_sample_rate: mutable u32&, out_audio_channels: mutable u32&, out_video_width: mutable u32&, out_video_height: mutable u32&, out_video_pitch: mutable u32&, out_video_aspect_num: mutable u32&, out_video_aspect_den: mutable u32&):
+    if frame == null:
+        return
+    converted: mutable void&? = frame
+    if payload_is_video:
+        converted <- avffmpeg_convert_video_to_nv12(frame)
+    else:
+        converted <- avffmpeg_convert_audio_to_s16(frame)
+    if converted == null:
+        converted <- frame
+    decoded_ptr: AVFramePublicPrefix&? = converted.cast[AVFramePublicPrefix&?]
+    if decoded_ptr == null:
+        return
+    if decoded_ptr[0].nb_samples > 0:
+        out_audio_samples <- decoded_ptr[0].nb_samples.u32()
+    if decoded_ptr[0].sample_rate > 0:
+        out_audio_sample_rate <- decoded_ptr[0].sample_rate.u32()
+    out_audio_channels <- avffmpeg_frame_channels(decoded_ptr[0])
+    if decoded_ptr[0].width > 0:
+        out_video_width <- decoded_ptr[0].width.u32()
+    if decoded_ptr[0].height > 0:
+        out_video_height <- decoded_ptr[0].height.u32()
+    if decoded_ptr[0].linesize[0] > 0:
+        out_video_pitch <- decoded_ptr[0].linesize[0].u32()
+    if decoded_ptr[0].sample_aspect_ratio.num > 0 and decoded_ptr[0].sample_aspect_ratio.den > 0:
+        out_video_aspect_num <- decoded_ptr[0].sample_aspect_ratio.num.u32()
+        out_video_aspect_den <- decoded_ptr[0].sample_aspect_ratio.den.u32()
+    avffmpeg_copy_decoded_payload(decoded_ptr[0], payload, payload_size, payload_is_video)
+    if converted != frame:
+        avffmpeg_free_frame(converted)
+
 def avplayer_ffmpeg_decode_next_ts_copy(handle: i32, stream_index: u32, codec_ctx: void&?, out_ts: mutable u64&, out_audio_samples: mutable u32&, out_audio_sample_rate: mutable u32&, out_audio_channels: mutable u32&, out_video_width: mutable u32&, out_video_height: mutable u32&, out_video_pitch: mutable u32&, out_video_aspect_num: mutable u32&, out_video_aspect_den: mutable u32&, payload: mutable u8&?, payload_size: u32, payload_is_video: bool) -> i32:
     if not avffmpeg_valid_handle(handle) or codec_ctx == null:
         return -1
@@ -867,21 +903,7 @@ def avplayer_ffmpeg_decode_next_ts_copy(handle: i32, stream_index: u32, codec_ct
                 return -1
             drain_rc: i32 = avcodec_receive_frame(codec_ctx, frame)
             if drain_rc == 0:
-                decoded: AVFramePublicPrefix& = frame.cast[AVFramePublicPrefix&]
-                if decoded.nb_samples > 0:
-                    out_audio_samples <- decoded.nb_samples.u32()
-                if decoded.sample_rate > 0:
-                    out_audio_sample_rate <- decoded.sample_rate.u32()
-                if decoded.width > 0:
-                    out_video_width <- decoded.width.u32()
-                if decoded.height > 0:
-                    out_video_height <- decoded.height.u32()
-                if decoded.linesize[0] > 0:
-                    out_video_pitch <- decoded.linesize[0].u32()
-                if decoded.sample_aspect_ratio.num > 0 and decoded.sample_aspect_ratio.den > 0:
-                    out_video_aspect_num <- decoded.sample_aspect_ratio.num.u32()
-                    out_video_aspect_den <- decoded.sample_aspect_ratio.den.u32()
-                avffmpeg_copy_decoded_payload(decoded, payload, payload_size, payload_is_video)
+                avffmpeg_copy_frame_metadata_and_payload(frame, payload, payload_size, payload_is_video, out_audio_samples, out_audio_sample_rate, out_audio_channels, out_video_width, out_video_height, out_video_pitch, out_video_aspect_num, out_video_aspect_den)
                 next_ts: u64 = avffmpeg_last_stream_ts[stream_slot] + 33
                 avffmpeg_last_stream_ts[stream_slot] <- next_ts
                 out_ts <- next_ts
@@ -906,21 +928,7 @@ def avplayer_ffmpeg_decode_next_ts_copy(handle: i32, stream_index: u32, codec_ct
                 return -1
             recv_rc: i32 = avcodec_receive_frame(codec_ctx, frame)
             if recv_rc == 0:
-                decoded: AVFramePublicPrefix& = frame.cast[AVFramePublicPrefix&]
-                if decoded.nb_samples > 0:
-                    out_audio_samples <- decoded.nb_samples.u32()
-                if decoded.sample_rate > 0:
-                    out_audio_sample_rate <- decoded.sample_rate.u32()
-                if decoded.width > 0:
-                    out_video_width <- decoded.width.u32()
-                if decoded.height > 0:
-                    out_video_height <- decoded.height.u32()
-                if decoded.linesize[0] > 0:
-                    out_video_pitch <- decoded.linesize[0].u32()
-                if decoded.sample_aspect_ratio.num > 0 and decoded.sample_aspect_ratio.den > 0:
-                    out_video_aspect_num <- decoded.sample_aspect_ratio.num.u32()
-                    out_video_aspect_den <- decoded.sample_aspect_ratio.den.u32()
-                avffmpeg_copy_decoded_payload(decoded, payload, payload_size, payload_is_video)
+                avffmpeg_copy_frame_metadata_and_payload(frame, payload, payload_size, payload_is_video, out_audio_samples, out_audio_sample_rate, out_audio_channels, out_video_width, out_video_height, out_video_pitch, out_video_aspect_num, out_video_aspect_den)
                 pkt_dts_u64: mutable u64 = 0
                 if local_dts > 0:
                     pkt_dts_u64 <- local_dts.u64()

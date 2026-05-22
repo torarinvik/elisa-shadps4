@@ -37,6 +37,11 @@ Current validated prefix structs:
 ### Public API wiring (`avplayer.elisa`)
 
 - `Implemented`: init/initEx/addSource/addSourceEx/start/stop/pause/resume/close
+- `Implemented`: `Start` now matches C++ restart semantics for already-active playback by stopping the source first, publishing `Stop`, then entering `Starting`/`Play` again.
+- `Implemented`: `Stop` now follows the C++ ordering: source/workers are stopped before the public `Stop` state/event is emitted.
+- `Implemented`: `Pause` is a success no-op when the player is already at EOF, matching `AvPlayerState::Pause`.
+- `Implemented`: constructor/init autoplay behavior now matches C++: missing guest event callback or explicit `auto_start` enables internal autoplay.
+- `Implemented`: internal autoplay consumes `StateReady` and forwards later state events such as `StatePlay` to the guest callback, matching C++ `AutoPlayEventCallback`.
 - `Implemented`: stream count/info, get audio/video data, loop flag, current time
 - `Implemented`: `SetAvSyncMode` now stores sync mode in source state; `None` bypasses video delivery sync gating like C++ source behavior
 - `Implemented`: `SetLooping` now updates both source and controller loop state and fails when no source is attached
@@ -53,6 +58,7 @@ Current validated prefix structs:
 
 - `Implemented`: FFmpeg open/close/start/stop/pause/resume calls
 - `Implemented`: start path seeks streams back to the beginning before decoder setup
+- `Implemented`: restarted playback reopens codec contexts and resumes decode-backed frame retrieval after the C++ `Start` restart path.
 - `Implemented`: stream info extraction (type, duration/start, video/audio details)
 - `Implemented`: stream enable/disable based on resolved stream type
 - `Implemented`: started/stopped lifecycle tracking and queue-backed pull behavior
@@ -82,8 +88,10 @@ Current validated prefix structs:
 - `Implemented`: FFmpeg 8 `AVFrame` prefix binding now follows the public `data[8]` layout and validates with `c-bind-check`
 - `Implemented`: successful `GetAudioData`, `GetVideoData`, and `GetVideoDataEx` now allocate stable frame payload buffers through the player memory callbacks instead of returning metadata-only frames with `p_data = null`
 - `Implemented`: FFmpeg decode now has an Elisa-side copy path that copies live decoded frame data into caller-provided payload buffers before `AVFrame` release
+- `Implemented`: FFmpeg fixture tests now verify real MP4 video and audio decode into caller-owned payload buffers, not just metadata/timestamp decode
 - `Implemented`: callback-backed file replacement now tracks open fd, file size, position, read-packet EOF/short-read behavior, seek/reset clamping, close-on-replace, and close-on-release in Elisa
-- `Partial`: decoded payload copying currently handles direct plane copies for already-compatible frame data; non-NV12 video and non-S16 audio still need swscale/swresample conversion parity
+- `Implemented`: decoded payload copying routes non-NV12 video through swscale to NV12 and non-S16 audio through swresample to S16 before guest-buffer copy
+- `Partial`: swscale/swresample conversion helpers are wired and unit-covered for synthetic audio conversion, but still need non-native-format media fixture coverage for video and audio conversion payload bytes
 - `Different`: Elisa currently cannot model nullable function-pointer fields directly, so `AvPlayerMemAllocator` callback fields are represented as callable function values; this preserves callback invocation and function-pointer-sized ABI shape, but null-callback validation is deferred to compiler nullable-function support
 - `Implemented`: source caches stream start-time/duration for active audio/video and frame getters now apply cached stream start-time offset to output timestamps
 - `Implemented`: start-time offset application now keys on `start_time` presence (not duration presence), improving streams with unknown/zero duration
@@ -122,7 +130,11 @@ Current validated prefix structs:
 - `Implemented`: controller flushes and scrubs pending queued events on hard transitions (`STOP`, explicit `ERROR`, add-source failure to `ERROR`, and `REVERT_STATE`)
 - `Implemented`: add-source entry now hard-flushes queued controller events before scheduling add-source processing
 - `Implemented`: add-source controller flow now re-baselines state to `INITIAL` before entering `ADDING_SOURCE`
-- `Partial`: no dedicated controller thread or full C++ event queue semantics
+- `Implemented`: controller dispatch now skips callback invocation when the guest did not install an event callback, matching the C++ no-callback behavior instead of calling a dummy Elisa function pointer
+- `Implemented`: started FFmpeg-backed public frame retrieval now opens source codecs, uses a concrete libc clock FFI, enters active playback, and returns decoded video/audio payloads through `sceAvPlayerGetVideoDataEx` and `sceAvPlayerGetAudioData`
+- `Implemented`: `Stop -> Starting -> Play` is now a valid transition so explicit restart from stopped/active paths follows C++ `AvPlayerState::Start`.
+- `Implemented`: init starts a host-backed controller tick thread, mirroring C++ constructor lifecycle.
+- `Partial`: controller thread is currently limited to event/buffering ticks; full C++ source worker-thread demux/decode queues are still pending, so background frame decoding is intentionally not performed from the controller thread.
 
 ### FFI layer (`avplayer_ffmpeg_ffi.elisa`)
 
@@ -133,7 +145,6 @@ Current validated prefix structs:
 - `Implemented`: decoder EOF drain attempt (flush packet + receive) before signaling terminal EOF
 - `Implemented`: seek/flush accessors for source-level replay handling
 - `Implemented`: ABI prefix layout checks for core structs
-- `Missing`: swscale/swresample conversion helpers for frame formats that are not already directly copy-compatible with the expected guest output
 - `Implemented`: swscale/swresample declarations and conversion helper paths are present for non-NV12 video and non-S16 audio; they are covered by binding checks but still need media-fixture runtime coverage
 
 ## Remaining Gaps To Reach 100% C++ Parity
@@ -141,6 +152,6 @@ Current validated prefix structs:
 - Port full source pipeline behaviors from `avplayer_source.cpp`:
   demux loop, decoder loops, frame buffering, and frame conversion metadata parity.
 - Port controller-thread event processing behavior from `avplayer_state.cpp`.
-- Add media-fixture runtime tests for swscale/swresample conversion outputs and decoded payload parity.
+- Add media-fixture runtime tests for swscale/swresample conversion outputs using files that are not already NV12/S16.
 - Expand parity harness scenarios for EOF/loop, buffering transitions, and
   invalid-state edge behavior.

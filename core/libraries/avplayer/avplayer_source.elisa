@@ -4,7 +4,17 @@
 include "./avplayer_ffmpeg_ffi.elisa"
 include "./avplayer_error.elisa"
 
-extern high_resolution_now_ns() -> i64
+struct AvsrcHostTimeval:
+    tv_sec: i64
+    tv_usec: i64
+
+extern gettimeofday(tv: mutable AvsrcHostTimeval&?, tz: void&?) -> int
+
+def high_resolution_now_ns() -> i64:
+    tv: mutable AvsrcHostTimeval = zeroed
+    if gettimeofday(tv.ref[mutable AvsrcHostTimeval&], null) != 0:
+        return 0
+    return (tv.tv_sec * 1000000000) + (tv.tv_usec * 1000)
 
 const AVPLAYER_MAX_STREAMS: int = 8
 const AVSRC_MAX_HANDLES: int = 64
@@ -98,7 +108,6 @@ global mutable avsrc_file_fd: i32[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_file_position: u64[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_file_size_bytes: u64[AVSRC_MAX_HANDLES] = zeroed
 global mutable avsrc_file_replacement_enabled: bool[AVSRC_MAX_HANDLES] = zeroed
-
 def avsrc_null_open_file(obj: void&?, path: i8&?) -> i32:
     _ = obj
     _ = path
@@ -883,35 +892,11 @@ def avsrc_start(slot: int) -> bool:
         ctx: void&? = avplayer_ffmpeg_context(avsrc_ffmpeg_handle[slot])
         if ctx == null:
             return false
-        if avsrc_video_stream_index[slot] >= 0:
-            stream_idx: i32 = avsrc_video_stream_index[slot]
-            stream_duration: mutable i64 = 0
-            if avsrc_ffmpeg_handle[slot] > 0:
-                typ: mutable u32 = 0
-                duration: mutable u64 = 0
-                start_time: mutable u64 = 0
-                video_width: mutable u32 = 0
-                video_height: mutable u32 = 0
-                audio_channels: mutable u32 = 0
-                audio_sample_rate: mutable u32 = 0
-                if avplayer_ffmpeg_get_stream_info(avsrc_ffmpeg_handle[slot], avsrc_video_stream_index[slot].u32(), typ, duration, start_time, video_width, video_height, audio_channels, audio_sample_rate) == 0:
-                    stream_duration <- duration.i64()
-            _ = avformat_seek_file(ctx, stream_idx, 0, 0, stream_duration, 0)
-        if avsrc_audio_stream_index[slot] >= 0:
-            stream_idx: i32 = avsrc_audio_stream_index[slot]
-            stream_duration: mutable i64 = 0
-            if avsrc_ffmpeg_handle[slot] > 0:
-                typ: mutable u32 = 0
-                duration: mutable u64 = 0
-                start_time: mutable u64 = 0
-                video_width: mutable u32 = 0
-                video_height: mutable u32 = 0
-                audio_channels: mutable u32 = 0
-                audio_sample_rate: mutable u32 = 0
-                if avplayer_ffmpeg_get_stream_info(avsrc_ffmpeg_handle[slot], avsrc_audio_stream_index[slot].u32(), typ, duration, start_time, video_width, video_height, audio_channels, audio_sample_rate) == 0:
-                    stream_duration <- duration.i64()
-            _ = avformat_seek_file(ctx, stream_idx, 0, 0, stream_duration, 0)
         if avsrc_video_enabled[slot] and avsrc_video_stream_index[slot] >= 0:
+            video_duration: mutable i64 = avsrc_video_duration_cache[slot].i64()
+            if video_duration <= 0:
+                video_duration <- 0x7fffffffffffffff
+            _ = avformat_seek_file(ctx, avsrc_video_stream_index[slot], 0, 0, video_duration, 0)
             decoder: mutable void&? = null
             codec_ctx: mutable void&? = null
             decoder <- avplayer_ffmpeg_find_decoder_for_stream(avsrc_ffmpeg_handle[slot], avsrc_video_stream_index[slot].u32())
@@ -929,6 +914,10 @@ def avsrc_start(slot: int) -> bool:
                 return false
             avsrc_video_codec_ctx[slot] <- codec_ctx
         if avsrc_audio_enabled[slot] and avsrc_audio_stream_index[slot] >= 0:
+            audio_duration: mutable i64 = avsrc_audio_duration_cache[slot].i64()
+            if audio_duration <= 0:
+                audio_duration <- 0x7fffffffffffffff
+            _ = avformat_seek_file(ctx, avsrc_audio_stream_index[slot], 0, 0, audio_duration, 0)
             decoder: mutable void&? = null
             codec_ctx: mutable void&? = null
             decoder <- avplayer_ffmpeg_find_decoder_for_stream(avsrc_ffmpeg_handle[slot], avsrc_audio_stream_index[slot].u32())

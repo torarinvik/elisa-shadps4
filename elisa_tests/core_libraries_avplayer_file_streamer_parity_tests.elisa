@@ -2,6 +2,7 @@ include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
 include "../core/libraries/avplayer/avplayer_harness.elisa"
 
 const AVPLAYER_LOCAL_MP4_FIXTURE: static u8& = "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/shadPS4/Games/CUSA05716/movies/Scene_39b_est_shot.mp4"
+const AV_PIX_FMT_YUV420P_LOCAL: i32 = 0
 
 global mutable g_avp_open_calls: i32 = 0
 global mutable g_avp_close_calls: i32 = 0
@@ -11,6 +12,10 @@ global mutable g_avp_last_read_pos: u64 = 0u64
 global mutable g_avp_last_read_len: u32 = 0u32
 global mutable g_avp_short_read_limit: i32 = -1
 global mutable g_avp_force_open_fail: bool = false
+global mutable g_avp_video_decode_payload: u8[8388608] = zeroed
+global mutable g_avp_audio_decode_payload: u8[1048576] = zeroed
+global mutable g_avp_event_count: i32 = 0
+global mutable g_avp_event_ids: i32[16] = zeroed
 
 def avp_reset_file_probe():
     g_avp_open_calls <- 0
@@ -21,6 +26,21 @@ def avp_reset_file_probe():
     g_avp_last_read_len <- 0u32
     g_avp_short_read_limit <- -1
     g_avp_force_open_fail <- false
+
+def avp_reset_event_probe():
+    g_avp_event_count <- 0
+    i: mutable int = 0
+    while i < 16:
+        g_avp_event_ids[i] <- 0
+        i <- i + 1
+
+def avp_event_callback(object_ptr: void&?, event_id: i32, source_id: i32, event_data: void&?):
+    _ = object_ptr
+    _ = source_id
+    _ = event_data
+    if g_avp_event_count >= 0 and g_avp_event_count < 16:
+        g_avp_event_ids[g_avp_event_count] <- event_id
+    g_avp_event_count <- g_avp_event_count + 1
 
 def avp_file_open(obj: void&?, name: i8&?) -> i32:
     _ = obj
@@ -135,6 +155,57 @@ def avp_decode_one_fixture_stream_index(stream_index: i32, payload_is_video: boo
         return video_width > 0 and video_height > 0
     return audio_samples > 0 and audio_sample_rate > 0
 
+def avp_decode_one_fixture_stream_index_into_payload(stream_index: i32, payload_is_video: bool, payload: mutable u8&, payload_size: u32) -> bool:
+    handle: i32 = avplayer_ffmpeg_open(AVPLAYER_LOCAL_MP4_FIXTURE.cast[i8&?])
+    if handle < 0:
+        return false
+
+    if stream_index < 0:
+        avplayer_ffmpeg_close(handle)
+        return false
+
+    decoder: mutable void&? = avplayer_ffmpeg_find_decoder_for_stream(handle, stream_index.u32())
+    if decoder == null:
+        avplayer_ffmpeg_close(handle)
+        return false
+
+    codec_ctx: mutable void&? = avcodec_alloc_context3(decoder)
+    if codec_ctx == null:
+        avplayer_ffmpeg_close(handle)
+        return false
+
+    if avplayer_ffmpeg_copy_stream_params_to_codec_ctx(handle, stream_index.u32(), codec_ctx) < 0:
+        avffmpeg_free_codec_context(codec_ctx)
+        avplayer_ffmpeg_close(handle)
+        return false
+
+    options: mutable void&? = null
+    if avcodec_open2(codec_ctx, decoder, options.ref[mutable void&?&]) < 0:
+        avffmpeg_free_codec_context(codec_ctx)
+        avplayer_ffmpeg_close(handle)
+        return false
+
+    _ = avplayer_ffmpeg_start(handle)
+    ts: mutable u64 = 0
+    audio_samples: mutable u32 = 0
+    audio_sample_rate: mutable u32 = 0
+    audio_channels: mutable u32 = 0
+    video_width: mutable u32 = 0
+    video_height: mutable u32 = 0
+    video_pitch: mutable u32 = 0
+    aspect_num: mutable u32 = 0
+    aspect_den: mutable u32 = 0
+    rc: i32 = avplayer_ffmpeg_decode_next_ts_copy(handle, stream_index.u32(), codec_ctx, ts, audio_samples, audio_sample_rate, audio_channels, video_width, video_height, video_pitch, aspect_num, aspect_den, payload, payload_size, payload_is_video)
+
+    avffmpeg_free_codec_context(codec_ctx)
+    avplayer_ffmpeg_close(handle)
+
+    if rc != 0:
+        return false
+    if payload_is_video:
+        return video_width > 0 and video_height > 0
+    return audio_samples > 0 and audio_sample_rate > 0
+
 def avp_decode_one_fixture_stream(wanted_type: u32, payload_is_video: bool) -> bool:
     handle: i32 = avplayer_ffmpeg_open(AVPLAYER_LOCAL_MP4_FIXTURE.cast[i8&?])
     if handle < 0:
@@ -143,7 +214,7 @@ def avp_decode_one_fixture_stream(wanted_type: u32, payload_is_video: bool) -> b
     avplayer_ffmpeg_close(handle)
     return avp_decode_one_fixture_stream_index(stream_index, payload_is_video)
 
-def avp_prepare_fixture_handle() -> AvPlayerHandle:
+def avp_prepare_fixture_handle_for_stream(wanted_type: u32) -> AvPlayerHandle:
     init_data: AvPlayerInitData = build_init_data()
     handle: AvPlayerHandle = sceAvPlayerInit(init_data.ref[mutable AvPlayerInitData&])
     if handle == 0:
@@ -151,13 +222,45 @@ def avp_prepare_fixture_handle() -> AvPlayerHandle:
     if sceAvPlayerAddSource(handle, AVPLAYER_LOCAL_MP4_FIXTURE.cast[i8&?]) != ORBIS_OK:
         _ = sceAvPlayerClose(handle)
         return 0
-    if sceAvPlayerEnableStream(handle, 0) != ORBIS_OK:
+    probe: i32 = avplayer_ffmpeg_open(AVPLAYER_LOCAL_MP4_FIXTURE.cast[i8&?])
+    stream_index: i32 = avp_find_stream_by_type(probe, wanted_type)
+    if probe >= 0:
+        avplayer_ffmpeg_close(probe)
+    if stream_index < 0:
         _ = sceAvPlayerClose(handle)
         return 0
-    if sceAvPlayerEnableStream(handle, 1) != ORBIS_OK:
+    if sceAvPlayerEnableStream(handle, stream_index.u32()) != ORBIS_OK:
         _ = sceAvPlayerClose(handle)
         return 0
     return handle
+
+def avp_prepare_started_fixture_handle_for_stream(wanted_type: u32) -> AvPlayerHandle:
+    handle: AvPlayerHandle = avp_prepare_fixture_handle_for_stream(wanted_type)
+    if handle == 0:
+        return 0
+    if sceAvPlayerStart(handle) != ORBIS_OK:
+        _ = sceAvPlayerClose(handle)
+        return 0
+    return handle
+
+def avp_prepare_fixture_handle() -> AvPlayerHandle:
+    return avp_prepare_fixture_handle_for_stream(AVPLAYER_STREAM_TYPE_VIDEO)
+
+def avp_event_seen(event_id: i32) -> bool:
+    i: mutable int = 0
+    while i < g_avp_event_count and i < 16:
+        if g_avp_event_ids[i] == event_id:
+            return true
+        i <- i + 1
+    return false
+
+def avp_event_index(event_id: i32) -> i32:
+    i: mutable int = 0
+    while i < g_avp_event_count and i < 16:
+        if g_avp_event_ids[i] == event_id:
+            return i.i32()
+        i <- i + 1
+    return -1
 
 @test
 def avplayer_file_replacement_open_close_contract() -> void:
@@ -325,6 +428,30 @@ def avplayer_ffmpeg_local_mp4_decodes_audio_when_fixture_exists() -> void:
         assert avp_decode_one_fixture_stream(AVPLAYER_STREAM_TYPE_AUDIO, false)
 
 @test
+def avplayer_ffmpeg_local_mp4_copies_video_payload_when_fixture_exists() -> void:
+    can Console.Write, Abort.Panic:
+        probe: i32 = avplayer_ffmpeg_open(AVPLAYER_LOCAL_MP4_FIXTURE.cast[i8&?])
+        if probe < 0:
+            return
+        stream_index: i32 = avp_find_stream_by_type(probe, AVPLAYER_STREAM_TYPE_VIDEO)
+        avplayer_ffmpeg_close(probe)
+        assert stream_index >= 0
+
+        assert avp_decode_one_fixture_stream_index_into_payload(stream_index, true, g_avp_video_decode_payload[0].ref[mutable u8&], 8388608u32)
+
+@test
+def avplayer_ffmpeg_local_mp4_copies_audio_payload_when_fixture_exists() -> void:
+    can Console.Write, Abort.Panic:
+        probe: i32 = avplayer_ffmpeg_open(AVPLAYER_LOCAL_MP4_FIXTURE.cast[i8&?])
+        if probe < 0:
+            return
+        stream_index: i32 = avp_find_stream_by_type(probe, AVPLAYER_STREAM_TYPE_AUDIO)
+        avplayer_ffmpeg_close(probe)
+        assert stream_index >= 0
+
+        assert avp_decode_one_fixture_stream_index_into_payload(stream_index, false, g_avp_audio_decode_payload[0].ref[mutable u8&], 1048576u32)
+
+@test
 def avplayer_ffmpeg_copy_decoded_payload_respects_nv12_linesize() -> void:
     can Abort.Panic:
         frame: mutable AVFramePublicPrefix = zeroed
@@ -380,6 +507,34 @@ def avplayer_ffmpeg_copy_decoded_payload_respects_nv12_linesize() -> void:
         assert payload[11] == 13u8
 
 @test
+def avplayer_ffmpeg_convert_video_to_nv12_converts_yuv420p_frame() -> void:
+    can Abort.Panic:
+        frame: mutable void&? = av_frame_alloc()
+        assert frame != null
+
+        src: mutable AVFramePublicPrefix& = frame.cast[mutable AVFramePublicPrefix&]
+        src.format <- AV_PIX_FMT_YUV420P_LOCAL
+        src.width <- 4
+        src.height <- 4
+        assert av_frame_get_buffer(frame, 0) == 0
+
+        converted: mutable void&? = avffmpeg_convert_video_to_nv12(frame)
+        assert converted != null
+        assert converted != frame
+
+        out: AVFramePublicPrefix& = converted.cast[AVFramePublicPrefix&]
+        assert out.format == AV_PIX_FMT_NV12
+        assert out.width == 4
+        assert out.height == 4
+        assert out.data[0] != null
+        assert out.data[1] != null
+        assert out.linesize[0] >= 4
+        assert out.linesize[1] >= 4
+
+        avffmpeg_free_frame(converted)
+        avffmpeg_free_frame(frame)
+
+@test
 def avplayer_ffmpeg_convert_audio_to_s16_converts_fltp_frame() -> void:
     can Abort.Panic:
         frame: mutable void&? = av_frame_alloc()
@@ -408,27 +563,195 @@ def avplayer_ffmpeg_convert_audio_to_s16_converts_fltp_frame() -> void:
 @test
 def avplayer_frame_info_video_metadata_matches_ex() -> void:
     can Thread.Spawn, Thread.Join, Thread.Sleep, Abort.Panic:
-        handle_v: AvPlayerHandle = avp_prepare_fixture_handle()
+        handle_v: AvPlayerHandle = avp_prepare_fixture_handle_for_stream(AVPLAYER_STREAM_TYPE_VIDEO)
         assert handle_v != 0
         video: AvPlayerFrameInfo = zeroed
         assert sceAvPlayerGetVideoData(handle_v, video.ref[mutable AvPlayerFrameInfo&])
+        video_details: mutable AvPlayerStreamDetailsVideo& = avplayer_stream_details_video(video.details)
+        assert video.p_data != null
+        assert video_details.width > 0
+        assert video_details.height > 0
         _ = sceAvPlayerClose(handle_v)
 
-        handle_ex: AvPlayerHandle = avp_prepare_fixture_handle()
+        handle_ex: AvPlayerHandle = avp_prepare_fixture_handle_for_stream(AVPLAYER_STREAM_TYPE_VIDEO)
         assert handle_ex != 0
         video_ex: AvPlayerFrameInfoEx = zeroed
         assert sceAvPlayerGetVideoDataEx(handle_ex, video_ex.ref[mutable AvPlayerFrameInfoEx&])
+        video_ex_details: mutable AvPlayerStreamDetailsVideoEx& = avplayer_stream_details_ex_video(video_ex.details)
+        assert video_ex.p_data != null
+        assert video_ex_details.width > 0
+        assert video_ex_details.height > 0
         _ = sceAvPlayerClose(handle_ex)
 
 @test
 def avplayer_frame_info_audio_metadata_matches_stream_info() -> void:
     can Thread.Spawn, Thread.Join, Thread.Sleep, Abort.Panic:
-        handle: AvPlayerHandle = avp_prepare_fixture_handle()
+        handle: AvPlayerHandle = avp_prepare_fixture_handle_for_stream(AVPLAYER_STREAM_TYPE_AUDIO)
         assert handle != 0
         audio: AvPlayerFrameInfo = zeroed
         assert sceAvPlayerGetAudioData(handle, audio.ref[mutable AvPlayerFrameInfo&])
+        audio_details: mutable AvPlayerStreamDetailsAudio& = avplayer_stream_details_audio(audio.details)
+        assert audio.p_data != null
+        assert audio_details.channel_count > 0
+        assert audio_details.sample_rate > 0
+        assert audio_details.size > 0
 
         _ = sceAvPlayerClose(handle)
+
+@test
+def avplayer_started_video_frame_retrieval_decodes_payload() -> void:
+    can Thread.Spawn, Thread.Join, Thread.Sleep, Abort.Panic:
+        handle: AvPlayerHandle = avp_prepare_started_fixture_handle_for_stream(AVPLAYER_STREAM_TYPE_VIDEO)
+        assert handle != 0
+        assert sceAvPlayerIsActive(handle)
+        video: AvPlayerFrameInfoEx = zeroed
+        assert sceAvPlayerGetVideoDataEx(handle, video.ref[mutable AvPlayerFrameInfoEx&])
+        details: mutable AvPlayerStreamDetailsVideoEx& = avplayer_stream_details_ex_video(video.details)
+        assert video.p_data != null
+        assert details.width > 0
+        assert details.height > 0
+        assert sceAvPlayerStop(handle) == ORBIS_OK
+        assert sceAvPlayerClose(handle) == ORBIS_OK
+
+@test
+def avplayer_started_audio_frame_retrieval_decodes_payload() -> void:
+    can Thread.Spawn, Thread.Join, Thread.Sleep, Abort.Panic:
+        handle: AvPlayerHandle = avp_prepare_started_fixture_handle_for_stream(AVPLAYER_STREAM_TYPE_AUDIO)
+        assert handle != 0
+        assert sceAvPlayerIsActive(handle)
+        audio: AvPlayerFrameInfo = zeroed
+        assert sceAvPlayerGetAudioData(handle, audio.ref[mutable AvPlayerFrameInfo&])
+        details: mutable AvPlayerStreamDetailsAudio& = avplayer_stream_details_audio(audio.details)
+        assert audio.p_data != null
+        assert details.channel_count > 0
+        assert details.sample_rate > 0
+        assert details.size > 0
+        assert sceAvPlayerStop(handle) == ORBIS_OK
+        assert sceAvPlayerClose(handle) == ORBIS_OK
+
+@test
+def avplayer_event_callback_reports_ready_then_play_for_started_fixture() -> void:
+    can Thread.Spawn, Thread.Join, Thread.Sleep, Abort.Panic:
+        avp_reset_event_probe()
+        init_data: AvPlayerInitData = build_init_data()
+        init_data.event_replacement.object_ptr <- null
+        init_data.event_replacement.event_callback <- avp_event_callback.cast[void&?]
+        handle: AvPlayerHandle = sceAvPlayerInit(init_data.ref[mutable AvPlayerInitData&])
+        assert handle != 0
+        assert sceAvPlayerAddSource(handle, AVPLAYER_LOCAL_MP4_FIXTURE.cast[i8&?]) == ORBIS_OK
+        assert avp_event_seen(AVPLAYER_EVENTS_STATE_READY)
+        assert sceAvPlayerEnableStream(handle, 0) == ORBIS_OK
+        assert sceAvPlayerStart(handle) == ORBIS_OK
+        assert avp_event_seen(AVPLAYER_EVENTS_STATE_PLAY)
+        ready_index: i32 = avp_event_index(AVPLAYER_EVENTS_STATE_READY)
+        play_index: i32 = avp_event_index(AVPLAYER_EVENTS_STATE_PLAY)
+        assert ready_index >= 0
+        assert play_index >= 0
+        assert ready_index < play_index
+        assert sceAvPlayerClose(handle) == ORBIS_OK
+
+@test
+def avplayer_auto_start_enters_active_playback_after_ready() -> void:
+    can Thread.Spawn, Thread.Join, Thread.Sleep, Abort.Panic:
+        avp_reset_event_probe()
+        init_data: AvPlayerInitData = build_init_data()
+        init_data.auto_start <- true
+        init_data.event_replacement.object_ptr <- null
+        init_data.event_replacement.event_callback <- avp_event_callback.cast[void&?]
+        handle: AvPlayerHandle = sceAvPlayerInit(init_data.ref[mutable AvPlayerInitData&])
+        assert handle != 0
+        assert sceAvPlayerAddSource(handle, AVPLAYER_LOCAL_MP4_FIXTURE.cast[i8&?]) == ORBIS_OK
+        assert sceAvPlayerIsActive(handle)
+        # C++ consumes StateReady in the internal autoplay callback and only
+        # forwards subsequent state events to the guest callback.
+        assert not avp_event_seen(AVPLAYER_EVENTS_STATE_READY)
+        assert avp_event_seen(AVPLAYER_EVENTS_STATE_PLAY)
+        assert sceAvPlayerClose(handle) == ORBIS_OK
+
+@test
+def avplayer_missing_event_callback_autostarts_like_cpp() -> void:
+    can Thread.Spawn, Thread.Join, Thread.Sleep, Abort.Panic:
+        init_data: AvPlayerInitData = build_init_data()
+        init_data.auto_start <- false
+        init_data.event_replacement.object_ptr <- null
+        init_data.event_replacement.event_callback <- null
+        handle: AvPlayerHandle = sceAvPlayerInit(init_data.ref[mutable AvPlayerInitData&])
+        assert handle != 0
+        assert sceAvPlayerAddSource(handle, AVPLAYER_LOCAL_MP4_FIXTURE.cast[i8&?]) == ORBIS_OK
+        assert sceAvPlayerIsActive(handle)
+        assert sceAvPlayerClose(handle) == ORBIS_OK
+
+@test
+def avplayer_start_restarts_active_source_like_cpp() -> void:
+    can Thread.Spawn, Thread.Join, Thread.Sleep, Abort.Panic:
+        avp_reset_event_probe()
+        init_data: AvPlayerInitData = build_init_data()
+        init_data.event_replacement.object_ptr <- null
+        init_data.event_replacement.event_callback <- avp_event_callback.cast[void&?]
+        handle: AvPlayerHandle = sceAvPlayerInit(init_data.ref[mutable AvPlayerInitData&])
+        assert handle != 0
+        assert sceAvPlayerAddSource(handle, AVPLAYER_LOCAL_MP4_FIXTURE.cast[i8&?]) == ORBIS_OK
+        assert sceAvPlayerEnableStream(handle, 0) == ORBIS_OK
+        assert sceAvPlayerStart(handle) == ORBIS_OK
+        first_play_index: i32 = avp_event_index(AVPLAYER_EVENTS_STATE_PLAY)
+        assert first_play_index >= 0
+
+        # Restart while already active should produce Stop then Play in order.
+        assert sceAvPlayerStart(handle) == ORBIS_OK
+        stop_index: mutable i32 = -1
+        second_play_index: mutable i32 = -1
+        i: mutable i32 = 0
+        while i < g_avp_event_count and i < 16:
+            ev: i32 = g_avp_event_ids[i.int()]
+            if i > first_play_index and stop_index < 0 and ev == AVPLAYER_EVENTS_STATE_STOP:
+                stop_index <- i
+            if i > first_play_index and ev == AVPLAYER_EVENTS_STATE_PLAY:
+                second_play_index <- i
+                i <- g_avp_event_count
+            else:
+                i <- i + 1
+        assert stop_index > first_play_index
+        assert second_play_index > stop_index
+
+        assert sceAvPlayerIsActive(handle)
+        video: AvPlayerFrameInfoEx = zeroed
+        assert sceAvPlayerGetVideoDataEx(handle, video.ref[mutable AvPlayerFrameInfoEx&])
+        assert video.p_data != null
+        assert sceAvPlayerStop(handle) == ORBIS_OK
+        assert sceAvPlayerClose(handle) == ORBIS_OK
+
+@test
+def avplayer_autostart_callback_hides_ready_event_but_keeps_play() -> void:
+    can Thread.Spawn, Thread.Join, Thread.Sleep, Abort.Panic:
+        avp_reset_event_probe()
+        init_data: AvPlayerInitData = build_init_data()
+        init_data.auto_start <- true
+        init_data.event_replacement.object_ptr <- null
+        init_data.event_replacement.event_callback <- avp_event_callback.cast[void&?]
+        handle: AvPlayerHandle = sceAvPlayerInit(init_data.ref[mutable AvPlayerInitData&])
+        assert handle != 0
+        assert sceAvPlayerAddSource(handle, AVPLAYER_LOCAL_MP4_FIXTURE.cast[i8&?]) == ORBIS_OK
+        assert not avp_event_seen(AVPLAYER_EVENTS_STATE_READY)
+        assert avp_event_seen(AVPLAYER_EVENTS_STATE_PLAY)
+        ready_index: i32 = avp_event_index(AVPLAYER_EVENTS_STATE_READY)
+        play_index: i32 = avp_event_index(AVPLAYER_EVENTS_STATE_PLAY)
+        assert ready_index == -1
+        assert play_index >= 0
+        assert sceAvPlayerIsActive(handle)
+        assert sceAvPlayerIsActive(handle)
+        assert sceAvPlayerClose(handle) == ORBIS_OK
+
+@test
+def avplayer_pause_after_eof_is_success_noop_like_cpp() -> void:
+    can Thread.Spawn, Thread.Join, Thread.Sleep, Abort.Panic:
+        handle: AvPlayerHandle = avp_prepare_started_fixture_handle_for_stream(AVPLAYER_STREAM_TYPE_VIDEO)
+        assert handle != 0
+        slot: int = handle - 1
+        avs_on_eof(slot)
+        avplayer_controller_tick(slot)
+        assert g_state_current[slot] == AV_STATE_END_OF_FILE
+        assert sceAvPlayerPause(handle) == ORBIS_OK
+        assert sceAvPlayerClose(handle) == ORBIS_OK
 
 @test
 def avplayer_frame_output_struct_layout_matches_cpp() -> void:

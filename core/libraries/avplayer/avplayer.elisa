@@ -176,6 +176,7 @@ global mutable g_handle_current_time: u64[AVPLAYER_MAX_HANDLES] = zeroed
 global mutable g_handle_stream_count: i32[AVPLAYER_MAX_HANDLES] = zeroed
 global mutable g_handle_event_object: void&?[AVPLAYER_MAX_HANDLES] = zeroed
 global mutable g_handle_event_callback: AvPlayerEventCallback[AVPLAYER_MAX_HANDLES] = zeroed
+global mutable g_handle_event_callback_present: bool[AVPLAYER_MAX_HANDLES] = zeroed
 global mutable g_handle_mem_object: void&?[AVPLAYER_MAX_HANDLES] = zeroed
 const AVPLAYER_VIDEO_PAYLOAD_POOL_MAX: int = 16
 const AVPLAYER_AUDIO_PAYLOAD_POOL_MAX: int = 8
@@ -394,11 +395,16 @@ def avplayer_estimate_audio_size_bytes(handle_slot: int, channels: u32, sample_r
     return samples_per_channel * channels * bytes_per_sample
 
 def avplayer_dispatch_state_events(slot: int):
+    if not g_handle_event_callback_present[slot]:
+        g_state_event_last[slot] <- 0
+        g_state_warning_last[slot] <- 0
+        return
     event_cb: AvPlayerEventCallback = g_handle_event_callback[slot]
     event_obj: void&? = g_handle_event_object[slot]
     event_id: i32 = g_state_event_last[slot]
     if event_id != 0:
-        event_cb(event_obj, event_id, 0, null)
+        if not (g_handle_auto_start[slot] and event_id == AVPLAYER_EVENTS_STATE_READY):
+            event_cb(event_obj, event_id, 0, null)
         g_state_event_last[slot] <- 0
     warning_id: i32 = g_state_warning_last[slot]
     if warning_id != 0:
@@ -422,8 +428,6 @@ def avplayer_controller_thread_entry(arg: void&?) -> void&?:
         i: mutable int = 0
         while i < AVPLAYER_MAX_HANDLES:
             if g_handle_active[i]:
-                if avsrc_has_source[i] and avsrc_started[i] and not avsrc_is_paused[i]:
-                    _ = avsrc_fill_outputs(i, avsrc_video_enabled[i], avsrc_audio_enabled[i])
                 avplayer_controller_tick(i)
             i <- i + 1
         _ = usleep(2000)
@@ -468,6 +472,7 @@ def avplayer_alloc_handle() -> AvPlayerHandle:
             g_handle_stream_count[i] <- 2
             g_handle_event_object[i] <- null
             g_handle_event_callback[i] <- avplayer_null_event_callback
+            g_handle_event_callback_present[i] <- false
             g_handle_video_payload_count[i] <- 2
             g_handle_video_payload_cursor[i] <- 0
             g_handle_audio_payload_cursor[i] <- 0
@@ -533,10 +538,9 @@ def avplayer_auto_start_streams(handle: AvPlayerHandle) -> bool:
     if selected_timedtext != -1:
         _ = avsrc_enable_stream(handle - 1, selected_timedtext.u32())
         timedtext_enabled <- true
-    if not avsrc_start(handle - 1):
-        return false
-    g_handle_active_playback[handle - 1] <- true
-    return true
+    # C++ auto-start observes the Ready transition, then enters the same Start()
+    # path as an explicit guest call so state/event side effects stay identical.
+    return sceAvPlayerStart(handle) == ORBIS_OK
 
 def sceAvPlayerAddSource(handle: AvPlayerHandle, filename: i8&?) -> i32:
     if not avplayer_valid_handle(handle):
@@ -580,6 +584,7 @@ def sceAvPlayerClose(handle: AvPlayerHandle) -> i32:
     g_handle_default_language[handle - 1] <- null
     g_handle_event_object[handle - 1] <- null
     g_handle_event_callback[handle - 1] <- avplayer_null_event_callback
+    g_handle_event_callback_present[handle - 1] <- false
     avplayer_release_payloads(handle - 1)
     g_handle_mem_object[handle - 1] <- null
     if not avplayer_any_handle_active():
@@ -611,12 +616,36 @@ def sceAvPlayerGetAudioData(handle: AvPlayerHandle, p_info: mutable AvPlayerFram
     pending_warning: mutable i32 = 0
     if avsrc_consume_warning(handle - 1, pending_warning):
         avs_on_warning(handle - 1, pending_warning)
-    p_info.p_data <- null
+    audio_channels: mutable u32 = avsrc_get_audio_channels(handle - 1)
+    audio_sample_rate: mutable u32 = avsrc_get_audio_sample_rate(handle - 1)
+    audio_size: mutable u32 = avplayer_estimate_audio_size_bytes(handle - 1, audio_channels, audio_sample_rate)
+    if audio_size == 0:
+        audio_size <- 8192
+    payload: void&? = avplayer_ensure_audio_payload(handle - 1, audio_size)
+    if payload == null:
+        return false
+    payload_bytes: mutable u8&? = payload.cast[mutable u8&?]
+    audio_ts: mutable u64 = avsrc_current_time(handle - 1)
+    if avsrc_started[handle - 1]:
+        if not avsrc_get_audio_data_into(handle - 1, audio_ts, payload_bytes, audio_size):
+            return false
+    audio_channels <- avsrc_get_audio_channels(handle - 1)
+    audio_sample_rate <- avsrc_get_audio_sample_rate(handle - 1)
+    audio_size <- avsrc_get_last_audio_size_bytes(handle - 1)
+    if audio_size == 0:
+        audio_size <- avplayer_estimate_audio_size_bytes(handle - 1, audio_channels, audio_sample_rate)
+    p_info.p_data <- payload_bytes
     p_info.reserved[0] <- 0
     p_info.reserved[1] <- 0
     p_info.reserved[2] <- 0
     p_info.reserved[3] <- 0
-    p_info.timestamp <- g_handle_current_time[handle - 1]
+    p_info.timestamp <- audio_ts
+    avplayer_clear_stream_details(p_info.details)
+    audio_details: mutable AvPlayerStreamDetailsAudio& = avplayer_stream_details_audio(p_info.details)
+    audio_details.channel_count <- audio_channels.u16()
+    audio_details.sample_rate <- audio_sample_rate
+    audio_details.size <- audio_size
+    avplayer_copy_language_codes(p_info.details, avsrc_get_stream_language(handle - 1, avsrc_get_audio_stream_index(handle - 1).u32()))
     g_handle_current_time[handle - 1] <- p_info.timestamp
     return true
 
@@ -654,15 +683,22 @@ def sceAvPlayerGetStreamInfo(handle: AvPlayerHandle, stream_id: u32, p_info: mut
 def sceAvPlayerGetVideoData(handle: AvPlayerHandle, video_info: mutable AvPlayerFrameInfo&?) -> bool:
     if not avplayer_valid_handle(handle) or video_info == null:
         return false
-    pending_warning: mutable i32 = 0
-    if avsrc_consume_warning(handle - 1, pending_warning):
-        avs_on_warning(handle - 1, pending_warning)
-    video_info.p_data <- null
+    ex_info: AvPlayerFrameInfoEx = zeroed
+    if not sceAvPlayerGetVideoDataEx(handle, ex_info.ref[mutable AvPlayerFrameInfoEx&]):
+        return false
+    ex_video: mutable AvPlayerStreamDetailsVideoEx& = avplayer_stream_details_ex_video(ex_info.details)
+    video_info.p_data <- ex_info.p_data.cast[mutable u8&?]
     video_info.reserved[0] <- 0
     video_info.reserved[1] <- 0
     video_info.reserved[2] <- 0
     video_info.reserved[3] <- 0
-    g_handle_current_time[handle - 1] <- video_info.timestamp
+    video_info.timestamp <- ex_info.timestamp
+    avplayer_clear_stream_details(video_info.details)
+    video_details: mutable AvPlayerStreamDetailsVideo& = avplayer_stream_details_video(video_info.details)
+    video_details.width <- ex_video.width
+    video_details.height <- ex_video.height
+    video_details.aspect_ratio <- ex_video.aspect_ratio
+    avplayer_copy_language_codes(video_info.details, avsrc_get_stream_language(handle - 1, avsrc_get_video_stream_index(handle - 1).u32()))
     return true
 
 def sceAvPlayerGetVideoDataEx(handle: AvPlayerHandle, video_info: mutable AvPlayerFrameInfoEx&?) -> bool:
@@ -671,11 +707,41 @@ def sceAvPlayerGetVideoDataEx(handle: AvPlayerHandle, video_info: mutable AvPlay
     pending_warning: mutable i32 = 0
     if avsrc_consume_warning(handle - 1, pending_warning):
         avs_on_warning(handle - 1, pending_warning)
-    video_info.p_data <- null
+    width: mutable u32 = avsrc_get_video_width(handle - 1)
+    height: mutable u32 = avsrc_get_video_height(handle - 1)
+    payload_size: u32 = avplayer_video_payload_size(width, height)
+    payload: void&? = avplayer_ensure_video_payload(handle - 1, width, height)
+    if payload == null:
+        return false
+    payload_bytes: mutable u8&? = payload.cast[mutable u8&?]
+    video_ts: mutable u64 = avsrc_current_time(handle - 1)
+    if avsrc_started[handle - 1]:
+        if not avsrc_get_video_data_into(handle - 1, video_ts, payload_bytes, payload_size):
+            return false
+    width <- avsrc_get_video_width(handle - 1)
+    height <- avsrc_get_video_height(handle - 1)
+    video_info.p_data <- payload
     video_info.reserved[0] <- 0
     video_info.reserved[1] <- 0
     video_info.reserved[2] <- 0
     video_info.reserved[3] <- 0
+    video_info.timestamp <- video_ts
+    avplayer_clear_stream_details_ex(video_info.details)
+    video_details: mutable AvPlayerStreamDetailsVideoEx& = avplayer_stream_details_ex_video(video_info.details)
+    video_details.width <- width
+    video_details.height <- height
+    if height > 0:
+        video_details.aspect_ratio <- width.f32() / height.f32()
+    if avsrc_get_last_video_aspect_den(handle - 1) > 0:
+        video_details.aspect_ratio <- avsrc_get_last_video_aspect_num(handle - 1).f32() / avsrc_get_last_video_aspect_den(handle - 1).f32()
+    video_details.framerate <- 30u32
+    video_details.pitch <- avsrc_get_last_video_pitch(handle - 1)
+    if video_details.pitch == 0:
+        video_details.pitch <- width
+    video_details.luma_bit_depth <- 8u8
+    video_details.chroma_bit_depth <- 8u8
+    video_details.video_full_range_flag <- avsrc_get_last_video_full_range(handle - 1)
+    avplayer_copy_language_codes_ex(video_info.details, avsrc_get_stream_language(handle - 1, avsrc_get_video_stream_index(handle - 1).u32()))
     g_handle_current_time[handle - 1] <- video_info.timestamp
     return true
 
@@ -684,13 +750,15 @@ def sceAvPlayerInit(data: mutable AvPlayerInitData&?) -> AvPlayerHandle:
         return 0
     handle: AvPlayerHandle = avplayer_alloc_handle()
     if handle != 0:
-        g_handle_auto_start[handle - 1] <- data.auto_start
+        g_handle_auto_start[handle - 1] <- data.auto_start or data.event_replacement.event_callback == null
         g_handle_default_language[handle - 1] <- data.default_language
         g_handle_event_object[handle - 1] <- data.event_replacement.object_ptr
         if data.event_replacement.event_callback != null:
             g_handle_event_callback[handle - 1] <- data.event_replacement.event_callback.cast[AvPlayerEventCallback]
+            g_handle_event_callback_present[handle - 1] <- true
         else:
             g_handle_event_callback[handle - 1] <- avplayer_null_event_callback
+            g_handle_event_callback_present[handle - 1] <- false
         avplayer_store_allocator(handle - 1, data.memory_replacement)
         avsrc_set_file_replacement(handle - 1, data.file_replacement.object_ptr, data.file_replacement.open, data.file_replacement.close, data.file_replacement.read_offset, data.file_replacement.size)
         avsrc_set_max_video_framebuffers(handle - 1, data.num_output_video_framebuffers)
@@ -700,6 +768,7 @@ def sceAvPlayerInit(data: mutable AvPlayerInitData&?) -> AvPlayerHandle:
         if requested_pool_count > AVPLAYER_VIDEO_PAYLOAD_POOL_MAX:
             requested_pool_count <- AVPLAYER_VIDEO_PAYLOAD_POOL_MAX
         g_handle_video_payload_count[handle - 1] <- requested_pool_count
+        avplayer_controller_thread_start()
     return handle
 
 def sceAvPlayerInitEx(p_data: AvPlayerInitData&?, p_player: mutable AvPlayerHandle&?) -> i32:
@@ -708,13 +777,15 @@ def sceAvPlayerInitEx(p_data: AvPlayerInitData&?, p_player: mutable AvPlayerHand
     p_player <- avplayer_alloc_handle()
     if p_player == 0:
         return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
-    g_handle_auto_start[p_player - 1] <- p_data.auto_start
+    g_handle_auto_start[p_player - 1] <- p_data.auto_start or p_data.event_replacement.event_callback == null
     g_handle_default_language[p_player - 1] <- p_data.default_language
     g_handle_event_object[p_player - 1] <- p_data.event_replacement.object_ptr
     if p_data.event_replacement.event_callback != null:
         g_handle_event_callback[p_player - 1] <- p_data.event_replacement.event_callback.cast[AvPlayerEventCallback]
+        g_handle_event_callback_present[p_player - 1] <- true
     else:
         g_handle_event_callback[p_player - 1] <- avplayer_null_event_callback
+        g_handle_event_callback_present[p_player - 1] <- false
     avplayer_store_allocator(p_player - 1, p_data.memory_replacement)
     avsrc_set_file_replacement(p_player - 1, p_data.file_replacement.object_ptr, p_data.file_replacement.open, p_data.file_replacement.close, p_data.file_replacement.read_offset, p_data.file_replacement.size)
     avsrc_set_max_video_framebuffers(p_player - 1, p_data.num_output_video_framebuffers)
@@ -724,6 +795,7 @@ def sceAvPlayerInitEx(p_data: AvPlayerInitData&?, p_player: mutable AvPlayerHand
     if requested_pool_count > AVPLAYER_VIDEO_PAYLOAD_POOL_MAX:
         requested_pool_count <- AVPLAYER_VIDEO_PAYLOAD_POOL_MAX
     g_handle_video_payload_count[p_player - 1] <- requested_pool_count
+    avplayer_controller_thread_start()
     return ORBIS_OK
 
 def sceAvPlayerIsActive(handle: AvPlayerHandle) -> bool:
@@ -743,6 +815,8 @@ def sceAvPlayerJumpToTime(handle: AvPlayerHandle, target_time: u64) -> i32:
 def sceAvPlayerPause(handle: AvPlayerHandle) -> i32:
     if not avplayer_valid_handle(handle):
         return ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+    if g_state_current[handle - 1] == AV_STATE_END_OF_FILE:
+        return ORBIS_OK
     if not avs_pause(handle - 1):
         return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
     avplayer_controller_tick(handle - 1)
@@ -803,14 +877,22 @@ def sceAvPlayerSetTrickSpeed(handle: AvPlayerHandle, trick_speed: i32) -> i32:
 def sceAvPlayerStart(handle: AvPlayerHandle) -> i32:
     if not avplayer_valid_handle(handle):
         return ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+    state: i32 = g_state_current[handle - 1]
+    if state != AV_STATE_READY and state != AV_STATE_STOP:
+        # C++ Start() restarts active playback by running Stop(), whose source
+        # teardown happens before the state transition/event.
+        if not avsrc_stop(handle - 1):
+            return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
+        if not avs_stop(handle - 1):
+            return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
+        avplayer_controller_tick(handle - 1)
+        g_handle_active_playback[handle - 1] <- false
     if not avs_start(handle - 1):
         return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
-    avplayer_controller_tick(handle - 1)
     if not avsrc_start(handle - 1):
+        _ = avs_set_state(handle - 1, AV_STATE_ERROR)
+        avplayer_controller_tick(handle - 1)
         return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
-    has_frames_for_play: bool = avsrc_has_frames(handle - 1, 0)
-    has_frames_for_buffer_resume: bool = avsrc_has_frames(handle - 1, 1)
-    avs_update_buffering_state(handle - 1, has_frames_for_play, has_frames_for_buffer_resume)
     avplayer_controller_tick(handle - 1)
     g_handle_active_playback[handle - 1] <- true
     return ORBIS_OK
@@ -818,11 +900,12 @@ def sceAvPlayerStart(handle: AvPlayerHandle) -> i32:
 def sceAvPlayerStop(handle: AvPlayerHandle) -> i32:
     if not avplayer_valid_handle(handle):
         return ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
+    # Match AvPlayerState::Stop(): stop source/workers first, then publish Stop.
+    if not avsrc_stop(handle - 1):
+        return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
     if not avs_stop(handle - 1):
         return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
     avplayer_controller_tick(handle - 1)
-    if not avsrc_stop(handle - 1):
-        return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
     g_handle_active_playback[handle - 1] <- false
     return ORBIS_OK
 
