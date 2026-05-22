@@ -238,6 +238,7 @@ def parse_cusa_metrics(results: list[Result]) -> dict[str, int | str]:
         "guest_exec_host_arch": "",
         "guest_exec_host_mode": "",
         "guest_exec_supported_native_execution": 0,
+        "guest_exec_x64_subprocess_available": 0,
         "guest_exec_probe_only": 0,
         "guest_exec_last_module": "",
         "guest_exec_last_symbol": "",
@@ -305,6 +306,7 @@ def parse_cusa_metrics(results: list[Result]) -> dict[str, int | str]:
         if row.get("guest_exec_host_mode"):
             summary["guest_exec_host_mode"] = row.get("guest_exec_host_mode", "")
         summary["guest_exec_supported_native_execution"] = max(int(summary["guest_exec_supported_native_execution"]), to_int(row.get("guest_exec_supported_native_execution")))
+        summary["guest_exec_x64_subprocess_available"] = max(int(summary["guest_exec_x64_subprocess_available"]), to_int(row.get("guest_exec_x64_subprocess_available")))
         summary["guest_exec_probe_only"] = max(int(summary["guest_exec_probe_only"]), to_int(row.get("guest_exec_probe_only")))
         if row.get("guest_exec_last_module"):
             summary["guest_exec_last_module"] = row.get("guest_exec_last_module", "")
@@ -667,6 +669,7 @@ def summarize_progress(results: list[Result], require_first_boundary: bool = Fal
     lines.append(f"- guest exec host arch: {cusa['guest_exec_host_arch']}")
     lines.append(f"- guest exec host mode: {cusa['guest_exec_host_mode']}")
     lines.append(f"- guest exec supported native execution: {cusa['guest_exec_supported_native_execution']}")
+    lines.append(f"- guest exec x64 subprocess available: {cusa['guest_exec_x64_subprocess_available']}")
     lines.append(f"- guest exec probe only: {cusa['guest_exec_probe_only']}")
     lines.append(f"- guest exec started: {cusa['guest_exec_started']}")
     lines.append(f"- guest exec entry reached: {cusa['guest_exec_entry_reached']}")

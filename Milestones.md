@@ -323,3 +323,11 @@ cd "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/eli
 - Result: `passed=14 failed=0 selected=14`
 - What improved: guest-exec now verifies executable mapping cleanup, guarded synthetic timeout recovery, crash capture, and the guarded main-entry trampoline ABI used by real x86_64 guest handoff
 - Next blocker: run the guarded CUSA07399 entry on an x86_64 native-exec host to validate the first real guest HLE/syscall boundary; arm64 macOS remains probe-only by design
+
+## 2026-05-22: Emulator Parity Gate Run
+
+- Date: 2026-05-22
+- Command run: `./emulator-cpp-parity --quick`
+- Result: `passed=15 failed=0 selected=15`
+- What improved: all 15 selected gate steps passed
+- Next blocker: promote execute/boundary/frame stages deeper into runtime coverage

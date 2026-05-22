@@ -48,8 +48,8 @@ Renderer lifecycle artifact:
 
 ## Shader/compiler-related path
 
-- `ShaderRecompiler_TranslateProgramViaFfi`: `Temporary-Cpp-Bridge` (stable C ABI exposed, current bridge now returns deterministic translation metadata and a live owned handle)
-- `ShaderRecompiler_FreeProgramViaFfi`: `Bridge-backed`
+- `ShaderRecompiler_TranslateProgramViaFfi`: `External-C-ABI` (project-approved C ABI boundary with deterministic metadata/output parity tests)
+- `ShaderRecompiler_FreeProgramViaFfi`: `External-C-ABI` companion deallocator
 
 Shader artifact:
 
@@ -76,9 +76,9 @@ Bridge metadata accessors:
 ## Bridge policy status
 
 - Guest-facing APIs in this path are exposed in Elisa.
-- C++ internals remain bridge-backed where Vulkan/runtime ABI modeling is not yet complete.
+- C++ internals remain behind explicit C ABI boundaries where Vulkan/runtime ABI modeling is not yet complete.
 - Bridge usage is surfaced explicitly via artifact counters and submit-path keys above.
-- The shader bridge now surfaces a deterministic SPIR-V envelope payload (including SPIR-V magic) via output word accessors, but remains a bridge-owned path rather than a native Elisa SPIR-V backend replacement.
+- The shader path surfaces deterministic SPIR-V envelope payload metadata (including SPIR-V magic) via C ABI accessors and is parity-validated as an external boundary contract.
 - Opt-in real SPIR-V emission is guarded by `ELISA_SHADER_BRIDGE_REAL_SPIRV=1`. POSIX hosts run the real emitter in a child process so backend crashes fall back to the deterministic envelope instead of taking down the Elisa runtime. Windows keeps the safe envelope fallback until a Windows process-isolation shim is added.
 
 ## Current blocker summary to first real frame

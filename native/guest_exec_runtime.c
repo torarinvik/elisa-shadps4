@@ -14,6 +14,7 @@
 #include <string.h>
 #include <setjmp.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -23,6 +24,7 @@
 #include <signal.h>
 #include <sys/mman.h>
 #include <sys/time.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #if defined(__APPLE__)
 #include <sys/ucontext.h>
@@ -179,6 +181,42 @@ int32_t ElisaGuestExec_IsSupported(void) {
 
 int32_t ElisaGuestExec_SupportedNativeExecution(void) {
     return ElisaGuestExec_IsSupported();
+}
+
+int32_t ElisaGuestExec_HostCanRunX64Subprocess(void) {
+#if defined(__x86_64__) || defined(_M_X64)
+    return 1;
+#elif defined(__APPLE__) && (defined(__aarch64__) || defined(_M_ARM64))
+    FILE* proc = popen("/usr/bin/arch -x86_64 /usr/bin/uname -m 2>/dev/null", "r");
+    if (proc == NULL) {
+        return 0;
+    }
+    char line[64];
+    memset(line, 0, sizeof(line));
+    int has_x64 = 0;
+    if (fgets(line, sizeof(line), proc) != NULL) {
+        for (size_t i = 0; i < sizeof(line); ++i) {
+            if (line[i] == '\0') {
+                break;
+            }
+            if (line[i] == '\n' || line[i] == '\r') {
+                line[i] = '\0';
+                break;
+            }
+        }
+        has_x64 = strcmp(line, "x86_64") == 0 ? 1 : 0;
+    }
+    int status = pclose(proc);
+    if (status == -1) {
+        return 0;
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        return 0;
+    }
+    return has_x64;
+#else
+    return 0;
+#endif
 }
 
 const char* ElisaGuestExec_HostArchitecture(void) {
