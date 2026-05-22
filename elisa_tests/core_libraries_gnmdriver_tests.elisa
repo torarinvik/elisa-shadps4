@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
-include "../core/libraries/kernel/orbis_kernel_event.elisa"
+include "../core/libraries/videoout/videoout.elisa"
 type VAddr = u64
 include "../core/libraries/gnmdriver/gnmdriver.elisa"
 
@@ -188,6 +188,75 @@ def gnmdriver_connected_submit_smoke_records_liverpool_and_rasterizer_progress()
         assert g_runtime_last_flip_mode == 1u32
         assert g_runtime_last_flip_arg == 42.i64()
         assert g_gnm_artifact_submit_path_native_emitted
+
+@test
+def gnmdriver_runtime_present_routes_to_videoout_first_frame() -> void:
+    can Abort.Panic:
+        GnmDriver_RegisterLib(null)
+        _ = sceVideoOutClose(1)
+        videoout_reset_port_state()
+
+        handle: int = sceVideoOutOpen(0, 0, 0, null)
+        assert handle == 1
+        assert g_videoout_artifact_opened_emitted
+        assert not g_videoout_artifact_buffers_registered_emitted
+        assert not g_videoout_artifact_first_flip_emitted
+        assert not g_videoout_artifact_flip_completed_emitted
+        assert not g_videoout_artifact_first_frame_candidate_emitted
+
+        attr: mutable VideoOutBufferAttribute = zeroed
+        sceVideoOutSetBufferAttribute(
+            attr.ref[mutable VideoOutBufferAttribute&].cast[void&?],
+            0x80000000,
+            0,
+            0,
+            64,
+            64,
+            64
+        )
+
+        frame_buffer: mutable array[u8, 256] = zeroed
+        addresses: mutable array[u64, 1] = zeroed
+        addresses[0] <- frame_buffer[0].ref[mutable u8&].cast[u64]
+
+        group_index: int = sceVideoOutRegisterBuffers(
+            handle.i64(),
+            0,
+            addresses[0].ref[mutable u64&].cast[void&?],
+            1,
+            attr.ref[mutable VideoOutBufferAttribute&].cast[void&?]
+        )
+        assert group_index == 0
+
+        dcb_addrs: mutable u32[1] = [0x5000u32]
+        dcb_sizes: mutable u32[1] = [0x40u32]
+
+        assert sceGnmSubmitAndFlipCommandBuffers(
+            1u32,
+            dcb_addrs[0].ref[u32&],
+            dcb_sizes[0].ref[u32&],
+            null,
+            null,
+            handle.u32(),
+            0u32,
+            1u32,
+            123.i64()
+        ) == ORBIS_OK
+
+        assert g_runtime_present_prepare_count == 1u64
+        assert g_runtime_present_count == 1u64
+        assert g_runtime_present_success_count == 1u64
+        assert g_runtime_last_present_ok
+        assert g_videoout_artifact_first_flip_emitted
+        assert g_videoout_artifact_flip_completed_emitted
+        assert g_videoout_artifact_first_frame_candidate_emitted
+        assert sceVideoOutIsFlipPending(handle.i64()) == 0
+        label_addr: mutable i64 = 0
+        assert sceVideoOutGetBufferLabelAddress(handle.i64(), label_addr.ref[mutable i64&].cast[void&?]) == 16
+        labels: mutable u64& = label_addr.cast[mutable u64&]
+        assert labels[0] == 1u64
+
+        assert sceVideoOutClose(handle.i64()) == ORBIS_OK
 
 @test
 def gnmdriver_runtime_frame_path_callbacks_dispatch() -> void:
