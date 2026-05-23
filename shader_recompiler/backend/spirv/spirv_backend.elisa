@@ -103,8 +103,23 @@ const SPIRV_OP_STORE: u16 = 62u16
 const SPIRV_OP_ACCESS_CHAIN: u16 = 65u16
 
 # emit_spirv_atomic.cpp: atomic opcodes.
+const SPIRV_OP_IMAGE_TEXEL_POINTER: u16 = 60u16
+const SPIRV_OP_ATOMIC_EXCHANGE: u16 = 229u16
+const SPIRV_OP_ATOMIC_COMPARE_EXCHANGE: u16 = 230u16
 const SPIRV_OP_ATOMIC_I_INCREMENT: u16 = 232u16
 const SPIRV_OP_ATOMIC_I_DECREMENT: u16 = 233u16
+
+# emit_spirv_atomic.cpp / context: buffer pointer-alias kinds and element sizes.
+const SPIRV_POINTER_TYPE_U8: u32 = 0u32
+const SPIRV_POINTER_TYPE_U16: u32 = 1u32
+const SPIRV_POINTER_TYPE_U32: u32 = 2u32
+const SPIRV_POINTER_TYPE_F32: u32 = 3u32
+const SPIRV_POINTER_TYPE_U64: u32 = 4u32
+const SPIRV_POINTER_TYPE_F64: u32 = 5u32
+const SPIRV_POINTER_SIZE_B8: u32 = 0u32
+const SPIRV_POINTER_SIZE_B16: u32 = 1u32
+const SPIRV_POINTER_SIZE_B32: u32 = 2u32
+const SPIRV_POINTER_SIZE_B64: u32 = 3u32
 const SPIRV_OP_ATOMIC_I_ADD: u16 = 234u16
 const SPIRV_OP_ATOMIC_I_SUB: u16 = 235u16
 const SPIRV_OP_ATOMIC_S_MIN: u16 = 236u16
@@ -248,6 +263,25 @@ def SpirvBackend_SetUseFfiBridge(enabled: bool) -> void:
 struct SpirvVectorIds:
     ids: mutable u32[4]
 
+# emit_spirv context: a storage/uniform buffer with per-element-type pointer
+# aliases (indexed by SPIRV_POINTER_TYPE_*) and per-size byte offsets (indexed
+# by SPIRV_POINTER_SIZE_*). Mirrors EmitContext::BufferDefinition.
+struct SpirvBufferDefinition:
+    binding: mutable u32
+    buffer_type: mutable u32
+    offsets: mutable u32[4]
+    alias_ids: mutable u32[6]
+    alias_ptrs: mutable u32[6]
+
+# A sampled/storage image resource. Mirrors EmitContext::TextureDefinition.
+struct SpirvTextureDefinition:
+    id: mutable u32
+    sampled_type: mutable u32
+    image_type: mutable u32
+    view_type: mutable u32
+    is_integer: mutable bool
+    is_storage: mutable bool
+
 # Mirrors Shader::Backend::SPIRV::EmitContext. The arithmetic type ids are
 # allocated in exactly the order of EmitContext::DefineArithmeticTypes so that
 # every downstream emit op references the same ids as the C++ backend. Emitting
@@ -330,6 +364,12 @@ struct SpirvEmitContext:
     shared_memory_u32: mutable u32
     shared_memory_u64: mutable u32
     shared_memory_is_layered: mutable bool
+    # Buffer / image / sampler resource tables + image-atomic texel pointer types.
+    buffers: mutable darray[SpirvBufferDefinition]
+    images: mutable darray[SpirvTextureDefinition]
+    samplers: mutable darray[u32]
+    image_u32: mutable u32
+    image_f32: mutable u32
 
 struct SpirvEmitResult:
     words: mutable darray[u32]
@@ -1494,6 +1534,191 @@ def SpirvEmitSharedAtomicDec32(ctx: mutable SpirvEmitContext&, offset: u32) -> u
 
 def SpirvEmitSharedAtomicDec64(ctx: mutable SpirvEmitContext&, offset: u32) -> u32:
     return SpirvEmitSharedAtomicU64IncDec(ctx, SPIRV_OP_ATOMIC_I_DECREMENT, offset)
+
+# OpAtomicCompareExchange: <ResultType> <ResultId> <Pointer> <Scope>
+# <EqualSemantics> <UnequalSemantics> <Value> <Comparator> (9 words).
+def SpirvEmitAtomicCompareExchange(ctx: mutable SpirvEmitContext&, result_type: u32, pointer: u32, scope: u32, eq_sem: u32, uneq_sem: u32, value: u32, comparator: u32) -> u32:
+    result_id: u32 = SpirvEmitContext_AllocateId(ctx)
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(SPIRV_OP_ATOMIC_COMPARE_EXCHANGE, 9u16))
+    SpirvEmitContext_AppendWord(ctx, result_type)
+    SpirvEmitContext_AppendWord(ctx, result_id)
+    SpirvEmitContext_AppendWord(ctx, pointer)
+    SpirvEmitContext_AppendWord(ctx, scope)
+    SpirvEmitContext_AppendWord(ctx, eq_sem)
+    SpirvEmitContext_AppendWord(ctx, uneq_sem)
+    SpirvEmitContext_AppendWord(ctx, value)
+    SpirvEmitContext_AppendWord(ctx, comparator)
+    return result_id
+
+# Registration helpers (stand in for the Info-driven DefineBuffers /
+# DefineImagesAndSamplers, which decode resource descriptors).
+def SpirvEmitContext_PushBuffer(ctx: mutable SpirvEmitContext&, buf: SpirvBufferDefinition) -> usize:
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            ctx.buffers.push(buf)
+    return ctx.buffers.count - 1usize
+
+def SpirvEmitContext_PushImage(ctx: mutable SpirvEmitContext&, tex: SpirvTextureDefinition) -> usize:
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            ctx.images.push(tex)
+    return ctx.images.count - 1usize
+
+# Buffer atomic on a 32-bit element (U32 or, with is_float, F32). Adds the
+# per-buffer byte offset to the address, forms the storage access chain, then
+# the atomic op (device scope, relaxed semantics). Mirrors BufferAtomicU32.
+def SpirvEmitBufferAtomicU32(ctx: mutable SpirvEmitContext&, opcode: u16, handle: u32, address: u32, value: u32, is_float: bool) -> u32:
+    buf: SpirvBufferDefinition = ctx.buffers[handle.usize()]
+    result_type: mutable u32 = ctx.u32_id
+    ptr_kind: mutable u32 = SPIRV_POINTER_TYPE_U32
+    if is_float:
+        result_type <- ctx.f32_id
+        ptr_kind <- SPIRV_POINTER_TYPE_F32
+    addr: mutable u32 = address
+    offset: u32 = buf.offsets[SPIRV_POINTER_SIZE_B32.usize()]
+    if offset != 0u32:
+        addr <- SpirvEmitIAdd32(ctx, addr, offset)
+    base_id: u32 = buf.alias_ids[ptr_kind.usize()]
+    pointer_type: u32 = buf.alias_ptrs[ptr_kind.usize()]
+    ptr: u32 = SpirvEmitAccessChain2(ctx, pointer_type, base_id, ctx.u32_zero_value, addr)
+    atomic_scope: u32 = SpirvEmitAtomicScope(ctx)
+    return SpirvEmitAtomicBinary(ctx, opcode, result_type, ptr, atomic_scope, ctx.u32_zero_value, value)
+
+def SpirvEmitBufferAtomicU64(ctx: mutable SpirvEmitContext&, opcode: u16, handle: u32, address: u32, value: u32) -> u32:
+    buf: SpirvBufferDefinition = ctx.buffers[handle.usize()]
+    addr: mutable u32 = address
+    offset: u32 = buf.offsets[SPIRV_POINTER_SIZE_B64.usize()]
+    if offset != 0u32:
+        addr <- SpirvEmitIAdd32(ctx, addr, offset)
+    base_id: u32 = buf.alias_ids[SPIRV_POINTER_TYPE_U64.usize()]
+    pointer_type: u32 = buf.alias_ptrs[SPIRV_POINTER_TYPE_U64.usize()]
+    ptr: u32 = SpirvEmitAccessChain2(ctx, pointer_type, base_id, ctx.u32_zero_value, addr)
+    atomic_scope: u32 = SpirvEmitAtomicScope(ctx)
+    return SpirvEmitAtomicBinary(ctx, opcode, ctx.u64_id, ptr, atomic_scope, ctx.u32_zero_value, value)
+
+def SpirvEmitBufferAtomicU32IncDec(ctx: mutable SpirvEmitContext&, opcode: u16, handle: u32, address: u32) -> u32:
+    buf: SpirvBufferDefinition = ctx.buffers[handle.usize()]
+    addr: mutable u32 = address
+    offset: u32 = buf.offsets[SPIRV_POINTER_SIZE_B32.usize()]
+    if offset != 0u32:
+        addr <- SpirvEmitIAdd32(ctx, addr, offset)
+    base_id: u32 = buf.alias_ids[SPIRV_POINTER_TYPE_U32.usize()]
+    pointer_type: u32 = buf.alias_ptrs[SPIRV_POINTER_TYPE_U32.usize()]
+    ptr: u32 = SpirvEmitAccessChain2(ctx, pointer_type, base_id, ctx.u32_zero_value, addr)
+    atomic_scope: u32 = SpirvEmitAtomicScope(ctx)
+    return SpirvEmitAtomicIncDec(ctx, opcode, ctx.u32_id, ptr, atomic_scope, ctx.u32_zero_value)
+
+def SpirvEmitBufferAtomicU32CmpSwap(ctx: mutable SpirvEmitContext&, handle: u32, address: u32, value: u32, cmp_value: u32) -> u32:
+    buf: SpirvBufferDefinition = ctx.buffers[handle.usize()]
+    addr: mutable u32 = address
+    offset: u32 = buf.offsets[SPIRV_POINTER_SIZE_B32.usize()]
+    if offset != 0u32:
+        addr <- SpirvEmitIAdd32(ctx, addr, offset)
+    base_id: u32 = buf.alias_ids[SPIRV_POINTER_TYPE_U32.usize()]
+    pointer_type: u32 = buf.alias_ptrs[SPIRV_POINTER_TYPE_U32.usize()]
+    ptr: u32 = SpirvEmitAccessChain2(ctx, pointer_type, base_id, ctx.u32_zero_value, addr)
+    atomic_scope: u32 = SpirvEmitAtomicScope(ctx)
+    return SpirvEmitAtomicCompareExchange(ctx, ctx.u32_id, ptr, atomic_scope, ctx.u32_zero_value, ctx.u32_zero_value, value, cmp_value)
+
+# Named buffer-atomic emitters (integer; FP-atomic min/max/cmpswap fallbacks
+# need profile flags + extension opcodes and are deferred).
+def SpirvEmitBufferAtomicIAdd32(ctx: mutable SpirvEmitContext&, handle: u32, address: u32, value: u32) -> u32:
+    return SpirvEmitBufferAtomicU32(ctx, SPIRV_OP_ATOMIC_I_ADD, handle, address, value, false)
+
+def SpirvEmitBufferAtomicIAdd64(ctx: mutable SpirvEmitContext&, handle: u32, address: u32, value: u32) -> u32:
+    return SpirvEmitBufferAtomicU64(ctx, SPIRV_OP_ATOMIC_I_ADD, handle, address, value)
+
+def SpirvEmitBufferAtomicISub32(ctx: mutable SpirvEmitContext&, handle: u32, address: u32, value: u32) -> u32:
+    return SpirvEmitBufferAtomicU32(ctx, SPIRV_OP_ATOMIC_I_SUB, handle, address, value, false)
+
+def SpirvEmitBufferAtomicSMin32(ctx: mutable SpirvEmitContext&, handle: u32, address: u32, value: u32) -> u32:
+    return SpirvEmitBufferAtomicU32(ctx, SPIRV_OP_ATOMIC_S_MIN, handle, address, value, false)
+
+def SpirvEmitBufferAtomicSMin64(ctx: mutable SpirvEmitContext&, handle: u32, address: u32, value: u32) -> u32:
+    return SpirvEmitBufferAtomicU64(ctx, SPIRV_OP_ATOMIC_S_MIN, handle, address, value)
+
+def SpirvEmitBufferAtomicUMin32(ctx: mutable SpirvEmitContext&, handle: u32, address: u32, value: u32) -> u32:
+    return SpirvEmitBufferAtomicU32(ctx, SPIRV_OP_ATOMIC_U_MIN, handle, address, value, false)
+
+def SpirvEmitBufferAtomicUMin64(ctx: mutable SpirvEmitContext&, handle: u32, address: u32, value: u32) -> u32:
+    return SpirvEmitBufferAtomicU64(ctx, SPIRV_OP_ATOMIC_U_MIN, handle, address, value)
+
+def SpirvEmitBufferAtomicSMax32(ctx: mutable SpirvEmitContext&, handle: u32, address: u32, value: u32) -> u32:
+    return SpirvEmitBufferAtomicU32(ctx, SPIRV_OP_ATOMIC_S_MAX, handle, address, value, false)
+
+def SpirvEmitBufferAtomicSMax64(ctx: mutable SpirvEmitContext&, handle: u32, address: u32, value: u32) -> u32:
+    return SpirvEmitBufferAtomicU64(ctx, SPIRV_OP_ATOMIC_S_MAX, handle, address, value)
+
+def SpirvEmitBufferAtomicUMax32(ctx: mutable SpirvEmitContext&, handle: u32, address: u32, value: u32) -> u32:
+    return SpirvEmitBufferAtomicU32(ctx, SPIRV_OP_ATOMIC_U_MAX, handle, address, value, false)
+
+def SpirvEmitBufferAtomicUMax64(ctx: mutable SpirvEmitContext&, handle: u32, address: u32, value: u32) -> u32:
+    return SpirvEmitBufferAtomicU64(ctx, SPIRV_OP_ATOMIC_U_MAX, handle, address, value)
+
+def SpirvEmitBufferAtomicAnd32(ctx: mutable SpirvEmitContext&, handle: u32, address: u32, value: u32) -> u32:
+    return SpirvEmitBufferAtomicU32(ctx, SPIRV_OP_ATOMIC_AND, handle, address, value, false)
+
+def SpirvEmitBufferAtomicOr32(ctx: mutable SpirvEmitContext&, handle: u32, address: u32, value: u32) -> u32:
+    return SpirvEmitBufferAtomicU32(ctx, SPIRV_OP_ATOMIC_OR, handle, address, value, false)
+
+def SpirvEmitBufferAtomicXor32(ctx: mutable SpirvEmitContext&, handle: u32, address: u32, value: u32) -> u32:
+    return SpirvEmitBufferAtomicU32(ctx, SPIRV_OP_ATOMIC_XOR, handle, address, value, false)
+
+def SpirvEmitBufferAtomicSwap32(ctx: mutable SpirvEmitContext&, handle: u32, address: u32, value: u32) -> u32:
+    return SpirvEmitBufferAtomicU32(ctx, SPIRV_OP_ATOMIC_EXCHANGE, handle, address, value, false)
+
+def SpirvEmitBufferAtomicInc32(ctx: mutable SpirvEmitContext&, handle: u32, address: u32) -> u32:
+    return SpirvEmitBufferAtomicU32IncDec(ctx, SPIRV_OP_ATOMIC_I_INCREMENT, handle, address)
+
+def SpirvEmitBufferAtomicDec32(ctx: mutable SpirvEmitContext&, handle: u32, address: u32) -> u32:
+    return SpirvEmitBufferAtomicU32IncDec(ctx, SPIRV_OP_ATOMIC_I_DECREMENT, handle, address)
+
+def SpirvEmitBufferAtomicCmpSwap32(ctx: mutable SpirvEmitContext&, handle: u32, address: u32, value: u32, cmp_value: u32) -> u32:
+    return SpirvEmitBufferAtomicU32CmpSwap(ctx, handle, address, value, cmp_value)
+
+# Image atomics: form an OpImageTexelPointer into the storage image, then atomic.
+def SpirvEmitImageAtomicU32(ctx: mutable SpirvEmitContext&, opcode: u16, handle: u32, coords: u32, value: u32) -> u32:
+    tex: SpirvTextureDefinition = ctx.images[(handle & 0xFFFFu32).usize()]
+    sample0: u32 = SpirvEmitConstU32(ctx, 0u32)
+    pointer: u32 = SpirvEmitTernaryOp(ctx, SPIRV_OP_IMAGE_TEXEL_POINTER, ctx.image_u32, tex.id, coords, sample0)
+    atomic_scope: u32 = SpirvEmitAtomicScope(ctx)
+    return SpirvEmitAtomicBinary(ctx, opcode, ctx.u32_id, pointer, atomic_scope, ctx.u32_zero_value, value)
+
+def SpirvEmitImageAtomicU32CmpSwap(ctx: mutable SpirvEmitContext&, handle: u32, coords: u32, value: u32, cmp_value: u32) -> u32:
+    tex: SpirvTextureDefinition = ctx.images[(handle & 0xFFFFu32).usize()]
+    sample0: u32 = SpirvEmitConstU32(ctx, 0u32)
+    pointer: u32 = SpirvEmitTernaryOp(ctx, SPIRV_OP_IMAGE_TEXEL_POINTER, ctx.image_u32, tex.id, coords, sample0)
+    atomic_scope: u32 = SpirvEmitAtomicScope(ctx)
+    return SpirvEmitAtomicCompareExchange(ctx, ctx.u32_id, pointer, atomic_scope, ctx.u32_zero_value, ctx.u32_zero_value, value, cmp_value)
+
+def SpirvEmitImageAtomicIAdd32(ctx: mutable SpirvEmitContext&, handle: u32, coords: u32, value: u32) -> u32:
+    return SpirvEmitImageAtomicU32(ctx, SPIRV_OP_ATOMIC_I_ADD, handle, coords, value)
+
+def SpirvEmitImageAtomicSMin32(ctx: mutable SpirvEmitContext&, handle: u32, coords: u32, value: u32) -> u32:
+    return SpirvEmitImageAtomicU32(ctx, SPIRV_OP_ATOMIC_S_MIN, handle, coords, value)
+
+def SpirvEmitImageAtomicUMin32(ctx: mutable SpirvEmitContext&, handle: u32, coords: u32, value: u32) -> u32:
+    return SpirvEmitImageAtomicU32(ctx, SPIRV_OP_ATOMIC_U_MIN, handle, coords, value)
+
+def SpirvEmitImageAtomicSMax32(ctx: mutable SpirvEmitContext&, handle: u32, coords: u32, value: u32) -> u32:
+    return SpirvEmitImageAtomicU32(ctx, SPIRV_OP_ATOMIC_S_MAX, handle, coords, value)
+
+def SpirvEmitImageAtomicUMax32(ctx: mutable SpirvEmitContext&, handle: u32, coords: u32, value: u32) -> u32:
+    return SpirvEmitImageAtomicU32(ctx, SPIRV_OP_ATOMIC_U_MAX, handle, coords, value)
+
+def SpirvEmitImageAtomicAnd32(ctx: mutable SpirvEmitContext&, handle: u32, coords: u32, value: u32) -> u32:
+    return SpirvEmitImageAtomicU32(ctx, SPIRV_OP_ATOMIC_AND, handle, coords, value)
+
+def SpirvEmitImageAtomicOr32(ctx: mutable SpirvEmitContext&, handle: u32, coords: u32, value: u32) -> u32:
+    return SpirvEmitImageAtomicU32(ctx, SPIRV_OP_ATOMIC_OR, handle, coords, value)
+
+def SpirvEmitImageAtomicXor32(ctx: mutable SpirvEmitContext&, handle: u32, coords: u32, value: u32) -> u32:
+    return SpirvEmitImageAtomicU32(ctx, SPIRV_OP_ATOMIC_XOR, handle, coords, value)
+
+def SpirvEmitImageAtomicExchange32(ctx: mutable SpirvEmitContext&, handle: u32, coords: u32, value: u32) -> u32:
+    return SpirvEmitImageAtomicU32(ctx, SPIRV_OP_ATOMIC_EXCHANGE, handle, coords, value)
 
 # ------------------------------------------------------------
 # emit_spirv_convert.cpp: width/format conversions (all 4-word unary ops).

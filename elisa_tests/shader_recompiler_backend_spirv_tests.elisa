@@ -342,6 +342,56 @@ def spirv_backend_emit_bitwise_conversion_matches_cpp() -> void:
         assert us4 == ctx.words[ctx.words.count - 2usize]
 
 @test
+def spirv_backend_emit_buffer_image_atomic_matches_cpp() -> void:
+    can Abort.Panic, Memory.Allocate:
+        ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
+        SpirvEmitContext_DefineArithmeticTypes(ctx)
+        # Register a buffer with a U32 alias (stand-in for DefineBuffers).
+        base_var: u32 = SpirvEmitContext_AllocateId(ctx)
+        ptr_ty: u32 = SpirvEmitContext_AllocateId(ctx)
+        buf: mutable SpirvBufferDefinition = zeroed
+        buf.alias_ids[SPIRV_POINTER_TYPE_U32.usize()] <- base_var
+        buf.alias_ptrs[SPIRV_POINTER_TYPE_U32.usize()] <- ptr_ty
+        _ = SpirvEmitContext_PushBuffer(ctx, buf)
+        # --- BufferAtomicIAdd32: access chain (no offset), scope const, atomic. ---
+        b0: usize = ctx.words.count
+        r: u32 = SpirvEmitBufferAtomicIAdd32(ctx, 0u32, 300u32, 9u32)
+        assert ctx.words.count == b0 + 17usize
+        assert ctx.words[b0] == SpirvWord(SPIRV_OP_ACCESS_CHAIN, 6u16)
+        assert ctx.words[b0 + 1usize] == ptr_ty
+        assert ctx.words[b0 + 3usize] == base_var
+        assert ctx.words[b0 + 4usize] == ctx.u32_zero_value
+        assert ctx.words[b0 + 5usize] == 300u32
+        assert ctx.words[b0 + 10usize] == SpirvWord(SPIRV_OP_ATOMIC_I_ADD, 7u16)
+        assert ctx.words[b0 + 11usize] == ctx.u32_id
+        assert ctx.words[b0 + 12usize] == r
+        assert ctx.words[b0 + 16usize] == 9u32
+        # --- BufferAtomicCmpSwap32 ends in a 9-word OpAtomicCompareExchange. ---
+        b1: usize = ctx.words.count
+        cs: u32 = SpirvEmitBufferAtomicCmpSwap32(ctx, 0u32, 300u32, 7u32, 8u32)
+        assert ctx.words[ctx.words.count - 9usize] == SpirvWord(SPIRV_OP_ATOMIC_COMPARE_EXCHANGE, 9u16)
+        assert ctx.words[ctx.words.count - 2usize] == 7u32
+        assert ctx.words[ctx.words.count - 1usize] == 8u32
+        _ = cs
+        _ = b1
+        # Register an image + the texel-pointer type.
+        tex: mutable SpirvTextureDefinition = zeroed
+        tex.id <- SpirvEmitContext_AllocateId(ctx)
+        tex_id: u32 = tex.id
+        _ = SpirvEmitContext_PushImage(ctx, tex)
+        ctx.image_u32 <- SpirvEmitContext_AllocateId(ctx)
+        # --- ImageAtomicIAdd32: ConstU32(sample), OpImageTexelPointer, scope, atomic. ---
+        b2: usize = ctx.words.count
+        ir: u32 = SpirvEmitImageAtomicIAdd32(ctx, 0u32, 400u32, 5u32)
+        assert ctx.words[b2 + 4usize] == SpirvWord(SPIRV_OP_IMAGE_TEXEL_POINTER, 6u16)
+        assert ctx.words[b2 + 5usize] == ctx.image_u32
+        assert ctx.words[b2 + 7usize] == tex_id
+        assert ctx.words[b2 + 8usize] == 400u32
+        assert ctx.words[b2 + 14usize] == SpirvWord(SPIRV_OP_ATOMIC_I_ADD, 7u16)
+        assert ctx.words[b2 + 15usize] == ctx.u32_id
+        assert ctx.words[b2 + 16usize] == ir
+
+@test
 def spirv_backend_emit_shared_atomic_matches_cpp() -> void:
     can Abort.Panic, Memory.Allocate:
         ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
