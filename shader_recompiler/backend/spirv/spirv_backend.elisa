@@ -6,6 +6,9 @@ include "./spirv_ffi_bridge.elisa"
 
 const SPIRV_MAGIC: u32 = 0x07230203u32
 const SPIRV_VERSION_1_6: u32 = 0x00010600u32
+const SPIRV_VERSION_1_5: u32 = 0x00010500u32
+const SPIRV_F32_ONE_BITS: u32 = 0x3F800000u32
+const SPIRV_F32_MINUS_ONE_BITS: u32 = 0xBF800000u32
 const SPIRV_GENERATOR_SHADPS4_ELISA: u32 = 0u32
 const SPIRV_SCHEMA_RESERVED: u32 = 0u32
 
@@ -72,6 +75,43 @@ const SPIRV_OP_CONSTANT_FALSE: u16 = 42u16
 const SPIRV_OP_CONSTANT_COMPOSITE: u16 = 44u16
 const SPIRV_STORAGE_CLASS_INPUT: u32 = 1u32
 const SPIRV_STORAGE_CLASS_OUTPUT: u32 = 3u32
+const SPIRV_STORAGE_CLASS_FUNCTION: u32 = 7u32
+# emit_spirv_quad_rect.cpp: module structural opcodes (function-capable builder).
+const SPIRV_OP_ENTRY_POINT: u16 = 15u16
+const SPIRV_OP_EXECUTION_MODE: u16 = 16u16
+const SPIRV_OP_TYPE_ARRAY: u16 = 28u16
+const SPIRV_OP_TYPE_FUNCTION: u16 = 33u16
+const SPIRV_OP_VARIABLE: u16 = 59u16
+const SPIRV_OP_FUNCTION: u16 = 54u16
+const SPIRV_OP_FUNCTION_END: u16 = 56u16
+const SPIRV_OP_RETURN: u16 = 253u16
+const SPIRV_OP_DECORATE: u16 = 71u16
+const SPIRV_OP_MEMBER_DECORATE: u16 = 72u16
+const SPIRV_OP_VECTOR_TIMES_SCALAR: u16 = 142u16
+# spv::ExecutionModel / ExecutionMode / Decoration / BuiltIn values used here.
+const SPIRV_EXEC_MODEL_TESS_CONTROL: u32 = 1u32
+const SPIRV_EXEC_MODEL_TESS_EVAL: u32 = 2u32
+const SPIRV_EXEC_MODE_QUADS: u32 = 7u32
+const SPIRV_EXEC_MODE_SPACING_EQUAL: u32 = 1u32
+const SPIRV_EXEC_MODE_VERTEX_ORDER_CW: u32 = 4u32
+const SPIRV_EXEC_MODE_OUTPUT_VERTICES: u32 = 26u32
+const SPIRV_CAPABILITY_SHADER: u32 = 1u32
+const SPIRV_CAPABILITY_TESSELLATION: u32 = 3u32
+const SPIRV_DECORATION_BUILTIN: u32 = 11u32
+const SPIRV_DECORATION_BLOCK: u32 = 2u32
+const SPIRV_DECORATION_LOCATION: u32 = 30u32
+const SPIRV_DECORATION_PATCH: u32 = 1u32
+const SPIRV_BUILTIN_POSITION: u32 = 0u32
+const SPIRV_BUILTIN_POINT_SIZE: u32 = 1u32
+const SPIRV_BUILTIN_CLIP_DISTANCE: u32 = 3u32
+const SPIRV_BUILTIN_CULL_DISTANCE: u32 = 4u32
+const SPIRV_BUILTIN_INVOCATION_ID: u32 = 8u32
+const SPIRV_BUILTIN_TESS_LEVEL_OUTER: u32 = 11u32
+const SPIRV_BUILTIN_TESS_LEVEL_INNER: u32 = 12u32
+const SPIRV_BUILTIN_TESS_COORD: u32 = 13u32
+# "main\0" packed little-endian into two words for OpEntryPoint.
+const SPIRV_NAME_MAIN_W0: u32 = 0x6E69616Du32
+const SPIRV_NAME_MAIN_W1: u32 = 0u32
 const SPIRV_OP_CONTROL_BARRIER: u16 = 224u16
 const SPIRV_OP_MEMORY_BARRIER: u16 = 225u16
 
@@ -2583,6 +2623,137 @@ def SpirvModule_EmitCodeBinary(m: mutable SpirvModule&, opcode: u16, result_type
     SpirvMod_Push(m.code, rhs)
     return result_id
 
+# --- Additional type declarations (deduped). ---
+def SpirvModule_TypeArray(m: mutable SpirvModule&, elem_type: u32, length_const: u32) -> u32:
+    return SpirvMod_Decl2(m, SPIRV_OP_TYPE_ARRAY, 0u32, elem_type, length_const)
+
+def SpirvModule_TypeFunction0(m: mutable SpirvModule&, return_type: u32) -> u32:
+    return SpirvMod_Decl1(m, SPIRV_OP_TYPE_FUNCTION, 0u32, return_type)
+
+def SpirvModule_TypeStruct4(m: mutable SpirvModule&, a: u32, b: u32, c: u32, d: u32) -> u32:
+    return SpirvMod_Decl4(m, SPIRV_OP_TYPE_STRUCT, 0u32, a, b, c, d)
+
+# --- Global variable (global_variables stream): OpVariable <Ptr> <Id> <SC>. ---
+def SpirvModule_AddGlobalVariable(m: mutable SpirvModule&, pointer_type: u32, storage_class: u32) -> u32:
+    id: u32 = SpirvModule_AllocId(m)
+    SpirvMod_Push(m.global_variables, SpirvWord(SPIRV_OP_VARIABLE, 4u16))
+    SpirvMod_Push(m.global_variables, pointer_type)
+    SpirvMod_Push(m.global_variables, id)
+    SpirvMod_Push(m.global_variables, storage_class)
+    return id
+
+# --- Decorations (annotations stream; not deduped). ---
+def SpirvModule_Decorate1(m: mutable SpirvModule&, target: u32, decoration: u32) -> void:
+    SpirvMod_Push(m.annotations, SpirvWord(SPIRV_OP_DECORATE, 3u16))
+    SpirvMod_Push(m.annotations, target)
+    SpirvMod_Push(m.annotations, decoration)
+
+def SpirvModule_Decorate2(m: mutable SpirvModule&, target: u32, decoration: u32, literal: u32) -> void:
+    SpirvMod_Push(m.annotations, SpirvWord(SPIRV_OP_DECORATE, 4u16))
+    SpirvMod_Push(m.annotations, target)
+    SpirvMod_Push(m.annotations, decoration)
+    SpirvMod_Push(m.annotations, literal)
+
+def SpirvModule_MemberDecorate(m: mutable SpirvModule&, struct_id: u32, member: u32, decoration: u32, literal: u32) -> void:
+    SpirvMod_Push(m.annotations, SpirvWord(SPIRV_OP_MEMBER_DECORATE, 5u16))
+    SpirvMod_Push(m.annotations, struct_id)
+    SpirvMod_Push(m.annotations, member)
+    SpirvMod_Push(m.annotations, decoration)
+    SpirvMod_Push(m.annotations, literal)
+
+# --- Execution modes / entry point. ---
+def SpirvModule_AddExecutionMode1(m: mutable SpirvModule&, entry: u32, mode: u32) -> void:
+    SpirvMod_Push(m.execution_modes, SpirvWord(SPIRV_OP_EXECUTION_MODE, 3u16))
+    SpirvMod_Push(m.execution_modes, entry)
+    SpirvMod_Push(m.execution_modes, mode)
+
+def SpirvModule_AddExecutionMode2(m: mutable SpirvModule&, entry: u32, mode: u32, literal: u32) -> void:
+    SpirvMod_Push(m.execution_modes, SpirvWord(SPIRV_OP_EXECUTION_MODE, 4u16))
+    SpirvMod_Push(m.execution_modes, entry)
+    SpirvMod_Push(m.execution_modes, mode)
+    SpirvMod_Push(m.execution_modes, literal)
+
+# OpEntryPoint <Model> <EntryId> "main" <Interfaces...>.
+def SpirvModule_AddEntryPointMain(m: mutable SpirvModule&, model: u32, entry: u32, interfaces: darray[u32]) -> void:
+    word_count: u16 = (5usize + interfaces.count).u16()
+    SpirvMod_Push(m.entry_points, SpirvWord(SPIRV_OP_ENTRY_POINT, word_count))
+    SpirvMod_Push(m.entry_points, model)
+    SpirvMod_Push(m.entry_points, entry)
+    SpirvMod_Push(m.entry_points, SPIRV_NAME_MAIN_W0)
+    SpirvMod_Push(m.entry_points, SPIRV_NAME_MAIN_W1)
+    for i in 0..<interfaces.count:
+        SpirvMod_Push(m.entry_points, interfaces[i])
+
+# --- Function body (code stream). ---
+def SpirvModule_BeginFunction(m: mutable SpirvModule&, return_type: u32, func_type: u32) -> u32:
+    id: u32 = SpirvModule_AllocId(m)
+    SpirvMod_Push(m.code, SpirvWord(SPIRV_OP_FUNCTION, 5u16))
+    SpirvMod_Push(m.code, return_type)
+    SpirvMod_Push(m.code, id)
+    SpirvMod_Push(m.code, 0u32)
+    SpirvMod_Push(m.code, func_type)
+    return id
+
+def SpirvModule_CodeLabel(m: mutable SpirvModule&) -> u32:
+    id: u32 = SpirvModule_AllocId(m)
+    SpirvMod_Push(m.code, SpirvWord(SPIRV_OP_LABEL, 2u16))
+    SpirvMod_Push(m.code, id)
+    return id
+
+def SpirvModule_CodeReturn(m: mutable SpirvModule&) -> void:
+    SpirvMod_Push(m.code, SpirvWord(SPIRV_OP_RETURN, 1u16))
+
+def SpirvModule_CodeFunctionEnd(m: mutable SpirvModule&) -> void:
+    SpirvMod_Push(m.code, SpirvWord(SPIRV_OP_FUNCTION_END, 1u16))
+
+def SpirvModule_CodeOp1(m: mutable SpirvModule&, opcode: u16, result_type: u32, a: u32) -> u32:
+    id: u32 = SpirvModule_AllocId(m)
+    SpirvMod_Push(m.code, SpirvWord(opcode, 4u16))
+    SpirvMod_Push(m.code, result_type)
+    SpirvMod_Push(m.code, id)
+    SpirvMod_Push(m.code, a)
+    return id
+
+def SpirvModule_CodeOp2(m: mutable SpirvModule&, opcode: u16, result_type: u32, a: u32, b: u32) -> u32:
+    return SpirvModule_EmitCodeBinary(m, opcode, result_type, a, b)
+
+def SpirvModule_CodeOp3(m: mutable SpirvModule&, opcode: u16, result_type: u32, a: u32, b: u32, c: u32) -> u32:
+    id: u32 = SpirvModule_AllocId(m)
+    SpirvMod_Push(m.code, SpirvWord(opcode, 6u16))
+    SpirvMod_Push(m.code, result_type)
+    SpirvMod_Push(m.code, id)
+    SpirvMod_Push(m.code, a)
+    SpirvMod_Push(m.code, b)
+    SpirvMod_Push(m.code, c)
+    return id
+
+def SpirvModule_CodeLoad(m: mutable SpirvModule&, result_type: u32, pointer: u32) -> u32:
+    return SpirvModule_CodeOp1(m, SPIRV_OP_LOAD, result_type, pointer)
+
+def SpirvModule_CodeStore(m: mutable SpirvModule&, pointer: u32, value: u32) -> void:
+    SpirvMod_Push(m.code, SpirvWord(SPIRV_OP_STORE, 3u16))
+    SpirvMod_Push(m.code, pointer)
+    SpirvMod_Push(m.code, value)
+
+def SpirvModule_CodeAccessChain1(m: mutable SpirvModule&, result_type: u32, base: u32, i0: u32) -> u32:
+    id: u32 = SpirvModule_AllocId(m)
+    SpirvMod_Push(m.code, SpirvWord(SPIRV_OP_ACCESS_CHAIN, 5u16))
+    SpirvMod_Push(m.code, result_type)
+    SpirvMod_Push(m.code, id)
+    SpirvMod_Push(m.code, base)
+    SpirvMod_Push(m.code, i0)
+    return id
+
+def SpirvModule_CodeAccessChain2(m: mutable SpirvModule&, result_type: u32, base: u32, i0: u32, i1: u32) -> u32:
+    id: u32 = SpirvModule_AllocId(m)
+    SpirvMod_Push(m.code, SpirvWord(SPIRV_OP_ACCESS_CHAIN, 6u16))
+    SpirvMod_Push(m.code, result_type)
+    SpirvMod_Push(m.code, id)
+    SpirvMod_Push(m.code, base)
+    SpirvMod_Push(m.code, i0)
+    SpirvMod_Push(m.code, i1)
+    return id
+
 # Assemble: header + sections in canonical SPIR-V order (mirrors Module::Assemble).
 def SpirvModule_Assemble(m: SpirvModule) -> darray[u32]:
     out: mutable darray[u32] = zeroed
@@ -2606,6 +2777,150 @@ def SpirvModule_Assemble(m: SpirvModule) -> darray[u32]:
     SpirvMod_AppendStream(out, m.global_variables)
     SpirvMod_AppendStream(out, m.code)
     return out
+
+# ============================================================
+# emit_spirv_quad_rect.cpp: auxiliary passthrough tessellation shader generator,
+# built on the SpirvModule builder (mirrors QuadRectListEmitter). The forwarded
+# vertex params are passed as their location indices (already filtered for the
+# fragment-shader defaults the C++ skips).
+# ============================================================
+
+struct SpirvQuadRectEmitter:
+    m: mutable SpirvModule
+    void_id: mutable u32
+    bool_id: mutable u32
+    float_id: mutable u32
+    uint_id: mutable u32
+    int_id: mutable u32
+    bvec2_id: mutable u32
+    vec2_id: mutable u32
+    vec3_id: mutable u32
+    vec4_id: mutable u32
+    float_one: mutable u32
+    float_min_one: mutable u32
+    int_zero: mutable u32
+    gl_per_vertex_type: mutable u32
+    main: mutable u32
+    gl_in: mutable u32
+    gl_per_vertex: mutable u32
+    gl_tess_coord: mutable u32
+    interfaces: mutable darray[u32]
+    inputs: mutable darray[u32]
+    outputs: mutable darray[u32]
+
+def SpirvQR_Int(e: mutable SpirvQuadRectEmitter&, value: u32) -> u32:
+    return SpirvModule_Constant32(e.m, e.int_id, value)
+
+def SpirvQR_Uint(e: mutable SpirvQuadRectEmitter&, value: u32) -> u32:
+    return SpirvModule_Constant32(e.m, e.uint_id, value)
+
+def SpirvQuadRectEmitter_Default() -> SpirvQuadRectEmitter:
+    e: mutable SpirvQuadRectEmitter = zeroed
+    e.m.version <- SPIRV_VERSION_1_5
+    e.void_id <- SpirvModule_TypeVoid(e.m)
+    e.bool_id <- SpirvModule_TypeBool(e.m)
+    e.float_id <- SpirvModule_TypeFloat(e.m, 32u32)
+    e.uint_id <- SpirvModule_TypeInt(e.m, 32u32, 0u32)
+    e.int_id <- SpirvModule_TypeInt(e.m, 32u32, 1u32)
+    e.bvec2_id <- SpirvModule_TypeVector(e.m, e.bool_id, 2u32)
+    e.vec2_id <- SpirvModule_TypeVector(e.m, e.float_id, 2u32)
+    e.vec3_id <- SpirvModule_TypeVector(e.m, e.float_id, 3u32)
+    e.vec4_id <- SpirvModule_TypeVector(e.m, e.float_id, 4u32)
+    e.float_one <- SpirvModule_Constant32(e.m, e.float_id, SPIRV_F32_ONE_BITS)
+    e.float_min_one <- SpirvModule_Constant32(e.m, e.float_id, SPIRV_F32_MINUS_ONE_BITS)
+    e.int_zero <- SpirvModule_Constant32(e.m, e.int_id, 0u32)
+    float_arr1: u32 = SpirvModule_TypeArray(e.m, e.float_id, SpirvQR_Uint(e, 1u32))
+    e.gl_per_vertex_type <- SpirvModule_TypeStruct4(e.m, e.vec4_id, e.float_id, float_arr1, float_arr1)
+    SpirvModule_Decorate1(e.m, e.gl_per_vertex_type, SPIRV_DECORATION_BLOCK)
+    SpirvModule_MemberDecorate(e.m, e.gl_per_vertex_type, 0u32, SPIRV_DECORATION_BUILTIN, SPIRV_BUILTIN_POSITION)
+    SpirvModule_MemberDecorate(e.m, e.gl_per_vertex_type, 1u32, SPIRV_DECORATION_BUILTIN, SPIRV_BUILTIN_POINT_SIZE)
+    SpirvModule_MemberDecorate(e.m, e.gl_per_vertex_type, 2u32, SPIRV_DECORATION_BUILTIN, SPIRV_BUILTIN_CLIP_DISTANCE)
+    SpirvModule_MemberDecorate(e.m, e.gl_per_vertex_type, 3u32, SPIRV_DECORATION_BUILTIN, SPIRV_BUILTIN_CULL_DISTANCE)
+    return e
+
+def SpirvQR_AddInput(e: mutable SpirvQuadRectEmitter&, type_id: u32) -> u32:
+    ptr: u32 = SpirvModule_TypePointer(e.m, SPIRV_STORAGE_CLASS_INPUT, type_id)
+    v: u32 = SpirvModule_AddGlobalVariable(e.m, ptr, SPIRV_STORAGE_CLASS_INPUT)
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            e.interfaces.push(v)
+    return v
+
+def SpirvQR_AddOutput(e: mutable SpirvQuadRectEmitter&, type_id: u32) -> u32:
+    ptr: u32 = SpirvModule_TypePointer(e.m, SPIRV_STORAGE_CLASS_OUTPUT, type_id)
+    v: u32 = SpirvModule_AddGlobalVariable(e.m, ptr, SPIRV_STORAGE_CLASS_OUTPUT)
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            e.interfaces.push(v)
+    return v
+
+# EmitPassthroughTES: a quad tessellation-evaluation passthrough that picks the
+# control point selected by gl_TessCoord and forwards the vertex params.
+def SpirvQR_EmitPassthroughTES(e: mutable SpirvQuadRectEmitter&, param_locations: darray[u32]) -> void:
+    SpirvModule_AddCapability(e.m, SPIRV_CAPABILITY_SHADER)
+    SpirvModule_AddCapability(e.m, SPIRV_CAPABILITY_TESSELLATION)
+    void_fn: u32 = SpirvModule_TypeFunction0(e.m, e.void_id)
+    e.main <- SpirvModule_BeginFunction(e.m, e.void_id, void_fn)
+    SpirvModule_AddExecutionMode1(e.m, e.main, SPIRV_EXEC_MODE_QUADS)
+    SpirvModule_AddExecutionMode1(e.m, e.main, SPIRV_EXEC_MODE_SPACING_EQUAL)
+    SpirvModule_AddExecutionMode1(e.m, e.main, SPIRV_EXEC_MODE_VERTEX_ORDER_CW)
+    # Inputs: gl_TessCoord + gl_in[32] + the forwarded vec4[32] param arrays.
+    e.gl_tess_coord <- SpirvQR_AddInput(e, e.vec3_id)
+    SpirvModule_Decorate2(e.m, e.gl_tess_coord, SPIRV_DECORATION_BUILTIN, SPIRV_BUILTIN_TESS_COORD)
+    gpv_in_arr: u32 = SpirvModule_TypeArray(e.m, e.gl_per_vertex_type, SpirvQR_Uint(e, 32u32))
+    e.gl_in <- SpirvQR_AddInput(e, gpv_in_arr)
+    vec4_arr32: u32 = SpirvModule_TypeArray(e.m, e.vec4_id, SpirvQR_Int(e, 32u32))
+    for i in 0..<param_locations.count:
+        in_var: u32 = SpirvQR_AddInput(e, vec4_arr32)
+        SpirvModule_Decorate2(e.m, in_var, SPIRV_DECORATION_LOCATION, param_locations[i])
+        can Memory.Allocate, Abort.Panic:
+            owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+            in owner:
+                e.inputs.push(in_var)
+    # Outputs: gl_PerVertex + the forwarded vec4 params.
+    e.gl_per_vertex <- SpirvQR_AddOutput(e, e.gl_per_vertex_type)
+    for i in 0..<param_locations.count:
+        out_var: u32 = SpirvQR_AddOutput(e, e.vec4_id)
+        SpirvModule_Decorate2(e.m, out_var, SPIRV_DECORATION_LOCATION, param_locations[i])
+        can Memory.Allocate, Abort.Panic:
+            owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+            in owner:
+                e.outputs.push(out_var)
+    SpirvModule_AddEntryPointMain(e.m, SPIRV_EXEC_MODEL_TESS_EVAL, e.main, e.interfaces)
+    _label: u32 = SpirvModule_CodeLabel(e.m)
+    _ = _label
+    # index = int(gl_TessCoord.y) * 2 + int(gl_TessCoord.x)
+    input_float_ptr: u32 = SpirvModule_TypePointer(e.m, SPIRV_STORAGE_CLASS_INPUT, e.float_id)
+    tcx_ptr: u32 = SpirvModule_CodeAccessChain1(e.m, input_float_ptr, e.gl_tess_coord, SpirvQR_Int(e, 0u32))
+    tcx: u32 = SpirvModule_CodeLoad(e.m, e.float_id, tcx_ptr)
+    tcy_ptr: u32 = SpirvModule_CodeAccessChain1(e.m, input_float_ptr, e.gl_tess_coord, SpirvQR_Int(e, 1u32))
+    tcy: u32 = SpirvModule_CodeLoad(e.m, e.float_id, tcy_ptr)
+    iy: u32 = SpirvModule_CodeOp1(e.m, SPIRV_OP_CONVERT_F_TO_S, e.int_id, tcy)
+    ix: u32 = SpirvModule_CodeOp1(e.m, SPIRV_OP_CONVERT_F_TO_S, e.int_id, tcx)
+    iy2: u32 = SpirvModule_CodeOp2(e.m, SPIRV_OP_I_MUL, e.int_id, iy, SpirvQR_Int(e, 2u32))
+    index: u32 = SpirvModule_CodeOp2(e.m, SPIRV_OP_I_ADD, e.int_id, iy2, ix)
+    # gl_PerVertex.Position = gl_in[index].Position
+    input_vec4_ptr: u32 = SpirvModule_TypePointer(e.m, SPIRV_STORAGE_CLASS_INPUT, e.vec4_id)
+    output_vec4_ptr: u32 = SpirvModule_TypePointer(e.m, SPIRV_STORAGE_CLASS_OUTPUT, e.vec4_id)
+    pos_ptr: u32 = SpirvModule_CodeAccessChain2(e.m, input_vec4_ptr, e.gl_in, index, SpirvQR_Int(e, 0u32))
+    pos: u32 = SpirvModule_CodeLoad(e.m, e.vec4_id, pos_ptr)
+    pv0_ptr: u32 = SpirvModule_CodeAccessChain1(e.m, output_vec4_ptr, e.gl_per_vertex, SpirvQR_Int(e, 0u32))
+    SpirvModule_CodeStore(e.m, pv0_ptr, pos)
+    # out_paramN = in_paramN[index]
+    for i in 0..<param_locations.count:
+        pin: u32 = SpirvModule_CodeAccessChain1(e.m, input_vec4_ptr, e.inputs[i], index)
+        val: u32 = SpirvModule_CodeLoad(e.m, e.vec4_id, pin)
+        SpirvModule_CodeStore(e.m, e.outputs[i], val)
+    SpirvModule_CodeReturn(e.m)
+    SpirvModule_CodeFunctionEnd(e.m)
+
+# Build and assemble a passthrough TES module (AuxShaderType::PassthroughTES).
+def SpirvEmitPassthroughTESModule(param_locations: darray[u32]) -> darray[u32]:
+    e: mutable SpirvQuadRectEmitter = SpirvQuadRectEmitter_Default()
+    SpirvQR_EmitPassthroughTES(e, param_locations)
+    return SpirvModule_Assemble(e.m)
 
 def SpirvBackend_EmitWordsViaFfi(profile: void&?, runtime_info: void&?, program: void&?, bindings: mutable void&?, out_words: mutable void&?, out_word_count: mutable usize&) -> int:
     return elisa_spirv_backend_emit_words(profile, runtime_info, program, bindings, out_words, out_word_count)

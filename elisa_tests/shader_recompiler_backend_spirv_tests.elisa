@@ -51,6 +51,37 @@ def spirv_backend_binding_and_header_are_deterministic() -> void:
         assert binding.user_data == 0u32
 
 @test
+def spirv_quad_rect_passthrough_tes_assembles() -> void:
+    can Abort.Panic, Memory.Allocate:
+        # One forwarded vertex param at location 0.
+        locs: mutable darray[u32] = zeroed
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            locs.push(0u32)
+        words: darray[u32] = SpirvEmitPassthroughTESModule(locs)
+        # Header: magic, SPIR-V 1.5, generator, bound+1, schema.
+        assert words[0] == SPIRV_MAGIC
+        assert words[1] == SPIRV_VERSION_1_5
+        assert words[4] == SPIRV_SCHEMA_RESERVED
+        # First section is the two OpCapability (Shader, Tessellation).
+        assert words[5] == SpirvWord(SPIRV_OP_CAPABILITY, 2u16)
+        assert words[6] == SPIRV_CAPABILITY_SHADER
+        assert words[7] == SpirvWord(SPIRV_OP_CAPABILITY, 2u16)
+        assert words[8] == SPIRV_CAPABILITY_TESSELLATION
+        # OpMemoryModel follows the (empty) ext-inst-import section.
+        assert words[9] == SpirvWord(SPIRV_OP_MEMORY_MODEL, 3u16)
+        # The OpEntryPoint is for a TessellationEvaluation shader named "main".
+        # 5 base words + 5 interface ids (gl_TessCoord, gl_in, 1 input,
+        # gl_PerVertex, 1 output) = 10 words.
+        assert words[12] == SpirvWord(SPIRV_OP_ENTRY_POINT, 10u16)
+        assert words[13] == SPIRV_EXEC_MODEL_TESS_EVAL
+        assert words[15] == SPIRV_NAME_MAIN_W0
+        assert words[16] == SPIRV_NAME_MAIN_W1
+        # The module ends with the function body: ... OpReturn, OpFunctionEnd.
+        assert words[words.count - 1usize] == SpirvWord(SPIRV_OP_FUNCTION_END, 1u16)
+        assert words[words.count - 2usize] == SpirvWord(SPIRV_OP_RETURN, 1u16)
+
+@test
 def spirv_module_dedups_declarations_like_sirit() -> void:
     can Abort.Panic, Memory.Allocate:
         m: mutable SpirvModule = SpirvModule_Default()
