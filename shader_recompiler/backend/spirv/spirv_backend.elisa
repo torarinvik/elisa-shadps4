@@ -2700,6 +2700,16 @@ def SpirvModule_CodeLabel(m: mutable SpirvModule&) -> u32:
     SpirvMod_Push(m.code, id)
     return id
 
+# Function-local variable (OpVariable with an initializer) in the code stream.
+def SpirvModule_AddLocalVariable(m: mutable SpirvModule&, pointer_type: u32, storage_class: u32, initializer: u32) -> u32:
+    id: u32 = SpirvModule_AllocId(m)
+    SpirvMod_Push(m.code, SpirvWord(SPIRV_OP_VARIABLE, 5u16))
+    SpirvMod_Push(m.code, pointer_type)
+    SpirvMod_Push(m.code, id)
+    SpirvMod_Push(m.code, storage_class)
+    SpirvMod_Push(m.code, initializer)
+    return id
+
 def SpirvModule_CodeReturn(m: mutable SpirvModule&) -> void:
     SpirvMod_Push(m.code, SpirvWord(SPIRV_OP_RETURN, 1u16))
 
@@ -2754,6 +2764,18 @@ def SpirvModule_CodeAccessChain2(m: mutable SpirvModule&, result_type: u32, base
     SpirvMod_Push(m.code, i1)
     return id
 
+# OpVectorShuffle with two component selectors (e.g. extracting .xy).
+def SpirvModule_CodeVectorShuffle2(m: mutable SpirvModule&, result_type: u32, v1: u32, v2: u32, c0: u32, c1: u32) -> u32:
+    id: u32 = SpirvModule_AllocId(m)
+    SpirvMod_Push(m.code, SpirvWord(SPIRV_OP_VECTOR_SHUFFLE, 7u16))
+    SpirvMod_Push(m.code, result_type)
+    SpirvMod_Push(m.code, id)
+    SpirvMod_Push(m.code, v1)
+    SpirvMod_Push(m.code, v2)
+    SpirvMod_Push(m.code, c0)
+    SpirvMod_Push(m.code, c1)
+    return id
+
 # Assemble: header + sections in canonical SPIR-V order (mirrors Module::Assemble).
 def SpirvModule_Assemble(m: SpirvModule) -> darray[u32]:
     out: mutable darray[u32] = zeroed
@@ -2804,6 +2826,10 @@ struct SpirvQuadRectEmitter:
     gl_in: mutable u32
     gl_per_vertex: mutable u32
     gl_tess_coord: mutable u32
+    gl_out: mutable u32
+    gl_invocation_id: mutable u32
+    gl_tess_level_inner: mutable u32
+    gl_tess_level_outer: mutable u32
     interfaces: mutable darray[u32]
     inputs: mutable darray[u32]
     outputs: mutable darray[u32]
@@ -2916,10 +2942,178 @@ def SpirvQR_EmitPassthroughTES(e: mutable SpirvQuadRectEmitter&, param_locations
     SpirvModule_CodeReturn(e.m)
     SpirvModule_CodeFunctionEnd(e.m)
 
+# Shared TCS interface setup: invocation-id input, gl_in array, forwarded vec4
+# input arrays; gl_out array, tess-level outputs, forwarded vec4 output arrays.
+def SpirvQR_DefineTcsInterfaces(e: mutable SpirvQuadRectEmitter&, param_locations: darray[u32]) -> void:
+    e.gl_invocation_id <- SpirvQR_AddInput(e, e.int_id)
+    SpirvModule_Decorate2(e.m, e.gl_invocation_id, SPIRV_DECORATION_BUILTIN, SPIRV_BUILTIN_INVOCATION_ID)
+    gpv_in_arr: u32 = SpirvModule_TypeArray(e.m, e.gl_per_vertex_type, SpirvQR_Uint(e, 32u32))
+    e.gl_in <- SpirvQR_AddInput(e, gpv_in_arr)
+    vec4_arr32: u32 = SpirvModule_TypeArray(e.m, e.vec4_id, SpirvQR_Int(e, 32u32))
+    for i in 0..<param_locations.count:
+        in_var: u32 = SpirvQR_AddInput(e, vec4_arr32)
+        SpirvModule_Decorate2(e.m, in_var, SPIRV_DECORATION_LOCATION, param_locations[i])
+        can Memory.Allocate, Abort.Panic:
+            owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+            in owner:
+                e.inputs.push(in_var)
+    gpv_out_arr: u32 = SpirvModule_TypeArray(e.m, e.gl_per_vertex_type, SpirvQR_Uint(e, 4u32))
+    e.gl_out <- SpirvQR_AddOutput(e, gpv_out_arr)
+    arr2: u32 = SpirvModule_TypeArray(e.m, e.float_id, SpirvQR_Uint(e, 2u32))
+    e.gl_tess_level_inner <- SpirvQR_AddOutput(e, arr2)
+    SpirvModule_Decorate2(e.m, e.gl_tess_level_inner, SPIRV_DECORATION_BUILTIN, SPIRV_BUILTIN_TESS_LEVEL_INNER)
+    SpirvModule_Decorate1(e.m, e.gl_tess_level_inner, SPIRV_DECORATION_PATCH)
+    arr4: u32 = SpirvModule_TypeArray(e.m, e.float_id, SpirvQR_Uint(e, 4u32))
+    e.gl_tess_level_outer <- SpirvQR_AddOutput(e, arr4)
+    SpirvModule_Decorate2(e.m, e.gl_tess_level_outer, SPIRV_DECORATION_BUILTIN, SPIRV_BUILTIN_TESS_LEVEL_OUTER)
+    SpirvModule_Decorate1(e.m, e.gl_tess_level_outer, SPIRV_DECORATION_PATCH)
+    vec4_arr4: u32 = SpirvModule_TypeArray(e.m, e.vec4_id, SpirvQR_Int(e, 4u32))
+    for i in 0..<param_locations.count:
+        out_var: u32 = SpirvQR_AddOutput(e, vec4_arr4)
+        SpirvModule_Decorate2(e.m, out_var, SPIRV_DECORATION_LOCATION, param_locations[i])
+        can Memory.Allocate, Abort.Panic:
+            owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+            in owner:
+                e.outputs.push(out_var)
+
+# Write the passthrough tessellation factors (4 outer + 2 inner = 1.0).
+def SpirvQR_WriteTessFactors(e: mutable SpirvQuadRectEmitter&) -> void:
+    output_float_ptr: u32 = SpirvModule_TypePointer(e.m, SPIRV_STORAGE_CLASS_OUTPUT, e.float_id)
+    for i in 0u32..<4u32:
+        ptr: u32 = SpirvModule_CodeAccessChain1(e.m, output_float_ptr, e.gl_tess_level_outer, SpirvQR_Int(e, i))
+        SpirvModule_CodeStore(e.m, ptr, e.float_one)
+    for i in 0u32..<2u32:
+        ptr: u32 = SpirvModule_CodeAccessChain1(e.m, output_float_ptr, e.gl_tess_level_inner, SpirvQR_Int(e, i))
+        SpirvModule_CodeStore(e.m, ptr, e.float_one)
+
+# EmitQuadListTCS: passthrough quad TCS outputting 4 control points; remaps the
+# input vertices through a fixed {1,2,0,3} index table.
+def SpirvQR_EmitQuadListTCS(e: mutable SpirvQuadRectEmitter&, param_locations: darray[u32]) -> void:
+    SpirvModule_AddCapability(e.m, SPIRV_CAPABILITY_SHADER)
+    SpirvModule_AddCapability(e.m, SPIRV_CAPABILITY_TESSELLATION)
+    void_fn: u32 = SpirvModule_TypeFunction0(e.m, e.void_id)
+    e.main <- SpirvModule_BeginFunction(e.m, e.void_id, void_fn)
+    SpirvModule_AddExecutionMode2(e.m, e.main, SPIRV_EXEC_MODE_OUTPUT_VERTICES, 4u32)
+    SpirvQR_DefineTcsInterfaces(e, param_locations)
+    SpirvModule_AddEntryPointMain(e.m, SPIRV_EXEC_MODEL_TESS_CONTROL, e.main, e.interfaces)
+    _label: u32 = SpirvModule_CodeLabel(e.m)
+    _ = _label
+    # int indices[4] = {1, 2, 0, 3};
+    array_type: u32 = SpirvModule_TypeArray(e.m, e.int_id, SpirvQR_Int(e, 4u32))
+    values: u32 = SpirvModule_ConstantComposite4(e.m, array_type, SpirvQR_Int(e, 1u32), SpirvQR_Int(e, 2u32), SpirvQR_Int(e, 0u32), SpirvQR_Int(e, 3u32))
+    func_arr_ptr: u32 = SpirvModule_TypePointer(e.m, SPIRV_STORAGE_CLASS_FUNCTION, array_type)
+    indices: u32 = SpirvModule_AddLocalVariable(e.m, func_arr_ptr, SPIRV_STORAGE_CLASS_FUNCTION, values)
+    SpirvQR_WriteTessFactors(e)
+    input_vec4_ptr: u32 = SpirvModule_TypePointer(e.m, SPIRV_STORAGE_CLASS_INPUT, e.vec4_id)
+    output_vec4_ptr: u32 = SpirvModule_TypePointer(e.m, SPIRV_STORAGE_CLASS_OUTPUT, e.vec4_id)
+    func_int_ptr: u32 = SpirvModule_TypePointer(e.m, SPIRV_STORAGE_CLASS_FUNCTION, e.int_id)
+    invocation_id: u32 = SpirvModule_CodeLoad(e.m, e.int_id, e.gl_invocation_id)
+    idx_ptr: u32 = SpirvModule_CodeAccessChain1(e.m, func_int_ptr, indices, invocation_id)
+    index: u32 = SpirvModule_CodeLoad(e.m, e.int_id, idx_ptr)
+    in_pos_ptr: u32 = SpirvModule_CodeAccessChain2(e.m, input_vec4_ptr, e.gl_in, index, SpirvQR_Int(e, 0u32))
+    in_pos: u32 = SpirvModule_CodeLoad(e.m, e.vec4_id, in_pos_ptr)
+    out_pos_ptr: u32 = SpirvModule_CodeAccessChain2(e.m, output_vec4_ptr, e.gl_out, invocation_id, SpirvQR_Int(e, 0u32))
+    SpirvModule_CodeStore(e.m, out_pos_ptr, in_pos)
+    for i in 0..<param_locations.count:
+        pin: u32 = SpirvModule_CodeAccessChain1(e.m, input_vec4_ptr, e.inputs[i], index)
+        val: u32 = SpirvModule_CodeLoad(e.m, e.vec4_id, pin)
+        pout: u32 = SpirvModule_CodeAccessChain1(e.m, output_vec4_ptr, e.outputs[i], invocation_id)
+        SpirvModule_CodeStore(e.m, pout, val)
+    SpirvModule_CodeReturn(e.m)
+    SpirvModule_CodeFunctionEnd(e.m)
+
+# Edge-vertex flag for rect interpolation: (pce_i.x && pce_i2.y) || (pce_i.y && pce_i2.x).
+def SpirvQR_EdgeFlag(e: mutable SpirvQuadRectEmitter&, pce_i: u32, pce_i2: u32) -> u32:
+    x0: u32 = SpirvModule_CodeOp2(e.m, SPIRV_OP_COMPOSITE_EXTRACT, e.bool_id, pce_i, 0u32)
+    y2: u32 = SpirvModule_CodeOp2(e.m, SPIRV_OP_COMPOSITE_EXTRACT, e.bool_id, pce_i2, 1u32)
+    xy: u32 = SpirvModule_CodeOp2(e.m, SPIRV_OP_LOGICAL_AND, e.bool_id, x0, y2)
+    y0: u32 = SpirvModule_CodeOp2(e.m, SPIRV_OP_COMPOSITE_EXTRACT, e.bool_id, pce_i, 1u32)
+    x2: u32 = SpirvModule_CodeOp2(e.m, SPIRV_OP_COMPOSITE_EXTRACT, e.bool_id, pce_i2, 0u32)
+    yx: u32 = SpirvModule_CodeOp2(e.m, SPIRV_OP_LOGICAL_AND, e.bool_id, y0, x2)
+    return SpirvModule_CodeOp2(e.m, SPIRV_OP_LOGICAL_OR, e.bool_id, xy, yx)
+
+# Barycentric interpolation of 3 vec4s: v0*b0 + v1*b1 + v2*b2.
+def SpirvQR_Interpolate(e: mutable SpirvQuadRectEmitter&, v0: u32, v1: u32, v2: u32, b0: u32, b1: u32, b2: u32) -> u32:
+    p0: u32 = SpirvModule_CodeOp2(e.m, SPIRV_OP_VECTOR_TIMES_SCALAR, e.vec4_id, v0, b0)
+    p1: u32 = SpirvModule_CodeOp2(e.m, SPIRV_OP_VECTOR_TIMES_SCALAR, e.vec4_id, v1, b1)
+    p2: u32 = SpirvModule_CodeOp2(e.m, SPIRV_OP_VECTOR_TIMES_SCALAR, e.vec4_id, v2, b2)
+    inner: u32 = SpirvModule_CodeOp2(e.m, SPIRV_OP_F_ADD, e.vec4_id, p1, p2)
+    return SpirvModule_CodeOp2(e.m, SPIRV_OP_F_ADD, e.vec4_id, p0, inner)
+
+# EmitRectListTCS: interpolates the 4th vertex of a rectangle primitive from the
+# 3 provided vertices, then forwards positions/params for each control point.
+def SpirvQR_EmitRectListTCS(e: mutable SpirvQuadRectEmitter&, param_locations: darray[u32]) -> void:
+    SpirvModule_AddCapability(e.m, SPIRV_CAPABILITY_SHADER)
+    SpirvModule_AddCapability(e.m, SPIRV_CAPABILITY_TESSELLATION)
+    void_fn: u32 = SpirvModule_TypeFunction0(e.m, e.void_id)
+    e.main <- SpirvModule_BeginFunction(e.m, e.void_id, void_fn)
+    SpirvModule_AddExecutionMode2(e.m, e.main, SPIRV_EXEC_MODE_OUTPUT_VERTICES, 4u32)
+    SpirvQR_DefineTcsInterfaces(e, param_locations)
+    SpirvModule_AddEntryPointMain(e.m, SPIRV_EXEC_MODEL_TESS_CONTROL, e.main, e.interfaces)
+    _label: u32 = SpirvModule_CodeLabel(e.m)
+    _ = _label
+    SpirvQR_WriteTessFactors(e)
+    input_vec4_ptr: u32 = SpirvModule_TypePointer(e.m, SPIRV_STORAGE_CLASS_INPUT, e.vec4_id)
+    output_vec4_ptr: u32 = SpirvModule_TypePointer(e.m, SPIRV_STORAGE_CLASS_OUTPUT, e.vec4_id)
+    # Load the three input positions.
+    pos0: u32 = SpirvModule_CodeLoad(e.m, e.vec4_id, SpirvModule_CodeAccessChain2(e.m, input_vec4_ptr, e.gl_in, SpirvQR_Int(e, 0u32), e.int_zero))
+    pos1: u32 = SpirvModule_CodeLoad(e.m, e.vec4_id, SpirvModule_CodeAccessChain2(e.m, input_vec4_ptr, e.gl_in, SpirvQR_Int(e, 1u32), e.int_zero))
+    pos2: u32 = SpirvModule_CodeLoad(e.m, e.vec4_id, SpirvModule_CodeAccessChain2(e.m, input_vec4_ptr, e.gl_in, SpirvQR_Int(e, 2u32), e.int_zero))
+    # point_coord_equal[i] = equal(pos[i].xy, pos[(i+1)%3].xy)
+    xy0: u32 = SpirvModule_CodeVectorShuffle2(e.m, e.vec2_id, pos0, pos0, 0u32, 1u32)
+    xy1: u32 = SpirvModule_CodeVectorShuffle2(e.m, e.vec2_id, pos1, pos1, 0u32, 1u32)
+    xy2: u32 = SpirvModule_CodeVectorShuffle2(e.m, e.vec2_id, pos2, pos2, 0u32, 1u32)
+    pce0: u32 = SpirvModule_CodeOp2(e.m, SPIRV_OP_F_ORD_EQUAL, e.bvec2_id, xy0, xy1)
+    pce1: u32 = SpirvModule_CodeOp2(e.m, SPIRV_OP_F_ORD_EQUAL, e.bvec2_id, xy1, xy2)
+    pce2: u32 = SpirvModule_CodeOp2(e.m, SPIRV_OP_F_ORD_EQUAL, e.bvec2_id, xy2, xy0)
+    # is_edge_vertex[i] uses pce[i] and pce[(i+2)%3]; bary[i] = is_edge ? -1 : 1.
+    edge0: u32 = SpirvQR_EdgeFlag(e, pce0, pce2)
+    edge1: u32 = SpirvQR_EdgeFlag(e, pce1, pce0)
+    edge2: u32 = SpirvQR_EdgeFlag(e, pce2, pce1)
+    bary0: u32 = SpirvModule_CodeOp3(e.m, SPIRV_OP_SELECT, e.float_id, edge0, e.float_min_one, e.float_one)
+    bary1: u32 = SpirvModule_CodeOp3(e.m, SPIRV_OP_SELECT, e.float_id, edge1, e.float_min_one, e.float_one)
+    bary2: u32 = SpirvModule_CodeOp3(e.m, SPIRV_OP_SELECT, e.float_id, edge2, e.float_min_one, e.float_one)
+    # vertex_index = edge1 ? 1 : (edge2 ? 2 : 0)
+    vi_a: u32 = SpirvModule_CodeOp3(e.m, SPIRV_OP_SELECT, e.int_id, edge2, SpirvQR_Int(e, 2u32), SpirvQR_Int(e, 0u32))
+    vertex_index: u32 = SpirvModule_CodeOp3(e.m, SPIRV_OP_SELECT, e.int_id, edge1, SpirvQR_Int(e, 1u32), vi_a)
+    invocation_id: u32 = SpirvModule_CodeLoad(e.m, e.int_id, e.gl_invocation_id)
+    invocation_3: u32 = SpirvModule_CodeOp2(e.m, SPIRV_OP_I_EQUAL, e.bool_id, invocation_id, SpirvQR_Int(e, 3u32))
+    sum_idx: u32 = SpirvModule_CodeOp2(e.m, SPIRV_OP_I_ADD, e.int_id, vertex_index, invocation_id)
+    index: u32 = SpirvModule_CodeOp2(e.m, SPIRV_OP_S_MOD, e.int_id, sum_idx, SpirvQR_Int(e, 3u32))
+    # gl_out[invocation].Position = invocation==3 ? interpolate(pos) : gl_in[index].Position
+    pos3: u32 = SpirvQR_Interpolate(e, pos0, pos1, pos2, bary0, bary1, bary2)
+    in_pos: u32 = SpirvModule_CodeLoad(e.m, e.vec4_id, SpirvModule_CodeAccessChain2(e.m, input_vec4_ptr, e.gl_in, index, SpirvQR_Int(e, 0u32)))
+    position: u32 = SpirvModule_CodeOp3(e.m, SPIRV_OP_SELECT, e.vec4_id, invocation_3, pos3, in_pos)
+    out_pos_ptr: u32 = SpirvModule_CodeAccessChain2(e.m, output_vec4_ptr, e.gl_out, invocation_id, SpirvQR_Int(e, 0u32))
+    SpirvModule_CodeStore(e.m, out_pos_ptr, position)
+    # Forward params: out[invocation] = invocation==3 ? interpolate(in[0..2]) : in[index]
+    for i in 0..<param_locations.count:
+        v0: u32 = SpirvModule_CodeLoad(e.m, e.vec4_id, SpirvModule_CodeAccessChain1(e.m, input_vec4_ptr, e.inputs[i], SpirvQR_Int(e, 0u32)))
+        v1: u32 = SpirvModule_CodeLoad(e.m, e.vec4_id, SpirvModule_CodeAccessChain1(e.m, input_vec4_ptr, e.inputs[i], SpirvQR_Int(e, 1u32)))
+        v2: u32 = SpirvModule_CodeLoad(e.m, e.vec4_id, SpirvModule_CodeAccessChain1(e.m, input_vec4_ptr, e.inputs[i], SpirvQR_Int(e, 2u32)))
+        in_param3: u32 = SpirvQR_Interpolate(e, v0, v1, v2, bary0, bary1, bary2)
+        in_param: u32 = SpirvModule_CodeLoad(e.m, e.vec4_id, SpirvModule_CodeAccessChain1(e.m, input_vec4_ptr, e.inputs[i], index))
+        out_param: u32 = SpirvModule_CodeOp3(e.m, SPIRV_OP_SELECT, e.vec4_id, invocation_3, in_param3, in_param)
+        SpirvModule_CodeStore(e.m, SpirvModule_CodeAccessChain1(e.m, output_vec4_ptr, e.outputs[i], invocation_id), out_param)
+    SpirvModule_CodeReturn(e.m)
+    SpirvModule_CodeFunctionEnd(e.m)
+
 # Build and assemble a passthrough TES module (AuxShaderType::PassthroughTES).
 def SpirvEmitPassthroughTESModule(param_locations: darray[u32]) -> darray[u32]:
     e: mutable SpirvQuadRectEmitter = SpirvQuadRectEmitter_Default()
     SpirvQR_EmitPassthroughTES(e, param_locations)
+    return SpirvModule_Assemble(e.m)
+
+# Build and assemble a quad-list TCS module (AuxShaderType::QuadListTCS).
+def SpirvEmitQuadListTCSModule(param_locations: darray[u32]) -> darray[u32]:
+    e: mutable SpirvQuadRectEmitter = SpirvQuadRectEmitter_Default()
+    SpirvQR_EmitQuadListTCS(e, param_locations)
+    return SpirvModule_Assemble(e.m)
+
+# Build and assemble a rect-list TCS module (AuxShaderType::RectListTCS).
+def SpirvEmitRectListTCSModule(param_locations: darray[u32]) -> darray[u32]:
+    e: mutable SpirvQuadRectEmitter = SpirvQuadRectEmitter_Default()
+    SpirvQR_EmitRectListTCS(e, param_locations)
     return SpirvModule_Assemble(e.m)
 
 def SpirvBackend_EmitWordsViaFfi(profile: void&?, runtime_info: void&?, program: void&?, bindings: mutable void&?, out_words: mutable void&?, out_word_count: mutable usize&) -> int:

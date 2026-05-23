@@ -82,6 +82,41 @@ def spirv_quad_rect_passthrough_tes_assembles() -> void:
         assert words[words.count - 2usize] == SpirvWord(SPIRV_OP_RETURN, 1u16)
 
 @test
+def spirv_quad_rect_tcs_shaders_assemble() -> void:
+    can Abort.Panic, Memory.Allocate:
+        locs: mutable darray[u32] = zeroed
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            locs.push(0u32)
+        # --- QuadListTCS: TessControl entry + OutputVertices 4 exec mode. ---
+        qw: darray[u32] = SpirvEmitQuadListTCSModule(locs)
+        assert qw[0] == SPIRV_MAGIC
+        assert qw[1] == SPIRV_VERSION_1_5
+        assert qw[5] == SpirvWord(SPIRV_OP_CAPABILITY, 2u16)
+        # OpEntryPoint (after caps + memory model) is a TessControl shader.
+        # 5 base words + 7 interface ids (invocation_id, gl_in, 1 input, gl_out,
+        # tess_inner, tess_outer, 1 output) = 12 words.
+        assert qw[12] == SpirvWord(SPIRV_OP_ENTRY_POINT, 12u16)
+        assert qw[13] == SPIRV_EXEC_MODEL_TESS_CONTROL
+        # The execution-modes section follows the 12-word entry point (at word 24).
+        assert qw[24] == SpirvWord(SPIRV_OP_EXECUTION_MODE, 4u16)
+        assert qw[26] == SPIRV_EXEC_MODE_OUTPUT_VERTICES
+        assert qw[27] == 4u32
+        assert qw[qw.count - 1usize] == SpirvWord(SPIRV_OP_FUNCTION_END, 1u16)
+        # --- RectListTCS: also a TessControl shader, larger body (interp). ---
+        rw: darray[u32] = SpirvEmitRectListTCSModule(locs)
+        assert rw[1] == SPIRV_VERSION_1_5
+        assert rw[13] == SPIRV_EXEC_MODEL_TESS_CONTROL
+        assert rw[rw.count - 1usize] == SpirvWord(SPIRV_OP_FUNCTION_END, 1u16)
+        assert rw[rw.count - 2usize] == SpirvWord(SPIRV_OP_RETURN, 1u16)
+        # The rect interpolation emits OpVectorTimesScalar; ensure it appears.
+        found_vts: mutable bool = false
+        for i in 0..<rw.count:
+            if rw[i] == SpirvWord(SPIRV_OP_VECTOR_TIMES_SCALAR, 5u16):
+                found_vts <- true
+        assert found_vts == true
+
+@test
 def spirv_module_dedups_declarations_like_sirit() -> void:
     can Abort.Panic, Memory.Allocate:
         m: mutable SpirvModule = SpirvModule_Default()
