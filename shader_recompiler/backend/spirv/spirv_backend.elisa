@@ -56,6 +56,22 @@ const SPIRV_OP_LOGICAL_NOT: u16 = 168u16
 const SPIRV_OP_SELECT: u16 = 169u16
 const SPIRV_OP_UNDEF: u16 = 1u16
 const SPIRV_OP_CONSTANT: u16 = 43u16
+# Module-level / declaration opcodes (sirit-equivalent module builder).
+const SPIRV_OP_EXT_INST_IMPORT: u16 = 11u16
+const SPIRV_OP_MEMORY_MODEL: u16 = 14u16
+const SPIRV_OP_CAPABILITY: u16 = 17u16
+const SPIRV_OP_TYPE_VOID: u16 = 19u16
+const SPIRV_OP_TYPE_BOOL: u16 = 20u16
+const SPIRV_OP_TYPE_INT: u16 = 21u16
+const SPIRV_OP_TYPE_FLOAT: u16 = 22u16
+const SPIRV_OP_TYPE_VECTOR: u16 = 23u16
+const SPIRV_OP_TYPE_STRUCT: u16 = 30u16
+const SPIRV_OP_TYPE_POINTER: u16 = 32u16
+const SPIRV_OP_CONSTANT_TRUE: u16 = 41u16
+const SPIRV_OP_CONSTANT_FALSE: u16 = 42u16
+const SPIRV_OP_CONSTANT_COMPOSITE: u16 = 44u16
+const SPIRV_STORAGE_CLASS_INPUT: u32 = 1u32
+const SPIRV_STORAGE_CLASS_OUTPUT: u32 = 3u32
 const SPIRV_OP_CONTROL_BARRIER: u16 = 224u16
 const SPIRV_OP_MEMORY_BARRIER: u16 = 225u16
 
@@ -1591,6 +1607,218 @@ def SpirvEmitDiscardCond(ctx: mutable SpirvEmitContext&, condition: u32) -> void
     SpirvEmitDiscard(ctx)
     SpirvEmitBranch(ctx, merge_label)
     SpirvEmitLabel(ctx, merge_label)
+
+# ============================================================
+# SpirvModule: an Elisa port of the sirit SPIR-V builder. Mirrors
+# Sirit::Module: per-section instruction streams, a monotonic id bound, a
+# declaration dedup table (types/constants), and Assemble() that emits the
+# header and concatenates the sections in canonical SPIR-V order.
+# ============================================================
+
+struct SpirvDeclRecord:
+    start: mutable usize
+    len: mutable usize
+    id: mutable u32
+
+struct SpirvModule:
+    version: mutable u32
+    bound: mutable u32
+    addressing_model: mutable u32
+    memory_model: mutable u32
+    capabilities: mutable darray[u32]
+    ext_inst_imports: mutable darray[u32]
+    entry_points: mutable darray[u32]
+    execution_modes: mutable darray[u32]
+    debug: mutable darray[u32]
+    annotations: mutable darray[u32]
+    declarations: mutable darray[u32]
+    global_variables: mutable darray[u32]
+    code: mutable darray[u32]
+    decls_index: mutable darray[SpirvDeclRecord]
+
+def SpirvModule_Default() -> SpirvModule:
+    m: mutable SpirvModule = zeroed
+    m.version <- SPIRV_VERSION_1_6
+    return m
+
+def SpirvModule_AllocId(m: mutable SpirvModule&) -> u32:
+    m.bound <- m.bound + 1u32
+    return m.bound
+
+def SpirvMod_Push(stream: mutable darray[u32]&, w: u32) -> void:
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            stream.push(w)
+
+def SpirvMod_PushRec(recs: mutable darray[SpirvDeclRecord]&, rec: SpirvDeclRecord) -> void:
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            recs.push(rec)
+
+def SpirvMod_AppendStream(out: mutable darray[u32]&, src: darray[u32]) -> void:
+    for i in 0..<src.count:
+        SpirvMod_Push(out, src[i])
+
+# Compare a candidate declaration word-range against a stored record, ignoring
+# the result-id slot (sirit normalizes the id to 0 before comparing).
+def SpirvMod_DeclEquals(decls: darray[u32], rec: SpirvDeclRecord, cand_start: usize, cand_len: usize, id_offset: usize) -> bool:
+    if rec.len != cand_len:
+        return false
+    for i in 0..<cand_len:
+        if i != id_offset:
+            if decls[rec.start + i] != decls[cand_start + i]:
+                return false
+    return true
+
+# Begin a declaration: allocate the id and write opcode + optional result-type
+# + result-id, returning the stream offset where it started. Operands are then
+# pushed by the caller; SpirvMod_DedupDecl finalizes (keeping or rewinding).
+def SpirvMod_BeginDecl(m: mutable SpirvModule&, opcode: u16, result_type: u32, word_count: u16) -> u32:
+    has_rt: bool = result_type != 0u32
+    new_id: u32 = SpirvModule_AllocId(m)
+    SpirvMod_Push(m.declarations, SpirvWord(opcode, word_count))
+    if has_rt:
+        SpirvMod_Push(m.declarations, result_type)
+    SpirvMod_Push(m.declarations, new_id)
+    return new_id
+
+# Finalize a just-written declaration: dedup against prior declarations and
+# either keep it (recording the range) or rewind and reuse the existing id.
+def SpirvMod_DedupDecl(m: mutable SpirvModule&, start: usize, new_id: u32, rt_words: usize) -> u32:
+    cand_len: usize = m.declarations.count - start
+    id_offset: usize = 1usize + rt_words
+    for j in 0..<m.decls_index.count:
+        rec: SpirvDeclRecord = m.decls_index[j]
+        if SpirvMod_DeclEquals(m.declarations, rec, start, cand_len, id_offset):
+            m.declarations.count <- start
+            m.bound <- m.bound - 1u32
+            return rec.id
+    SpirvMod_PushRec(m.decls_index, SpirvDeclRecord(start, cand_len, new_id))
+    return new_id
+
+def SpirvMod_RtWords(result_type: u32) -> usize:
+    if result_type != 0u32:
+        return 1usize
+    return 0usize
+
+# Arity-specific declaration emitters (avoid darray-literal operands, which
+# would require an active arena scope at every call site).
+def SpirvMod_Decl0(m: mutable SpirvModule&, opcode: u16, result_type: u32) -> u32:
+    rt: usize = SpirvMod_RtWords(result_type)
+    start: usize = m.declarations.count
+    id: u32 = SpirvMod_BeginDecl(m, opcode, result_type, (2usize + rt).u16())
+    return SpirvMod_DedupDecl(m, start, id, rt)
+
+def SpirvMod_Decl1(m: mutable SpirvModule&, opcode: u16, result_type: u32, a: u32) -> u32:
+    rt: usize = SpirvMod_RtWords(result_type)
+    start: usize = m.declarations.count
+    id: u32 = SpirvMod_BeginDecl(m, opcode, result_type, (3usize + rt).u16())
+    SpirvMod_Push(m.declarations, a)
+    return SpirvMod_DedupDecl(m, start, id, rt)
+
+def SpirvMod_Decl2(m: mutable SpirvModule&, opcode: u16, result_type: u32, a: u32, b: u32) -> u32:
+    rt: usize = SpirvMod_RtWords(result_type)
+    start: usize = m.declarations.count
+    id: u32 = SpirvMod_BeginDecl(m, opcode, result_type, (4usize + rt).u16())
+    SpirvMod_Push(m.declarations, a)
+    SpirvMod_Push(m.declarations, b)
+    return SpirvMod_DedupDecl(m, start, id, rt)
+
+def SpirvMod_Decl4(m: mutable SpirvModule&, opcode: u16, result_type: u32, a: u32, b: u32, c: u32, d: u32) -> u32:
+    rt: usize = SpirvMod_RtWords(result_type)
+    start: usize = m.declarations.count
+    id: u32 = SpirvMod_BeginDecl(m, opcode, result_type, (6usize + rt).u16())
+    SpirvMod_Push(m.declarations, a)
+    SpirvMod_Push(m.declarations, b)
+    SpirvMod_Push(m.declarations, c)
+    SpirvMod_Push(m.declarations, d)
+    return SpirvMod_DedupDecl(m, start, id, rt)
+
+# --- Type declarations (no result-type word; deduped). ---
+def SpirvModule_TypeVoid(m: mutable SpirvModule&) -> u32:
+    return SpirvMod_Decl0(m, SPIRV_OP_TYPE_VOID, 0u32)
+
+def SpirvModule_TypeBool(m: mutable SpirvModule&) -> u32:
+    return SpirvMod_Decl0(m, SPIRV_OP_TYPE_BOOL, 0u32)
+
+def SpirvModule_TypeInt(m: mutable SpirvModule&, width: u32, signedness: u32) -> u32:
+    return SpirvMod_Decl2(m, SPIRV_OP_TYPE_INT, 0u32, width, signedness)
+
+def SpirvModule_TypeFloat(m: mutable SpirvModule&, width: u32) -> u32:
+    return SpirvMod_Decl1(m, SPIRV_OP_TYPE_FLOAT, 0u32, width)
+
+def SpirvModule_TypeVector(m: mutable SpirvModule&, component_type: u32, count: u32) -> u32:
+    return SpirvMod_Decl2(m, SPIRV_OP_TYPE_VECTOR, 0u32, component_type, count)
+
+def SpirvModule_TypePointer(m: mutable SpirvModule&, storage_class: u32, type_id: u32) -> u32:
+    return SpirvMod_Decl2(m, SPIRV_OP_TYPE_POINTER, 0u32, storage_class, type_id)
+
+def SpirvModule_TypeStruct2(m: mutable SpirvModule&, a: u32, b: u32) -> u32:
+    return SpirvMod_Decl2(m, SPIRV_OP_TYPE_STRUCT, 0u32, a, b)
+
+# --- Constant declarations (result-type word present; deduped). ---
+def SpirvModule_ConstantTrue(m: mutable SpirvModule&, type_id: u32) -> u32:
+    return SpirvMod_Decl0(m, SPIRV_OP_CONSTANT_TRUE, type_id)
+
+def SpirvModule_ConstantFalse(m: mutable SpirvModule&, type_id: u32) -> u32:
+    return SpirvMod_Decl0(m, SPIRV_OP_CONSTANT_FALSE, type_id)
+
+def SpirvModule_Constant32(m: mutable SpirvModule&, type_id: u32, value: u32) -> u32:
+    return SpirvMod_Decl1(m, SPIRV_OP_CONSTANT, type_id, value)
+
+def SpirvModule_ConstantComposite4(m: mutable SpirvModule&, type_id: u32, a: u32, b: u32, c: u32, d: u32) -> u32:
+    return SpirvMod_Decl4(m, SPIRV_OP_CONSTANT_COMPOSITE, type_id, a, b, c, d)
+
+# --- Capabilities / ext-inst imports. ---
+def SpirvModule_AddCapability(m: mutable SpirvModule&, capability: u32) -> void:
+    SpirvMod_Push(m.capabilities, capability)
+
+# OpExtInstImport: <ResultId> <Name...>. The name is passed pre-packed into
+# little-endian words; returns the import's result id.
+def SpirvModule_AddExtInstImport(m: mutable SpirvModule&, name_words: darray[u32]) -> u32:
+    id: u32 = SpirvModule_AllocId(m)
+    word_count: u16 = (2usize + name_words.count).u16()
+    SpirvMod_Push(m.ext_inst_imports, SpirvWord(SPIRV_OP_EXT_INST_IMPORT, word_count))
+    SpirvMod_Push(m.ext_inst_imports, id)
+    for i in 0..<name_words.count:
+        SpirvMod_Push(m.ext_inst_imports, name_words[i])
+    return id
+
+# --- Function-body emission (the `code` stream; no dedup). ---
+def SpirvModule_EmitCodeBinary(m: mutable SpirvModule&, opcode: u16, result_type: u32, lhs: u32, rhs: u32) -> u32:
+    result_id: u32 = SpirvModule_AllocId(m)
+    SpirvMod_Push(m.code, SpirvWord(opcode, 5u16))
+    SpirvMod_Push(m.code, result_type)
+    SpirvMod_Push(m.code, result_id)
+    SpirvMod_Push(m.code, lhs)
+    SpirvMod_Push(m.code, rhs)
+    return result_id
+
+# Assemble: header + sections in canonical SPIR-V order (mirrors Module::Assemble).
+def SpirvModule_Assemble(m: SpirvModule) -> darray[u32]:
+    out: mutable darray[u32] = zeroed
+    SpirvMod_Push(out, SPIRV_MAGIC)
+    SpirvMod_Push(out, m.version)
+    SpirvMod_Push(out, SPIRV_GENERATOR_SHADPS4_ELISA)
+    SpirvMod_Push(out, m.bound + 1u32)
+    SpirvMod_Push(out, SPIRV_SCHEMA_RESERVED)
+    for i in 0..<m.capabilities.count:
+        SpirvMod_Push(out, SpirvWord(SPIRV_OP_CAPABILITY, 2u16))
+        SpirvMod_Push(out, m.capabilities[i])
+    SpirvMod_AppendStream(out, m.ext_inst_imports)
+    SpirvMod_Push(out, SpirvWord(SPIRV_OP_MEMORY_MODEL, 3u16))
+    SpirvMod_Push(out, m.addressing_model)
+    SpirvMod_Push(out, m.memory_model)
+    SpirvMod_AppendStream(out, m.entry_points)
+    SpirvMod_AppendStream(out, m.execution_modes)
+    SpirvMod_AppendStream(out, m.debug)
+    SpirvMod_AppendStream(out, m.annotations)
+    SpirvMod_AppendStream(out, m.declarations)
+    SpirvMod_AppendStream(out, m.global_variables)
+    SpirvMod_AppendStream(out, m.code)
+    return out
 
 def SpirvBackend_EmitWordsViaFfi(profile: void&?, runtime_info: void&?, program: void&?, bindings: mutable void&?, out_words: mutable void&?, out_word_count: mutable usize&) -> int:
     return elisa_spirv_backend_emit_words(profile, runtime_info, program, bindings, out_words, out_word_count)

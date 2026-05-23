@@ -51,6 +51,63 @@ def spirv_backend_binding_and_header_are_deterministic() -> void:
         assert binding.user_data == 0u32
 
 @test
+def spirv_module_dedups_declarations_like_sirit() -> void:
+    can Abort.Panic, Memory.Allocate:
+        m: mutable SpirvModule = SpirvModule_Default()
+        # First use of each type allocates a fresh id.
+        u32_a: u32 = SpirvModule_TypeInt(m, 32u32, 0u32)
+        f32_t: u32 = SpirvModule_TypeFloat(m, 32u32)
+        assert u32_a == 1u32
+        assert f32_t == 2u32
+        # Re-emitting an identical type returns the same id and adds no words.
+        before: usize = m.declarations.count
+        bound_before: u32 = m.bound
+        u32_b: u32 = SpirvModule_TypeInt(m, 32u32, 0u32)
+        assert u32_b == u32_a
+        assert m.declarations.count == before
+        assert m.bound == bound_before
+        # A differing operand (signedness) is a distinct declaration.
+        s32_t: u32 = SpirvModule_TypeInt(m, 32u32, 1u32)
+        assert s32_t == 3u32
+        # Constants dedup too (result-type word precedes the id).
+        c0_a: u32 = SpirvModule_Constant32(m, u32_a, 0u32)
+        c0_b: u32 = SpirvModule_Constant32(m, u32_a, 0u32)
+        c1: u32 = SpirvModule_Constant32(m, u32_a, 1u32)
+        assert c0_a == c0_b
+        assert c1 != c0_a
+
+@test
+def spirv_module_assemble_emits_header_and_sections() -> void:
+    can Abort.Panic, Memory.Allocate:
+        m: mutable SpirvModule = SpirvModule_Default()
+        m.addressing_model <- 0u32
+        m.memory_model <- 1u32
+        SpirvModule_AddCapability(m, 1u32)
+        u32_t: u32 = SpirvModule_TypeInt(m, 32u32, 0u32)
+        a: u32 = SpirvModule_Constant32(m, u32_t, 10u32)
+        b: u32 = SpirvModule_Constant32(m, u32_t, 20u32)
+        sum: u32 = SpirvModule_EmitCodeBinary(m, SPIRV_OP_I_ADD, u32_t, a, b)
+        words: darray[u32] = SpirvModule_Assemble(m)
+        # Header.
+        assert words[0] == SPIRV_MAGIC
+        assert words[1] == SPIRV_VERSION_1_6
+        assert words[3] == m.bound + 1u32
+        assert words[4] == SPIRV_SCHEMA_RESERVED
+        # OpCapability(2), value=1.
+        assert words[5] == SpirvWord(SPIRV_OP_CAPABILITY, 2u16)
+        assert words[6] == 1u32
+        # OpMemoryModel(3) follows (no ext-inst imports were added).
+        assert words[7] == SpirvWord(SPIRV_OP_MEMORY_MODEL, 3u16)
+        assert words[8] == 0u32
+        assert words[9] == 1u32
+        # The IAdd from the code section is the last instruction (5 words).
+        assert words[words.count - 5usize] == SpirvWord(SPIRV_OP_I_ADD, 5u16)
+        assert words[words.count - 4usize] == u32_t
+        assert words[words.count - 3usize] == sum
+        assert words[words.count - 2usize] == a
+        assert words[words.count - 1usize] == b
+
+@test
 def spirv_backend_arithmetic_type_ids_follow_cpp_order() -> void:
     can Abort.Panic:
         ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
