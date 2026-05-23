@@ -98,6 +98,10 @@ const SPIRV_OP_GROUP_NON_UNIFORM_BALLOT: u16 = 339u16
 const SPIRV_OP_GROUP_NON_UNIFORM_BALLOT_FIND_LSB: u16 = 343u16
 const SPIRV_OP_GROUP_NON_UNIFORM_QUAD_BROADCAST: u16 = 365u16
 
+# emit_spirv_shared_memory.cpp: memory access opcodes.
+const SPIRV_OP_STORE: u16 = 62u16
+const SPIRV_OP_ACCESS_CHAIN: u16 = 65u16
+
 # emit_spirv_special.cpp: control-flow / geometry / discard opcodes.
 const SPIRV_OP_EMIT_VERTEX: u16 = 218u16
 const SPIRV_OP_END_PRIMITIVE: u16 = 219u16
@@ -304,6 +308,15 @@ struct SpirvEmitContext:
     # Misc imports / interface ids defined outside the arithmetic-type section.
     subgroup_local_invocation_id: mutable u32
     glsl_std_450_id: mutable u32
+    # Shared (workgroup) memory: element pointer types + the variable ids, plus
+    # whether the shared block is a multi-type layout struct (popcount>1).
+    shared_u16: mutable u32
+    shared_u32: mutable u32
+    shared_u64: mutable u32
+    shared_memory_u16: mutable u32
+    shared_memory_u32: mutable u32
+    shared_memory_u64: mutable u32
+    shared_memory_is_layered: mutable bool
 
 struct SpirvEmitResult:
     words: mutable darray[u32]
@@ -1257,6 +1270,86 @@ def SpirvEmitFindILsb64(ctx: mutable SpirvEmitContext&, value: u32) -> u32:
     neg_one: u32 = SpirvEmitConstU32(ctx, 0xFFFFFFFFu32)
     found_lo: u32 = SpirvEmitINotEqual32(ctx, lo_lsb, neg_one)
     return SpirvEmitOpSelect(ctx, ctx.u32_id, found_lo, lo_lsb, hi_lsb)
+
+# ------------------------------------------------------------
+# emit_spirv_shared_memory.cpp: workgroup-memory load/store via OpAccessChain.
+# ------------------------------------------------------------
+
+# OpLoad: <ResultType> <ResultId> <Pointer> (4 words).
+def SpirvEmitLoad(ctx: mutable SpirvEmitContext&, result_type: u32, pointer: u32) -> u32:
+    return SpirvEmitUnaryOp(ctx, SPIRV_OP_LOAD, result_type, pointer)
+
+# OpStore: <Pointer> <Object> (3 words, no result id).
+def SpirvEmitStore(ctx: mutable SpirvEmitContext&, pointer: u32, value: u32) -> void:
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(SPIRV_OP_STORE, 3u16))
+    SpirvEmitContext_AppendWord(ctx, pointer)
+    SpirvEmitContext_AppendWord(ctx, value)
+
+# OpAccessChain: <ResultType> <ResultId> <Base> <Indexes...>.
+def SpirvEmitAccessChain1(ctx: mutable SpirvEmitContext&, result_type: u32, base: u32, index: u32) -> u32:
+    result_id: u32 = SpirvEmitContext_AllocateId(ctx)
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(SPIRV_OP_ACCESS_CHAIN, 5u16))
+    SpirvEmitContext_AppendWord(ctx, result_type)
+    SpirvEmitContext_AppendWord(ctx, result_id)
+    SpirvEmitContext_AppendWord(ctx, base)
+    SpirvEmitContext_AppendWord(ctx, index)
+    return result_id
+
+def SpirvEmitAccessChain2(ctx: mutable SpirvEmitContext&, result_type: u32, base: u32, i0: u32, i1: u32) -> u32:
+    result_id: u32 = SpirvEmitContext_AllocateId(ctx)
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(SPIRV_OP_ACCESS_CHAIN, 6u16))
+    SpirvEmitContext_AppendWord(ctx, result_type)
+    SpirvEmitContext_AppendWord(ctx, result_id)
+    SpirvEmitContext_AppendWord(ctx, base)
+    SpirvEmitContext_AppendWord(ctx, i0)
+    SpirvEmitContext_AppendWord(ctx, i1)
+    return result_id
+
+# EmitContext::EmitSharedMemoryAccess: a multi-type shared block is a layout
+# struct, so it needs the leading u32_zero member index; a single-type block
+# is indexed directly.
+def SpirvEmitSharedMemoryAccess(ctx: mutable SpirvEmitContext&, result_type: u32, shared_mem: u32, index: u32) -> u32:
+    if ctx.shared_memory_is_layered:
+        return SpirvEmitAccessChain2(ctx, result_type, shared_mem, ctx.u32_zero_value, index)
+    return SpirvEmitAccessChain1(ctx, result_type, shared_mem, index)
+
+# Load/Write shared U16/U32/U64: shift the byte offset to an element index,
+# form the access chain, then load/store.
+def SpirvEmitLoadSharedU16(ctx: mutable SpirvEmitContext&, offset: u32) -> u32:
+    shift_id: u32 = SpirvEmitConstU32(ctx, 1u32)
+    index: u32 = SpirvEmitShiftRightLogical32(ctx, offset, shift_id)
+    pointer: u32 = SpirvEmitSharedMemoryAccess(ctx, ctx.shared_u16, ctx.shared_memory_u16, index)
+    return SpirvEmitLoad(ctx, ctx.u16_id, pointer)
+
+def SpirvEmitLoadSharedU32(ctx: mutable SpirvEmitContext&, offset: u32) -> u32:
+    shift_id: u32 = SpirvEmitConstU32(ctx, 2u32)
+    index: u32 = SpirvEmitShiftRightLogical32(ctx, offset, shift_id)
+    pointer: u32 = SpirvEmitSharedMemoryAccess(ctx, ctx.shared_u32, ctx.shared_memory_u32, index)
+    return SpirvEmitLoad(ctx, ctx.u32_id, pointer)
+
+def SpirvEmitLoadSharedU64(ctx: mutable SpirvEmitContext&, offset: u32) -> u32:
+    shift_id: u32 = SpirvEmitConstU32(ctx, 3u32)
+    index: u32 = SpirvEmitShiftRightLogical32(ctx, offset, shift_id)
+    pointer: u32 = SpirvEmitSharedMemoryAccess(ctx, ctx.shared_u64, ctx.shared_memory_u64, index)
+    return SpirvEmitLoad(ctx, ctx.u64_id, pointer)
+
+def SpirvEmitWriteSharedU16(ctx: mutable SpirvEmitContext&, offset: u32, value: u32) -> void:
+    shift_id: u32 = SpirvEmitConstU32(ctx, 1u32)
+    index: u32 = SpirvEmitShiftRightLogical32(ctx, offset, shift_id)
+    pointer: u32 = SpirvEmitSharedMemoryAccess(ctx, ctx.shared_u16, ctx.shared_memory_u16, index)
+    SpirvEmitStore(ctx, pointer, value)
+
+def SpirvEmitWriteSharedU32(ctx: mutable SpirvEmitContext&, offset: u32, value: u32) -> void:
+    shift_id: u32 = SpirvEmitConstU32(ctx, 2u32)
+    index: u32 = SpirvEmitShiftRightLogical32(ctx, offset, shift_id)
+    pointer: u32 = SpirvEmitSharedMemoryAccess(ctx, ctx.shared_u32, ctx.shared_memory_u32, index)
+    SpirvEmitStore(ctx, pointer, value)
+
+def SpirvEmitWriteSharedU64(ctx: mutable SpirvEmitContext&, offset: u32, value: u32) -> void:
+    shift_id: u32 = SpirvEmitConstU32(ctx, 3u32)
+    index: u32 = SpirvEmitShiftRightLogical32(ctx, offset, shift_id)
+    pointer: u32 = SpirvEmitSharedMemoryAccess(ctx, ctx.shared_u64, ctx.shared_memory_u64, index)
+    SpirvEmitStore(ctx, pointer, value)
 
 # ------------------------------------------------------------
 # emit_spirv_convert.cpp: width/format conversions (all 4-word unary ops).

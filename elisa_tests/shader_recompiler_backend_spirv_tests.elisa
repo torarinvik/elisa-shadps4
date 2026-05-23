@@ -342,6 +342,49 @@ def spirv_backend_emit_bitwise_conversion_matches_cpp() -> void:
         assert us4 == ctx.words[ctx.words.count - 2usize]
 
 @test
+def spirv_backend_emit_shared_memory_matches_cpp() -> void:
+    can Abort.Panic, Memory.Allocate:
+        ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
+        SpirvEmitContext_DefineArithmeticTypes(ctx)
+        # Stand in for DefineSharedMemory: pointer types + variable ids.
+        ctx.shared_u32 <- SpirvEmitContext_AllocateId(ctx)
+        ctx.shared_memory_u32 <- SpirvEmitContext_AllocateId(ctx)
+        # --- Single-type block: ConstU32 shift, shift-right, access chain, load. ---
+        ctx.shared_memory_is_layered <- false
+        b0: usize = ctx.words.count
+        v: u32 = SpirvEmitLoadSharedU32(ctx, 500u32)
+        assert ctx.words.count == b0 + 18usize
+        # ConstU32(2) for the byte->element shift.
+        assert ctx.words[b0] == SpirvWord(SPIRV_OP_CONSTANT, 4u16)
+        assert ctx.words[b0 + 3usize] == 2u32
+        # ShiftRightLogical(offset, shift).
+        assert ctx.words[b0 + 4usize] == SpirvWord(SPIRV_OP_SHIFT_RIGHT_LOGICAL, 5u16)
+        assert ctx.words[b0 + 7usize] == 500u32
+        # OpAccessChain (single index) into the shared variable.
+        assert ctx.words[b0 + 9usize] == SpirvWord(SPIRV_OP_ACCESS_CHAIN, 5u16)
+        assert ctx.words[b0 + 10usize] == ctx.shared_u32
+        assert ctx.words[b0 + 12usize] == ctx.shared_memory_u32
+        # OpLoad of the U32 element.
+        assert ctx.words[b0 + 14usize] == SpirvWord(SPIRV_OP_LOAD, 4u16)
+        assert ctx.words[b0 + 15usize] == ctx.u32_id
+        assert ctx.words[b0 + 16usize] == v
+        # --- Multi-type (layered) block: access chain gains the u32_zero member. ---
+        ctx.shared_memory_is_layered <- true
+        b1: usize = ctx.words.count
+        v2: u32 = SpirvEmitLoadSharedU32(ctx, 501u32)
+        assert ctx.words[b1 + 9usize] == SpirvWord(SPIRV_OP_ACCESS_CHAIN, 6u16)
+        # Layout: word, result_type, result_id, base, i0=u32_zero, i1=index.
+        assert ctx.words[b1 + 12usize] == ctx.shared_memory_u32
+        assert ctx.words[b1 + 13usize] == ctx.u32_zero_value
+        _ = v2
+        # --- Write path ends in an OpStore (no result id). ---
+        ctx.shared_memory_is_layered <- false
+        b2: usize = ctx.words.count
+        SpirvEmitWriteSharedU32(ctx, 502u32, 99u32)
+        assert ctx.words[ctx.words.count - 3usize] == SpirvWord(SPIRV_OP_STORE, 3u16)
+        assert ctx.words[ctx.words.count - 1usize] == 99u32
+
+@test
 def spirv_backend_emit_convert_matches_cpp() -> void:
     can Abort.Panic, Memory.Allocate:
         ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
