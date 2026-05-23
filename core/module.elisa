@@ -536,19 +536,23 @@ def Module_SymbolNameAndNidAt(self: Module&, offset: u32, out_name: mutable stat
     # as an unbounded cstr can run past the segment into adjacent heap, yielding a
     # nondeterministic symbol name (and thus nondeterministic import resolution).
     base: usize = offset.usize()
-    max_len: usize = self.dynamic_data.count - base
+    # Scan within bounds-safe views of the segment: indexing a view is proven in
+    # range by its length, so no unchecked indexing and no over-read past the
+    # segment (the bug this guards against).
+    seg: dview[u8] = self.dynamic_data[base:self.dynamic_data.count]
     name_len: mutable usize = 0
-    while name_len < max_len and self.dynamic_data[base + name_len] != 0u8:
+    while name_len < seg.len and seg[name_len] != 0u8:
         name_len <- name_len + 1
     if name_len == 0:
         return false
     out_name <- Module_CopyDynDataSlice(self.ref[Module&], base, base + name_len)
+    name_seg: dview[u8] = seg[0:name_len]
     hash_index: mutable usize = name_len
     i: mutable usize = 0
-    while i < name_len:
-        if self.dynamic_data[base + i] == 35u8:
+    while i < name_seg.len:
+        if name_seg[i] == 35u8:
             hash_index <- i
-            i <- name_len
+            i <- name_seg.len
         else:
             i <- i + 1
     if hash_index == 0:
@@ -583,19 +587,22 @@ def Module_CopyDynDataSlice(self: Module&, start: usize, end_exclusive: usize) -
     end_bounded: mutable usize = end_exclusive
     if end_bounded > self.dynamic_data.count:
         end_bounded <- self.dynamic_data.count
-    len: usize = end_bounded - start
-    raw: mutable heap void&? = null
-    can Memory.Allocate:
-        raw <- malloc(len + 1)
-    if raw == null:
-        return ""
-    out: mutable heap u8& = raw.cast[mutable heap u8&]
-    i: mutable usize = 0
-    while i < len:
-        out[i] <- self.dynamic_data[start + i]
-        i <- i + 1
-    out[len] <- 0
-    return out.cast[static u8&]
+    # Take a bounds-safe view of the requested slice and deep-copy it into the
+    # persistent metadata arena as an owned, NUL-terminated string. No malloc and
+    # no unchecked indexing: the copy is the language's clone, and the view never
+    # reads past the buffer.
+    seg: dview[u8] = self.dynamic_data[start:end_bounded]
+    out: mutable dstr = []
+    can Memory.Allocate, Abort.Panic:
+        trusted Unsafe.MutableGlobal:
+            owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
+            in owner:
+                out <- clone[dstr](seg)
+                out.push(0)
+    # The bytes live in the persistent metadata arena, valid for the module's
+    # lifetime; the cast asserts that managed lifetime. out is non-empty here.
+    trusted Unsafe.PointerCast, Unsafe.UncheckedIndex:
+        return out[0].ref[static u8&]
 
 # Bounded NUL-terminated copy of the dynamic-data string starting at offset,
 # scanning only within the segment.
