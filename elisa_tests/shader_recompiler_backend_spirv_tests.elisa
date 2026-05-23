@@ -94,6 +94,48 @@ def spirv_backend_emit_select_matches_cpp_opselect() -> void:
         _ = f32_sel
 
 @test
+def spirv_backend_emit_special_matches_cpp() -> void:
+    can Abort.Panic, Memory.Allocate:
+        ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
+        SpirvEmitContext_DefineCoreTypes(ctx)
+        # Zero-operand void ops are a single word.
+        b0: usize = ctx.words.count
+        SpirvEmitDiscard(ctx)
+        assert ctx.words.count == b0 + 1usize
+        assert ctx.words[b0] == SpirvWord(SPIRV_OP_DEMOTE_TO_HELPER_INVOCATION, 1u16)
+        b1: usize = ctx.words.count
+        SpirvEmitEmitVertex(ctx)
+        assert ctx.words.count == b1 + 1usize
+        assert ctx.words[b1] == SpirvWord(SPIRV_OP_EMIT_VERTEX, 1u16)
+        b2: usize = ctx.words.count
+        SpirvEmitEmitPrimitive(ctx)
+        assert ctx.words[b2] == SpirvWord(SPIRV_OP_END_PRIMITIVE, 1u16)
+        # EmitDiscardCond: SelectionMerge(3) + BranchConditional(4) + Label(2)
+        # + Discard(1) + Branch(2) + Label(2) = 14 words.
+        next_id: u32 = ctx.next_id
+        b3: usize = ctx.words.count
+        SpirvEmitDiscardCond(ctx, 77u32)
+        assert ctx.words.count == b3 + 14usize
+        # kill_label = next_id, merge_label = next_id + 1.
+        kill_label: u32 = next_id
+        merge_label: u32 = next_id + 1u32
+        assert ctx.words[b3] == SpirvWord(SPIRV_OP_SELECTION_MERGE, 3u16)
+        assert ctx.words[b3 + 1usize] == merge_label
+        assert ctx.words[b3 + 2usize] == SPIRV_SELECTION_CONTROL_NONE
+        assert ctx.words[b3 + 3usize] == SpirvWord(SPIRV_OP_BRANCH_CONDITIONAL, 4u16)
+        assert ctx.words[b3 + 4usize] == 77u32
+        assert ctx.words[b3 + 5usize] == kill_label
+        assert ctx.words[b3 + 6usize] == merge_label
+        assert ctx.words[b3 + 7usize] == SpirvWord(SPIRV_OP_LABEL, 2u16)
+        assert ctx.words[b3 + 8usize] == kill_label
+        assert ctx.words[b3 + 9usize] == SpirvWord(SPIRV_OP_DEMOTE_TO_HELPER_INVOCATION, 1u16)
+        assert ctx.words[b3 + 10usize] == SpirvWord(SPIRV_OP_BRANCH, 2u16)
+        assert ctx.words[b3 + 11usize] == merge_label
+        assert ctx.words[b3 + 12usize] == SpirvWord(SPIRV_OP_LABEL, 2u16)
+        assert ctx.words[b3 + 13usize] == merge_label
+        assert ctx.last_label == merge_label
+
+@test
 def spirv_backend_emit_warp_matches_cpp() -> void:
     can Abort.Panic, Memory.Allocate:
         ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()

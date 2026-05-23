@@ -82,6 +82,16 @@ const SPIRV_OP_GROUP_NON_UNIFORM_BALLOT: u16 = 339u16
 const SPIRV_OP_GROUP_NON_UNIFORM_BALLOT_FIND_LSB: u16 = 343u16
 const SPIRV_OP_GROUP_NON_UNIFORM_QUAD_BROADCAST: u16 = 365u16
 
+# emit_spirv_special.cpp: control-flow / geometry / discard opcodes.
+const SPIRV_OP_EMIT_VERTEX: u16 = 218u16
+const SPIRV_OP_END_PRIMITIVE: u16 = 219u16
+const SPIRV_OP_SELECTION_MERGE: u16 = 247u16
+const SPIRV_OP_LABEL: u16 = 248u16
+const SPIRV_OP_BRANCH: u16 = 249u16
+const SPIRV_OP_BRANCH_CONDITIONAL: u16 = 250u16
+const SPIRV_OP_DEMOTE_TO_HELPER_INVOCATION: u16 = 5380u16
+const SPIRV_SELECTION_CONTROL_NONE: u32 = 0u32
+
 global mutable g_spirv_backend_use_ffi_bridge: bool = false
 
 def SpirvBackend_SetUseFfiBridge(enabled: bool) -> void:
@@ -384,6 +394,58 @@ def SpirvEmitBallotFindLsb(ctx: mutable SpirvEmitContext&, mask: u32) -> u32:
 def SpirvEmitGroupAny(ctx: mutable SpirvEmitContext&, bit: u32) -> u32:
     sg_scope: u32 = SpirvSubgroupScope(ctx)
     return SpirvEmitBinaryOp(ctx, SPIRV_OP_GROUP_NON_UNIFORM_ANY, ctx.u1_id, sg_scope, bit)
+
+# emit_spirv_special.cpp: zero-operand void instructions (1 word).
+def SpirvEmitVoidOp(ctx: mutable SpirvEmitContext&, opcode: u16) -> void:
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(opcode, 1u16))
+
+# EmitDiscard: OpDemoteToHelperInvocationEXT.
+def SpirvEmitDiscard(ctx: mutable SpirvEmitContext&) -> void:
+    SpirvEmitVoidOp(ctx, SPIRV_OP_DEMOTE_TO_HELPER_INVOCATION)
+
+# EmitEmitVertex / EmitEmitPrimitive: geometry-shader stream control.
+def SpirvEmitEmitVertex(ctx: mutable SpirvEmitContext&) -> void:
+    SpirvEmitVoidOp(ctx, SPIRV_OP_EMIT_VERTEX)
+
+def SpirvEmitEmitPrimitive(ctx: mutable SpirvEmitContext&) -> void:
+    SpirvEmitVoidOp(ctx, SPIRV_OP_END_PRIMITIVE)
+
+# OpLabel <ResultId> (2 words). Begins a basic block; tracks last_label.
+def SpirvEmitLabel(ctx: mutable SpirvEmitContext&, label_id: u32) -> void:
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(SPIRV_OP_LABEL, 2u16))
+    SpirvEmitContext_AppendWord(ctx, label_id)
+    ctx.last_label <- label_id
+
+# OpBranch <TargetLabel> (2 words).
+def SpirvEmitBranch(ctx: mutable SpirvEmitContext&, target: u32) -> void:
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(SPIRV_OP_BRANCH, 2u16))
+    SpirvEmitContext_AppendWord(ctx, target)
+
+# OpSelectionMerge <MergeBlock> <SelectionControl> (3 words).
+def SpirvEmitSelectionMerge(ctx: mutable SpirvEmitContext&, merge_block: u32, control: u32) -> void:
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(SPIRV_OP_SELECTION_MERGE, 3u16))
+    SpirvEmitContext_AppendWord(ctx, merge_block)
+    SpirvEmitContext_AppendWord(ctx, control)
+
+# OpBranchConditional <Condition> <TrueLabel> <FalseLabel> (4 words).
+def SpirvEmitBranchConditional(ctx: mutable SpirvEmitContext&, condition: u32, true_label: u32, false_label: u32) -> void:
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(SPIRV_OP_BRANCH_CONDITIONAL, 4u16))
+    SpirvEmitContext_AppendWord(ctx, condition)
+    SpirvEmitContext_AppendWord(ctx, true_label)
+    SpirvEmitContext_AppendWord(ctx, false_label)
+
+# EmitDiscardCond: guarded demote-to-helper. Reserves a kill and merge block,
+# emits a selection-merge + conditional branch, then demotes inside the kill
+# block before falling through to the merge block.
+def SpirvEmitDiscardCond(ctx: mutable SpirvEmitContext&, condition: u32) -> void:
+    kill_label: u32 = SpirvEmitContext_AllocateId(ctx)
+    merge_label: u32 = SpirvEmitContext_AllocateId(ctx)
+    SpirvEmitSelectionMerge(ctx, merge_label, SPIRV_SELECTION_CONTROL_NONE)
+    SpirvEmitBranchConditional(ctx, condition, kill_label, merge_label)
+    SpirvEmitLabel(ctx, kill_label)
+    SpirvEmitDiscard(ctx)
+    SpirvEmitBranch(ctx, merge_label)
+    SpirvEmitLabel(ctx, merge_label)
 
 def SpirvBackend_EmitWordsViaFfi(profile: void&?, runtime_info: void&?, program: void&?, bindings: mutable void&?, out_words: mutable void&?, out_word_count: mutable usize&) -> int:
     return elisa_spirv_backend_emit_words(profile, runtime_info, program, bindings, out_words, out_word_count)
