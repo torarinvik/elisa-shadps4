@@ -1,0 +1,189 @@
+# SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# IR -> SPIR-V dispatch (ports the EmitInst switch from emit_spirv.cpp). The C++
+# uses template metaprogramming (FuncTraits/Invoke) to marshal IR::Inst args
+# into the Emit* functions; Elisa has no such metaprogramming, so the dispatch
+# is an explicit opcode switch. Each value-producing instruction resolves its
+# args to SPIR-V ids (SpirvDef), emits, and stores the result id in the inst's
+# `definition` field (the ctx.Def mechanism).
+
+include "spirv_backend.elisa"
+include "../../ir/program.elisa"
+
+# EmitContext::Def: resolve an IR value to its SPIR-V id. Inst references return
+# the referenced inst's stored definition; immediates emit a constant.
+def SpirvDef(ctx: mutable SpirvEmitContext&, program: ShaderIrProgram&, value: ShaderIrValue) -> u32:
+    if value.type_bits == IR_TYPE_OPAQUE:
+        if value.inst_block < program.block_count and value.inst_index < program.blocks[value.inst_block.usize()].inst_count:
+            return program.blocks[value.inst_block.usize()].insts[value.inst_index.usize()].definition
+        return SPIRV_INVALID_ID
+    if value.type_bits == IR_TYPE_U32:
+        return SpirvEmitConstU32(ctx, value.imm_u32)
+    if value.type_bits == IR_TYPE_U1:
+        if value.imm_u1:
+            return ctx.true_value
+        return ctx.false_value
+    return SPIRV_INVALID_ID
+
+# EmitInst: dispatch one instruction by opcode, marshalling resolved-id args and
+# storing the result definition. Covers the value-producing arithmetic/logical/
+# bitwise/compare/select/convert opcodes whose emitters take resolved ids.
+def SpirvEmitInst(ctx: mutable SpirvEmitContext&, program: mutable ShaderIrProgram&, inst_block: u32, inst_index: u32) -> void:
+    bi: usize = inst_block.usize()
+    ii: usize = inst_index.usize()
+    op: u32 = program.blocks[bi].insts[ii].opcode
+    nargs: u32 = program.blocks[bi].insts[ii].arg_count
+    arg0: mutable ShaderIrValue = ShaderIrValue_Empty()
+    arg1: mutable ShaderIrValue = ShaderIrValue_Empty()
+    arg2: mutable ShaderIrValue = ShaderIrValue_Empty()
+    if nargs >= 1u32:
+        arg0 <- program.blocks[bi].insts[ii].args[0usize]
+    if nargs >= 2u32:
+        arg1 <- program.blocks[bi].insts[ii].args[1usize]
+    if nargs >= 3u32:
+        arg2 <- program.blocks[bi].insts[ii].args[2usize]
+    a0: u32 = SpirvDef(ctx, program, arg0)
+    a1: u32 = SpirvDef(ctx, program, arg1)
+    a2: u32 = SpirvDef(ctx, program, arg2)
+    result: mutable u32 = SPIRV_INVALID_ID
+    # --- 32-bit integer arithmetic / shift / bitwise ---
+    if op == IR_OPCODE_IADD32:
+        result <- SpirvEmitIAdd32(ctx, a0, a1)
+    elif op == IR_OPCODE_ISUB32:
+        result <- SpirvEmitISub32(ctx, a0, a1)
+    elif op == IR_OPCODE_IMUL32:
+        result <- SpirvEmitIMul32(ctx, a0, a1)
+    elif op == IR_OPCODE_SHIFTLEFTLOGICAL32:
+        result <- SpirvEmitShiftLeftLogical32(ctx, a0, a1)
+    elif op == IR_OPCODE_SHIFTRIGHTLOGICAL32:
+        result <- SpirvEmitShiftRightLogical32(ctx, a0, a1)
+    elif op == IR_OPCODE_SHIFTRIGHTARITHMETIC32:
+        result <- SpirvEmitShiftRightArithmetic32(ctx, a0, a1)
+    elif op == IR_OPCODE_BITWISEAND32:
+        result <- SpirvEmitBitwiseAnd32(ctx, a0, a1)
+    elif op == IR_OPCODE_BITWISEOR32:
+        result <- SpirvEmitBitwiseOr32(ctx, a0, a1)
+    elif op == IR_OPCODE_BITWISEXOR32:
+        result <- SpirvEmitBitwiseXor32(ctx, a0, a1)
+    elif op == IR_OPCODE_SMIN32:
+        result <- SpirvEmitSMin32(ctx, a0, a1)
+    elif op == IR_OPCODE_UMIN32:
+        result <- SpirvEmitUMin32(ctx, a0, a1)
+    elif op == IR_OPCODE_UMAX32:
+        result <- SpirvEmitUMax32(ctx, a0, a1)
+    # --- comparisons (U1 result) ---
+    elif op == IR_OPCODE_SLESSTHAN32:
+        result <- SpirvEmitSLessThan32(ctx, a0, a1)
+    elif op == IR_OPCODE_ULESSTHAN32:
+        result <- SpirvEmitULessThan32(ctx, a0, a1)
+    elif op == IR_OPCODE_IEQUAL32:
+        result <- SpirvEmitIEqual32(ctx, a0, a1)
+    # --- boolean logic ---
+    elif op == IR_OPCODE_LOGICALOR:
+        result <- SpirvEmitLogicalOr(ctx, a0, a1)
+    elif op == IR_OPCODE_LOGICALAND:
+        result <- SpirvEmitLogicalAnd(ctx, a0, a1)
+    elif op == IR_OPCODE_LOGICALNOT:
+        result <- SpirvEmitLogicalNot(ctx, a0)
+    # --- select / bitcast ---
+    elif op == IR_OPCODE_SELECTU32:
+        result <- SpirvEmitSelectU32(ctx, a0, a1, a2)
+    elif op == IR_OPCODE_BITCASTU32F32:
+        result <- SpirvEmitBitcast(ctx, ctx.u32_id, a0)
+    elif op == IR_OPCODE_BITCASTF32U32:
+        result <- SpirvEmitBitcast(ctx, ctx.f32_id, a0)
+    # --- 32-bit float arithmetic ---
+    elif op == IR_OPCODE_FPADD32:
+        result <- SpirvEmitFPAdd32(ctx, a0, a1)
+    elif op == IR_OPCODE_FPSUB32:
+        result <- SpirvEmitFPSub32(ctx, a0, a1)
+    elif op == IR_OPCODE_FPMUL32:
+        result <- SpirvEmitFPMul32(ctx, a0, a1)
+    elif op == IR_OPCODE_FPNEG32:
+        result <- SpirvEmitFPNeg32(ctx, a0)
+    # --- integer unary / bit-scan (U32 result) ---
+    elif op == IR_OPCODE_INEG32:
+        result <- SpirvEmitINeg32(ctx, a0)
+    elif op == IR_OPCODE_IABS32:
+        result <- SpirvEmitIAbs32(ctx, a0)
+    elif op == IR_OPCODE_BITWISENOT32:
+        result <- SpirvEmitBitwiseNot32(ctx, a0)
+    elif op == IR_OPCODE_BITREVERSE32:
+        result <- SpirvEmitBitReverse32(ctx, a0)
+    elif op == IR_OPCODE_BITCOUNT32:
+        result <- SpirvEmitBitCount32(ctx, a0)
+    elif op == IR_OPCODE_FINDSMSB32:
+        result <- SpirvEmitFindSMsb32(ctx, a0)
+    elif op == IR_OPCODE_FINDUMSB32:
+        result <- SpirvEmitFindUMsb32(ctx, a0)
+    elif op == IR_OPCODE_FINDILSB32:
+        result <- SpirvEmitFindILsb32(ctx, a0)
+    elif op == IR_OPCODE_SMAX32:
+        result <- SpirvEmitSMax32(ctx, a0, a1)
+    # --- remaining comparisons (U1 result) ---
+    elif op == IR_OPCODE_SLESSTHANEQUAL32:
+        result <- SpirvEmitSLessThanEqual32(ctx, a0, a1)
+    elif op == IR_OPCODE_ULESSTHANEQUAL32:
+        result <- SpirvEmitULessThanEqual32(ctx, a0, a1)
+    elif op == IR_OPCODE_SGREATERTHAN32:
+        result <- SpirvEmitSGreaterThan32(ctx, a0, a1)
+    elif op == IR_OPCODE_UGREATERTHAN32:
+        result <- SpirvEmitUGreaterThan32(ctx, a0, a1)
+    elif op == IR_OPCODE_INOTEQUAL32:
+        result <- SpirvEmitINotEqual32(ctx, a0, a1)
+    elif op == IR_OPCODE_SGREATERTHANEQUAL32:
+        result <- SpirvEmitSGreaterThanEqual32(ctx, a0, a1)
+    elif op == IR_OPCODE_UGREATERTHANEQUAL32:
+        result <- SpirvEmitUGreaterThanEqual32(ctx, a0, a1)
+    # --- typed selects / undef ---
+    elif op == IR_OPCODE_SELECTU1:
+        result <- SpirvEmitSelectU1(ctx, a0, a1, a2)
+    elif op == IR_OPCODE_SELECTF32:
+        result <- SpirvEmitSelectF32(ctx, a0, a1, a2)
+    elif op == IR_OPCODE_UNDEFU1:
+        result <- SpirvEmitUndefU1(ctx)
+    elif op == IR_OPCODE_UNDEFU32:
+        result <- SpirvEmitUndefU32(ctx)
+    # --- float transcendental / min-max (F32 result) ---
+    elif op == IR_OPCODE_FPABS32:
+        result <- SpirvEmitFPAbs32(ctx, a0)
+    elif op == IR_OPCODE_FPSQRT:
+        result <- SpirvEmitFPSqrt32(ctx, a0)
+    elif op == IR_OPCODE_FPSIN:
+        result <- SpirvEmitFPSin(ctx, a0)
+    elif op == IR_OPCODE_FPCOS:
+        result <- SpirvEmitFPCos(ctx, a0)
+    elif op == IR_OPCODE_FPMAX32:
+        result <- SpirvEmitFPMax32(ctx, a0, a1)
+    elif op == IR_OPCODE_FPMIN32:
+        result <- SpirvEmitFPMin32(ctx, a0, a1)
+    # --- shared-memory loads (value-producing) ---
+    elif op == IR_OPCODE_LOADSHAREDU16:
+        result <- SpirvEmitLoadSharedU16(ctx, a0)
+    elif op == IR_OPCODE_LOADSHAREDU32:
+        result <- SpirvEmitLoadSharedU32(ctx, a0)
+    elif op == IR_OPCODE_LOADSHAREDU64:
+        result <- SpirvEmitLoadSharedU64(ctx, a0)
+    # --- void instructions (no result definition) ---
+    elif op == IR_OPCODE_DISCARD:
+        SpirvEmitDiscard(ctx)
+    elif op == IR_OPCODE_DISCARDCOND:
+        SpirvEmitDiscardCond(ctx, a0)
+    elif op == IR_OPCODE_BARRIER:
+        SpirvEmitBarrier(ctx, false)
+    elif op == IR_OPCODE_WORKGROUPMEMORYBARRIER:
+        SpirvEmitWorkgroupMemoryBarrier(ctx)
+    elif op == IR_OPCODE_DEVICEMEMORYBARRIER:
+        SpirvEmitDeviceMemoryBarrier(ctx)
+    elif op == IR_OPCODE_EMITVERTEX:
+        SpirvEmitEmitVertex(ctx)
+    elif op == IR_OPCODE_EMITPRIMITIVE:
+        SpirvEmitEmitPrimitive(ctx)
+    elif op == IR_OPCODE_WRITESHAREDU16:
+        SpirvEmitWriteSharedU16(ctx, a0, a1)
+    elif op == IR_OPCODE_WRITESHAREDU32:
+        SpirvEmitWriteSharedU32(ctx, a0, a1)
+    elif op == IR_OPCODE_WRITESHAREDU64:
+        SpirvEmitWriteSharedU64(ctx, a0, a1)
+    program.blocks[bi].insts[ii].definition <- result

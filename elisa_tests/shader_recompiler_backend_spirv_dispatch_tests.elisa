@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../shader_recompiler/backend/spirv/spirv_dispatch.elisa"
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+
+@test
+def spirv_dispatch_emits_and_links_definitions() -> void:
+    can Abort.Panic, Memory.Allocate:
+        ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
+        SpirvEmitContext_DefineArithmeticTypes(ctx)
+        info: ShaderIrProgramInfo = zeroed
+        program: mutable ShaderIrProgram = ShaderIrProgram_New(info)
+        block: u32 = ShaderIrProgram_AddBlock(program)
+        # inst0: IAdd32(imm 10, imm 11)
+        args0: mutable ShaderIrValue[6] = zeroed
+        args0[0usize] <- ShaderIrValue_FromU32(10u32)
+        args0[1usize] <- ShaderIrValue_FromU32(11u32)
+        i0: u32 = ShaderIrProgram_AppendInst(program, block, IR_OPCODE_IADD32, args0, 2u32, 0u64)
+        # inst1: IMul32(inst0, imm 2) -- second operand references the first inst.
+        args1: mutable ShaderIrValue[6] = zeroed
+        args1[0usize] <- ShaderIrValue_FromInst(block, i0)
+        args1[1usize] <- ShaderIrValue_FromU32(2u32)
+        i1: u32 = ShaderIrProgram_AppendInst(program, block, IR_OPCODE_IMUL32, args1, 2u32, 0u64)
+        # Dispatch both instructions.
+        SpirvEmitInst(ctx, program, block, i0)
+        before1: usize = ctx.words.count
+        SpirvEmitInst(ctx, program, block, i1)
+        # inst0 got a definition (the OpIAdd result id).
+        def0: u32 = program.blocks[block.usize()].insts[i0.usize()].definition
+        def1: u32 = program.blocks[block.usize()].insts[i1.usize()].definition
+        assert def0 != SPIRV_INVALID_ID
+        assert def1 != SPIRV_INVALID_ID
+        assert def0 != def1
+        # inst1 emitted: ConstU32(2) [4 words] then OpIMul [5 words].
+        assert ctx.words[before1] == SpirvWord(SPIRV_OP_CONSTANT, 4u16)
+        assert ctx.words[before1 + 3usize] == 2u32
+        imul_at: usize = before1 + 4usize
+        assert ctx.words[imul_at] == SpirvWord(SPIRV_OP_I_MUL, 5u16)
+        assert ctx.words[imul_at + 1usize] == ctx.u32_id
+        assert ctx.words[imul_at + 2usize] == def1
+        # First IMul operand is inst0's definition (the dependency was linked).
+        assert ctx.words[imul_at + 3usize] == def0
+        # Second IMul operand is the freshly emitted constant id (at before1+2).
+        assert ctx.words[imul_at + 4usize] == ctx.words[before1 + 2usize]
+
+@test
+def spirv_dispatch_resolves_u1_immediates() -> void:
+    can Abort.Panic, Memory.Allocate:
+        ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
+        SpirvEmitContext_DefineArithmeticTypes(ctx)
+        info: ShaderIrProgramInfo = zeroed
+        program: mutable ShaderIrProgram = ShaderIrProgram_New(info)
+        block: u32 = ShaderIrProgram_AddBlock(program)
+        # LogicalNot(true) -- the U1 immediate resolves to ctx.true_value.
+        args: mutable ShaderIrValue[6] = zeroed
+        args[0usize] <- ShaderIrValue_FromU1(true)
+        i0: u32 = ShaderIrProgram_AppendInst(program, block, IR_OPCODE_LOGICALNOT, args, 1u32, 0u64)
+        before: usize = ctx.words.count
+        SpirvEmitInst(ctx, program, block, i0)
+        # OpLogicalNot is a 4-word unary op with the U1 result type.
+        assert ctx.words[before] == SpirvWord(SPIRV_OP_LOGICAL_NOT, 4u16)
+        assert ctx.words[before + 1usize] == ctx.u1_id
+        assert ctx.words[before + 3usize] == ctx.true_value
