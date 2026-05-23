@@ -396,6 +396,91 @@ def Linker_FallbackSlotSymbolIndexAt(index: u32) -> u32:
 def Linker_FallbackSlotRelTypeAt(index: u32) -> u32:
     return c_GuestExec_FallbackSlotRelTypeAt(index)
 
+# Diagnostic: order-dependent fingerprint of every symbol relocation's
+# resolution outcome (symbol index + relocation type + whether it fell to the
+# fallback stub), accumulated during relocation. Two runs with identical inputs
+# must produce identical fingerprints; a difference localises nondeterminism to
+# the resolution path.
+global mutable linker_resolution_fp: u64 = 0
+global mutable linker_resolution_relocs: u64 = 0
+global mutable linker_seq_fp: u64 = 0
+global mutable linker_name_fp: u64 = 0
+global mutable linker_dbg_first_name: static u8&? = null
+global mutable linker_dbg_first_index: u32 = 0
+global mutable linker_name_setfp: u64 = 0
+global mutable linker_name_count: u64 = 0
+
+def Linker_DbgFirstName() -> static u8&:
+    if linker_dbg_first_name == null:
+        return ""
+    return linker_dbg_first_name
+def Linker_DbgFirstIndex() -> u32:
+    return linker_dbg_first_index
+def Linker_NameSetFingerprint() -> u64:
+    return linker_name_setfp
+def Linker_NameCount() -> u64:
+    return linker_name_count
+
+def Linker_ResetResolutionFingerprint() -> void:
+    linker_resolution_fp <- 0xcbf29ce484222325u64
+    linker_seq_fp <- 0xcbf29ce484222325u64
+    linker_name_fp <- 0xcbf29ce484222325u64
+    linker_resolution_relocs <- 0
+    linker_dbg_first_name <- null
+    linker_dbg_first_index <- 0
+    linker_name_setfp <- 0
+    linker_name_count <- 0
+
+def Linker_ResolutionFingerprintValue() -> u64:
+    return linker_resolution_fp
+
+def Linker_SeqFingerprintValue() -> u64:
+    return linker_seq_fp
+
+def Linker_NameFingerprintValue() -> u64:
+    return linker_name_fp
+
+def Linker_ResolutionRelocCount() -> u64:
+    return linker_resolution_relocs
+
+def Linker_MixResolution(symbol_index: u32, is_stub: bool, rel_type: u32, name: static u8&) -> void:
+    stub_bit: u64 = 1u64 if is_stub else 0u64
+    # Sequence fingerprint: relocation identity only (must be stable).
+    seq: u64 = symbol_index.u64() ^ (rel_type.u64() << 24u64)
+    linker_seq_fp <- (linker_seq_fp ^ seq) * 0x100000001b3u64
+    # Name fingerprint: the resolved symbol name bytes (must be stable if the
+    # symbol/string tables are read deterministically).
+    n: mutable usize = 0
+    nl: usize = static_strlen(name)
+    per_name: mutable u64 = 0xcbf29ce484222325u64
+    while n < nl:
+        linker_name_fp <- (linker_name_fp ^ name[n].u64()) * 0x100000001b3u64
+        per_name <- (per_name ^ name[n].u64()) * 0x100000001b3u64
+        n <- n + 1
+    linker_name_fp <- linker_name_fp ^ 0xffu64
+    if nl > 0:
+        # Order-independent: combine (symbol_index, content-hash) so a stable set
+        # of (index -> name) yields a stable value regardless of visit order.
+        linker_name_setfp <- linker_name_setfp + (per_name ^ (symbol_index.u64() * 0x9e3779b97f4a7c15u64))
+        linker_name_count <- linker_name_count + 1
+    if nl > 0 and linker_dbg_first_name == null:
+        linker_dbg_first_name <- name
+        linker_dbg_first_index <- symbol_index
+    # Resolution fingerprint: includes the stub/resolved outcome.
+    linker_resolution_fp <- (linker_resolution_fp ^ (seq ^ (stub_bit << 40u64))) * 0x100000001b3u64
+    linker_resolution_relocs <- linker_resolution_relocs + 1
+
+# Count of registered HLE symbols whose callable_address is zero. A nonzero,
+# run-to-run-varying count would reveal an uninitialized-scalar (address) read.
+def Linker_HleZeroAddrCount(self: Linker&) -> u64:
+    count: mutable u64 = 0
+    i: mutable usize = 0
+    while i < self.hle_symbols.symbols.count:
+        if self.hle_symbols.symbols[i].callable_address == 0:
+            count <- count + 1
+        i <- i + 1
+    return count
+
 def Linker_FallbackTableFingerprint() -> u64:
     # Order-independent fingerprint of the fallback slot table: sum of a per-slot
     # FNV-style mix of (slot_va, symbol_index). Used to compare the unresolved
@@ -560,6 +645,7 @@ def Linker_ApplyRelocationEntry(self: mutable Linker&, module: mutable Module&, 
             # to a specific unimplemented import.
             resolved_addr <- GuestExec_AeroLibFallbackStubAddress().u64()
             resolved <- true
+        Linker_MixResolution(symbol_index, resolved_addr == GuestExec_AeroLibFallbackStubAddress().u64(), rel_type, symbol_name)
         if resolved:
             value: u64 = resolved_addr + addend.u64()
             # Record every slot that ends up holding the fallback stub, no matter
@@ -607,6 +693,7 @@ def Linker_RelocateAllImports(self: mutable Linker&) -> void:
     self.last_malformed_import_count <- 0
     self.last_failed_relocation_count <- 0
     Linker_ResetFallbackSlots()
+    Linker_ResetResolutionFingerprint()
     for i in 0..<self.modules.count:
         Linker_RelocateAnyImports(self.ref[mutable Linker&], self.modules[i].ref[mutable Module&])
     self.relocated_all_imports <- true

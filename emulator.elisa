@@ -7,6 +7,14 @@ include "./core/hle_libs.elisa"
 include "./core/linker.elisa"
 include "./core/guest_exec.elisa"
 
+# Persistent arena owning emulator-session buffers (built strings returned to
+# callers, the play-time update list, restart-arg lists) that outlive the call
+# producing them. Growing them from a transient local arena is a use-after-free.
+global mutable emulator_arena: Arena = zeroed
+
+def Emulator_ResetArena() -> void:
+    emulator_arena <- zeroed
+
 struct SysModuleEntry:
     module_name: mutable static u8&
     callback_ptr: mutable uintptr
@@ -98,9 +106,9 @@ def Emulator_Reset() -> void:
     emulator_singleton <- Emulator_New()
 
 def Emulator_Substr(input: static u8&, start: usize, len: usize) -> static u8&:
-    arena: Arena = zeroed
     out: mutable darray[u8] = []
-    in arena:
+    owner: mutable Arena& = emulator_arena.ref[mutable Arena&]
+    in owner:
         for i in 0..<len:
             out.push(input[start + i])
         out.push(0)
@@ -109,9 +117,9 @@ def Emulator_Substr(input: static u8&, start: usize, len: usize) -> static u8&:
 def Emulator_Concat2(lhs: static u8&, rhs: static u8&) -> static u8&:
     lhs_len: usize = static_strlen(lhs)
     rhs_len: usize = static_strlen(rhs)
-    arena: Arena = zeroed
     out: mutable darray[u8] = []
-    in arena:
+    owner: mutable Arena& = emulator_arena.ref[mutable Arena&]
+    in owner:
         for i in 0..<lhs_len:
             out.push(lhs[i])
         for j in 0..<rhs_len:
@@ -243,8 +251,8 @@ def Emulator_Run(self: mutable Emulator&, file: static u8&, args: darray[static 
 def Emulator_UpdatePlayTime(self: mutable Emulator&, serial: static u8&) -> void:
     if static_strlen(serial) == 0:
         return
-    arena: Arena = zeroed
-    in arena:
+    playtime_owner: mutable Arena& = emulator_arena.ref[mutable Arena&]
+    in playtime_owner:
         self.play_time_updates.push(serial)
 
 def Emulator_Restart(self: mutable Emulator&, eboot_path: static u8&, guest_args: darray[static u8&]) -> void:
@@ -255,9 +263,9 @@ def Emulator_Restart(self: mutable Emulator&, eboot_path: static u8&, guest_args
 def Emulator_TakePendingRestartArgs(self: mutable Emulator&) -> darray[static u8&]:
     if not self.pending_restart:
         return []
-    arena: Arena = zeroed
     out: mutable darray[static u8&] = []
-    in arena:
+    restart_owner: mutable Arena& = emulator_arena.ref[mutable Arena&]
+    in restart_owner:
         if self.pending_restart_path != null:
             out.push(self.pending_restart_path)
         for i in 0..<self.pending_restart_args.count:
