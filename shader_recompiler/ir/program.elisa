@@ -28,16 +28,27 @@ struct ShaderIrProgram:
     info: mutable ShaderIrProgramInfo
 
 
-def ShaderIrProgram_New(info: ShaderIrProgramInfo) -> ShaderIrProgram:
-    out: mutable ShaderIrProgram = zeroed
-    out.info <- info
-    return out
+# ShaderIrProgram is a very large aggregate (its fixed-capacity block/inst
+# arrays make it multi-gigabyte). Constructing it as a by-value stack local
+# would overflow the stack, so it is allocated and zero-initialized directly on
+# the scratch arena and handed back as a heap reference. Every accessor already
+# takes `ShaderIrProgram&`, so callers are unaffected aside from the binding
+# type (`mutable heap ShaderIrProgram&`).
+def ShaderIrProgram_New(info: ShaderIrProgramInfo) -> mutable heap ShaderIrProgram&:
+    can Memory.Allocate, Abort.Panic:
+        out: mutable heap ShaderIrProgram& = arena_box_zeroed[ShaderIrProgram](scratch_arena.ref[mutable Arena&])
+        out.info <- info
+        return out
 
 
 def ShaderIrProgram_AddBlock(program: mutable ShaderIrProgram&) -> u32:
     assert program.block_count < IR_PROGRAM_MAX_BLOCKS
     idx: u32 = program.block_count
-    program.blocks[idx.usize()] <- ShaderIrBlock_New()
+    # The program is heap-allocated zero-initialized and block_count only grows,
+    # so blocks[idx] is already a fresh zeroed ShaderIrBlock. Initializing in
+    # place avoids materializing an 8MB ShaderIrBlock_New() return value on the
+    # stack (which would overflow it). cfg_block_id mirrors ShaderIrBlock_New's
+    # sentinel-then-assign, collapsed to the final value.
     program.blocks[idx.usize()].cfg_block_id <- idx
     program.block_count <- program.block_count + 1u32
     return idx
@@ -90,17 +101,17 @@ def ShaderIrProgram_AddSyntaxNode(program: mutable ShaderIrProgram&, node: Shade
     program.syntax_count <- program.syntax_count + 1u32
 
 
-def ShaderIrProgram_Dump(program: ShaderIrProgram) -> static u8&:
+def ShaderIrProgram_Dump(program: ShaderIrProgram&) -> static u8&:
     _ = program
     return "ShaderIrProgram"
 
 
-def ShaderIrProgram_DumpWithType(program: ShaderIrProgram, dump_type: static u8&) -> static u8&:
+def ShaderIrProgram_DumpWithType(program: ShaderIrProgram&, dump_type: static u8&) -> static u8&:
     _ = program
     _ = dump_type
     return "ShaderIrProgram"
 
 
-def ShaderIrProgram_DumpProgram(program: ShaderIrProgram, info: ShaderIrProgramInfo, dump_type: static u8&) -> static u8&:
+def ShaderIrProgram_DumpProgram(program: ShaderIrProgram&, info: ShaderIrProgramInfo, dump_type: static u8&) -> static u8&:
     _ = info
     return ShaderIrProgram_DumpWithType(program, dump_type)
