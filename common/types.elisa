@@ -24,10 +24,14 @@ def GB(x: u64) -> u64:
 def static_strlen(value: u8&?) -> usize:
     if value == null:
         return 0
-    i: mutable usize = 0
-    while value[i] != 0.u8():
-        i <- i + 1
-    return i
+    # The cstr->length boundary: scanning an unbounded C string to its NUL
+    # terminator is inherently unprovable in the type (there is no length yet);
+    # this is the one vetted place that measures it.
+    trusted Unsafe.UncheckedIndex:
+        i: mutable usize = 0
+        while value[i] != 0.u8():
+            i <- i + 1
+        return i
 
 def streq(lhs: u8&?, rhs: u8&?) -> int:
     left: u8& = lhs if lhs != null else ""
@@ -36,9 +40,26 @@ def streq(lhs: u8&?, rhs: u8&?) -> int:
     right_len: usize = static_strlen(right)
     if left_len != right_len:
         return 0
-    i: mutable usize = 0
-    while i < left_len:
-        if left[i] != right[i]:
-            return 0
-        i <- i + 1
+    # Bytes compared up to the shared length; raw C strings carry no length in
+    # their type so the indexing is vouched against the measured lengths.
+    trusted Unsafe.UncheckedIndex:
+        i: mutable usize = 0
+        while i < left_len:
+            if left[i] != right[i]:
+                return 0
+            i <- i + 1
     return 1
+
+# Bounds-safe equality of two string views. a[i] is proven in range by i < a.len;
+# b[i] is in range because the lengths are equal (vouched in this one place), so
+# every caller compares views with no Unsafe of its own.
+def sview_eq(a: sview, b: sview) -> bool:
+    if a.len != b.len:
+        return false
+    trusted Unsafe.UncheckedIndex:
+        i: mutable usize = 0
+        while i < a.len.usize():
+            if a[i] != b[i]:
+                return false
+            i <- i + 1
+    return true
