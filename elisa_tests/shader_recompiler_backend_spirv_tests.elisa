@@ -234,6 +234,53 @@ def spirv_backend_emit_integer_matches_cpp() -> void:
         _ = iabs
 
 @test
+def spirv_backend_emit_integer_completion_matches_cpp() -> void:
+    can Abort.Panic, Memory.Allocate:
+        ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
+        SpirvEmitContext_DefineArithmeticTypes(ctx)
+        SpirvEmitContext_DefineExtInst(ctx)
+        # --- 64-bit arithmetic uses the u64 result type. ---
+        b0: usize = ctx.words.count
+        add64: u32 = SpirvEmitIAdd64(ctx, 100u32, 101u32)
+        assert ctx.words[b0] == SpirvWord(SPIRV_OP_I_ADD, 5u16)
+        assert ctx.words[b0 + 1usize] == ctx.u64_id
+        assert ctx.words[b0 + 2usize] == add64
+        # --- UMulHi: OpUMulExtended (full_result_u32x2) then extract hi word. ---
+        b1: usize = ctx.words.count
+        umulhi: u32 = SpirvEmitUMulHi(ctx, 5u32, 6u32)
+        assert ctx.words[b1] == SpirvWord(SPIRV_OP_U_MUL_EXTENDED, 5u16)
+        assert ctx.words[b1 + 1usize] == ctx.full_result_u32x2
+        # extract: result_type u32, composite = mul_ext id (b1+2), index 1.
+        assert ctx.words[b1 + 5usize] == SpirvWord(SPIRV_OP_COMPOSITE_EXTRACT, 5u16)
+        assert ctx.words[b1 + 6usize] == ctx.u32_id
+        assert ctx.words[b1 + 7usize] == umulhi
+        assert ctx.words[b1 + 8usize] == ctx.words[b1 + 2usize]
+        assert ctx.words[b1 + 9usize] == 1u32
+        # --- SMulHi: two bitcasts to S32, SMulExtended (i32x2), extract, bitcast. ---
+        b2: usize = ctx.words.count
+        smulhi: u32 = SpirvEmitSMulHi(ctx, 7u32, 8u32)
+        assert ctx.words[b2] == SpirvWord(SPIRV_OP_BITCAST, 4u16)
+        assert ctx.words[b2 + 1usize] == ctx.s32_id
+        assert ctx.words[b2 + 8usize] == SpirvWord(SPIRV_OP_S_MUL_EXTENDED, 5u16)
+        assert ctx.words[b2 + 9usize] == ctx.full_result_i32x2
+        _ = smulhi
+        # --- BitCount64: bitcast u32x2, extract lo/hi, two BitCount32, IAdd32. ---
+        b3: usize = ctx.words.count
+        bc64: u32 = SpirvEmitBitCount64(ctx, 9u32)
+        assert ctx.words[b3] == SpirvWord(SPIRV_OP_BITCAST, 4u16)
+        assert ctx.words[b3 + 1usize] == ctx.u32x2_id
+        # last instruction is the IAdd32 of the two popcounts.
+        assert ctx.words[ctx.words.count - 5usize] == SpirvWord(SPIRV_OP_I_ADD, 5u16)
+        assert bc64 == ctx.words[ctx.words.count - 3usize]
+        # --- FindUMsb64 ends in an OpSelect choosing shifted-hi vs lo msb. ---
+        b4: usize = ctx.words.count
+        fmsb: u32 = SpirvEmitFindUMsb64(ctx, 10u32)
+        assert ctx.words[ctx.words.count - 6usize] == SpirvWord(SPIRV_OP_SELECT, 6u16)
+        assert ctx.words[ctx.words.count - 5usize] == ctx.u32_id
+        assert fmsb == ctx.words[ctx.words.count - 4usize]
+        _ = b4
+
+@test
 def spirv_backend_emit_floating_point_matches_cpp() -> void:
     can Abort.Panic, Memory.Allocate:
         ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()

@@ -149,6 +149,9 @@ const GLSL_STD_450_FIND_ILSB: u32 = 73u32
 
 # emit_spirv_integer.cpp: core integer arithmetic / bitwise / shift opcodes.
 const SPIRV_OP_S_NEGATE: u16 = 126u16
+const SPIRV_OP_I_ADD_CARRY: u16 = 149u16
+const SPIRV_OP_U_MUL_EXTENDED: u16 = 151u16
+const SPIRV_OP_S_MUL_EXTENDED: u16 = 152u16
 const SPIRV_OP_I_ADD: u16 = 128u16
 const SPIRV_OP_I_SUB: u16 = 130u16
 const SPIRV_OP_I_MUL: u16 = 132u16
@@ -1137,6 +1140,90 @@ def SpirvEmitCompositeInsertF32x4(ctx: mutable SpirvEmitContext&, composite: u32
 
 def SpirvEmitCompositeShuffleF32x4(ctx: mutable SpirvEmitContext&, c1: u32, c2: u32, comp0: u32, comp1: u32, comp2: u32, comp3: u32) -> u32:
     return SpirvEmitVectorShuffle4(ctx, ctx.f32x4_id, c1, c2, comp0, comp1, comp2, comp3)
+
+# ------------------------------------------------------------
+# emit_spirv_integer.cpp completions: 64-bit ops + extended multiply / 64-bit
+# bit-scan decompositions (now that u64 and the result struct types exist).
+# ------------------------------------------------------------
+
+def SpirvEmitIAdd64(ctx: mutable SpirvEmitContext&, a: u32, b: u32) -> u32:
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_I_ADD, ctx.u64_id, a, b)
+
+def SpirvEmitISub64(ctx: mutable SpirvEmitContext&, a: u32, b: u32) -> u32:
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_I_SUB, ctx.u64_id, a, b)
+
+def SpirvEmitIMul64(ctx: mutable SpirvEmitContext&, a: u32, b: u32) -> u32:
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_I_MUL, ctx.u64_id, a, b)
+
+def SpirvEmitINeg64(ctx: mutable SpirvEmitContext&, value: u32) -> u32:
+    return SpirvEmitUnaryOp(ctx, SPIRV_OP_S_NEGATE, ctx.u64_id, value)
+
+def SpirvEmitShiftLeftLogical64(ctx: mutable SpirvEmitContext&, base: u32, shift: u32) -> u32:
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_SHIFT_LEFT_LOGICAL, ctx.u64_id, base, shift)
+
+def SpirvEmitShiftRightLogical64(ctx: mutable SpirvEmitContext&, base: u32, shift: u32) -> u32:
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_SHIFT_RIGHT_LOGICAL, ctx.u64_id, base, shift)
+
+def SpirvEmitShiftRightArithmetic64(ctx: mutable SpirvEmitContext&, base: u32, shift: u32) -> u32:
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_SHIFT_RIGHT_ARITHMETIC, ctx.u64_id, base, shift)
+
+def SpirvEmitBitwiseAnd64(ctx: mutable SpirvEmitContext&, a: u32, b: u32) -> u32:
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_BITWISE_AND, ctx.u64_id, a, b)
+
+def SpirvEmitBitwiseOr64(ctx: mutable SpirvEmitContext&, a: u32, b: u32) -> u32:
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_BITWISE_OR, ctx.u64_id, a, b)
+
+# EmitSMulHi: signed multiply-extended, take the high word and reinterpret U32.
+def SpirvEmitSMulHi(ctx: mutable SpirvEmitContext&, a: u32, b: u32) -> u32:
+    signed_a: u32 = SpirvEmitBitcast(ctx, ctx.s32_id, a)
+    signed_b: u32 = SpirvEmitBitcast(ctx, ctx.s32_id, b)
+    mul_ext: u32 = SpirvEmitBinaryOp(ctx, SPIRV_OP_S_MUL_EXTENDED, ctx.full_result_i32x2, signed_a, signed_b)
+    signed_hi: u32 = SpirvEmitCompositeExtract(ctx, ctx.s32_id, mul_ext, 1u32)
+    return SpirvEmitBitcast(ctx, ctx.u32_id, signed_hi)
+
+# EmitUMulHi: unsigned multiply-extended, take the high word.
+def SpirvEmitUMulHi(ctx: mutable SpirvEmitContext&, a: u32, b: u32) -> u32:
+    mul_ext: u32 = SpirvEmitBinaryOp(ctx, SPIRV_OP_U_MUL_EXTENDED, ctx.full_result_u32x2, a, b)
+    return SpirvEmitCompositeExtract(ctx, ctx.u32_id, mul_ext, 1u32)
+
+# EmitIAddCarry32: add-with-carry, producing the {result, carry} struct.
+def SpirvEmitIAddCarry32(ctx: mutable SpirvEmitContext&, a: u32, b: u32) -> u32:
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_I_ADD_CARRY, ctx.full_result_u32x2, a, b)
+
+# EmitBitCount64: Vulkan restricts bit ops to 32-bit; decompose into lo/hi and
+# add the two 32-bit popcounts.
+def SpirvEmitBitCount64(ctx: mutable SpirvEmitContext&, value: u32) -> u32:
+    unpacked: u32 = SpirvEmitBitcast(ctx, ctx.u32x2_id, value)
+    lo: u32 = SpirvEmitCompositeExtract(ctx, ctx.u32_id, unpacked, 0u32)
+    hi: u32 = SpirvEmitCompositeExtract(ctx, ctx.u32_id, unpacked, 1u32)
+    lo_count: u32 = SpirvEmitBitCount32(ctx, lo)
+    hi_count: u32 = SpirvEmitBitCount32(ctx, hi)
+    return SpirvEmitIAdd32(ctx, lo_count, hi_count)
+
+# EmitFindUMsb64: decompose, find the MSB of the high word and shift, else the
+# low word's MSB. (value == 0 is handled by the IR emitter.)
+def SpirvEmitFindUMsb64(ctx: mutable SpirvEmitContext&, value: u32) -> u32:
+    unpacked: u32 = SpirvEmitBitcast(ctx, ctx.u32x2_id, value)
+    hi: u32 = SpirvEmitCompositeExtract(ctx, ctx.u32_id, unpacked, 1u32)
+    lo: u32 = SpirvEmitCompositeExtract(ctx, ctx.u32_id, unpacked, 0u32)
+    hi_msb: u32 = SpirvEmitFindUMsb32(ctx, hi)
+    lo_msb: u32 = SpirvEmitFindUMsb32(ctx, lo)
+    neg_one: u32 = SpirvEmitConstU32(ctx, 0xFFFFFFFFu32)
+    found_hi: u32 = SpirvEmitINotEqual32(ctx, hi_msb, neg_one)
+    thirty_two: u32 = SpirvEmitConstU32(ctx, 32u32)
+    shifted_hi: u32 = SpirvEmitIAdd32(ctx, hi_msb, thirty_two)
+    return SpirvEmitOpSelect(ctx, ctx.u32_id, found_hi, shifted_hi, lo_msb)
+
+# EmitFindILsb64: decompose, prefer the low word's LSB, else the high word's.
+def SpirvEmitFindILsb64(ctx: mutable SpirvEmitContext&, value: u32) -> u32:
+    unpacked: u32 = SpirvEmitBitcast(ctx, ctx.u32x2_id, value)
+    lo: u32 = SpirvEmitCompositeExtract(ctx, ctx.u32_id, unpacked, 0u32)
+    hi: u32 = SpirvEmitCompositeExtract(ctx, ctx.u32_id, unpacked, 1u32)
+    lo_lsb: u32 = SpirvEmitFindILsb32(ctx, lo)
+    hi_lsb: u32 = SpirvEmitFindILsb32(ctx, hi)
+    neg_one: u32 = SpirvEmitConstU32(ctx, 0xFFFFFFFFu32)
+    found_lo: u32 = SpirvEmitINotEqual32(ctx, lo_lsb, neg_one)
+    return SpirvEmitOpSelect(ctx, ctx.u32_id, found_lo, lo_lsb, hi_lsb)
 
 # emit_spirv_special.cpp: zero-operand void instructions (1 word).
 def SpirvEmitVoidOp(ctx: mutable SpirvEmitContext&, opcode: u16) -> void:
