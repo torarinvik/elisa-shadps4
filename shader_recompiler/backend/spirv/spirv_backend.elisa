@@ -100,6 +100,21 @@ const SPIRV_OP_F_ADD: u16 = 129u16
 const SPIRV_OP_F_SUB: u16 = 131u16
 const SPIRV_OP_F_MUL: u16 = 133u16
 const SPIRV_OP_F_DIV: u16 = 136u16
+const SPIRV_OP_BITCAST: u16 = 124u16
+const SPIRV_OP_IS_NAN: u16 = 156u16
+const SPIRV_OP_IS_INF: u16 = 157u16
+const SPIRV_OP_F_ORD_EQUAL: u16 = 180u16
+const SPIRV_OP_F_UNORD_EQUAL: u16 = 181u16
+const SPIRV_OP_F_ORD_NOT_EQUAL: u16 = 182u16
+const SPIRV_OP_F_UNORD_NOT_EQUAL: u16 = 183u16
+const SPIRV_OP_F_ORD_LESS_THAN: u16 = 184u16
+const SPIRV_OP_F_UNORD_LESS_THAN: u16 = 185u16
+const SPIRV_OP_F_ORD_GREATER_THAN: u16 = 186u16
+const SPIRV_OP_F_UNORD_GREATER_THAN: u16 = 187u16
+const SPIRV_OP_F_ORD_LESS_THAN_EQUAL: u16 = 188u16
+const SPIRV_OP_F_UNORD_LESS_THAN_EQUAL: u16 = 189u16
+const SPIRV_OP_F_ORD_GREATER_THAN_EQUAL: u16 = 190u16
+const SPIRV_OP_F_UNORD_GREATER_THAN_EQUAL: u16 = 191u16
 
 # GLSL.std.450 extended-instruction numbers.
 const GLSL_STD_450_FABS: u32 = 4u32
@@ -115,6 +130,12 @@ const GLSL_STD_450_INVERSE_SQRT: u32 = 32u32
 const GLSL_STD_450_FMIN: u32 = 37u32
 const GLSL_STD_450_FMAX: u32 = 40u32
 const GLSL_STD_450_FMA: u32 = 50u32
+const GLSL_STD_450_ROUND_EVEN: u32 = 2u32
+const GLSL_STD_450_TRUNC: u32 = 3u32
+const GLSL_STD_450_CEIL: u32 = 9u32
+const GLSL_STD_450_FCLAMP: u32 = 43u32
+const GLSL_STD_450_FREXP_STRUCT: u32 = 52u32
+const GLSL_STD_450_LDEXP: u32 = 53u32
 const GLSL_STD_450_SABS: u32 = 5u32
 const GLSL_STD_450_UMIN: u32 = 38u32
 const GLSL_STD_450_SMIN: u32 = 39u32
@@ -690,6 +711,149 @@ def SpirvEmitFPMinTri32(ctx: mutable SpirvEmitContext&, a: u32, b: u32, c: u32) 
 def SpirvEmitFPMaxTri32(ctx: mutable SpirvEmitContext&, a: u32, b: u32, c: u32) -> u32:
     inner: u32 = SpirvEmitFPMax32(ctx, b, c)
     return SpirvEmitFPMax32(ctx, a, inner)
+
+# OpConstant of an f32 (value passed as its 32-bit bit pattern). The C++
+# ConstF32 dedups into the constants section; this models the value word.
+def SpirvEmitConstF32(ctx: mutable SpirvEmitContext&, bits: u32) -> u32:
+    result_id: u32 = SpirvEmitContext_AllocateId(ctx)
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(SPIRV_OP_CONSTANT, 4u16))
+    SpirvEmitContext_AppendWord(ctx, ctx.f32_id)
+    SpirvEmitContext_AppendWord(ctx, result_id)
+    SpirvEmitContext_AppendWord(ctx, bits)
+    return result_id
+
+# OpBitcast: <ResultType> <ResultId> <Operand> (4 words).
+def SpirvEmitBitcast(ctx: mutable SpirvEmitContext&, result_type: u32, value: u32) -> u32:
+    return SpirvEmitUnaryOp(ctx, SPIRV_OP_BITCAST, result_type, value)
+
+# --- 64-bit float arithmetic (require uses_fp64 so f64_id is defined). ---
+def SpirvEmitFPAbs64(ctx: mutable SpirvEmitContext&, value: u32) -> u32:
+    return SpirvEmitExtInstUnary(ctx, ctx.f64_id, GLSL_STD_450_FABS, value)
+
+def SpirvEmitFPNeg64(ctx: mutable SpirvEmitContext&, value: u32) -> u32:
+    return SpirvEmitUnaryOp(ctx, SPIRV_OP_F_NEGATE, ctx.f64_id, value)
+
+def SpirvEmitFPAdd64(ctx: mutable SpirvEmitContext&, a: u32, b: u32) -> u32:
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_F_ADD, ctx.f64_id, a, b)
+
+def SpirvEmitFPMul64(ctx: mutable SpirvEmitContext&, a: u32, b: u32) -> u32:
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_F_MUL, ctx.f64_id, a, b)
+
+def SpirvEmitFPDiv64(ctx: mutable SpirvEmitContext&, a: u32, b: u32) -> u32:
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_F_DIV, ctx.f64_id, a, b)
+
+def SpirvEmitFPMax64(ctx: mutable SpirvEmitContext&, a: u32, b: u32) -> u32:
+    return SpirvEmitExtInstBinary(ctx, ctx.f64_id, GLSL_STD_450_FMAX, a, b)
+
+def SpirvEmitFPMin64(ctx: mutable SpirvEmitContext&, a: u32, b: u32) -> u32:
+    return SpirvEmitExtInstBinary(ctx, ctx.f64_id, GLSL_STD_450_FMIN, a, b)
+
+def SpirvEmitFPFma64(ctx: mutable SpirvEmitContext&, a: u32, b: u32, c: u32) -> u32:
+    return SpirvEmitExtInstTernary(ctx, ctx.f64_id, GLSL_STD_450_FMA, a, b, c)
+
+# --- Sin/Cos: GLSL Sin/Cos of (pi_x2 * value). ---
+def SpirvEmitFPSin(ctx: mutable SpirvEmitContext&, value: u32) -> u32:
+    scaled: u32 = SpirvEmitFPMul32(ctx, ctx.pi_x2, value)
+    return SpirvEmitExtInstUnary(ctx, ctx.f32_id, GLSL_STD_450_SIN, scaled)
+
+def SpirvEmitFPCos(ctx: mutable SpirvEmitContext&, value: u32) -> u32:
+    scaled: u32 = SpirvEmitFPMul32(ctx, ctx.pi_x2, value)
+    return SpirvEmitExtInstUnary(ctx, ctx.f32_id, GLSL_STD_450_COS, scaled)
+
+# --- Misc GLSL transcendental / rounding ops. ---
+def SpirvEmitFPLdexp(ctx: mutable SpirvEmitContext&, value: u32, exp: u32) -> u32:
+    return SpirvEmitExtInstBinary(ctx, ctx.f32_id, GLSL_STD_450_LDEXP, value, exp)
+
+def SpirvEmitFPRecipSqrt32(ctx: mutable SpirvEmitContext&, value: u32) -> u32:
+    return SpirvEmitExtInstUnary(ctx, ctx.f32_id, GLSL_STD_450_INVERSE_SQRT, value)
+
+def SpirvEmitFPRecipSqrt64(ctx: mutable SpirvEmitContext&, value: u32) -> u32:
+    return SpirvEmitExtInstUnary(ctx, ctx.f64_id, GLSL_STD_450_INVERSE_SQRT, value)
+
+def SpirvEmitFPRoundEven32(ctx: mutable SpirvEmitContext&, value: u32) -> u32:
+    return SpirvEmitExtInstUnary(ctx, ctx.f32_id, GLSL_STD_450_ROUND_EVEN, value)
+
+def SpirvEmitFPRoundEven64(ctx: mutable SpirvEmitContext&, value: u32) -> u32:
+    return SpirvEmitExtInstUnary(ctx, ctx.f64_id, GLSL_STD_450_ROUND_EVEN, value)
+
+def SpirvEmitFPCeil32(ctx: mutable SpirvEmitContext&, value: u32) -> u32:
+    return SpirvEmitExtInstUnary(ctx, ctx.f32_id, GLSL_STD_450_CEIL, value)
+
+def SpirvEmitFPCeil64(ctx: mutable SpirvEmitContext&, value: u32) -> u32:
+    return SpirvEmitExtInstUnary(ctx, ctx.f64_id, GLSL_STD_450_CEIL, value)
+
+def SpirvEmitFPTrunc32(ctx: mutable SpirvEmitContext&, value: u32) -> u32:
+    return SpirvEmitExtInstUnary(ctx, ctx.f32_id, GLSL_STD_450_TRUNC, value)
+
+def SpirvEmitFPTrunc64(ctx: mutable SpirvEmitContext&, value: u32) -> u32:
+    return SpirvEmitExtInstUnary(ctx, ctx.f64_id, GLSL_STD_450_TRUNC, value)
+
+def SpirvEmitFPFloor64(ctx: mutable SpirvEmitContext&, value: u32) -> u32:
+    return SpirvEmitExtInstUnary(ctx, ctx.f64_id, GLSL_STD_450_FLOOR, value)
+
+def SpirvEmitFPFract64(ctx: mutable SpirvEmitContext&, value: u32) -> u32:
+    return SpirvEmitExtInstUnary(ctx, ctx.f64_id, GLSL_STD_450_FRACT, value)
+
+def SpirvEmitFPClamp32(ctx: mutable SpirvEmitContext&, value: u32, min_v: u32, max_v: u32) -> u32:
+    return SpirvEmitExtInstTernary(ctx, ctx.f32_id, GLSL_STD_450_FCLAMP, value, min_v, max_v)
+
+def SpirvEmitFPClamp64(ctx: mutable SpirvEmitContext&, value: u32, min_v: u32, max_v: u32) -> u32:
+    return SpirvEmitExtInstTernary(ctx, ctx.f64_id, GLSL_STD_450_FCLAMP, value, min_v, max_v)
+
+# Frexp: GLSL FrexpStruct returns {significand, exponent}; extract component 0
+# for the significand, component 1 (S32) bitcast to U32 for the exponent.
+def SpirvEmitFPFrexpSig32(ctx: mutable SpirvEmitContext&, value: u32) -> u32:
+    frexp: u32 = SpirvEmitExtInstUnary(ctx, ctx.frexp_result_f32, GLSL_STD_450_FREXP_STRUCT, value)
+    return SpirvEmitCompositeExtract(ctx, ctx.f32_id, frexp, 0u32)
+
+def SpirvEmitFPFrexpExp32(ctx: mutable SpirvEmitContext&, value: u32) -> u32:
+    frexp: u32 = SpirvEmitExtInstUnary(ctx, ctx.frexp_result_f32, GLSL_STD_450_FREXP_STRUCT, value)
+    exp_s32: u32 = SpirvEmitCompositeExtract(ctx, ctx.s32_id, frexp, 1u32)
+    return SpirvEmitBitcast(ctx, ctx.u32_id, exp_s32)
+
+# Float comparisons (ordered / unordered). The IR 16/32/64 variants all emit
+# the same instruction (result type U1; operand width carried by the operands).
+def SpirvEmitFOrdEqual(ctx: mutable SpirvEmitContext&, lhs: u32, rhs: u32) -> u32:
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_F_ORD_EQUAL, ctx.u1_id, lhs, rhs)
+
+def SpirvEmitFUnordEqual(ctx: mutable SpirvEmitContext&, lhs: u32, rhs: u32) -> u32:
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_F_UNORD_EQUAL, ctx.u1_id, lhs, rhs)
+
+def SpirvEmitFOrdNotEqual(ctx: mutable SpirvEmitContext&, lhs: u32, rhs: u32) -> u32:
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_F_ORD_NOT_EQUAL, ctx.u1_id, lhs, rhs)
+
+def SpirvEmitFUnordNotEqual(ctx: mutable SpirvEmitContext&, lhs: u32, rhs: u32) -> u32:
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_F_UNORD_NOT_EQUAL, ctx.u1_id, lhs, rhs)
+
+def SpirvEmitFOrdLessThan(ctx: mutable SpirvEmitContext&, lhs: u32, rhs: u32) -> u32:
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_F_ORD_LESS_THAN, ctx.u1_id, lhs, rhs)
+
+def SpirvEmitFUnordLessThan(ctx: mutable SpirvEmitContext&, lhs: u32, rhs: u32) -> u32:
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_F_UNORD_LESS_THAN, ctx.u1_id, lhs, rhs)
+
+def SpirvEmitFOrdGreaterThan(ctx: mutable SpirvEmitContext&, lhs: u32, rhs: u32) -> u32:
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_F_ORD_GREATER_THAN, ctx.u1_id, lhs, rhs)
+
+def SpirvEmitFUnordGreaterThan(ctx: mutable SpirvEmitContext&, lhs: u32, rhs: u32) -> u32:
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_F_UNORD_GREATER_THAN, ctx.u1_id, lhs, rhs)
+
+def SpirvEmitFOrdLessThanEqual(ctx: mutable SpirvEmitContext&, lhs: u32, rhs: u32) -> u32:
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_F_ORD_LESS_THAN_EQUAL, ctx.u1_id, lhs, rhs)
+
+def SpirvEmitFUnordLessThanEqual(ctx: mutable SpirvEmitContext&, lhs: u32, rhs: u32) -> u32:
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_F_UNORD_LESS_THAN_EQUAL, ctx.u1_id, lhs, rhs)
+
+def SpirvEmitFOrdGreaterThanEqual(ctx: mutable SpirvEmitContext&, lhs: u32, rhs: u32) -> u32:
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_F_ORD_GREATER_THAN_EQUAL, ctx.u1_id, lhs, rhs)
+
+def SpirvEmitFUnordGreaterThanEqual(ctx: mutable SpirvEmitContext&, lhs: u32, rhs: u32) -> u32:
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_F_UNORD_GREATER_THAN_EQUAL, ctx.u1_id, lhs, rhs)
+
+def SpirvEmitFPIsNan(ctx: mutable SpirvEmitContext&, value: u32) -> u32:
+    return SpirvEmitUnaryOp(ctx, SPIRV_OP_IS_NAN, ctx.u1_id, value)
+
+def SpirvEmitFPIsInf(ctx: mutable SpirvEmitContext&, value: u32) -> u32:
+    return SpirvEmitUnaryOp(ctx, SPIRV_OP_IS_INF, ctx.u1_id, value)
 
 # Generic quaternary op: <ResultType> <ResultId> <Op1>..<Op4> (7 words).
 def SpirvEmitQuaternaryOp(ctx: mutable SpirvEmitContext&, opcode: u16, result_type: u32, a: u32, b: u32, c: u32, d: u32) -> u32:

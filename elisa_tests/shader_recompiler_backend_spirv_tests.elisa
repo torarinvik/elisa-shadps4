@@ -303,6 +303,64 @@ def spirv_backend_emit_floating_point_matches_cpp() -> void:
         assert tri == ctx.words[b6 + 9usize]
 
 @test
+def spirv_backend_emit_floating_point_completion_matches_cpp() -> void:
+    can Abort.Panic, Memory.Allocate:
+        ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
+        ctx.uses_fp64 <- true
+        SpirvEmitContext_DefineArithmeticTypes(ctx)
+        SpirvEmitContext_DefineExtInst(ctx)
+        # --- F64 arithmetic uses the f64 result type. ---
+        b0: usize = ctx.words.count
+        add64: u32 = SpirvEmitFPAdd64(ctx, 100u32, 101u32)
+        assert ctx.words[b0] == SpirvWord(SPIRV_OP_F_ADD, 5u16)
+        assert ctx.words[b0 + 1usize] == ctx.f64_id
+        assert ctx.words[b0 + 2usize] == add64
+        # --- Sin: FMul(pi_x2, value) then GLSL Sin of the product. ---
+        b1: usize = ctx.words.count
+        sin: u32 = SpirvEmitFPSin(ctx, 200u32)
+        assert ctx.words.count == b1 + 11usize
+        assert ctx.words[b1] == SpirvWord(SPIRV_OP_F_MUL, 5u16)
+        assert ctx.words[b1 + 3usize] == ctx.pi_x2
+        assert ctx.words[b1 + 4usize] == 200u32
+        assert ctx.words[b1 + 5usize] == SpirvWord(SPIRV_OP_EXT_INST, 6u16)
+        assert ctx.words[b1 + 6usize] == ctx.f32_id
+        assert ctx.words[b1 + 7usize] == sin
+        assert ctx.words[b1 + 9usize] == GLSL_STD_450_SIN
+        # The Sin operand is the FMul result id (id at b1+2).
+        assert ctx.words[b1 + 10usize] == ctx.words[b1 + 2usize]
+        # --- FClamp32: 8-word GLSL ternary ext-inst. ---
+        b2: usize = ctx.words.count
+        clamp: u32 = SpirvEmitFPClamp32(ctx, 1u32, 2u32, 3u32)
+        assert ctx.words[b2] == SpirvWord(SPIRV_OP_EXT_INST, 8u16)
+        assert ctx.words[b2 + 4usize] == GLSL_STD_450_FCLAMP
+        _ = clamp
+        # --- FrexpExp32: FrexpStruct -> extract S32 component 1 -> bitcast U32. ---
+        b3: usize = ctx.words.count
+        fexp: u32 = SpirvEmitFPFrexpExp32(ctx, 7u32)
+        assert ctx.words.count == b3 + 15usize
+        assert ctx.words[b3] == SpirvWord(SPIRV_OP_EXT_INST, 6u16)
+        assert ctx.words[b3 + 1usize] == ctx.frexp_result_f32
+        assert ctx.words[b3 + 4usize] == GLSL_STD_450_FREXP_STRUCT
+        assert ctx.words[b3 + 6usize] == SpirvWord(SPIRV_OP_COMPOSITE_EXTRACT, 5u16)
+        assert ctx.words[b3 + 7usize] == ctx.s32_id
+        assert ctx.words[b3 + 10usize] == 1u32
+        assert ctx.words[b3 + 11usize] == SpirvWord(SPIRV_OP_BITCAST, 4u16)
+        assert ctx.words[b3 + 12usize] == ctx.u32_id
+        assert ctx.words[b3 + 13usize] == fexp
+        # --- Comparisons produce the U1 type; IsNan is a unary U1 op. ---
+        b4: usize = ctx.words.count
+        lt: u32 = SpirvEmitFOrdLessThan(ctx, 10u32, 11u32)
+        assert ctx.words[b4] == SpirvWord(SPIRV_OP_F_ORD_LESS_THAN, 5u16)
+        assert ctx.words[b4 + 1usize] == ctx.u1_id
+        assert ctx.words[b4 + 2usize] == lt
+        b5: usize = ctx.words.count
+        nan: u32 = SpirvEmitFPIsNan(ctx, 12u32)
+        assert ctx.words.count == b5 + 4usize
+        assert ctx.words[b5] == SpirvWord(SPIRV_OP_IS_NAN, 4u16)
+        assert ctx.words[b5 + 1usize] == ctx.u1_id
+        assert ctx.words[b5 + 2usize] == nan
+
+@test
 def spirv_backend_emit_special_matches_cpp() -> void:
     can Abort.Panic, Memory.Allocate:
         ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
