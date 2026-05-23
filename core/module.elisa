@@ -563,19 +563,19 @@ def Module_SymbolNameAndNidAt(self: Module&, offset: u32, out_name: mutable stat
 def Module_CopySlice(input: static u8&, start: usize, end_exclusive: usize) -> static u8&:
     if end_exclusive <= start:
         return ""
-    len: usize = end_exclusive - start
-    raw: mutable heap void&? = null
-    can Memory.Allocate:
-        raw <- malloc(len + 1)
-    if raw == null:
-        return ""
-    out: mutable heap u8& = raw.cast[mutable heap u8&]
-    i: mutable usize = 0
-    while i < len:
-        out[i] <- input[start + i]
-        i <- i + 1
-    out[len] <- 0
-    return out.cast[static u8&]
+    # Bounded view of the requested slice deep-copied into the persistent metadata
+    # arena as an owned, NUL-terminated string (no malloc, no unchecked indexing).
+    seg: sview = input[start:end_exclusive]
+    out: mutable dstr = []
+    can Memory.Allocate, Abort.Panic:
+        trusted Unsafe.MutableGlobal:
+            owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
+            in owner:
+                out <- clone[dstr](seg)
+                out.push(0)
+    # Bytes live in the persistent metadata arena; out is non-empty here.
+    trusted Unsafe.PointerCast, Unsafe.UncheckedIndex:
+        return out[0].ref[static u8&]
 
 # Copy dynamic-data bytes [start, end_exclusive) into a fresh heap-owned,
 # NUL-terminated string. Reads are bounded by the buffer (the caller passes
@@ -621,16 +621,19 @@ def Module_ParseImportSymbol(raw_symbol: static u8&, out_nid: mutable static u8&
     total: usize = static_strlen(raw_symbol)
     if total == 0:
         return false
+    # Scan a bounds-safe view of the symbol; view[i] is proven in range by
+    # view.len, so no unchecked indexing past the string.
+    view: sview = raw_symbol[0:total]
     first_hash: mutable usize = total
     second_hash: mutable usize = total
     i: mutable usize = 0
-    while i < total:
-        if raw_symbol[i] == 35u8:
+    while i < view.len.usize():
+        if view[i] == 35u8:
             if first_hash == total:
                 first_hash <- i
             elif second_hash == total:
                 second_hash <- i
-                i <- total
+                i <- view.len.usize()
         i <- i + 1
     if first_hash == 0:
         return false
