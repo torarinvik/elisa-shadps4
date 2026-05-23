@@ -560,22 +560,22 @@ def Module_SymbolNameAndNidAt(self: Module&, offset: u32, out_name: mutable stat
     out_nid <- Module_CopyDynDataSlice(self.ref[Module&], base, base + hash_index)
     return static_strlen(out_nid) > 0
 
-def Module_CopySlice(input: static u8&, start: usize, end_exclusive: usize) -> static u8&:
+# input is taken as cstr (length-carrying, sliceable) so the slice is a
+# bounds-safe view; callers passing `static u8&` / string literals coerce freely.
+def Module_CopySlice(input: cstr, start: usize, end_exclusive: usize) -> static u8&:
     if end_exclusive <= start:
         return ""
-    len: usize = end_exclusive - start
-    raw: mutable heap void&? = null
-    can Memory.Allocate:
-        raw <- malloc(len + 1)
-    if raw == null:
-        return ""
-    out: mutable heap u8& = raw.cast[mutable heap u8&]
-    i: mutable usize = 0
-    while i < len:
-        out[i] <- input[start + i]
-        i <- i + 1
-    out[len] <- 0
-    return out.cast[static u8&]
+    seg: sview = input[start:end_exclusive]
+    out: mutable dstr = []
+    can Memory.Allocate, Abort.Panic:
+        trusted Unsafe.MutableGlobal:
+            owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
+            in owner:
+                out <- clone[dstr](seg)
+                out.push(0)
+    # Bytes live in the persistent metadata arena; out is non-empty here.
+    trusted Unsafe.PointerCast, Unsafe.UncheckedIndex:
+        return out[0].ref[static u8&]
 
 # Copy dynamic-data bytes [start, end_exclusive) into a fresh heap-owned,
 # NUL-terminated string. Reads are bounded by the buffer (the caller passes
@@ -614,28 +614,32 @@ def Module_CopyDynDataString(self: Module&, offset: usize) -> static u8&:
         end <- end + 1
     return Module_CopyDynDataSlice(self.ref[Module&], offset, end)
 
-def Module_ParseImportSymbol(raw_symbol: static u8&, out_nid: mutable static u8&, out_library: mutable static u8&, out_module: mutable static u8&) -> bool:
+# raw_symbol is taken as cstr so it can be scanned through a bounds-safe view
+# (no unchecked indexing past the string); callers passing static u8& coerce.
+def Module_ParseImportSymbol(raw_symbol: cstr, out_nid: mutable static u8&, out_library: mutable static u8&, out_module: mutable static u8&) -> bool:
     out_nid <- ""
     out_library <- ""
     out_module <- ""
     total: usize = static_strlen(raw_symbol)
     if total == 0:
         return false
+    view: sview = raw_symbol[0:total]
     first_hash: mutable usize = total
     second_hash: mutable usize = total
     i: mutable usize = 0
-    while i < total:
-        if raw_symbol[i] == 35u8:
+    while i < view.len.usize():
+        if view[i] == 35u8:
             if first_hash == total:
                 first_hash <- i
             elif second_hash == total:
                 second_hash <- i
-                i <- total
+                i <- view.len.usize()
         i <- i + 1
     if first_hash == 0:
         return false
     if first_hash == total:
-        out_nid <- raw_symbol
+        whole_nid: static u8& = raw_symbol
+        out_nid <- whole_nid
         return true
     parsed_nid: static u8& = Module_CopySlice(raw_symbol, 0, first_hash)
     out_nid <- parsed_nid
