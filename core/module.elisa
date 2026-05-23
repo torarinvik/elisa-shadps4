@@ -459,14 +459,55 @@ def Module_DynamicDataChecksum(self: Module&) -> u64:
 def Module_DynamicDataLen(self: Module&) -> u64:
     return self.dynamic_data.count.u64()
 
-def Module_DynamicAt(self: Module&, offset: usize) -> elf_dynamic&:
-    return self.dynamic_segment[offset].ref[u8&].cast[elf_dynamic&]
+# Bounded little-endian readers over a byte buffer. The length check makes the
+# compound indexing safe; vouched once here so ELF structs are read by copying
+# their bytes into typed values instead of reinterpreting a one-byte interior
+# pointer as a wider struct (the out-of-bounds over-read class).
+def buf_read_u8(buf: darray[u8], offset: usize) -> u8:
+    if offset >= buf.count:
+        return 0u8
+    trusted Unsafe.UncheckedIndex:
+        return buf[offset]
 
-def Module_SymbolAt(self: Module&, offset: usize) -> elf_symbol&:
-    return self.dynamic_data[offset].ref[u8&].cast[elf_symbol&]
+def buf_read_u16(buf: darray[u8], offset: usize) -> u16:
+    if offset + 2 > buf.count:
+        return 0u16
+    trusted Unsafe.UncheckedIndex:
+        return buf[offset].u16() | (buf[offset + 1].u16() << 8)
 
-def Module_RelocationAt(self: Module&, offset: usize) -> elf_relocation&:
-    return self.dynamic_data[offset].ref[u8&].cast[elf_relocation&]
+def buf_read_u32(buf: darray[u8], offset: usize) -> u32:
+    if offset + 4 > buf.count:
+        return 0u32
+    trusted Unsafe.UncheckedIndex:
+        return buf[offset].u32() | (buf[offset + 1].u32() << 8) | (buf[offset + 2].u32() << 16) | (buf[offset + 3].u32() << 24)
+
+def buf_read_u64(buf: darray[u8], offset: usize) -> u64:
+    if offset + 8 > buf.count:
+        return 0u64
+    value: mutable u64 = 0
+    trusted Unsafe.UncheckedIndex:
+        i: mutable usize = 0
+        while i < 8:
+            value <- value | (buf[offset + i].u64() << (i.u64() * 8))
+            i <- i + 1
+    return value
+
+# Read an ELF dynamic entry / symbol by copying its bytes into a typed value.
+def Module_ReadDynamicAt(self: Module&, offset: usize) -> elf_dynamic:
+    out: mutable elf_dynamic = zeroed
+    out.d_tag <- buf_read_u64(self.dynamic_segment, offset).i64()
+    out.d_un <- buf_read_u64(self.dynamic_segment, offset + 8)
+    return out
+
+def Module_ReadSymbolAt(self: Module&, offset: usize) -> elf_symbol:
+    out: mutable elf_symbol = zeroed
+    out.st_name <- buf_read_u32(self.dynamic_data, offset)
+    out.st_info <- buf_read_u8(self.dynamic_data, offset + 4)
+    out.st_other <- buf_read_u8(self.dynamic_data, offset + 5)
+    out.st_shndx <- buf_read_u16(self.dynamic_data, offset + 6)
+    out.st_value <- buf_read_u64(self.dynamic_data, offset + 8)
+    out.st_size <- buf_read_u64(self.dynamic_data, offset + 16)
+    return out
 
 def Module_ReadU32At(self: Module&, offset: usize) -> u32:
     if offset + 4 > self.dynamic_data.count:
@@ -711,7 +752,7 @@ def Module_LoadDynamicInfo(self: mutable Module&) -> void:
     dynamic_count: usize = self.dynamic_segment.count / size_of(elf_dynamic)
     found_null: mutable bool = false
     for dyn_index in 0..<dynamic_count:
-        dyn: elf_dynamic& = Module_DynamicAt(self, dyn_index * size_of(elf_dynamic))
+        dyn: elf_dynamic = Module_ReadDynamicAt(self, dyn_index * size_of(elf_dynamic))
         if dyn.d_tag == DT_NULL:
             found_null <- true
         if found_null:
@@ -806,7 +847,7 @@ def Module_LoadSymbols(self: mutable Module&) -> void:
     sym_end: u64 = self.dynamic_info.symbol_table_offset + self.dynamic_info.symbol_table_total_size
     sym_offset: mutable u64 = self.dynamic_info.symbol_table_offset
     while sym_offset + size_of(elf_symbol).u64() <= sym_end and sym_offset + size_of(elf_symbol).u64() <= self.dynamic_data.count.u64():
-        sym: elf_symbol& = Module_SymbolAt(self, sym_offset.usize())
+        sym: elf_symbol = Module_ReadSymbolAt(self, sym_offset.usize())
         bind: u8 = ElfSymbol_GetBind(sym)
         typ: u8 = ElfSymbol_GetType(sym)
         imported: bool = sym.st_shndx == ELF_SHN_UNDEF
@@ -859,7 +900,7 @@ def Module_FindDefinedSymbolAddress(self: mutable Module&, name: static u8&, out
     sym_end: u64 = self.dynamic_info.symbol_table_offset + self.dynamic_info.symbol_table_total_size
     sym_offset: mutable u64 = self.dynamic_info.symbol_table_offset
     while sym_offset + size_of(elf_symbol).u64() <= sym_end and sym_offset + size_of(elf_symbol).u64() <= self.dynamic_data.count.u64():
-        sym: elf_symbol& = Module_SymbolAt(self, sym_offset.usize())
+        sym: elf_symbol = Module_ReadSymbolAt(self, sym_offset.usize())
         bind: u8 = ElfSymbol_GetBind(sym)
         typ: u8 = ElfSymbol_GetType(sym)
         defined: bool = sym.st_shndx != ELF_SHN_UNDEF
