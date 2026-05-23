@@ -102,6 +102,19 @@ const SPIRV_OP_GROUP_NON_UNIFORM_QUAD_BROADCAST: u16 = 365u16
 const SPIRV_OP_STORE: u16 = 62u16
 const SPIRV_OP_ACCESS_CHAIN: u16 = 65u16
 
+# emit_spirv_atomic.cpp: atomic opcodes.
+const SPIRV_OP_ATOMIC_I_INCREMENT: u16 = 232u16
+const SPIRV_OP_ATOMIC_I_DECREMENT: u16 = 233u16
+const SPIRV_OP_ATOMIC_I_ADD: u16 = 234u16
+const SPIRV_OP_ATOMIC_I_SUB: u16 = 235u16
+const SPIRV_OP_ATOMIC_S_MIN: u16 = 236u16
+const SPIRV_OP_ATOMIC_U_MIN: u16 = 237u16
+const SPIRV_OP_ATOMIC_S_MAX: u16 = 238u16
+const SPIRV_OP_ATOMIC_U_MAX: u16 = 239u16
+const SPIRV_OP_ATOMIC_AND: u16 = 240u16
+const SPIRV_OP_ATOMIC_OR: u16 = 241u16
+const SPIRV_OP_ATOMIC_XOR: u16 = 242u16
+
 # emit_spirv_special.cpp: control-flow / geometry / discard opcodes.
 const SPIRV_OP_EMIT_VERTEX: u16 = 218u16
 const SPIRV_OP_END_PRIMITIVE: u16 = 219u16
@@ -1350,6 +1363,137 @@ def SpirvEmitWriteSharedU64(ctx: mutable SpirvEmitContext&, offset: u32, value: 
     index: u32 = SpirvEmitShiftRightLogical32(ctx, offset, shift_id)
     pointer: u32 = SpirvEmitSharedMemoryAccess(ctx, ctx.shared_u64, ctx.shared_memory_u64, index)
     SpirvEmitStore(ctx, pointer, value)
+
+# ------------------------------------------------------------
+# emit_spirv_atomic.cpp (shared-memory atomics). Buffer/image atomics need the
+# buffer/image context state and are deferred to that port.
+# ------------------------------------------------------------
+
+# Atomic binary op: <ResultType> <ResultId> <Pointer> <Scope> <Semantics>
+# <Value> (7 words).
+def SpirvEmitAtomicBinary(ctx: mutable SpirvEmitContext&, opcode: u16, result_type: u32, pointer: u32, scope: u32, semantics: u32, value: u32) -> u32:
+    result_id: u32 = SpirvEmitContext_AllocateId(ctx)
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(opcode, 7u16))
+    SpirvEmitContext_AppendWord(ctx, result_type)
+    SpirvEmitContext_AppendWord(ctx, result_id)
+    SpirvEmitContext_AppendWord(ctx, pointer)
+    SpirvEmitContext_AppendWord(ctx, scope)
+    SpirvEmitContext_AppendWord(ctx, semantics)
+    SpirvEmitContext_AppendWord(ctx, value)
+    return result_id
+
+# Atomic increment/decrement: <ResultType> <ResultId> <Pointer> <Scope>
+# <Semantics> (6 words).
+def SpirvEmitAtomicIncDec(ctx: mutable SpirvEmitContext&, opcode: u16, result_type: u32, pointer: u32, scope: u32, semantics: u32) -> u32:
+    result_id: u32 = SpirvEmitContext_AllocateId(ctx)
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(opcode, 6u16))
+    SpirvEmitContext_AppendWord(ctx, result_type)
+    SpirvEmitContext_AppendWord(ctx, result_id)
+    SpirvEmitContext_AppendWord(ctx, pointer)
+    SpirvEmitContext_AppendWord(ctx, scope)
+    SpirvEmitContext_AppendWord(ctx, semantics)
+    return result_id
+
+# AtomicArgs: device scope (a fresh ConstU32) + the u32-zero semantics mask.
+def SpirvEmitAtomicScope(ctx: mutable SpirvEmitContext&) -> u32:
+    return SpirvEmitConstU32(ctx, SPIRV_SCOPE_DEVICE)
+
+# Shared-memory atomic on a U32 element: shift offset to index, access chain,
+# then the atomic op (device scope, relaxed semantics).
+def SpirvEmitSharedAtomicU32(ctx: mutable SpirvEmitContext&, opcode: u16, offset: u32, value: u32) -> u32:
+    shift_id: u32 = SpirvEmitConstU32(ctx, 2u32)
+    index: u32 = SpirvEmitShiftRightLogical32(ctx, offset, shift_id)
+    pointer: u32 = SpirvEmitSharedMemoryAccess(ctx, ctx.shared_u32, ctx.shared_memory_u32, index)
+    atomic_scope: u32 = SpirvEmitAtomicScope(ctx)
+    return SpirvEmitAtomicBinary(ctx, opcode, ctx.u32_id, pointer, atomic_scope, ctx.u32_zero_value, value)
+
+def SpirvEmitSharedAtomicU64(ctx: mutable SpirvEmitContext&, opcode: u16, offset: u32, value: u32) -> u32:
+    shift_id: u32 = SpirvEmitConstU32(ctx, 3u32)
+    index: u32 = SpirvEmitShiftRightLogical32(ctx, offset, shift_id)
+    pointer: u32 = SpirvEmitSharedMemoryAccess(ctx, ctx.shared_u64, ctx.shared_memory_u64, index)
+    atomic_scope: u32 = SpirvEmitAtomicScope(ctx)
+    return SpirvEmitAtomicBinary(ctx, opcode, ctx.u64_id, pointer, atomic_scope, ctx.u32_zero_value, value)
+
+def SpirvEmitSharedAtomicU32IncDec(ctx: mutable SpirvEmitContext&, opcode: u16, offset: u32) -> u32:
+    shift_id: u32 = SpirvEmitConstU32(ctx, 2u32)
+    index: u32 = SpirvEmitShiftRightLogical32(ctx, offset, shift_id)
+    pointer: u32 = SpirvEmitSharedMemoryAccess(ctx, ctx.shared_u32, ctx.shared_memory_u32, index)
+    atomic_scope: u32 = SpirvEmitAtomicScope(ctx)
+    return SpirvEmitAtomicIncDec(ctx, opcode, ctx.u32_id, pointer, atomic_scope, ctx.u32_zero_value)
+
+def SpirvEmitSharedAtomicU64IncDec(ctx: mutable SpirvEmitContext&, opcode: u16, offset: u32) -> u32:
+    shift_id: u32 = SpirvEmitConstU32(ctx, 3u32)
+    index: u32 = SpirvEmitShiftRightLogical32(ctx, offset, shift_id)
+    pointer: u32 = SpirvEmitSharedMemoryAccess(ctx, ctx.shared_u64, ctx.shared_memory_u64, index)
+    atomic_scope: u32 = SpirvEmitAtomicScope(ctx)
+    return SpirvEmitAtomicIncDec(ctx, opcode, ctx.u64_id, pointer, atomic_scope, ctx.u32_zero_value)
+
+# The named shared-atomic emitters (32- and 64-bit), one per atomic opcode.
+def SpirvEmitSharedAtomicIAdd32(ctx: mutable SpirvEmitContext&, offset: u32, value: u32) -> u32:
+    return SpirvEmitSharedAtomicU32(ctx, SPIRV_OP_ATOMIC_I_ADD, offset, value)
+
+def SpirvEmitSharedAtomicIAdd64(ctx: mutable SpirvEmitContext&, offset: u32, value: u32) -> u32:
+    return SpirvEmitSharedAtomicU64(ctx, SPIRV_OP_ATOMIC_I_ADD, offset, value)
+
+def SpirvEmitSharedAtomicISub32(ctx: mutable SpirvEmitContext&, offset: u32, value: u32) -> u32:
+    return SpirvEmitSharedAtomicU32(ctx, SPIRV_OP_ATOMIC_I_SUB, offset, value)
+
+def SpirvEmitSharedAtomicISub64(ctx: mutable SpirvEmitContext&, offset: u32, value: u32) -> u32:
+    return SpirvEmitSharedAtomicU64(ctx, SPIRV_OP_ATOMIC_I_SUB, offset, value)
+
+def SpirvEmitSharedAtomicSMin32(ctx: mutable SpirvEmitContext&, offset: u32, value: u32) -> u32:
+    return SpirvEmitSharedAtomicU32(ctx, SPIRV_OP_ATOMIC_S_MIN, offset, value)
+
+def SpirvEmitSharedAtomicSMin64(ctx: mutable SpirvEmitContext&, offset: u32, value: u32) -> u32:
+    return SpirvEmitSharedAtomicU64(ctx, SPIRV_OP_ATOMIC_S_MIN, offset, value)
+
+def SpirvEmitSharedAtomicUMin32(ctx: mutable SpirvEmitContext&, offset: u32, value: u32) -> u32:
+    return SpirvEmitSharedAtomicU32(ctx, SPIRV_OP_ATOMIC_U_MIN, offset, value)
+
+def SpirvEmitSharedAtomicUMin64(ctx: mutable SpirvEmitContext&, offset: u32, value: u32) -> u32:
+    return SpirvEmitSharedAtomicU64(ctx, SPIRV_OP_ATOMIC_U_MIN, offset, value)
+
+def SpirvEmitSharedAtomicSMax32(ctx: mutable SpirvEmitContext&, offset: u32, value: u32) -> u32:
+    return SpirvEmitSharedAtomicU32(ctx, SPIRV_OP_ATOMIC_S_MAX, offset, value)
+
+def SpirvEmitSharedAtomicSMax64(ctx: mutable SpirvEmitContext&, offset: u32, value: u32) -> u32:
+    return SpirvEmitSharedAtomicU64(ctx, SPIRV_OP_ATOMIC_S_MAX, offset, value)
+
+def SpirvEmitSharedAtomicUMax32(ctx: mutable SpirvEmitContext&, offset: u32, value: u32) -> u32:
+    return SpirvEmitSharedAtomicU32(ctx, SPIRV_OP_ATOMIC_U_MAX, offset, value)
+
+def SpirvEmitSharedAtomicUMax64(ctx: mutable SpirvEmitContext&, offset: u32, value: u32) -> u32:
+    return SpirvEmitSharedAtomicU64(ctx, SPIRV_OP_ATOMIC_U_MAX, offset, value)
+
+def SpirvEmitSharedAtomicAnd32(ctx: mutable SpirvEmitContext&, offset: u32, value: u32) -> u32:
+    return SpirvEmitSharedAtomicU32(ctx, SPIRV_OP_ATOMIC_AND, offset, value)
+
+def SpirvEmitSharedAtomicAnd64(ctx: mutable SpirvEmitContext&, offset: u32, value: u32) -> u32:
+    return SpirvEmitSharedAtomicU64(ctx, SPIRV_OP_ATOMIC_AND, offset, value)
+
+def SpirvEmitSharedAtomicOr32(ctx: mutable SpirvEmitContext&, offset: u32, value: u32) -> u32:
+    return SpirvEmitSharedAtomicU32(ctx, SPIRV_OP_ATOMIC_OR, offset, value)
+
+def SpirvEmitSharedAtomicOr64(ctx: mutable SpirvEmitContext&, offset: u32, value: u32) -> u32:
+    return SpirvEmitSharedAtomicU64(ctx, SPIRV_OP_ATOMIC_OR, offset, value)
+
+def SpirvEmitSharedAtomicXor32(ctx: mutable SpirvEmitContext&, offset: u32, value: u32) -> u32:
+    return SpirvEmitSharedAtomicU32(ctx, SPIRV_OP_ATOMIC_XOR, offset, value)
+
+def SpirvEmitSharedAtomicXor64(ctx: mutable SpirvEmitContext&, offset: u32, value: u32) -> u32:
+    return SpirvEmitSharedAtomicU64(ctx, SPIRV_OP_ATOMIC_XOR, offset, value)
+
+def SpirvEmitSharedAtomicInc32(ctx: mutable SpirvEmitContext&, offset: u32) -> u32:
+    return SpirvEmitSharedAtomicU32IncDec(ctx, SPIRV_OP_ATOMIC_I_INCREMENT, offset)
+
+def SpirvEmitSharedAtomicInc64(ctx: mutable SpirvEmitContext&, offset: u32) -> u32:
+    return SpirvEmitSharedAtomicU64IncDec(ctx, SPIRV_OP_ATOMIC_I_INCREMENT, offset)
+
+def SpirvEmitSharedAtomicDec32(ctx: mutable SpirvEmitContext&, offset: u32) -> u32:
+    return SpirvEmitSharedAtomicU32IncDec(ctx, SPIRV_OP_ATOMIC_I_DECREMENT, offset)
+
+def SpirvEmitSharedAtomicDec64(ctx: mutable SpirvEmitContext&, offset: u32) -> u32:
+    return SpirvEmitSharedAtomicU64IncDec(ctx, SPIRV_OP_ATOMIC_I_DECREMENT, offset)
 
 # ------------------------------------------------------------
 # emit_spirv_convert.cpp: width/format conversions (all 4-word unary ops).
