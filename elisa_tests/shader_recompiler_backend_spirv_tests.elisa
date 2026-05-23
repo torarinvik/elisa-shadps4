@@ -234,6 +234,59 @@ def spirv_backend_emit_integer_matches_cpp() -> void:
         _ = iabs
 
 @test
+def spirv_backend_emit_convert_matches_cpp() -> void:
+    can Abort.Panic, Memory.Allocate:
+        ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
+        ctx.uses_fp16 <- true
+        ctx.uses_fp64 <- true
+        SpirvEmitContext_DefineArithmeticTypes(ctx)
+        # --- Simple FToS to U32: single 4-word unary op. ---
+        b0: usize = ctx.words.count
+        s32: u32 = SpirvEmitConvertS32F32(ctx, 100u32)
+        assert ctx.words.count == b0 + 4usize
+        assert ctx.words[b0] == SpirvWord(SPIRV_OP_CONVERT_F_TO_S, 4u16)
+        assert ctx.words[b0 + 1usize] == ctx.u32_id
+        assert ctx.words[b0 + 2usize] == s32
+        assert ctx.words[b0 + 3usize] == 100u32
+        # --- FToU to U64. ---
+        b1: usize = ctx.words.count
+        u64v: u32 = SpirvEmitConvertU64F32(ctx, 101u32)
+        assert ctx.words[b1] == SpirvWord(SPIRV_OP_CONVERT_F_TO_U, 4u16)
+        assert ctx.words[b1 + 1usize] == ctx.u64_id
+        _ = u64v
+        # --- ConvertU16F32: inner FToU to U16, then UConvert to U32. ---
+        b2: usize = ctx.words.count
+        u16f: u32 = SpirvEmitConvertU16F32(ctx, 102u32)
+        assert ctx.words.count == b2 + 8usize
+        assert ctx.words[b2] == SpirvWord(SPIRV_OP_CONVERT_F_TO_U, 4u16)
+        assert ctx.words[b2 + 1usize] == ctx.u16_id
+        assert ctx.words[b2 + 4usize] == SpirvWord(SPIRV_OP_U_CONVERT, 4u16)
+        assert ctx.words[b2 + 5usize] == ctx.u32_id
+        assert ctx.words[b2 + 6usize] == u16f
+        # outer operand is the inner FToU result id.
+        assert ctx.words[b2 + 7usize] == ctx.words[b2 + 2usize]
+        # --- ConvertF32S8: ExtractS8 (SConvert to S8) then SToF to F32. ---
+        b3: usize = ctx.words.count
+        f32s8: u32 = SpirvEmitConvertF32S8(ctx, 103u32)
+        assert ctx.words.count == b3 + 8usize
+        assert ctx.words[b3] == SpirvWord(SPIRV_OP_S_CONVERT, 4u16)
+        assert ctx.words[b3 + 1usize] == ctx.s8_id
+        assert ctx.words[b3 + 4usize] == SpirvWord(SPIRV_OP_CONVERT_S_TO_F, 4u16)
+        assert ctx.words[b3 + 5usize] == ctx.f32_id
+        assert ctx.words[b3 + 6usize] == f32s8
+        assert ctx.words[b3 + 7usize] == ctx.words[b3 + 2usize]
+        # --- FConvert F32<-F16 and F64<-F32. ---
+        b4: usize = ctx.words.count
+        f16f: u32 = SpirvEmitConvertF16F32(ctx, 104u32)
+        assert ctx.words[b4] == SpirvWord(SPIRV_OP_F_CONVERT, 4u16)
+        assert ctx.words[b4 + 1usize] == ctx.f16_id
+        _ = f16f
+        b5: usize = ctx.words.count
+        f64f: u32 = SpirvEmitConvertF64F32(ctx, 105u32)
+        assert ctx.words[b5 + 1usize] == ctx.f64_id
+        _ = f64f
+
+@test
 def spirv_backend_emit_integer_completion_matches_cpp() -> void:
     can Abort.Panic, Memory.Allocate:
         ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
