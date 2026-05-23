@@ -342,6 +342,53 @@ def spirv_backend_emit_bitwise_conversion_matches_cpp() -> void:
         assert us4 == ctx.words[ctx.words.count - 2usize]
 
 @test
+def spirv_backend_emit_buffer_load_store_matches_cpp() -> void:
+    can Abort.Panic, Memory.Allocate:
+        ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
+        SpirvEmitContext_DefineArithmeticTypes(ctx)
+        base_var: u32 = SpirvEmitContext_AllocateId(ctx)
+        ptr_ty: u32 = SpirvEmitContext_AllocateId(ctx)
+        buf: mutable SpirvBufferDefinition = zeroed
+        buf.alias_ids[SPIRV_POINTER_TYPE_U32.usize()] <- base_var
+        buf.alias_ptrs[SPIRV_POINTER_TYPE_U32.usize()] <- ptr_ty
+        _ = SpirvEmitContext_PushBuffer(ctx, buf)
+        # --- ReadConstBuffer: single access chain + load (no offset). ---
+        b0: usize = ctx.words.count
+        rc: u32 = SpirvEmitReadConstBuffer(ctx, 0u32, 200u32)
+        assert ctx.words.count == b0 + 10usize
+        assert ctx.words[b0] == SpirvWord(SPIRV_OP_ACCESS_CHAIN, 6u16)
+        assert ctx.words[b0 + 1usize] == ptr_ty
+        assert ctx.words[b0 + 3usize] == base_var
+        assert ctx.words[b0 + 4usize] == ctx.u32_zero_value
+        assert ctx.words[b0 + 5usize] == 200u32
+        assert ctx.words[b0 + 6usize] == SpirvWord(SPIRV_OP_LOAD, 4u16)
+        assert ctx.words[b0 + 7usize] == ctx.u32_id
+        assert rc == ctx.words[b0 + 8usize]
+        # --- LoadBufferU32x2: two element loads, then a CompositeConstruct. ---
+        b1: usize = ctx.words.count
+        v2: u32 = SpirvEmitLoadBufferU32x2(ctx, 0u32, 300u32)
+        assert ctx.words[b1] == SpirvWord(SPIRV_OP_ACCESS_CHAIN, 6u16)
+        # The second element index is address + ConstU32(1).
+        assert ctx.words[ctx.words.count - 5usize] == SpirvWord(SPIRV_OP_COMPOSITE_CONSTRUCT, 5u16)
+        assert ctx.words[ctx.words.count - 4usize] == ctx.u32x2_id
+        assert v2 == ctx.words[ctx.words.count - 3usize]
+        # --- StoreBufferU32: access chain + store (no result id). ---
+        b2: usize = ctx.words.count
+        SpirvEmitStoreBufferU32(ctx, 0u32, 400u32, 77u32)
+        assert ctx.words.count == b2 + 9usize
+        assert ctx.words[b2] == SpirvWord(SPIRV_OP_ACCESS_CHAIN, 6u16)
+        assert ctx.words[b2 + 6usize] == SpirvWord(SPIRV_OP_STORE, 3u16)
+        assert ctx.words[b2 + 8usize] == 77u32
+        # --- StoreBufferU32x4: 4 stores, last value is CompositeExtract index 3. ---
+        b3: usize = ctx.words.count
+        SpirvEmitStoreBufferU32x4(ctx, 0u32, 500u32, 88u32)
+        assert ctx.words[ctx.words.count - 3usize] == SpirvWord(SPIRV_OP_STORE, 3u16)
+        # The stored value came from an OpCompositeExtract of component 3
+        # (5-word extract immediately precedes the 3-word store).
+        assert ctx.words[ctx.words.count - 8usize] == SpirvWord(SPIRV_OP_COMPOSITE_EXTRACT, 5u16)
+        assert ctx.words[ctx.words.count - 4usize] == 3u32
+
+@test
 def spirv_backend_emit_image_primitives_match_cpp() -> void:
     can Abort.Panic, Memory.Allocate:
         ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()

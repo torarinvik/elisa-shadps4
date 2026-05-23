@@ -1900,6 +1900,152 @@ def SpirvEmitImageQueryLod(ctx: mutable SpirvEmitContext&, result_type: u32, sam
     return SpirvEmitBinaryOp(ctx, SPIRV_OP_IMAGE_QUERY_LOD, result_type, sampled_image, coords)
 
 # ------------------------------------------------------------
+# emit_spirv_context_get_set.cpp: buffer load/store primitives. The attribute
+# get/set (IR::Attribute + the input/output attribute tables) is IR-coupled and
+# belongs with the dispatch port.
+# ------------------------------------------------------------
+
+# Access chain to buffer element i: index = address (+ i), through the storage
+# struct's first member (member_zero) then the element index.
+def SpirvEmitBufferElemPtr(ctx: mutable SpirvEmitContext&, pointer_type: u32, base: u32, member_zero: u32, address: u32, i: u32) -> u32:
+    index_i: mutable u32 = address
+    if i != 0u32:
+        index_i <- SpirvEmitIAdd32(ctx, address, SpirvEmitConstU32(ctx, i))
+    return SpirvEmitAccessChain2(ctx, pointer_type, base, member_zero, index_i)
+
+# Load N consecutive 32-bit elements (U32 or F32 alias) and, for N>1, compose
+# them into the matching vector. Mirrors EmitLoadBufferB32xN.
+def SpirvEmitLoadBufferB32xN(ctx: mutable SpirvEmitContext&, handle: u32, address: u32, n: u32, alias_kind: u32, scalar_type: u32, vec_type: u32) -> u32:
+    buf: SpirvBufferDefinition = ctx.buffers[handle.usize()]
+    addr: mutable u32 = address
+    offset: u32 = buf.offsets[SPIRV_POINTER_SIZE_B32.usize()]
+    if offset != 0u32:
+        addr <- SpirvEmitIAdd32(ctx, address, offset)
+    base: u32 = buf.alias_ids[alias_kind.usize()]
+    ptype: u32 = buf.alias_ptrs[alias_kind.usize()]
+    p0: u32 = SpirvEmitBufferElemPtr(ctx, ptype, base, ctx.u32_zero_value, addr, 0u32)
+    id0: u32 = SpirvEmitLoad(ctx, scalar_type, p0)
+    if n == 1u32:
+        return id0
+    p1: u32 = SpirvEmitBufferElemPtr(ctx, ptype, base, ctx.u32_zero_value, addr, 1u32)
+    id1: u32 = SpirvEmitLoad(ctx, scalar_type, p1)
+    if n == 2u32:
+        return SpirvEmitCompositeConstruct2(ctx, vec_type, id0, id1)
+    p2: u32 = SpirvEmitBufferElemPtr(ctx, ptype, base, ctx.u32_zero_value, addr, 2u32)
+    id2: u32 = SpirvEmitLoad(ctx, scalar_type, p2)
+    if n == 3u32:
+        return SpirvEmitCompositeConstruct3(ctx, vec_type, id0, id1, id2)
+    p3: u32 = SpirvEmitBufferElemPtr(ctx, ptype, base, ctx.u32_zero_value, addr, 3u32)
+    id3: u32 = SpirvEmitLoad(ctx, scalar_type, p3)
+    return SpirvEmitCompositeConstruct4(ctx, vec_type, id0, id1, id2, id3)
+
+# Store N consecutive 32-bit elements, extracting components for N>1.
+def SpirvEmitStoreBufferB32xN(ctx: mutable SpirvEmitContext&, handle: u32, address: u32, value: u32, n: u32, alias_kind: u32, scalar_type: u32) -> void:
+    buf: SpirvBufferDefinition = ctx.buffers[handle.usize()]
+    addr: mutable u32 = address
+    offset: u32 = buf.offsets[SPIRV_POINTER_SIZE_B32.usize()]
+    if offset != 0u32:
+        addr <- SpirvEmitIAdd32(ctx, address, offset)
+    base: u32 = buf.alias_ids[alias_kind.usize()]
+    ptype: u32 = buf.alias_ptrs[alias_kind.usize()]
+    for i in 0u32..<n:
+        ptr_i: u32 = SpirvEmitBufferElemPtr(ctx, ptype, base, ctx.u32_zero_value, addr, i)
+        value_i: mutable u32 = value
+        if n != 1u32:
+            value_i <- SpirvEmitCompositeExtract(ctx, scalar_type, value, i)
+        SpirvEmitStore(ctx, ptr_i, value_i)
+
+# Named 32-bit buffer loads/stores (U32 and F32 vectors).
+def SpirvEmitLoadBufferU32(ctx: mutable SpirvEmitContext&, handle: u32, address: u32) -> u32:
+    return SpirvEmitLoadBufferB32xN(ctx, handle, address, 1u32, SPIRV_POINTER_TYPE_U32, ctx.u32_id, ctx.u32_id)
+
+def SpirvEmitLoadBufferU32x2(ctx: mutable SpirvEmitContext&, handle: u32, address: u32) -> u32:
+    return SpirvEmitLoadBufferB32xN(ctx, handle, address, 2u32, SPIRV_POINTER_TYPE_U32, ctx.u32_id, ctx.u32x2_id)
+
+def SpirvEmitLoadBufferU32x3(ctx: mutable SpirvEmitContext&, handle: u32, address: u32) -> u32:
+    return SpirvEmitLoadBufferB32xN(ctx, handle, address, 3u32, SPIRV_POINTER_TYPE_U32, ctx.u32_id, ctx.u32x3_id)
+
+def SpirvEmitLoadBufferU32x4(ctx: mutable SpirvEmitContext&, handle: u32, address: u32) -> u32:
+    return SpirvEmitLoadBufferB32xN(ctx, handle, address, 4u32, SPIRV_POINTER_TYPE_U32, ctx.u32_id, ctx.u32x4_id)
+
+def SpirvEmitLoadBufferF32(ctx: mutable SpirvEmitContext&, handle: u32, address: u32) -> u32:
+    return SpirvEmitLoadBufferB32xN(ctx, handle, address, 1u32, SPIRV_POINTER_TYPE_F32, ctx.f32_id, ctx.f32_id)
+
+def SpirvEmitLoadBufferF32x2(ctx: mutable SpirvEmitContext&, handle: u32, address: u32) -> u32:
+    return SpirvEmitLoadBufferB32xN(ctx, handle, address, 2u32, SPIRV_POINTER_TYPE_F32, ctx.f32_id, ctx.f32x2_id)
+
+def SpirvEmitLoadBufferF32x3(ctx: mutable SpirvEmitContext&, handle: u32, address: u32) -> u32:
+    return SpirvEmitLoadBufferB32xN(ctx, handle, address, 3u32, SPIRV_POINTER_TYPE_F32, ctx.f32_id, ctx.f32x3_id)
+
+def SpirvEmitLoadBufferF32x4(ctx: mutable SpirvEmitContext&, handle: u32, address: u32) -> u32:
+    return SpirvEmitLoadBufferB32xN(ctx, handle, address, 4u32, SPIRV_POINTER_TYPE_F32, ctx.f32_id, ctx.f32x4_id)
+
+def SpirvEmitStoreBufferU32(ctx: mutable SpirvEmitContext&, handle: u32, address: u32, value: u32) -> void:
+    SpirvEmitStoreBufferB32xN(ctx, handle, address, value, 1u32, SPIRV_POINTER_TYPE_U32, ctx.u32_id)
+
+def SpirvEmitStoreBufferU32x2(ctx: mutable SpirvEmitContext&, handle: u32, address: u32, value: u32) -> void:
+    SpirvEmitStoreBufferB32xN(ctx, handle, address, value, 2u32, SPIRV_POINTER_TYPE_U32, ctx.u32_id)
+
+def SpirvEmitStoreBufferU32x3(ctx: mutable SpirvEmitContext&, handle: u32, address: u32, value: u32) -> void:
+    SpirvEmitStoreBufferB32xN(ctx, handle, address, value, 3u32, SPIRV_POINTER_TYPE_U32, ctx.u32_id)
+
+def SpirvEmitStoreBufferU32x4(ctx: mutable SpirvEmitContext&, handle: u32, address: u32, value: u32) -> void:
+    SpirvEmitStoreBufferB32xN(ctx, handle, address, value, 4u32, SPIRV_POINTER_TYPE_U32, ctx.u32_id)
+
+def SpirvEmitStoreBufferF32(ctx: mutable SpirvEmitContext&, handle: u32, address: u32, value: u32) -> void:
+    SpirvEmitStoreBufferB32xN(ctx, handle, address, value, 1u32, SPIRV_POINTER_TYPE_F32, ctx.f32_id)
+
+def SpirvEmitStoreBufferF32x4(ctx: mutable SpirvEmitContext&, handle: u32, address: u32, value: u32) -> void:
+    SpirvEmitStoreBufferB32xN(ctx, handle, address, value, 4u32, SPIRV_POINTER_TYPE_F32, ctx.f32_id)
+
+# Narrow / 64-bit single-element buffer loads (own byte-size offsets).
+def SpirvEmitLoadBufferU8(ctx: mutable SpirvEmitContext&, handle: u32, address: u32) -> u32:
+    buf: SpirvBufferDefinition = ctx.buffers[handle.usize()]
+    addr: mutable u32 = address
+    offset: u32 = buf.offsets[SPIRV_POINTER_SIZE_B8.usize()]
+    if offset != 0u32:
+        addr <- SpirvEmitIAdd32(ctx, address, offset)
+    base: u32 = buf.alias_ids[SPIRV_POINTER_TYPE_U8.usize()]
+    ptype: u32 = buf.alias_ptrs[SPIRV_POINTER_TYPE_U8.usize()]
+    ptr: u32 = SpirvEmitAccessChain2(ctx, ptype, base, ctx.u32_zero_value, addr)
+    return SpirvEmitLoad(ctx, ctx.u8_id, ptr)
+
+def SpirvEmitLoadBufferU16(ctx: mutable SpirvEmitContext&, handle: u32, address: u32) -> u32:
+    buf: SpirvBufferDefinition = ctx.buffers[handle.usize()]
+    addr: mutable u32 = address
+    offset: u32 = buf.offsets[SPIRV_POINTER_SIZE_B16.usize()]
+    if offset != 0u32:
+        addr <- SpirvEmitIAdd32(ctx, address, offset)
+    base: u32 = buf.alias_ids[SPIRV_POINTER_TYPE_U16.usize()]
+    ptype: u32 = buf.alias_ptrs[SPIRV_POINTER_TYPE_U16.usize()]
+    ptr: u32 = SpirvEmitAccessChain2(ctx, ptype, base, ctx.u32_zero_value, addr)
+    return SpirvEmitLoad(ctx, ctx.u16_id, ptr)
+
+def SpirvEmitLoadBufferU64(ctx: mutable SpirvEmitContext&, handle: u32, address: u32) -> u32:
+    buf: SpirvBufferDefinition = ctx.buffers[handle.usize()]
+    addr: mutable u32 = address
+    offset: u32 = buf.offsets[SPIRV_POINTER_SIZE_B64.usize()]
+    if offset != 0u32:
+        addr <- SpirvEmitIAdd32(ctx, address, offset)
+    base: u32 = buf.alias_ids[SPIRV_POINTER_TYPE_U64.usize()]
+    ptype: u32 = buf.alias_ptrs[SPIRV_POINTER_TYPE_U64.usize()]
+    # Mirrors the C++: the struct member index for U64 buffers is u64_zero.
+    ptr: u32 = SpirvEmitAccessChain2(ctx, ptype, base, ctx.u64_zero_value, addr)
+    return SpirvEmitLoad(ctx, ctx.u64_id, ptr)
+
+# EmitReadConstBuffer: a single U32 element load at the given dword index.
+def SpirvEmitReadConstBuffer(ctx: mutable SpirvEmitContext&, handle: u32, index: u32) -> u32:
+    buf: SpirvBufferDefinition = ctx.buffers[handle.usize()]
+    idx: mutable u32 = index
+    offset: u32 = buf.offsets[SPIRV_POINTER_SIZE_B32.usize()]
+    if offset != 0u32:
+        idx <- SpirvEmitIAdd32(ctx, index, offset)
+    base: u32 = buf.alias_ids[SPIRV_POINTER_TYPE_U32.usize()]
+    ptype: u32 = buf.alias_ptrs[SPIRV_POINTER_TYPE_U32.usize()]
+    ptr: u32 = SpirvEmitAccessChain2(ctx, ptype, base, ctx.u32_zero_value, idx)
+    return SpirvEmitLoad(ctx, ctx.u32_id, ptr)
+
+# ------------------------------------------------------------
 # emit_spirv_convert.cpp: width/format conversions (all 4-word unary ops).
 # ------------------------------------------------------------
 
