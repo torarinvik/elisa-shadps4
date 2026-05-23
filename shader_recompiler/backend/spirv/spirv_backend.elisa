@@ -92,6 +92,30 @@ const SPIRV_OP_BRANCH_CONDITIONAL: u16 = 250u16
 const SPIRV_OP_DEMOTE_TO_HELPER_INVOCATION: u16 = 5380u16
 const SPIRV_SELECTION_CONTROL_NONE: u32 = 0u32
 
+# emit_spirv_floating_point.cpp: core float arithmetic opcodes + GLSL.std.450
+# extended instructions (OpExtInst).
+const SPIRV_OP_EXT_INST: u16 = 12u16
+const SPIRV_OP_F_NEGATE: u16 = 127u16
+const SPIRV_OP_F_ADD: u16 = 129u16
+const SPIRV_OP_F_SUB: u16 = 131u16
+const SPIRV_OP_F_MUL: u16 = 133u16
+const SPIRV_OP_F_DIV: u16 = 136u16
+
+# GLSL.std.450 extended-instruction numbers.
+const GLSL_STD_450_FABS: u32 = 4u32
+const GLSL_STD_450_FLOOR: u32 = 8u32
+const GLSL_STD_450_FRACT: u32 = 10u32
+const GLSL_STD_450_SIN: u32 = 13u32
+const GLSL_STD_450_COS: u32 = 14u32
+const GLSL_STD_450_POW: u32 = 26u32
+const GLSL_STD_450_EXP2: u32 = 29u32
+const GLSL_STD_450_LOG2: u32 = 30u32
+const GLSL_STD_450_SQRT: u32 = 31u32
+const GLSL_STD_450_INVERSE_SQRT: u32 = 32u32
+const GLSL_STD_450_FMIN: u32 = 37u32
+const GLSL_STD_450_FMAX: u32 = 40u32
+const GLSL_STD_450_FMA: u32 = 50u32
+
 global mutable g_spirv_backend_use_ffi_bridge: bool = false
 
 def SpirvBackend_SetUseFfiBridge(enabled: bool) -> void:
@@ -111,6 +135,7 @@ struct SpirvEmitContext:
     words: mutable darray[u32]
     u32x4_id: mutable u32
     subgroup_local_invocation_id: mutable u32
+    glsl_std_450_id: mutable u32
 
 struct SpirvEmitResult:
     words: mutable darray[u32]
@@ -158,7 +183,7 @@ def SpirvGetOutputPrimitiveExecutionMode(output_type: u32) -> u32:
     return 0u32
 
 def SpirvEmitContext_Default() -> SpirvEmitContext:
-    return SpirvEmitContext(1u32, 0u32, 0u32, 0u32, 0u32, 0u32, [], [], 0u32, 0u32)
+    return SpirvEmitContext(1u32, 0u32, 0u32, 0u32, 0u32, 0u32, [], [], 0u32, 0u32, 0u32)
 
 def SpirvEmitContext_AllocateId(ctx: mutable SpirvEmitContext&) -> u32:
     id: u32 = ctx.next_id
@@ -394,6 +419,105 @@ def SpirvEmitBallotFindLsb(ctx: mutable SpirvEmitContext&, mask: u32) -> u32:
 def SpirvEmitGroupAny(ctx: mutable SpirvEmitContext&, bit: u32) -> u32:
     sg_scope: u32 = SpirvSubgroupScope(ctx)
     return SpirvEmitBinaryOp(ctx, SPIRV_OP_GROUP_NON_UNIFORM_ANY, ctx.u1_id, sg_scope, bit)
+
+# emit_spirv_floating_point.cpp: GLSL.std.450 import id, allocated lazily.
+def SpirvEmitContext_DefineExtInst(ctx: mutable SpirvEmitContext&) -> void:
+    if ctx.glsl_std_450_id == 0u32:
+        ctx.glsl_std_450_id <- SpirvEmitContext_AllocateId(ctx)
+
+# OpExtInst: <ResultType> <ResultId> <Set> <Instruction> <Operands...>.
+# Word count is 5 + operand count.
+def SpirvEmitExtInstUnary(ctx: mutable SpirvEmitContext&, result_type: u32, instruction: u32, a: u32) -> u32:
+    result_id: u32 = SpirvEmitContext_AllocateId(ctx)
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(SPIRV_OP_EXT_INST, 6u16))
+    SpirvEmitContext_AppendWord(ctx, result_type)
+    SpirvEmitContext_AppendWord(ctx, result_id)
+    SpirvEmitContext_AppendWord(ctx, ctx.glsl_std_450_id)
+    SpirvEmitContext_AppendWord(ctx, instruction)
+    SpirvEmitContext_AppendWord(ctx, a)
+    return result_id
+
+def SpirvEmitExtInstBinary(ctx: mutable SpirvEmitContext&, result_type: u32, instruction: u32, a: u32, b: u32) -> u32:
+    result_id: u32 = SpirvEmitContext_AllocateId(ctx)
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(SPIRV_OP_EXT_INST, 7u16))
+    SpirvEmitContext_AppendWord(ctx, result_type)
+    SpirvEmitContext_AppendWord(ctx, result_id)
+    SpirvEmitContext_AppendWord(ctx, ctx.glsl_std_450_id)
+    SpirvEmitContext_AppendWord(ctx, instruction)
+    SpirvEmitContext_AppendWord(ctx, a)
+    SpirvEmitContext_AppendWord(ctx, b)
+    return result_id
+
+def SpirvEmitExtInstTernary(ctx: mutable SpirvEmitContext&, result_type: u32, instruction: u32, a: u32, b: u32, c: u32) -> u32:
+    result_id: u32 = SpirvEmitContext_AllocateId(ctx)
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(SPIRV_OP_EXT_INST, 8u16))
+    SpirvEmitContext_AppendWord(ctx, result_type)
+    SpirvEmitContext_AppendWord(ctx, result_id)
+    SpirvEmitContext_AppendWord(ctx, ctx.glsl_std_450_id)
+    SpirvEmitContext_AppendWord(ctx, instruction)
+    SpirvEmitContext_AppendWord(ctx, a)
+    SpirvEmitContext_AppendWord(ctx, b)
+    SpirvEmitContext_AppendWord(ctx, c)
+    return result_id
+
+# Core 32-bit float arithmetic. The C++ wraps add/sub/mul/div/fma in a
+# NoContraction decoration (emitted into a separate annotations stream); the
+# arithmetic instruction word-stream is identical, so the decoration is omitted.
+def SpirvEmitFPAdd32(ctx: mutable SpirvEmitContext&, a: u32, b: u32) -> u32:
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_F_ADD, ctx.f32_id, a, b)
+
+def SpirvEmitFPSub32(ctx: mutable SpirvEmitContext&, a: u32, b: u32) -> u32:
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_F_SUB, ctx.f32_id, a, b)
+
+def SpirvEmitFPMul32(ctx: mutable SpirvEmitContext&, a: u32, b: u32) -> u32:
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_F_MUL, ctx.f32_id, a, b)
+
+def SpirvEmitFPDiv32(ctx: mutable SpirvEmitContext&, a: u32, b: u32) -> u32:
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_F_DIV, ctx.f32_id, a, b)
+
+def SpirvEmitFPNeg32(ctx: mutable SpirvEmitContext&, value: u32) -> u32:
+    return SpirvEmitUnaryOp(ctx, SPIRV_OP_F_NEGATE, ctx.f32_id, value)
+
+# 32-bit float transcendental / min-max via GLSL.std.450.
+def SpirvEmitFPAbs32(ctx: mutable SpirvEmitContext&, value: u32) -> u32:
+    return SpirvEmitExtInstUnary(ctx, ctx.f32_id, GLSL_STD_450_FABS, value)
+
+def SpirvEmitFPSqrt32(ctx: mutable SpirvEmitContext&, value: u32) -> u32:
+    return SpirvEmitExtInstUnary(ctx, ctx.f32_id, GLSL_STD_450_SQRT, value)
+
+def SpirvEmitFPExp2(ctx: mutable SpirvEmitContext&, value: u32) -> u32:
+    return SpirvEmitExtInstUnary(ctx, ctx.f32_id, GLSL_STD_450_EXP2, value)
+
+def SpirvEmitFPLog2(ctx: mutable SpirvEmitContext&, value: u32) -> u32:
+    return SpirvEmitExtInstUnary(ctx, ctx.f32_id, GLSL_STD_450_LOG2, value)
+
+def SpirvEmitFPFloor32(ctx: mutable SpirvEmitContext&, value: u32) -> u32:
+    return SpirvEmitExtInstUnary(ctx, ctx.f32_id, GLSL_STD_450_FLOOR, value)
+
+def SpirvEmitFPFract32(ctx: mutable SpirvEmitContext&, value: u32) -> u32:
+    return SpirvEmitExtInstUnary(ctx, ctx.f32_id, GLSL_STD_450_FRACT, value)
+
+def SpirvEmitFPMax32(ctx: mutable SpirvEmitContext&, a: u32, b: u32) -> u32:
+    return SpirvEmitExtInstBinary(ctx, ctx.f32_id, GLSL_STD_450_FMAX, a, b)
+
+def SpirvEmitFPMin32(ctx: mutable SpirvEmitContext&, a: u32, b: u32) -> u32:
+    return SpirvEmitExtInstBinary(ctx, ctx.f32_id, GLSL_STD_450_FMIN, a, b)
+
+def SpirvEmitFPPow32(ctx: mutable SpirvEmitContext&, x: u32, y: u32) -> u32:
+    return SpirvEmitExtInstBinary(ctx, ctx.f32_id, GLSL_STD_450_POW, x, y)
+
+def SpirvEmitFPFma32(ctx: mutable SpirvEmitContext&, a: u32, b: u32, c: u32) -> u32:
+    return SpirvEmitExtInstTernary(ctx, ctx.f32_id, GLSL_STD_450_FMA, a, b, c)
+
+# EmitFPMinTri32 / FPMaxTri32 fallback (no AMD trinary minmax support): nested
+# GLSL FMin/FMax. Matches the !supports_trinary_minmax path of the C++.
+def SpirvEmitFPMinTri32(ctx: mutable SpirvEmitContext&, a: u32, b: u32, c: u32) -> u32:
+    inner: u32 = SpirvEmitFPMin32(ctx, b, c)
+    return SpirvEmitFPMin32(ctx, a, inner)
+
+def SpirvEmitFPMaxTri32(ctx: mutable SpirvEmitContext&, a: u32, b: u32, c: u32) -> u32:
+    inner: u32 = SpirvEmitFPMax32(ctx, b, c)
+    return SpirvEmitFPMax32(ctx, a, inner)
 
 # emit_spirv_special.cpp: zero-operand void instructions (1 word).
 def SpirvEmitVoidOp(ctx: mutable SpirvEmitContext&, opcode: u16) -> void:

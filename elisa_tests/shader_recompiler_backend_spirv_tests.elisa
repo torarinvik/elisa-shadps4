@@ -94,6 +94,75 @@ def spirv_backend_emit_select_matches_cpp_opselect() -> void:
         _ = f32_sel
 
 @test
+def spirv_backend_emit_floating_point_matches_cpp() -> void:
+    can Abort.Panic, Memory.Allocate:
+        ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
+        SpirvEmitContext_DefineCoreTypes(ctx)
+        SpirvEmitContext_DefineExtInst(ctx)
+        # void=1,u1=2,u32=3,f32=4 -> GLSL.std.450 import id = 5.
+        assert ctx.glsl_std_450_id == 5u32
+        # --- Core arithmetic: 5-word binary op with the F32 result type. ---
+        b0: usize = ctx.words.count
+        add: u32 = SpirvEmitFPAdd32(ctx, 10u32, 11u32)
+        assert ctx.words.count == b0 + 5usize
+        assert ctx.words[b0] == SpirvWord(SPIRV_OP_F_ADD, 5u16)
+        assert ctx.words[b0 + 1usize] == ctx.f32_id
+        assert ctx.words[b0 + 2usize] == add
+        assert ctx.words[b0 + 3usize] == 10u32
+        assert ctx.words[b0 + 4usize] == 11u32
+        b1: usize = ctx.words.count
+        _mul: u32 = SpirvEmitFPMul32(ctx, 12u32, 13u32)
+        assert ctx.words[b1] == SpirvWord(SPIRV_OP_F_MUL, 5u16)
+        # FNegate is a 4-word unary op.
+        b2: usize = ctx.words.count
+        neg: u32 = SpirvEmitFPNeg32(ctx, 14u32)
+        assert ctx.words.count == b2 + 4usize
+        assert ctx.words[b2] == SpirvWord(SPIRV_OP_F_NEGATE, 4u16)
+        assert ctx.words[b2 + 2usize] == neg
+        # --- GLSL.std.450 unary: OpExtInst is 6 words. ---
+        b3: usize = ctx.words.count
+        sq: u32 = SpirvEmitFPSqrt32(ctx, 20u32)
+        assert ctx.words.count == b3 + 6usize
+        assert ctx.words[b3] == SpirvWord(SPIRV_OP_EXT_INST, 6u16)
+        assert ctx.words[b3 + 1usize] == ctx.f32_id
+        assert ctx.words[b3 + 2usize] == sq
+        assert ctx.words[b3 + 3usize] == ctx.glsl_std_450_id
+        assert ctx.words[b3 + 4usize] == GLSL_STD_450_SQRT
+        assert ctx.words[b3 + 5usize] == 20u32
+        # --- GLSL.std.450 binary: OpExtInst is 7 words (FMax). ---
+        b4: usize = ctx.words.count
+        mx: u32 = SpirvEmitFPMax32(ctx, 21u32, 22u32)
+        assert ctx.words.count == b4 + 7usize
+        assert ctx.words[b4] == SpirvWord(SPIRV_OP_EXT_INST, 7u16)
+        assert ctx.words[b4 + 4usize] == GLSL_STD_450_FMAX
+        assert ctx.words[b4 + 5usize] == 21u32
+        assert ctx.words[b4 + 6usize] == 22u32
+        _ = mx
+        # --- GLSL.std.450 ternary: OpExtInst is 8 words (Fma). ---
+        b5: usize = ctx.words.count
+        fma: u32 = SpirvEmitFPFma32(ctx, 23u32, 24u32, 25u32)
+        assert ctx.words.count == b5 + 8usize
+        assert ctx.words[b5] == SpirvWord(SPIRV_OP_EXT_INST, 8u16)
+        assert ctx.words[b5 + 4usize] == GLSL_STD_450_FMA
+        assert ctx.words[b5 + 7usize] == 25u32
+        _ = fma
+        # --- MinTri fallback: two nested GLSL FMin ext-insts (7 words each). ---
+        b6: usize = ctx.words.count
+        tri: u32 = SpirvEmitFPMinTri32(ctx, 30u32, 31u32, 32u32)
+        assert ctx.words.count == b6 + 14usize
+        assert ctx.words[b6] == SpirvWord(SPIRV_OP_EXT_INST, 7u16)
+        assert ctx.words[b6 + 4usize] == GLSL_STD_450_FMIN
+        # First (inner) min combines b=31,c=32.
+        assert ctx.words[b6 + 5usize] == 31u32
+        assert ctx.words[b6 + 6usize] == 32u32
+        # Second (outer) min combines a=30 with the inner result.
+        assert ctx.words[b6 + 7usize] == SpirvWord(SPIRV_OP_EXT_INST, 7u16)
+        assert ctx.words[b6 + 11usize] == GLSL_STD_450_FMIN
+        assert ctx.words[b6 + 12usize] == 30u32
+        assert ctx.words[b6 + 13usize] == ctx.words[b6 + 2usize]
+        assert tri == ctx.words[b6 + 9usize]
+
+@test
 def spirv_backend_emit_special_matches_cpp() -> void:
     can Abort.Panic, Memory.Allocate:
         ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
