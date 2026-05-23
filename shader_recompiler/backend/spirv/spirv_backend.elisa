@@ -160,6 +160,12 @@ const SPIRV_OP_S_LESS_THAN: u16 = 177u16
 const SPIRV_OP_U_LESS_THAN_EQUAL: u16 = 178u16
 const SPIRV_OP_S_LESS_THAN_EQUAL: u16 = 179u16
 
+# emit_spirv_composite.cpp: vector composite opcodes.
+const SPIRV_OP_VECTOR_SHUFFLE: u16 = 79u16
+const SPIRV_OP_COMPOSITE_CONSTRUCT: u16 = 80u16
+const SPIRV_OP_COMPOSITE_EXTRACT: u16 = 81u16
+const SPIRV_OP_COMPOSITE_INSERT: u16 = 82u16
+
 global mutable g_spirv_backend_use_ffi_bridge: bool = false
 
 def SpirvBackend_SetUseFfiBridge(enabled: bool) -> void:
@@ -180,6 +186,11 @@ struct SpirvEmitContext:
     u32x4_id: mutable u32
     subgroup_local_invocation_id: mutable u32
     glsl_std_450_id: mutable u32
+    u32x2_id: mutable u32
+    u32x3_id: mutable u32
+    f32x2_id: mutable u32
+    f32x3_id: mutable u32
+    f32x4_id: mutable u32
 
 struct SpirvEmitResult:
     words: mutable darray[u32]
@@ -227,7 +238,7 @@ def SpirvGetOutputPrimitiveExecutionMode(output_type: u32) -> u32:
     return 0u32
 
 def SpirvEmitContext_Default() -> SpirvEmitContext:
-    return SpirvEmitContext(1u32, 0u32, 0u32, 0u32, 0u32, 0u32, [], [], 0u32, 0u32, 0u32)
+    return SpirvEmitContext(1u32, 0u32, 0u32, 0u32, 0u32, 0u32, [], [], 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32)
 
 def SpirvEmitContext_AllocateId(ctx: mutable SpirvEmitContext&) -> u32:
     id: u32 = ctx.next_id
@@ -715,6 +726,151 @@ def SpirvEmitSGreaterThanEqual32(ctx: mutable SpirvEmitContext&, lhs: u32, rhs: 
 
 def SpirvEmitUGreaterThanEqual32(ctx: mutable SpirvEmitContext&, lhs: u32, rhs: u32) -> u32:
     return SpirvEmitBinaryOp(ctx, SPIRV_OP_U_GREATER_THAN_EQUAL, ctx.u1_id, lhs, rhs)
+
+# emit_spirv_composite.cpp: define the vector type ids used by composite ops.
+def SpirvEmitContext_DefineCompositeTypes(ctx: mutable SpirvEmitContext&) -> void:
+    if ctx.u32x2_id == 0u32:
+        ctx.u32x2_id <- SpirvEmitContext_AllocateId(ctx)
+    if ctx.u32x3_id == 0u32:
+        ctx.u32x3_id <- SpirvEmitContext_AllocateId(ctx)
+    if ctx.u32x4_id == 0u32:
+        ctx.u32x4_id <- SpirvEmitContext_AllocateId(ctx)
+    if ctx.f32x2_id == 0u32:
+        ctx.f32x2_id <- SpirvEmitContext_AllocateId(ctx)
+    if ctx.f32x3_id == 0u32:
+        ctx.f32x3_id <- SpirvEmitContext_AllocateId(ctx)
+    if ctx.f32x4_id == 0u32:
+        ctx.f32x4_id <- SpirvEmitContext_AllocateId(ctx)
+
+# OpCompositeConstruct: <ResultType> <ResultId> <Constituents...>. Word count
+# is 3 + constituent count. The C++ uses ConstantComposite when all args are
+# immediates; this models the runtime (non-constant) OpCompositeConstruct path.
+def SpirvEmitCompositeConstruct2(ctx: mutable SpirvEmitContext&, result_type: u32, e1: u32, e2: u32) -> u32:
+    result_id: u32 = SpirvEmitContext_AllocateId(ctx)
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(SPIRV_OP_COMPOSITE_CONSTRUCT, 5u16))
+    SpirvEmitContext_AppendWord(ctx, result_type)
+    SpirvEmitContext_AppendWord(ctx, result_id)
+    SpirvEmitContext_AppendWord(ctx, e1)
+    SpirvEmitContext_AppendWord(ctx, e2)
+    return result_id
+
+def SpirvEmitCompositeConstruct3(ctx: mutable SpirvEmitContext&, result_type: u32, e1: u32, e2: u32, e3: u32) -> u32:
+    result_id: u32 = SpirvEmitContext_AllocateId(ctx)
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(SPIRV_OP_COMPOSITE_CONSTRUCT, 6u16))
+    SpirvEmitContext_AppendWord(ctx, result_type)
+    SpirvEmitContext_AppendWord(ctx, result_id)
+    SpirvEmitContext_AppendWord(ctx, e1)
+    SpirvEmitContext_AppendWord(ctx, e2)
+    SpirvEmitContext_AppendWord(ctx, e3)
+    return result_id
+
+def SpirvEmitCompositeConstruct4(ctx: mutable SpirvEmitContext&, result_type: u32, e1: u32, e2: u32, e3: u32, e4: u32) -> u32:
+    result_id: u32 = SpirvEmitContext_AllocateId(ctx)
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(SPIRV_OP_COMPOSITE_CONSTRUCT, 7u16))
+    SpirvEmitContext_AppendWord(ctx, result_type)
+    SpirvEmitContext_AppendWord(ctx, result_id)
+    SpirvEmitContext_AppendWord(ctx, e1)
+    SpirvEmitContext_AppendWord(ctx, e2)
+    SpirvEmitContext_AppendWord(ctx, e3)
+    SpirvEmitContext_AppendWord(ctx, e4)
+    return result_id
+
+# OpCompositeExtract: <ResultType> <ResultId> <Composite> <Index> (5 words).
+def SpirvEmitCompositeExtract(ctx: mutable SpirvEmitContext&, result_type: u32, composite: u32, index: u32) -> u32:
+    result_id: u32 = SpirvEmitContext_AllocateId(ctx)
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(SPIRV_OP_COMPOSITE_EXTRACT, 5u16))
+    SpirvEmitContext_AppendWord(ctx, result_type)
+    SpirvEmitContext_AppendWord(ctx, result_id)
+    SpirvEmitContext_AppendWord(ctx, composite)
+    SpirvEmitContext_AppendWord(ctx, index)
+    return result_id
+
+# OpCompositeInsert: <ResultType> <ResultId> <Object> <Composite> <Index> (6 words).
+def SpirvEmitCompositeInsert(ctx: mutable SpirvEmitContext&, result_type: u32, object: u32, composite: u32, index: u32) -> u32:
+    result_id: u32 = SpirvEmitContext_AllocateId(ctx)
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(SPIRV_OP_COMPOSITE_INSERT, 6u16))
+    SpirvEmitContext_AppendWord(ctx, result_type)
+    SpirvEmitContext_AppendWord(ctx, result_id)
+    SpirvEmitContext_AppendWord(ctx, object)
+    SpirvEmitContext_AppendWord(ctx, composite)
+    SpirvEmitContext_AppendWord(ctx, index)
+    return result_id
+
+# OpVectorShuffle: <ResultType> <ResultId> <Vec1> <Vec2> <Components...>.
+# Word count is 5 + component count.
+def SpirvEmitVectorShuffle2(ctx: mutable SpirvEmitContext&, result_type: u32, v1: u32, v2: u32, c0: u32, c1: u32) -> u32:
+    result_id: u32 = SpirvEmitContext_AllocateId(ctx)
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(SPIRV_OP_VECTOR_SHUFFLE, 7u16))
+    SpirvEmitContext_AppendWord(ctx, result_type)
+    SpirvEmitContext_AppendWord(ctx, result_id)
+    SpirvEmitContext_AppendWord(ctx, v1)
+    SpirvEmitContext_AppendWord(ctx, v2)
+    SpirvEmitContext_AppendWord(ctx, c0)
+    SpirvEmitContext_AppendWord(ctx, c1)
+    return result_id
+
+def SpirvEmitVectorShuffle3(ctx: mutable SpirvEmitContext&, result_type: u32, v1: u32, v2: u32, c0: u32, c1: u32, c2: u32) -> u32:
+    result_id: u32 = SpirvEmitContext_AllocateId(ctx)
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(SPIRV_OP_VECTOR_SHUFFLE, 8u16))
+    SpirvEmitContext_AppendWord(ctx, result_type)
+    SpirvEmitContext_AppendWord(ctx, result_id)
+    SpirvEmitContext_AppendWord(ctx, v1)
+    SpirvEmitContext_AppendWord(ctx, v2)
+    SpirvEmitContext_AppendWord(ctx, c0)
+    SpirvEmitContext_AppendWord(ctx, c1)
+    SpirvEmitContext_AppendWord(ctx, c2)
+    return result_id
+
+def SpirvEmitVectorShuffle4(ctx: mutable SpirvEmitContext&, result_type: u32, v1: u32, v2: u32, c0: u32, c1: u32, c2: u32, c3: u32) -> u32:
+    result_id: u32 = SpirvEmitContext_AllocateId(ctx)
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(SPIRV_OP_VECTOR_SHUFFLE, 9u16))
+    SpirvEmitContext_AppendWord(ctx, result_type)
+    SpirvEmitContext_AppendWord(ctx, result_id)
+    SpirvEmitContext_AppendWord(ctx, v1)
+    SpirvEmitContext_AppendWord(ctx, v2)
+    SpirvEmitContext_AppendWord(ctx, c0)
+    SpirvEmitContext_AppendWord(ctx, c1)
+    SpirvEmitContext_AppendWord(ctx, c2)
+    SpirvEmitContext_AppendWord(ctx, c3)
+    return result_id
+
+# Typed U32 vector composites.
+def SpirvEmitCompositeConstructU32x2(ctx: mutable SpirvEmitContext&, e1: u32, e2: u32) -> u32:
+    return SpirvEmitCompositeConstruct2(ctx, ctx.u32x2_id, e1, e2)
+
+def SpirvEmitCompositeConstructU32x3(ctx: mutable SpirvEmitContext&, e1: u32, e2: u32, e3: u32) -> u32:
+    return SpirvEmitCompositeConstruct3(ctx, ctx.u32x3_id, e1, e2, e3)
+
+def SpirvEmitCompositeConstructU32x4(ctx: mutable SpirvEmitContext&, e1: u32, e2: u32, e3: u32, e4: u32) -> u32:
+    return SpirvEmitCompositeConstruct4(ctx, ctx.u32x4_id, e1, e2, e3, e4)
+
+def SpirvEmitCompositeExtractU32(ctx: mutable SpirvEmitContext&, composite: u32, index: u32) -> u32:
+    return SpirvEmitCompositeExtract(ctx, ctx.u32_id, composite, index)
+
+def SpirvEmitCompositeInsertU32x2(ctx: mutable SpirvEmitContext&, composite: u32, object: u32, index: u32) -> u32:
+    return SpirvEmitCompositeInsert(ctx, ctx.u32x2_id, object, composite, index)
+
+def SpirvEmitCompositeInsertU32x4(ctx: mutable SpirvEmitContext&, composite: u32, object: u32, index: u32) -> u32:
+    return SpirvEmitCompositeInsert(ctx, ctx.u32x4_id, object, composite, index)
+
+# Typed F32 vector composites.
+def SpirvEmitCompositeConstructF32x2(ctx: mutable SpirvEmitContext&, e1: u32, e2: u32) -> u32:
+    return SpirvEmitCompositeConstruct2(ctx, ctx.f32x2_id, e1, e2)
+
+def SpirvEmitCompositeConstructF32x3(ctx: mutable SpirvEmitContext&, e1: u32, e2: u32, e3: u32) -> u32:
+    return SpirvEmitCompositeConstruct3(ctx, ctx.f32x3_id, e1, e2, e3)
+
+def SpirvEmitCompositeConstructF32x4(ctx: mutable SpirvEmitContext&, e1: u32, e2: u32, e3: u32, e4: u32) -> u32:
+    return SpirvEmitCompositeConstruct4(ctx, ctx.f32x4_id, e1, e2, e3, e4)
+
+def SpirvEmitCompositeExtractF32(ctx: mutable SpirvEmitContext&, composite: u32, index: u32) -> u32:
+    return SpirvEmitCompositeExtract(ctx, ctx.f32_id, composite, index)
+
+def SpirvEmitCompositeInsertF32x4(ctx: mutable SpirvEmitContext&, composite: u32, object: u32, index: u32) -> u32:
+    return SpirvEmitCompositeInsert(ctx, ctx.f32x4_id, object, composite, index)
+
+def SpirvEmitCompositeShuffleF32x4(ctx: mutable SpirvEmitContext&, c1: u32, c2: u32, comp0: u32, comp1: u32, comp2: u32, comp3: u32) -> u32:
+    return SpirvEmitVectorShuffle4(ctx, ctx.f32x4_id, c1, c2, comp0, comp1, comp2, comp3)
 
 # emit_spirv_special.cpp: zero-operand void instructions (1 word).
 def SpirvEmitVoidOp(ctx: mutable SpirvEmitContext&, opcode: u16) -> void:
