@@ -43,8 +43,12 @@ const AMDGPU_GS_OUTPUT_TRIANGLE_STRIP: u32 = 2u32
 const SHADER_IR_TYPE_VOID: u32 = 0u32
 const SHADER_IR_TYPE_U1: u32 = 1u32 << 5
 const SHADER_IR_TYPE_U32: u32 = 1u32 << 8
+const SHADER_IR_TYPE_F32: u32 = 1u32 << 11
 
 const SPIRV_INVALID_ID: u32 = 0u32
+
+# SPIR-V instruction opcodes (subset emitted by the ported backend).
+const SPIRV_OP_SELECT: u16 = 169u16
 
 global mutable g_spirv_backend_use_ffi_bridge: bool = false
 
@@ -59,6 +63,7 @@ struct SpirvEmitContext:
     void_id: mutable u32
     u1_id: mutable u32
     u32_id: mutable u32
+    f32_id: mutable u32
     last_label: mutable u32
     interfaces: mutable darray[u32]
     words: mutable darray[u32]
@@ -109,7 +114,7 @@ def SpirvGetOutputPrimitiveExecutionMode(output_type: u32) -> u32:
     return 0u32
 
 def SpirvEmitContext_Default() -> SpirvEmitContext:
-    return SpirvEmitContext(1u32, 0u32, 0u32, 0u32, 0u32, [], [])
+    return SpirvEmitContext(1u32, 0u32, 0u32, 0u32, 0u32, 0u32, [], [])
 
 def SpirvEmitContext_AllocateId(ctx: mutable SpirvEmitContext&) -> u32:
     id: u32 = ctx.next_id
@@ -123,12 +128,16 @@ def SpirvEmitContext_DefineCoreTypes(ctx: mutable SpirvEmitContext&) -> void:
         ctx.u1_id <- SpirvEmitContext_AllocateId(ctx)
     if ctx.u32_id == 0u32:
         ctx.u32_id <- SpirvEmitContext_AllocateId(ctx)
+    if ctx.f32_id == 0u32:
+        ctx.f32_id <- SpirvEmitContext_AllocateId(ctx)
 
 def SpirvTypeId(ctx: SpirvEmitContext, ir_type: u32) -> u32:
     if ir_type == SHADER_IR_TYPE_U1:
         return ctx.u1_id
     if ir_type == SHADER_IR_TYPE_U32:
         return ctx.u32_id
+    if ir_type == SHADER_IR_TYPE_F32:
+        return ctx.f32_id
     return SPIRV_INVALID_ID
 
 def SpirvEmitContext_AddLabel(ctx: mutable SpirvEmitContext&) -> u32:
@@ -158,6 +167,33 @@ def SpirvEmitHeader(ctx: mutable SpirvEmitContext&) -> void:
         SpirvEmitContext_AppendWord(ctx, SPIRV_GENERATOR_SHADPS4_ELISA)
         SpirvEmitContext_AppendWord(ctx, ctx.next_id)
         SpirvEmitContext_AppendWord(ctx, SPIRV_SCHEMA_RESERVED)
+
+# ------------------------------------------------------------
+# IR -> SPIR-V instruction emitters (ported from backend/spirv/emit_spirv_*.cpp).
+# ------------------------------------------------------------
+
+# OpSelect: <ResultType> <ResultId> <Condition> <Object1> <Object2> (6 words).
+# Mirrors EmitContext::OpSelect used by emit_spirv_select.cpp.
+def SpirvEmitOpSelect(ctx: mutable SpirvEmitContext&, result_type: u32, condition: u32, true_value: u32, false_value: u32) -> u32:
+    result_id: u32 = SpirvEmitContext_AllocateId(ctx)
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(SPIRV_OP_SELECT, 6u16))
+    SpirvEmitContext_AppendWord(ctx, result_type)
+    SpirvEmitContext_AppendWord(ctx, result_id)
+    SpirvEmitContext_AppendWord(ctx, condition)
+    SpirvEmitContext_AppendWord(ctx, true_value)
+    SpirvEmitContext_AppendWord(ctx, false_value)
+    return result_id
+
+# emit_spirv_select.cpp: EmitSelectU1 / EmitSelectU32 / EmitSelectF32 select
+# between two values of the scalar result type on a boolean condition.
+def SpirvEmitSelectU1(ctx: mutable SpirvEmitContext&, condition: u32, true_value: u32, false_value: u32) -> u32:
+    return SpirvEmitOpSelect(ctx, ctx.u1_id, condition, true_value, false_value)
+
+def SpirvEmitSelectU32(ctx: mutable SpirvEmitContext&, condition: u32, true_value: u32, false_value: u32) -> u32:
+    return SpirvEmitOpSelect(ctx, ctx.u32_id, condition, true_value, false_value)
+
+def SpirvEmitSelectF32(ctx: mutable SpirvEmitContext&, condition: u32, true_value: u32, false_value: u32) -> u32:
+    return SpirvEmitOpSelect(ctx, ctx.f32_id, condition, true_value, false_value)
 
 def SpirvBackend_EmitWordsViaFfi(profile: void&?, runtime_info: void&?, program: void&?, bindings: mutable void&?, out_words: mutable void&?, out_word_count: mutable usize&) -> int:
     return elisa_spirv_backend_emit_words(profile, runtime_info, program, bindings, out_words, out_word_count)
