@@ -7,21 +7,44 @@ extern windows_get_last_error() -> int
 extern gnu_strerror_r(error_code: int, buffer: mutable stack u8&, buffer_size: usize) -> static u8&
 extern xsi_strerror_r(error_code: int, buffer: mutable stack u8&, buffer_size: usize) -> int
 extern posix_errno() -> int
+extern malloc(size: usize) -> mutable heap void&?
 const USE_GNU_STRERROR_R = target.libc.gnu_strerror_r
+
+# Copy a NUL-terminated string out of a caller-owned stack buffer into a fresh
+# heap allocation. The error string is formatted into a stack array; returning a
+# pointer into that array would dangle after the function returns (use after
+# return) and read unbounded, so it must be persisted to the heap. The scan is
+# bounded by max so it never reads past the stack buffer.
+def Error_PersistStackString(src: stack u8&, max: usize) -> static u8&:
+    len: mutable usize = 0
+    while len < max and src[len] != 0u8:
+        len <- len + 1
+    raw: mutable heap void&? = null
+    can Memory.Allocate:
+        raw <- malloc(len + 1)
+    if raw == null:
+        return ""
+    out: mutable heap u8& = raw.cast[mutable heap u8&]
+    i: mutable usize = 0
+    while i < len:
+        out[i] <- src[i]
+        i <- i + 1
+    out[len] <- 0
+    return out.cast[static u8&]
 
 def NativeErrorToString(e: int) -> static u8&:
     err_str: mutable u8[255]
     static if PLATFORM_WINDOWS:
         if not windows_format_message(e, err_str[0].ref[mutable stack u8&], 255):
             return "(FormatMessageA failed to format error)"
-        return err_str[0].ref[static u8&]
+        return Error_PersistStackString(err_str[0].ref[stack u8&], 255)
     static elif USE_GNU_STRERROR_R:
         return gnu_strerror_r(e, err_str[0].ref[mutable stack u8&], 255)
     static else:
         second_err: int = xsi_strerror_r(e, err_str[0].ref[mutable stack u8&], 255)
         if second_err != 0:
             return "(strerror_r failed to format error)"
-        return err_str[0].ref[static u8&]
+        return Error_PersistStackString(err_str[0].ref[stack u8&], 255)
 
 def GetLastErrorMsg() -> static u8&:
     static if PLATFORM_WINDOWS:

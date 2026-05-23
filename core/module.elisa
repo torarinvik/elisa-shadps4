@@ -521,9 +521,7 @@ def Module_ReadImageU64(self: Module&, addr: u64) -> u64:
     return value
 
 def Module_ReadDynString(self: Module&, offset: u32) -> static u8&:
-    if offset.usize() >= self.dynamic_data.count:
-        return ""
-    return self.dynamic_data[offset.usize()].ref[u8&].cast[static u8&]
+    return Module_CopyDynDataString(self.ref[Module&], offset.usize())
 
 def Module_ReadDynStringAtTable(self: Module&, str_offset: u64) -> static u8&:
     return Module_ReadDynString(self, (self.dynamic_info.str_table_offset + str_offset).u32())
@@ -533,29 +531,29 @@ def Module_SymbolNameAndNidAt(self: Module&, offset: u32, out_name: mutable stat
     out_nid <- ""
     if offset.usize() >= self.dynamic_data.count:
         return false
-    symbol_name: static u8& = self.dynamic_data[offset.usize()].ref[u8&].cast[static u8&]
-    out_name <- symbol_name
-    # Bound the name scan to the dynamic-data segment. The string table is not
-    # guaranteed to be NUL-terminated before the end of the buffer, so a plain
-    # static_strlen / cstr scan can read past it into adjacent heap, yielding a
+    # Scan only within the dynamic-data segment: the string table is not
+    # guaranteed to be NUL-terminated before the end of the buffer, so reading it
+    # as an unbounded cstr can run past the segment into adjacent heap, yielding a
     # nondeterministic symbol name (and thus nondeterministic import resolution).
-    max_len: usize = self.dynamic_data.count - offset.usize()
+    base: usize = offset.usize()
+    max_len: usize = self.dynamic_data.count - base
     name_len: mutable usize = 0
-    while name_len < max_len and self.dynamic_data[offset.usize() + name_len] != 0u8:
+    while name_len < max_len and self.dynamic_data[base + name_len] != 0u8:
         name_len <- name_len + 1
     if name_len == 0:
         return false
+    out_name <- Module_CopyDynDataSlice(self.ref[Module&], base, base + name_len)
     hash_index: mutable usize = name_len
     i: mutable usize = 0
     while i < name_len:
-        if self.dynamic_data[offset.usize() + i] == 35u8:
+        if self.dynamic_data[base + i] == 35u8:
             hash_index <- i
             i <- name_len
         else:
             i <- i + 1
     if hash_index == 0:
         return false
-    out_nid <- Module_CopySlice(symbol_name, 0, hash_index)
+    out_nid <- Module_CopyDynDataSlice(self.ref[Module&], base, base + hash_index)
     return static_strlen(out_nid) > 0
 
 def Module_CopySlice(input: static u8&, start: usize, end_exclusive: usize) -> static u8&:
@@ -574,6 +572,40 @@ def Module_CopySlice(input: static u8&, start: usize, end_exclusive: usize) -> s
         i <- i + 1
     out[len] <- 0
     return out.cast[static u8&]
+
+# Copy dynamic-data bytes [start, end_exclusive) into a fresh heap-owned,
+# NUL-terminated string. Reads are bounded by the buffer (the caller passes
+# in-range positions), avoiding the unbounded-cstr-over-read hazard of casting
+# an interior darray pointer to `static u8&` and scanning past the segment.
+def Module_CopyDynDataSlice(self: Module&, start: usize, end_exclusive: usize) -> static u8&:
+    if end_exclusive <= start or start >= self.dynamic_data.count:
+        return ""
+    end_bounded: mutable usize = end_exclusive
+    if end_bounded > self.dynamic_data.count:
+        end_bounded <- self.dynamic_data.count
+    len: usize = end_bounded - start
+    raw: mutable heap void&? = null
+    can Memory.Allocate:
+        raw <- malloc(len + 1)
+    if raw == null:
+        return ""
+    out: mutable heap u8& = raw.cast[mutable heap u8&]
+    i: mutable usize = 0
+    while i < len:
+        out[i] <- self.dynamic_data[start + i]
+        i <- i + 1
+    out[len] <- 0
+    return out.cast[static u8&]
+
+# Bounded NUL-terminated copy of the dynamic-data string starting at offset,
+# scanning only within the segment.
+def Module_CopyDynDataString(self: Module&, offset: usize) -> static u8&:
+    if offset >= self.dynamic_data.count:
+        return ""
+    end: mutable usize = offset
+    while end < self.dynamic_data.count and self.dynamic_data[end] != 0u8:
+        end <- end + 1
+    return Module_CopyDynDataSlice(self.ref[Module&], offset, end)
 
 def Module_ParseImportSymbol(raw_symbol: static u8&, out_nid: mutable static u8&, out_library: mutable static u8&, out_module: mutable static u8&) -> bool:
     out_nid <- ""
