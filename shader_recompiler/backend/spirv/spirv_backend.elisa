@@ -72,6 +72,16 @@ const SPIRV_MEM_SEM_WORKGROUP_MEMORY: u32 = 0x100u32
 const SPIRV_MEM_SEM_ATOMIC_COUNTER_MEMORY: u32 = 0x400u32
 const SPIRV_MEM_SEM_IMAGE_MEMORY: u32 = 0x800u32
 
+# spv::Scope::Subgroup, plus warp/subgroup op opcodes.
+const SPIRV_SCOPE_SUBGROUP: u32 = 3u32
+const SPIRV_OP_LOAD: u16 = 61u16
+const SPIRV_OP_GROUP_NON_UNIFORM_ANY: u16 = 335u16
+const SPIRV_OP_GROUP_NON_UNIFORM_BROADCAST: u16 = 337u16
+const SPIRV_OP_GROUP_NON_UNIFORM_BROADCAST_FIRST: u16 = 338u16
+const SPIRV_OP_GROUP_NON_UNIFORM_BALLOT: u16 = 339u16
+const SPIRV_OP_GROUP_NON_UNIFORM_BALLOT_FIND_LSB: u16 = 343u16
+const SPIRV_OP_GROUP_NON_UNIFORM_QUAD_BROADCAST: u16 = 365u16
+
 global mutable g_spirv_backend_use_ffi_bridge: bool = false
 
 def SpirvBackend_SetUseFfiBridge(enabled: bool) -> void:
@@ -89,6 +99,8 @@ struct SpirvEmitContext:
     last_label: mutable u32
     interfaces: mutable darray[u32]
     words: mutable darray[u32]
+    u32x4_id: mutable u32
+    subgroup_local_invocation_id: mutable u32
 
 struct SpirvEmitResult:
     words: mutable darray[u32]
@@ -136,7 +148,7 @@ def SpirvGetOutputPrimitiveExecutionMode(output_type: u32) -> u32:
     return 0u32
 
 def SpirvEmitContext_Default() -> SpirvEmitContext:
-    return SpirvEmitContext(1u32, 0u32, 0u32, 0u32, 0u32, 0u32, [], [])
+    return SpirvEmitContext(1u32, 0u32, 0u32, 0u32, 0u32, 0u32, [], [], 0u32, 0u32)
 
 def SpirvEmitContext_AllocateId(ctx: mutable SpirvEmitContext&) -> u32:
     id: u32 = ctx.next_id
@@ -315,6 +327,63 @@ def SpirvEmitWorkgroupMemoryBarrier(ctx: mutable SpirvEmitContext&) -> void:
 
 def SpirvEmitDeviceMemoryBarrier(ctx: mutable SpirvEmitContext&) -> void:
     SpirvEmitMemoryBarrier(ctx, SPIRV_SCOPE_DEVICE, SpirvMemoryBarrierSemantics())
+
+# Generic ternary op: <ResultType> <ResultId> <Op1> <Op2> <Op3> (6 words).
+def SpirvEmitTernaryOp(ctx: mutable SpirvEmitContext&, opcode: u16, result_type: u32, a: u32, b: u32, c: u32) -> u32:
+    result_id: u32 = SpirvEmitContext_AllocateId(ctx)
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(opcode, 6u16))
+    SpirvEmitContext_AppendWord(ctx, result_type)
+    SpirvEmitContext_AppendWord(ctx, result_id)
+    SpirvEmitContext_AppendWord(ctx, a)
+    SpirvEmitContext_AppendWord(ctx, b)
+    SpirvEmitContext_AppendWord(ctx, c)
+    return result_id
+
+# emit_spirv_warp.cpp: subgroup/warp intrinsics. Allocate the uvec4 ballot
+# type and the SubgroupLocalInvocationId input pointer used by these ops.
+def SpirvEmitContext_DefineWarpTypes(ctx: mutable SpirvEmitContext&) -> void:
+    if ctx.u32x4_id == 0u32:
+        ctx.u32x4_id <- SpirvEmitContext_AllocateId(ctx)
+    if ctx.subgroup_local_invocation_id == 0u32:
+        ctx.subgroup_local_invocation_id <- SpirvEmitContext_AllocateId(ctx)
+
+# SubgroupScope: ctx.ConstU32(spv::Scope::Subgroup).
+def SpirvSubgroupScope(ctx: mutable SpirvEmitContext&) -> u32:
+    return SpirvEmitConstU32(ctx, SPIRV_SCOPE_SUBGROUP)
+
+# EmitLaneId: OpLoad U32 from the SubgroupLocalInvocationId pointer.
+def SpirvEmitLaneId(ctx: mutable SpirvEmitContext&) -> u32:
+    return SpirvEmitUnaryOp(ctx, SPIRV_OP_LOAD, ctx.u32_id, ctx.subgroup_local_invocation_id)
+
+# EmitQuadShuffle: OpGroupNonUniformQuadBroadcast U32 Subgroup value index.
+def SpirvEmitQuadShuffle(ctx: mutable SpirvEmitContext&, value: u32, index: u32) -> u32:
+    sg_scope: u32 = SpirvSubgroupScope(ctx)
+    return SpirvEmitTernaryOp(ctx, SPIRV_OP_GROUP_NON_UNIFORM_QUAD_BROADCAST, ctx.u32_id, sg_scope, value, index)
+
+# EmitReadFirstLane: OpGroupNonUniformBroadcastFirst U32 Subgroup value.
+def SpirvEmitReadFirstLane(ctx: mutable SpirvEmitContext&, value: u32) -> u32:
+    sg_scope: u32 = SpirvSubgroupScope(ctx)
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_GROUP_NON_UNIFORM_BROADCAST_FIRST, ctx.u32_id, sg_scope, value)
+
+# EmitReadLane: OpGroupNonUniformBroadcast U32 Subgroup value lane.
+def SpirvEmitReadLane(ctx: mutable SpirvEmitContext&, value: u32, lane: u32) -> u32:
+    sg_scope: u32 = SpirvSubgroupScope(ctx)
+    return SpirvEmitTernaryOp(ctx, SPIRV_OP_GROUP_NON_UNIFORM_BROADCAST, ctx.u32_id, sg_scope, value, lane)
+
+# EmitBallot: OpGroupNonUniformBallot uvec4 Subgroup bit.
+def SpirvEmitBallot(ctx: mutable SpirvEmitContext&, bit: u32) -> u32:
+    sg_scope: u32 = SpirvSubgroupScope(ctx)
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_GROUP_NON_UNIFORM_BALLOT, ctx.u32x4_id, sg_scope, bit)
+
+# EmitBallotFindLsb: OpGroupNonUniformBallotFindLSB U32 Subgroup mask.
+def SpirvEmitBallotFindLsb(ctx: mutable SpirvEmitContext&, mask: u32) -> u32:
+    sg_scope: u32 = SpirvSubgroupScope(ctx)
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_GROUP_NON_UNIFORM_BALLOT_FIND_LSB, ctx.u32_id, sg_scope, mask)
+
+# EmitGroupAny: OpGroupNonUniformAny U1 Subgroup bit.
+def SpirvEmitGroupAny(ctx: mutable SpirvEmitContext&, bit: u32) -> u32:
+    sg_scope: u32 = SpirvSubgroupScope(ctx)
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_GROUP_NON_UNIFORM_ANY, ctx.u1_id, sg_scope, bit)
 
 def SpirvBackend_EmitWordsViaFfi(profile: void&?, runtime_info: void&?, program: void&?, bindings: mutable void&?, out_words: mutable void&?, out_word_count: mutable usize&) -> int:
     return elisa_spirv_backend_emit_words(profile, runtime_info, program, bindings, out_words, out_word_count)

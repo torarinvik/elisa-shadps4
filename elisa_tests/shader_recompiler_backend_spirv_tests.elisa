@@ -94,6 +94,59 @@ def spirv_backend_emit_select_matches_cpp_opselect() -> void:
         _ = f32_sel
 
 @test
+def spirv_backend_emit_warp_matches_cpp() -> void:
+    can Abort.Panic, Memory.Allocate:
+        ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
+        SpirvEmitContext_DefineCoreTypes(ctx)
+        SpirvEmitContext_DefineWarpTypes(ctx)
+        # void=1,u1=2,u32=3,f32=4 -> u32x4=5, subgroup_local_invocation_id=6.
+        assert ctx.u32x4_id == 5u32
+        assert ctx.subgroup_local_invocation_id == 6u32
+        # EmitLaneId: OpLoad U32 from the subgroup pointer (4-word unary op).
+        b0: usize = ctx.words.count
+        lane: u32 = SpirvEmitLaneId(ctx)
+        assert ctx.words.count == b0 + 4usize
+        assert ctx.words[b0] == SpirvWord(SPIRV_OP_LOAD, 4u16)
+        assert ctx.words[b0 + 1usize] == ctx.u32_id
+        assert ctx.words[b0 + 2usize] == lane
+        assert ctx.words[b0 + 3usize] == ctx.subgroup_local_invocation_id
+        # EmitReadFirstLane: ConstU32(Subgroup) then a 5-word group op.
+        b1: usize = ctx.words.count
+        rfl: u32 = SpirvEmitReadFirstLane(ctx, 42u32)
+        assert ctx.words[b1] == SpirvWord(SPIRV_OP_CONSTANT, 4u16)
+        assert ctx.words[b1 + 3usize] == SPIRV_SCOPE_SUBGROUP
+        gop: usize = b1 + 4usize
+        assert ctx.words[gop] == SpirvWord(SPIRV_OP_GROUP_NON_UNIFORM_BROADCAST_FIRST, 5u16)
+        assert ctx.words[gop + 1usize] == ctx.u32_id
+        assert ctx.words[gop + 2usize] == rfl
+        assert ctx.words[gop + 3usize] == ctx.words[b1 + 2usize]
+        assert ctx.words[gop + 4usize] == 42u32
+        # EmitQuadShuffle: scope const then a 6-word ternary group op.
+        b2: usize = ctx.words.count
+        qs: u32 = SpirvEmitQuadShuffle(ctx, 7u32, 8u32)
+        q: usize = b2 + 4usize
+        assert ctx.words[q] == SpirvWord(SPIRV_OP_GROUP_NON_UNIFORM_QUAD_BROADCAST, 6u16)
+        assert ctx.words[q + 1usize] == ctx.u32_id
+        assert ctx.words[q + 3usize] == ctx.words[b2 + 2usize]
+        assert ctx.words[q + 4usize] == 7u32
+        assert ctx.words[q + 5usize] == 8u32
+        # EmitBallot: result type is the uvec4 type.
+        b3: usize = ctx.words.count
+        bal: u32 = SpirvEmitBallot(ctx, 9u32)
+        bb: usize = b3 + 4usize
+        assert ctx.words[bb] == SpirvWord(SPIRV_OP_GROUP_NON_UNIFORM_BALLOT, 5u16)
+        assert ctx.words[bb + 1usize] == ctx.u32x4_id
+        # EmitGroupAny: result type is U1.
+        b4: usize = ctx.words.count
+        any: u32 = SpirvEmitGroupAny(ctx, 10u32)
+        ab: usize = b4 + 4usize
+        assert ctx.words[ab] == SpirvWord(SPIRV_OP_GROUP_NON_UNIFORM_ANY, 5u16)
+        assert ctx.words[ab + 1usize] == ctx.u1_id
+        _ = qs
+        _ = bal
+        _ = any
+
+@test
 def spirv_backend_emit_barriers_match_cpp() -> void:
     can Abort.Panic, Memory.Allocate:
         ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
