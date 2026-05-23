@@ -98,49 +98,61 @@ def Emulator_New() -> Emulator:
     )
 
 def Emulator_GetInstance() -> mutable Emulator&:
-    if emulator_singleton.memory_ptr == 0.uintptr():
-        emulator_singleton <- Emulator_New()
-    return emulator_singleton.ref[mutable Emulator&]
+    # The emulator is a process-wide singleton by design; accessing its global
+    # backing store is the intended architecture, not an accident.
+    trusted Unsafe.MutableGlobal:
+        if emulator_singleton.memory_ptr == 0.uintptr():
+            emulator_singleton <- Emulator_New()
+        return emulator_singleton.ref[mutable Emulator&]
 
 def Emulator_Reset() -> void:
     emulator_singleton <- Emulator_New()
 
 def Emulator_Substr(input: static u8&, start: usize, len: usize) -> static u8&:
-    out: mutable darray[u8] = []
-    owner: mutable Arena& = emulator_arena.ref[mutable Arena&]
-    in owner:
-        for i in 0..<len:
-            out.push(input[start + i])
-        out.push(0)
-    return out[0].ref[static u8&]
+    # input[start+i] is bounded by the caller's len (<= static_strlen); the bytes
+    # are built in the persistent emulator_arena, so the returned reference lives
+    # as long as the session. Both facts are outside the type system, hence vouched.
+    trusted Unsafe.MutableGlobal, Unsafe.UncheckedIndex, Unsafe.PointerCast:
+        out: mutable darray[u8] = []
+        owner: mutable Arena& = emulator_arena.ref[mutable Arena&]
+        in owner:
+            for i in 0..<len:
+                out.push(input[start + i])
+            out.push(0)
+        return out[0].ref[static u8&]
 
 def Emulator_Concat2(lhs: static u8&, rhs: static u8&) -> static u8&:
     lhs_len: usize = static_strlen(lhs)
     rhs_len: usize = static_strlen(rhs)
-    out: mutable darray[u8] = []
-    owner: mutable Arena& = emulator_arena.ref[mutable Arena&]
-    in owner:
-        for i in 0..<lhs_len:
-            out.push(lhs[i])
-        for j in 0..<rhs_len:
-            out.push(rhs[j])
-        out.push(0)
-    return out[0].ref[static u8&]
+    # Indices bounded by static_strlen; result built in the persistent arena.
+    trusted Unsafe.MutableGlobal, Unsafe.UncheckedIndex, Unsafe.PointerCast:
+        out: mutable darray[u8] = []
+        owner: mutable Arena& = emulator_arena.ref[mutable Arena&]
+        in owner:
+            for i in 0..<lhs_len:
+                out.push(lhs[i])
+            for j in 0..<rhs_len:
+                out.push(rhs[j])
+            out.push(0)
+        return out[0].ref[static u8&]
 
 def Emulator_PathEndsWith(path: static u8&, suffix: static u8&) -> bool:
     path_len: usize = static_strlen(path)
     suffix_len: usize = static_strlen(suffix)
     if suffix_len > path_len:
         return false
-    return streq(path[path_len - suffix_len].ref[u8&], suffix) == 1
+    # Offset is within path_len (checked above); cstr has no length in its type.
+    trusted Unsafe.UncheckedIndex:
+        return streq(path[path_len - suffix_len].ref[u8&], suffix) == 1
 
 def Emulator_TrimTrailingSlash(path: static u8&) -> static u8&:
-    len: mutable usize = static_strlen(path)
-    while len > 1 and path[len - 1] == '/'.u8():
-        len <- len - 1
-    if len == static_strlen(path):
-        return path
-    return Emulator_Substr(path, 0, len)
+    trusted Unsafe.UncheckedIndex:
+        len: mutable usize = static_strlen(path)
+        while len > 1 and path[len - 1] == '/'.u8():
+            len <- len - 1
+        if len == static_strlen(path):
+            return path
+        return Emulator_Substr(path, 0, len)
 
 def Emulator_DirName(path: static u8&) -> static u8&:
     trimmed: static u8& = Emulator_TrimTrailingSlash(path)
@@ -148,22 +160,24 @@ def Emulator_DirName(path: static u8&) -> static u8&:
     if len == 0:
         return ""
     i: mutable usize = len
-    while i > 0:
-        if trimmed[i - 1] == '/'.u8():
-            if i == 1:
-                return "/"
-            return Emulator_Substr(trimmed, 0, i - 1)
-        i <- i - 1
+    trusted Unsafe.UncheckedIndex:
+        while i > 0:
+            if trimmed[i - 1] == '/'.u8():
+                if i == 1:
+                    return "/"
+                return Emulator_Substr(trimmed, 0, i - 1)
+            i <- i - 1
     return ""
 
 def Emulator_BaseName(path: static u8&) -> static u8&:
     trimmed: static u8& = Emulator_TrimTrailingSlash(path)
     len: usize = static_strlen(trimmed)
     i: mutable usize = len
-    while i > 0:
-        if trimmed[i - 1] == '/'.u8():
-            return Emulator_Substr(trimmed, i, len - i)
-        i <- i - 1
+    trusted Unsafe.UncheckedIndex:
+        while i > 0:
+            if trimmed[i - 1] == '/'.u8():
+                return Emulator_Substr(trimmed, i, len - i)
+            i <- i - 1
     return trimmed
 
 def Emulator_PathJoin(lhs: static u8&, rhs: static u8&) -> static u8&:
@@ -171,8 +185,10 @@ def Emulator_PathJoin(lhs: static u8&, rhs: static u8&) -> static u8&:
         return rhs
     if static_strlen(rhs) == 0:
         return lhs
-    if lhs[static_strlen(lhs) - 1] == '/'.u8():
-        return Emulator_Concat2(lhs, rhs)
+    # Index is static_strlen(lhs)-1, in range since lhs is non-empty here.
+    trusted Unsafe.UncheckedIndex:
+        if lhs[static_strlen(lhs) - 1] == '/'.u8():
+            return Emulator_Concat2(lhs, rhs)
     return Emulator_Concat2(Emulator_Concat2(lhs, "/"), rhs)
 
 def Emulator_StripKnownOverlaySuffix(folder: static u8&) -> static u8&:
@@ -205,12 +221,14 @@ def Emulator_RelativeEbootName(file: static u8&, game_folder: static u8&) -> sta
     if folder_len > 0 and file_len > folder_len:
         prefix_matches: mutable bool = true
         i: mutable usize = 0
-        while i < folder_len:
-            if file[i] != game_folder[i]:
-                prefix_matches <- false
-            i <- i + 1
-        if prefix_matches and file[folder_len] == '/'.u8():
-            return Emulator_Substr(file, folder_len + 1, file_len - folder_len - 1)
+        # i < folder_len < file_len throughout; file[folder_len] valid (file_len > folder_len).
+        trusted Unsafe.UncheckedIndex:
+            while i < folder_len:
+                if file[i] != game_folder[i]:
+                    prefix_matches <- false
+                i <- i + 1
+            if prefix_matches and file[folder_len] == '/'.u8():
+                return Emulator_Substr(file, folder_len + 1, file_len - folder_len - 1)
     return Emulator_BaseName(file)
 
 def Emulator_Run(self: mutable Emulator&, file: static u8&, args: darray[static u8&], game_folder: static u8&?) -> void:
@@ -251,9 +269,10 @@ def Emulator_Run(self: mutable Emulator&, file: static u8&, args: darray[static 
 def Emulator_UpdatePlayTime(self: mutable Emulator&, serial: static u8&) -> void:
     if static_strlen(serial) == 0:
         return
-    playtime_owner: mutable Arena& = emulator_arena.ref[mutable Arena&]
-    in playtime_owner:
-        self.play_time_updates.push(serial)
+    trusted Unsafe.MutableGlobal:
+        playtime_owner: mutable Arena& = emulator_arena.ref[mutable Arena&]
+        in playtime_owner:
+            self.play_time_updates.push(serial)
 
 def Emulator_Restart(self: mutable Emulator&, eboot_path: static u8&, guest_args: darray[static u8&]) -> void:
     self.pending_restart <- true
@@ -264,12 +283,13 @@ def Emulator_TakePendingRestartArgs(self: mutable Emulator&) -> darray[static u8
     if not self.pending_restart:
         return []
     out: mutable darray[static u8&] = []
-    restart_owner: mutable Arena& = emulator_arena.ref[mutable Arena&]
-    in restart_owner:
-        if self.pending_restart_path != null:
-            out.push(self.pending_restart_path)
-        for i in 0..<self.pending_restart_args.count:
-            out.push(self.pending_restart_args[i])
+    trusted Unsafe.MutableGlobal:
+        restart_owner: mutable Arena& = emulator_arena.ref[mutable Arena&]
+        in restart_owner:
+            if self.pending_restart_path != null:
+                out.push(self.pending_restart_path)
+            for i in 0..<self.pending_restart_args.count:
+                out.push(self.pending_restart_args[i])
     self.pending_restart <- false
     self.pending_restart_path <- ""
     self.pending_restart_args.clear()
@@ -278,13 +298,15 @@ def Emulator_TakePendingRestartArgs(self: mutable Emulator&) -> darray[static u8
 def Emulator_ExecuteRestartArgs(self: mutable Emulator&, args: darray[static u8&]) -> void:
     if args.count == 0:
         return
-    eboot: static u8& = args[0]
-    arena: Arena = zeroed
-    passthrough: mutable darray[static u8&] = []
-    in arena:
-        for i in 1..<args.count:
-            passthrough.push(args[i])
-    Emulator_Run(self.ref[mutable Emulator&], eboot, passthrough, null)
+    # args is non-empty here; args[0] is in range.
+    trusted Unsafe.UncheckedIndex:
+        eboot: static u8& = args[0]
+        arena: Arena = zeroed
+        passthrough: mutable darray[static u8&] = []
+        in arena:
+            for i in 1..<args.count:
+                passthrough.push(args[i])
+        Emulator_Run(self.ref[mutable Emulator&], eboot, passthrough, null)
 
 def Emulator_GetLastRunPath(self: Emulator&) -> static u8&:
     return self.last_run_path if self.last_run_path != null else ""
