@@ -229,41 +229,53 @@ def Linker_SetApp0HostRoot(self: mutable Linker&, root: static u8&) -> void:
 # per-call heap churn) and return a pointer to its NUL-terminated bytes. The
 # buffer is explicitly terminated below; the unbounded-string lint flags this
 # conservatively (it cannot prove the terminator) and is a warning here.
-def Linker_Substr(input: static u8&, start: usize, len: usize) -> static u8&:
-    out: mutable darray[u8] = []
-    owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
-    in owner:
-        for i in 0..<len:
-            out.push(input[start + i])
-        out.push(0)
-    return out[0].ref[static u8&]
+# input taken as cstr (sliceable) so the substring is a bounds-safe view that is
+# deep-copied into the persistent metadata arena (no unchecked indexing).
+def Linker_Substr(input: cstr, start: usize, len: usize) -> static u8&:
+    seg: sview = input[start:start + len]
+    out: mutable dstr = []
+    can Memory.Allocate, Abort.Panic:
+        trusted Unsafe.MutableGlobal:
+            owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
+            in owner:
+                out <- clone[dstr](seg)
+                out.push(0)
+    trusted Unsafe.PointerCast, Unsafe.UncheckedIndex:
+        return out[0].ref[static u8&]
 
-def Linker_Concat2(lhs: static u8&, rhs: static u8&) -> static u8&:
-    lhs_len: usize = static_strlen(lhs)
-    rhs_len: usize = static_strlen(rhs)
-    out: mutable darray[u8] = []
-    owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
-    in owner:
-        for i in 0..<lhs_len:
-            out.push(lhs[i])
-        for j in 0..<rhs_len:
-            out.push(rhs[j])
-        out.push(0)
-    return out[0].ref[static u8&]
+def Linker_Concat2(lhs: cstr, rhs: cstr) -> static u8&:
+    lhs_view: sview = lhs[0:lhs.len]
+    rhs_view: sview = rhs[0:rhs.len]
+    out: mutable dstr = []
+    can Memory.Allocate, Abort.Panic:
+        trusted Unsafe.MutableGlobal:
+            owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
+            in owner:
+                out <- clone[dstr](lhs_view)
+                j: mutable usize = 0
+                while j < rhs_view.len.usize():
+                    out.push(rhs_view[j])
+                    j <- j + 1
+                out.push(0)
+    trusted Unsafe.PointerCast, Unsafe.UncheckedIndex:
+        return out[0].ref[static u8&]
 
-def Linker_PathJoin(lhs: static u8&, rhs: static u8&) -> static u8&:
+def Linker_PathJoin(lhs: cstr, rhs: cstr) -> static u8&:
     if static_strlen(lhs) == 0:
         return rhs
     if static_strlen(rhs) == 0:
         return lhs
-    if lhs[static_strlen(lhs) - 1] == '/'.u8():
+    if Linker_StringHasSuffix(lhs, "/"):
         return Linker_Concat2(lhs, rhs)
     return Linker_Concat2(Linker_Concat2(lhs, "/"), rhs)
 
-def Linker_StringContainsSlash(input: static u8&) -> bool:
-    for i in 0..<static_strlen(input):
-        if input[i] == '/'.u8():
+def Linker_StringContainsSlash(input: cstr) -> bool:
+    view: sview = input[0:input.len]
+    i: mutable usize = 0
+    while i < view.len.usize():
+        if view[i] == '/'.u8():
             return true
+        i <- i + 1
     return false
 
 def Linker_StringHasSuffix(input: static u8&, suffix: static u8&) -> bool:
