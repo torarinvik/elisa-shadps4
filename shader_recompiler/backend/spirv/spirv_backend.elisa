@@ -102,6 +102,29 @@ const SPIRV_OP_GROUP_NON_UNIFORM_QUAD_BROADCAST: u16 = 365u16
 const SPIRV_OP_STORE: u16 = 62u16
 const SPIRV_OP_ACCESS_CHAIN: u16 = 65u16
 
+# emit_spirv_image.cpp: image instruction opcodes + operand-mask bits.
+const SPIRV_OP_SAMPLED_IMAGE: u16 = 86u16
+const SPIRV_OP_IMAGE_SAMPLE_IMPLICIT_LOD: u16 = 87u16
+const SPIRV_OP_IMAGE_SAMPLE_EXPLICIT_LOD: u16 = 88u16
+const SPIRV_OP_IMAGE_SAMPLE_DREF_IMPLICIT_LOD: u16 = 89u16
+const SPIRV_OP_IMAGE_SAMPLE_DREF_EXPLICIT_LOD: u16 = 90u16
+const SPIRV_OP_IMAGE_FETCH: u16 = 95u16
+const SPIRV_OP_IMAGE_GATHER: u16 = 96u16
+const SPIRV_OP_IMAGE_DREF_GATHER: u16 = 97u16
+const SPIRV_OP_IMAGE_READ: u16 = 98u16
+const SPIRV_OP_IMAGE_WRITE: u16 = 99u16
+const SPIRV_OP_IMAGE_QUERY_SIZE_LOD: u16 = 103u16
+const SPIRV_OP_IMAGE_QUERY_SIZE: u16 = 104u16
+const SPIRV_OP_IMAGE_QUERY_LOD: u16 = 105u16
+const SPIRV_OP_IMAGE_QUERY_LEVELS: u16 = 106u16
+
+const SPIRV_IMAGE_OPERAND_BIAS: u32 = 0x1u32
+const SPIRV_IMAGE_OPERAND_LOD: u32 = 0x2u32
+const SPIRV_IMAGE_OPERAND_GRAD: u32 = 0x4u32
+const SPIRV_IMAGE_OPERAND_CONST_OFFSET: u32 = 0x8u32
+const SPIRV_IMAGE_OPERAND_OFFSET: u32 = 0x10u32
+const SPIRV_IMAGE_OPERAND_SAMPLE: u32 = 0x40u32
+
 # emit_spirv_atomic.cpp: atomic opcodes.
 const SPIRV_OP_IMAGE_TEXEL_POINTER: u16 = 60u16
 const SPIRV_OP_ATOMIC_EXCHANGE: u16 = 229u16
@@ -281,6 +304,10 @@ struct SpirvTextureDefinition:
     view_type: mutable u32
     is_integer: mutable bool
     is_storage: mutable bool
+    # Result types for sampled data: the vec4 family member and the scalar one
+    # (the C++ TextureDefinition reaches these via data_types->Get(4)/Get(1)).
+    data_type_vec4: mutable u32
+    data_type_scalar: mutable u32
 
 # Mirrors Shader::Backend::SPIRV::EmitContext. The arithmetic type ids are
 # allocated in exactly the order of EmitContext::DefineArithmeticTypes so that
@@ -370,6 +397,7 @@ struct SpirvEmitContext:
     samplers: mutable darray[u32]
     image_u32: mutable u32
     image_f32: mutable u32
+    sampler_type: mutable u32
 
 struct SpirvEmitResult:
     words: mutable darray[u32]
@@ -1719,6 +1747,157 @@ def SpirvEmitImageAtomicXor32(ctx: mutable SpirvEmitContext&, handle: u32, coord
 
 def SpirvEmitImageAtomicExchange32(ctx: mutable SpirvEmitContext&, handle: u32, coords: u32, value: u32) -> u32:
     return SpirvEmitImageAtomicU32(ctx, SPIRV_OP_ATOMIC_EXCHANGE, handle, coords, value)
+
+# ------------------------------------------------------------
+# emit_spirv_image.cpp emission primitives. The IR-driven offset/derivative
+# resolution (ImageOperands::AddOffset reads IR::Value/Inst) and the named
+# EmitImageSample* wrappers belong with the IR->SPIR-V dispatch port; these are
+# the reusable, IR-independent emitters built on an explicit operand list.
+# ------------------------------------------------------------
+
+# ImageOperands: an accumulated operand-mask + trailing operand ids, mirroring
+# the C++ ImageOperands helper.
+struct SpirvImageOperands:
+    mask: mutable u32
+    operands: mutable darray[u32]
+
+def SpirvImageOperands_Default() -> SpirvImageOperands:
+    r: mutable SpirvImageOperands = zeroed
+    return r
+
+# Add a single operand under a mask bit (ignored when the value id is invalid).
+def SpirvImageOperands_Add1(ops: mutable SpirvImageOperands&, mask_bit: u32, value: u32) -> void:
+    if value != 0u32:
+        ops.mask <- ops.mask | mask_bit
+        can Memory.Allocate, Abort.Panic:
+            owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+            in owner:
+                ops.operands.push(value)
+
+# Add a paired operand (e.g. Grad dx/dy) under a mask bit.
+def SpirvImageOperands_Add2(ops: mutable SpirvImageOperands&, mask_bit: u32, v1: u32, v2: u32) -> void:
+    ops.mask <- ops.mask | mask_bit
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            ops.operands.push(v1)
+            ops.operands.push(v2)
+
+# Trailing word count contributed by the image operands (mask word + operands).
+def SpirvImageOperands_TailWords(ops: SpirvImageOperands) -> usize:
+    if ops.mask != 0u32:
+        return 1usize + ops.operands.count
+    return 0usize
+
+def SpirvEmitImageOperandsTail(ctx: mutable SpirvEmitContext&, ops: SpirvImageOperands) -> void:
+    if ops.mask != 0u32:
+        SpirvEmitContext_AppendWord(ctx, ops.mask)
+        for i in 0..<ops.operands.count:
+            SpirvEmitContext_AppendWord(ctx, ops.operands[i])
+
+# OpSampledImage: <ResultType> <ResultId> <Image> <Sampler> (5 words).
+def SpirvEmitSampledImage(ctx: mutable SpirvEmitContext&, result_type: u32, image: u32, sampler: u32) -> u32:
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_SAMPLED_IMAGE, result_type, image, sampler)
+
+# OpImageSample{Implicit,Explicit}Lod: <ResultType> <ResultId> <SampledImage>
+# <Coordinate> [<ImageOperands> <Operands...>] (5 + tail words).
+def SpirvEmitImageSampleLod(ctx: mutable SpirvEmitContext&, opcode: u16, result_type: u32, sampled_image: u32, coords: u32, ops: SpirvImageOperands) -> u32:
+    result_id: u32 = SpirvEmitContext_AllocateId(ctx)
+    word_count: u16 = (5usize + SpirvImageOperands_TailWords(ops)).u16()
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(opcode, word_count))
+    SpirvEmitContext_AppendWord(ctx, result_type)
+    SpirvEmitContext_AppendWord(ctx, result_id)
+    SpirvEmitContext_AppendWord(ctx, sampled_image)
+    SpirvEmitContext_AppendWord(ctx, coords)
+    SpirvEmitImageOperandsTail(ctx, ops)
+    return result_id
+
+def SpirvEmitImageSampleImplicitLod(ctx: mutable SpirvEmitContext&, result_type: u32, sampled_image: u32, coords: u32, ops: SpirvImageOperands) -> u32:
+    return SpirvEmitImageSampleLod(ctx, SPIRV_OP_IMAGE_SAMPLE_IMPLICIT_LOD, result_type, sampled_image, coords, ops)
+
+def SpirvEmitImageSampleExplicitLod(ctx: mutable SpirvEmitContext&, result_type: u32, sampled_image: u32, coords: u32, ops: SpirvImageOperands) -> u32:
+    return SpirvEmitImageSampleLod(ctx, SPIRV_OP_IMAGE_SAMPLE_EXPLICIT_LOD, result_type, sampled_image, coords, ops)
+
+# OpImageSampleDref{Implicit,Explicit}Lod: extra Dref operand before the mask.
+def SpirvEmitImageSampleDrefLod(ctx: mutable SpirvEmitContext&, opcode: u16, result_type: u32, sampled_image: u32, coords: u32, dref: u32, ops: SpirvImageOperands) -> u32:
+    result_id: u32 = SpirvEmitContext_AllocateId(ctx)
+    word_count: u16 = (6usize + SpirvImageOperands_TailWords(ops)).u16()
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(opcode, word_count))
+    SpirvEmitContext_AppendWord(ctx, result_type)
+    SpirvEmitContext_AppendWord(ctx, result_id)
+    SpirvEmitContext_AppendWord(ctx, sampled_image)
+    SpirvEmitContext_AppendWord(ctx, coords)
+    SpirvEmitContext_AppendWord(ctx, dref)
+    SpirvEmitImageOperandsTail(ctx, ops)
+    return result_id
+
+# OpImageFetch / OpImageRead: <ResultType> <ResultId> <Image> <Coordinate>
+# [<ImageOperands> <Operands...>] (5 + tail words).
+def SpirvEmitImageFetchOrRead(ctx: mutable SpirvEmitContext&, opcode: u16, result_type: u32, image: u32, coords: u32, ops: SpirvImageOperands) -> u32:
+    result_id: u32 = SpirvEmitContext_AllocateId(ctx)
+    word_count: u16 = (5usize + SpirvImageOperands_TailWords(ops)).u16()
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(opcode, word_count))
+    SpirvEmitContext_AppendWord(ctx, result_type)
+    SpirvEmitContext_AppendWord(ctx, result_id)
+    SpirvEmitContext_AppendWord(ctx, image)
+    SpirvEmitContext_AppendWord(ctx, coords)
+    SpirvEmitImageOperandsTail(ctx, ops)
+    return result_id
+
+def SpirvEmitImageFetch(ctx: mutable SpirvEmitContext&, result_type: u32, image: u32, coords: u32, ops: SpirvImageOperands) -> u32:
+    return SpirvEmitImageFetchOrRead(ctx, SPIRV_OP_IMAGE_FETCH, result_type, image, coords, ops)
+
+def SpirvEmitImageRead(ctx: mutable SpirvEmitContext&, result_type: u32, image: u32, coords: u32, ops: SpirvImageOperands) -> u32:
+    return SpirvEmitImageFetchOrRead(ctx, SPIRV_OP_IMAGE_READ, result_type, image, coords, ops)
+
+# OpImageWrite: <Image> <Coordinate> <Texel> [<ImageOperands> <Operands...>]
+# (4 + tail words, no result id).
+def SpirvEmitImageWrite(ctx: mutable SpirvEmitContext&, image: u32, coords: u32, texel: u32, ops: SpirvImageOperands) -> void:
+    word_count: u16 = (4usize + SpirvImageOperands_TailWords(ops)).u16()
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(SPIRV_OP_IMAGE_WRITE, word_count))
+    SpirvEmitContext_AppendWord(ctx, image)
+    SpirvEmitContext_AppendWord(ctx, coords)
+    SpirvEmitContext_AppendWord(ctx, texel)
+    SpirvEmitImageOperandsTail(ctx, ops)
+
+# OpImageGather: extra Component operand before the mask.
+def SpirvEmitImageGather(ctx: mutable SpirvEmitContext&, result_type: u32, sampled_image: u32, coords: u32, component: u32, ops: SpirvImageOperands) -> u32:
+    result_id: u32 = SpirvEmitContext_AllocateId(ctx)
+    word_count: u16 = (6usize + SpirvImageOperands_TailWords(ops)).u16()
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(SPIRV_OP_IMAGE_GATHER, word_count))
+    SpirvEmitContext_AppendWord(ctx, result_type)
+    SpirvEmitContext_AppendWord(ctx, result_id)
+    SpirvEmitContext_AppendWord(ctx, sampled_image)
+    SpirvEmitContext_AppendWord(ctx, coords)
+    SpirvEmitContext_AppendWord(ctx, component)
+    SpirvEmitImageOperandsTail(ctx, ops)
+    return result_id
+
+# OpImageDrefGather: extra Dref operand before the mask.
+def SpirvEmitImageDrefGather(ctx: mutable SpirvEmitContext&, result_type: u32, sampled_image: u32, coords: u32, dref: u32, ops: SpirvImageOperands) -> u32:
+    result_id: u32 = SpirvEmitContext_AllocateId(ctx)
+    word_count: u16 = (6usize + SpirvImageOperands_TailWords(ops)).u16()
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(SPIRV_OP_IMAGE_DREF_GATHER, word_count))
+    SpirvEmitContext_AppendWord(ctx, result_type)
+    SpirvEmitContext_AppendWord(ctx, result_id)
+    SpirvEmitContext_AppendWord(ctx, sampled_image)
+    SpirvEmitContext_AppendWord(ctx, coords)
+    SpirvEmitContext_AppendWord(ctx, dref)
+    SpirvEmitImageOperandsTail(ctx, ops)
+    return result_id
+
+# Image queries.
+def SpirvEmitImageQuerySizeLod(ctx: mutable SpirvEmitContext&, result_type: u32, image: u32, lod: u32) -> u32:
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_IMAGE_QUERY_SIZE_LOD, result_type, image, lod)
+
+def SpirvEmitImageQuerySize(ctx: mutable SpirvEmitContext&, result_type: u32, image: u32) -> u32:
+    return SpirvEmitUnaryOp(ctx, SPIRV_OP_IMAGE_QUERY_SIZE, result_type, image)
+
+def SpirvEmitImageQueryLevels(ctx: mutable SpirvEmitContext&, result_type: u32, image: u32) -> u32:
+    return SpirvEmitUnaryOp(ctx, SPIRV_OP_IMAGE_QUERY_LEVELS, result_type, image)
+
+def SpirvEmitImageQueryLod(ctx: mutable SpirvEmitContext&, result_type: u32, sampled_image: u32, coords: u32) -> u32:
+    return SpirvEmitBinaryOp(ctx, SPIRV_OP_IMAGE_QUERY_LOD, result_type, sampled_image, coords)
 
 # ------------------------------------------------------------
 # emit_spirv_convert.cpp: width/format conversions (all 4-word unary ops).
