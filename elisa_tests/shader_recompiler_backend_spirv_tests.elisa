@@ -234,6 +234,57 @@ def spirv_backend_emit_integer_matches_cpp() -> void:
         _ = iabs
 
 @test
+def spirv_backend_emit_bitwise_conversion_matches_cpp() -> void:
+    can Abort.Panic, Memory.Allocate:
+        ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
+        ctx.uses_fp16 <- true
+        ctx.uses_fp64 <- true
+        SpirvEmitContext_DefineArithmeticTypes(ctx)
+        SpirvEmitContext_DefineExtInst(ctx)
+        # --- Plain reinterprets are single 4-word OpBitcast. ---
+        b0: usize = ctx.words.count
+        bc: u32 = SpirvEmitBitCastU32F32(ctx, 100u32)
+        assert ctx.words.count == b0 + 4usize
+        assert ctx.words[b0] == SpirvWord(SPIRV_OP_BITCAST, 4u16)
+        assert ctx.words[b0 + 1usize] == ctx.u32_id
+        assert ctx.words[b0 + 2usize] == bc
+        # --- PackUint2x32 reinterprets to U64. ---
+        b1: usize = ctx.words.count
+        p2x32: u32 = SpirvEmitPackUint2x32(ctx, 101u32)
+        assert ctx.words[b1 + 1usize] == ctx.u64_id
+        _ = p2x32
+        # --- PackHalf2x16: 6-word GLSL ext-inst producing U32. ---
+        b2: usize = ctx.words.count
+        ph: u32 = SpirvEmitPackHalf2x16(ctx, 102u32)
+        assert ctx.words.count == b2 + 6usize
+        assert ctx.words[b2] == SpirvWord(SPIRV_OP_EXT_INST, 6u16)
+        assert ctx.words[b2 + 1usize] == ctx.u32_id
+        assert ctx.words[b2 + 4usize] == GLSL_STD_450_PACK_HALF2X16
+        _ = ph
+        # --- UnpackUnorm4x8 produces F32x4. ---
+        b3: usize = ctx.words.count
+        uu: u32 = SpirvEmitUnpackUnorm4x8(ctx, 103u32)
+        assert ctx.words[b3 + 1usize] == ctx.f32x4_id
+        assert ctx.words[b3 + 4usize] == GLSL_STD_450_UNPACK_UNORM4X8
+        _ = uu
+        # --- PackUint2x16: bitcast u32x2, two extracts, two consts, insert. ---
+        b4: usize = ctx.words.count
+        p2x16: u32 = SpirvEmitPackUint2x16(ctx, 104u32)
+        assert ctx.words[b4] == SpirvWord(SPIRV_OP_BITCAST, 4u16)
+        assert ctx.words[b4 + 1usize] == ctx.u32x2_id
+        # Final instruction is a 7-word OpBitFieldInsert producing the result.
+        assert ctx.words[ctx.words.count - 7usize] == SpirvWord(SPIRV_OP_BIT_FIELD_INSERT, 7u16)
+        assert p2x16 == ctx.words[ctx.words.count - 5usize]
+        # --- UnpackSint4x8 ends in a bitcast to F32x4. ---
+        b5: usize = ctx.words.count
+        us4: u32 = SpirvEmitUnpackSint4x8(ctx, 105u32)
+        # The offset/size ConstU32 operands are emitted before the first extract.
+        assert ctx.words[b5] == SpirvWord(SPIRV_OP_CONSTANT, 4u16)
+        assert ctx.words[ctx.words.count - 4usize] == SpirvWord(SPIRV_OP_BITCAST, 4u16)
+        assert ctx.words[ctx.words.count - 3usize] == ctx.f32x4_id
+        assert us4 == ctx.words[ctx.words.count - 2usize]
+
+@test
 def spirv_backend_emit_convert_matches_cpp() -> void:
     can Abort.Panic, Memory.Allocate:
         ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
