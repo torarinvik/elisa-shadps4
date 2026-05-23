@@ -106,6 +106,14 @@ enum {
     ELISA_GUEST_EXEC_PHASE_UNSUPPORTED_RETURN = 900,
 };
 
+enum {
+    ELISA_GUEST_EXEC_PC_SOURCE_NONE = 0,
+    ELISA_GUEST_EXEC_PC_SOURCE_SIGNAL_UCONTEXT = 1,
+    ELISA_GUEST_EXEC_PC_SOURCE_FALLBACK_CHILD_SIGLONGJMP = 2,
+    ELISA_GUEST_EXEC_PC_SOURCE_FALLBACK_PARENT_SILENT_CHILD = 3,
+    ELISA_GUEST_EXEC_PC_SOURCE_FALLBACK_PARENT_STATUS = 4,
+};
+
 static int32_t elisa_guest_exec_last_status = 0;
 static int32_t elisa_guest_exec_last_signal = 0;
 static uintptr_t elisa_guest_exec_last_fault_address = 0;
@@ -130,19 +138,29 @@ static uintptr_t elisa_guest_exec_signal_stack_word1 = 0;
 static uintptr_t elisa_guest_exec_prejump_rdi = 0;
 static uintptr_t elisa_guest_exec_prejump_rsi = 0;
 static uintptr_t elisa_guest_exec_prejump_rsp = 0;
+static uintptr_t elisa_guest_exec_signal_guest_pc = 0;
+static uintptr_t elisa_guest_exec_fallback_guest_pc = 0;
 static uint32_t elisa_guest_exec_entry_native_prot = 0xffffffffu;
 static uint32_t elisa_guest_exec_pc_native_prot = 0xffffffffu;
 static int32_t elisa_guest_exec_last_pc_was_fallback = 0;
+static int32_t elisa_guest_exec_last_pc_source = ELISA_GUEST_EXEC_PC_SOURCE_NONE;
 static int32_t elisa_guest_exec_last_errno = 0;
 static volatile int32_t elisa_guest_exec_last_native_phase = ELISA_GUEST_EXEC_PHASE_NONE;
 static int32_t elisa_guest_exec_boundary_callback_count = 0;
 static uint64_t elisa_guest_exec_boundary_callback_reason = 0;
+static uint64_t elisa_guest_exec_failed_relocation_count = 0;
 static int32_t elisa_guest_exec_synthetic_observed_argc = 0;
 static uintptr_t elisa_guest_exec_synthetic_observed_argv0 = 0;
 static uintptr_t elisa_guest_exec_synthetic_observed_entry = 0;
 static uintptr_t elisa_guest_exec_synthetic_observed_params = 0;
 static uintptr_t elisa_guest_exec_synthetic_observed_exit_func = 0;
 static uintptr_t elisa_guest_exec_synthetic_observed_stack = 0;
+static uintptr_t elisa_guest_exec_aerolib_fallback_caller_pc = 0;
+static uintptr_t elisa_guest_exec_aerolib_fallback_slot_va = 0;
+static uint64_t elisa_guest_exec_aerolib_fallback_callsite_bytes = 0;
+static uint64_t elisa_guest_exec_aerolib_fallback_invocations = 0;
+static uintptr_t elisa_guest_exec_aerolib_fallback_plt_va = 0;
+static uint64_t elisa_guest_exec_aerolib_fallback_plt_bytes = 0;
 
 typedef struct ElisaGuestExecForkReport {
     volatile int32_t boundary_reached;
@@ -172,11 +190,20 @@ typedef struct ElisaGuestExecForkReport {
     volatile uintptr_t prejump_rdi;
     volatile uintptr_t prejump_rsi;
     volatile uintptr_t prejump_rsp;
+    volatile uintptr_t signal_guest_pc;
+    volatile uintptr_t fallback_guest_pc;
+    volatile int32_t pc_source;
     volatile uint32_t entry_native_prot;
     volatile uint32_t pc_native_prot;
     volatile uintptr_t entry_addr;
     volatile int32_t native_phase;
     volatile int32_t pc_was_fallback;
+    volatile uintptr_t aerolib_fallback_caller_pc;
+    volatile uintptr_t aerolib_fallback_slot_va;
+    volatile uint64_t aerolib_fallback_callsite_bytes;
+    volatile uint64_t aerolib_fallback_invocations;
+    volatile uintptr_t aerolib_fallback_plt_va;
+    volatile uint64_t aerolib_fallback_plt_bytes;
 } ElisaGuestExecForkReport;
 
 static ElisaGuestExecForkReport* elisa_guest_exec_fork_report = NULL;
@@ -186,6 +213,28 @@ static void elisa_guest_exec_set_native_phase(int32_t phase) {
     if (elisa_guest_exec_fork_report != NULL) {
         elisa_guest_exec_fork_report->native_phase = phase;
     }
+}
+
+static void elisa_guest_exec_record_fallback_pc(uintptr_t pc, int32_t source) {
+    if (pc == 0) {
+        return;
+    }
+    elisa_guest_exec_fallback_guest_pc = pc;
+    elisa_guest_exec_last_guest_pc = pc;
+    elisa_guest_exec_last_pc_was_fallback = 1;
+    elisa_guest_exec_last_pc_source = source;
+    if (elisa_guest_exec_fork_report != NULL) {
+        elisa_guest_exec_fork_report->fallback_guest_pc = pc;
+        elisa_guest_exec_fork_report->guest_pc = pc;
+        elisa_guest_exec_fork_report->pc_source = source;
+        elisa_guest_exec_fork_report->pc_was_fallback = 1;
+    }
+}
+
+static int32_t elisa_guest_exec_pc_source_is_fallback(int32_t source) {
+    return source == ELISA_GUEST_EXEC_PC_SOURCE_FALLBACK_CHILD_SIGLONGJMP ||
+           source == ELISA_GUEST_EXEC_PC_SOURCE_FALLBACK_PARENT_SILENT_CHILD ||
+           source == ELISA_GUEST_EXEC_PC_SOURCE_FALLBACK_PARENT_STATUS;
 }
 
 #define ELISA_GUEST_EXEC_WRITABLE_PAGE_CACHE 65536u
@@ -400,7 +449,12 @@ static void elisa_guest_exec_signal_handler(int sig, siginfo_t* info, void* uctx
     elisa_guest_exec_last_status = -sig;
     elisa_guest_exec_last_signal = sig;
     elisa_guest_exec_last_fault_address = info != NULL ? (uintptr_t)info->si_addr : 0;
-    elisa_guest_exec_last_guest_pc = elisa_guest_exec_extract_pc(uctx);
+    elisa_guest_exec_signal_guest_pc = elisa_guest_exec_extract_pc(uctx);
+    elisa_guest_exec_fallback_guest_pc = 0;
+    elisa_guest_exec_last_pc_was_fallback = 0;
+    elisa_guest_exec_last_pc_source = elisa_guest_exec_signal_guest_pc != 0 ?
+        ELISA_GUEST_EXEC_PC_SOURCE_SIGNAL_UCONTEXT : ELISA_GUEST_EXEC_PC_SOURCE_NONE;
+    elisa_guest_exec_last_guest_pc = elisa_guest_exec_signal_guest_pc;
     elisa_guest_exec_last_guest_sp = elisa_guest_exec_extract_sp(uctx);
     elisa_guest_exec_last_guest_bp = elisa_guest_exec_extract_bp(uctx);
     elisa_guest_exec_last_guest_rdi = elisa_guest_exec_extract_greg(uctx, 0);
@@ -439,6 +493,9 @@ static void elisa_guest_exec_signal_handler(int sig, siginfo_t* info, void* uctx
         elisa_guest_exec_fork_report->prejump_rdi = elisa_guest_exec_prejump_rdi;
         elisa_guest_exec_fork_report->prejump_rsi = elisa_guest_exec_prejump_rsi;
         elisa_guest_exec_fork_report->prejump_rsp = elisa_guest_exec_prejump_rsp;
+        elisa_guest_exec_fork_report->signal_guest_pc = elisa_guest_exec_signal_guest_pc;
+        elisa_guest_exec_fork_report->fallback_guest_pc = elisa_guest_exec_fallback_guest_pc;
+        elisa_guest_exec_fork_report->pc_source = elisa_guest_exec_last_pc_source;
         elisa_guest_exec_fork_report->pc_was_fallback = elisa_guest_exec_last_pc_was_fallback;
         elisa_guest_exec_fork_report->pc_native_prot = elisa_guest_exec_pc_native_prot;
         if (elisa_guest_exec_fork_report->execution_stage < 6) {
@@ -588,6 +645,132 @@ void ElisaGuestExec_ReportFirstBoundary(int32_t reason) {
     }
 }
 
+// Native AeroLib fallback stub. Unresolved JUMP_SLOT/GLOB_DAT relocations and
+// NID-table fallbacks are patched to point directly at this function, so when
+// the guest code does `call qword ptr [GOT_slot]` it lands here and
+// __builtin_return_address(0) is exactly the guest call site. We record the
+// first caller PC (and, when the call site uses the standard RIP-relative
+// `FF 15 disp32` encoding, the GOT slot virtual address it dispatched through)
+// into the shared fork report so the parent can attribute the crash to a
+// specific unimplemented import. Returns 0 just like the previous stub.
+uint64_t ElisaGuestExec_AeroLibFallbackStubImpl(void) {
+    uintptr_t caller_pc = (uintptr_t)__builtin_return_address(0);
+    if (elisa_guest_exec_fork_report != NULL) {
+        elisa_guest_exec_fork_report->aerolib_fallback_invocations++;
+        if (elisa_guest_exec_fork_report->aerolib_fallback_caller_pc == 0 && caller_pc != 0) {
+            elisa_guest_exec_fork_report->aerolib_fallback_caller_pc = caller_pc;
+            const uint8_t* p = (const uint8_t*)caller_pc;
+            uint64_t raw = 0;
+            for (int i = 1; i <= 8; ++i) {
+                raw = (raw << 8) | (uint64_t)p[-i];
+            }
+            elisa_guest_exec_fork_report->aerolib_fallback_callsite_bytes = raw;
+            uintptr_t slot_va = 0;
+            // Case 1: `call qword ptr [rip+disp32]` (FF 15 disp32), 6 bytes
+            // ending at caller_pc. The GOT slot is the RIP-relative target.
+            if (p[-6] == 0xFF && p[-5] == 0x15) {
+                int32_t disp = (int32_t)((uint32_t)p[-4] |
+                                         ((uint32_t)p[-3] << 8) |
+                                         ((uint32_t)p[-2] << 16) |
+                                         ((uint32_t)p[-1] << 24));
+                slot_va = (uintptr_t)((int64_t)caller_pc + (int64_t)disp);
+            } else if (p[-5] == 0xE8) {
+                // Case 2: `call rel32` (E8 disp32), 5 bytes ending at
+                // caller_pc, targeting a PLT thunk. Follow the thunk: a
+                // standard PLT entry is `jmp qword ptr [rip+disp32]`
+                // (FF 25 disp32); the GOT slot is its RIP-relative target.
+                int32_t rel = (int32_t)((uint32_t)p[-4] |
+                                        ((uint32_t)p[-3] << 8) |
+                                        ((uint32_t)p[-2] << 16) |
+                                        ((uint32_t)p[-1] << 24));
+                uintptr_t plt = (uintptr_t)((int64_t)caller_pc + (int64_t)rel);
+                elisa_guest_exec_fork_report->aerolib_fallback_plt_va = plt;
+                const uint8_t* q = (const uint8_t*)plt;
+                uint64_t plt_raw = 0;
+                for (int i = 7; i >= 0; --i) {
+                    plt_raw = (plt_raw << 8) | (uint64_t)q[i];
+                }
+                elisa_guest_exec_fork_report->aerolib_fallback_plt_bytes = plt_raw;
+                if (q[0] == 0xFF && q[1] == 0x25) {
+                    int32_t disp = (int32_t)((uint32_t)q[2] |
+                                             ((uint32_t)q[3] << 8) |
+                                             ((uint32_t)q[4] << 16) |
+                                             ((uint32_t)q[5] << 24));
+                    // RIP for the jmp is the address after its 6 bytes.
+                    slot_va = (uintptr_t)((int64_t)plt + 6 + (int64_t)disp);
+                }
+            }
+            elisa_guest_exec_fork_report->aerolib_fallback_slot_va = slot_va;
+        }
+    }
+    ElisaGuestExec_ReportFirstBoundary(2 /* GUEST_EXEC_BOUNDARY_REASON_AEROLIB_FALLBACK */);
+    return 0;
+}
+
+uintptr_t ElisaGuestExec_AeroLibFallbackStubAddress(void) {
+    return (uintptr_t)(void*)&ElisaGuestExec_AeroLibFallbackStubImpl;
+}
+
+// Patch-time table: GOT slot virtual address -> import symbol name for every
+// relocation patched with the AeroLib fallback stub. Populated by the linker in
+// the parent process during relocation; queried by the parent after a guarded
+// run to attribute the captured fallback slot to a concrete symbol. The symbol
+// pointers are static strings owned by the program image, so storing the
+// pointer is safe for the lifetime of the process.
+#define ELISA_GUEST_EXEC_FALLBACK_SLOT_CAP 4096
+static uint64_t elisa_guest_exec_fallback_slot_addrs[ELISA_GUEST_EXEC_FALLBACK_SLOT_CAP];
+static const char* elisa_guest_exec_fallback_slot_names[ELISA_GUEST_EXEC_FALLBACK_SLOT_CAP];
+static uint32_t elisa_guest_exec_fallback_slot_count = 0;
+
+void ElisaGuestExec_RecordFallbackSlot(uint64_t slot_va, const char* name) {
+    if (elisa_guest_exec_fallback_slot_count >= ELISA_GUEST_EXEC_FALLBACK_SLOT_CAP) {
+        return;
+    }
+    elisa_guest_exec_fallback_slot_addrs[elisa_guest_exec_fallback_slot_count] = slot_va;
+    elisa_guest_exec_fallback_slot_names[elisa_guest_exec_fallback_slot_count] = name;
+    elisa_guest_exec_fallback_slot_count++;
+}
+
+void ElisaGuestExec_ResetFallbackSlots(void) {
+    elisa_guest_exec_fallback_slot_count = 0;
+}
+
+const char* ElisaGuestExec_FindFallbackSymbolBySlot(uint64_t slot_va) {
+    if (slot_va == 0) {
+        return NULL;
+    }
+    for (uint32_t i = 0; i < elisa_guest_exec_fallback_slot_count; ++i) {
+        if (elisa_guest_exec_fallback_slot_addrs[i] == slot_va) {
+            return elisa_guest_exec_fallback_slot_names[i];
+        }
+    }
+    return NULL;
+}
+
+uintptr_t ElisaGuestExec_AeroLibFallbackCallerPc(void) {
+    return elisa_guest_exec_aerolib_fallback_caller_pc;
+}
+
+uintptr_t ElisaGuestExec_AeroLibFallbackSlotVa(void) {
+    return elisa_guest_exec_aerolib_fallback_slot_va;
+}
+
+uint64_t ElisaGuestExec_AeroLibFallbackCallsiteBytes(void) {
+    return elisa_guest_exec_aerolib_fallback_callsite_bytes;
+}
+
+uint64_t ElisaGuestExec_AeroLibFallbackInvocations(void) {
+    return elisa_guest_exec_aerolib_fallback_invocations;
+}
+
+uintptr_t ElisaGuestExec_AeroLibFallbackPltVa(void) {
+    return elisa_guest_exec_aerolib_fallback_plt_va;
+}
+
+uint64_t ElisaGuestExec_AeroLibFallbackPltBytes(void) {
+    return elisa_guest_exec_aerolib_fallback_plt_bytes;
+}
+
 int32_t ElisaGuestExec_ReportedBoundaryReached(void) {
     return elisa_guest_exec_fork_report != NULL ? elisa_guest_exec_fork_report->boundary_reached : 0;
 }
@@ -637,15 +820,17 @@ static void __attribute__((unused)) elisa_guest_exec_absorb_fork_report(void) {
         elisa_guest_exec_fork_report->execution_stage >= 4) {
         elisa_guest_exec_fork_report->status = -11;
         if (elisa_guest_exec_fork_report->guest_pc == 0) {
-            elisa_guest_exec_fork_report->guest_pc = elisa_guest_exec_fork_report->entry_addr;
-            elisa_guest_exec_fork_report->pc_was_fallback = 1;
+            elisa_guest_exec_record_fallback_pc(
+                elisa_guest_exec_fork_report->entry_addr,
+                ELISA_GUEST_EXEC_PC_SOURCE_FALLBACK_PARENT_SILENT_CHILD);
         }
     }
     if (elisa_guest_exec_fork_report->status < 0 &&
         elisa_guest_exec_fork_report->guest_pc == 0 &&
         elisa_guest_exec_fork_report->entry_addr != 0) {
-        elisa_guest_exec_fork_report->guest_pc = elisa_guest_exec_fork_report->entry_addr;
-        elisa_guest_exec_fork_report->pc_was_fallback = 1;
+        elisa_guest_exec_record_fallback_pc(
+            elisa_guest_exec_fork_report->entry_addr,
+            ELISA_GUEST_EXEC_PC_SOURCE_FALLBACK_PARENT_STATUS);
     }
     if (elisa_guest_exec_fork_report->status != 0) {
         elisa_guest_exec_last_status = elisa_guest_exec_fork_report->status;
@@ -697,6 +882,32 @@ static void __attribute__((unused)) elisa_guest_exec_absorb_fork_report(void) {
         elisa_guest_exec_prejump_rdi = elisa_guest_exec_fork_report->prejump_rdi;
         elisa_guest_exec_prejump_rsi = elisa_guest_exec_fork_report->prejump_rsi;
         elisa_guest_exec_prejump_rsp = elisa_guest_exec_fork_report->prejump_rsp;
+    }
+    if (elisa_guest_exec_fork_report->signal_guest_pc != 0) {
+        elisa_guest_exec_signal_guest_pc = elisa_guest_exec_fork_report->signal_guest_pc;
+        if (!elisa_guest_exec_fork_report->pc_was_fallback) {
+            elisa_guest_exec_last_guest_pc = elisa_guest_exec_signal_guest_pc;
+        }
+    }
+    if (elisa_guest_exec_fork_report->fallback_guest_pc != 0) {
+        elisa_guest_exec_fallback_guest_pc = elisa_guest_exec_fork_report->fallback_guest_pc;
+    }
+    if (elisa_guest_exec_fork_report->aerolib_fallback_invocations != 0) {
+        elisa_guest_exec_aerolib_fallback_invocations =
+            elisa_guest_exec_fork_report->aerolib_fallback_invocations;
+        elisa_guest_exec_aerolib_fallback_caller_pc =
+            elisa_guest_exec_fork_report->aerolib_fallback_caller_pc;
+        elisa_guest_exec_aerolib_fallback_slot_va =
+            elisa_guest_exec_fork_report->aerolib_fallback_slot_va;
+        elisa_guest_exec_aerolib_fallback_callsite_bytes =
+            elisa_guest_exec_fork_report->aerolib_fallback_callsite_bytes;
+        elisa_guest_exec_aerolib_fallback_plt_va =
+            elisa_guest_exec_fork_report->aerolib_fallback_plt_va;
+        elisa_guest_exec_aerolib_fallback_plt_bytes =
+            elisa_guest_exec_fork_report->aerolib_fallback_plt_bytes;
+    }
+    if (elisa_guest_exec_fork_report->pc_source != 0) {
+        elisa_guest_exec_last_pc_source = elisa_guest_exec_fork_report->pc_source;
     }
     if (elisa_guest_exec_fork_report->entry_native_word0 != 0 ||
         elisa_guest_exec_fork_report->entry_native_word1 != 0) {
@@ -875,7 +1086,9 @@ static void __attribute__((noreturn)) elisa_guest_exec_run_child_main_entry(
             if (elisa_guest_exec_fork_report != NULL) {
                 elisa_guest_exec_fork_report->status = status;
                 if (elisa_guest_exec_fork_report->guest_pc == 0) {
-                    elisa_guest_exec_fork_report->guest_pc = params->entry_addr;
+                    elisa_guest_exec_record_fallback_pc(
+                        params->entry_addr,
+                        ELISA_GUEST_EXEC_PC_SOURCE_FALLBACK_CHILD_SIGLONGJMP);
                 }
             }
         }
@@ -1128,7 +1341,20 @@ uint32_t ElisaGuestExec_LastPCNativeProt(void) {
 }
 
 int32_t ElisaGuestExec_LastPCWasFallback(void) {
-    return elisa_guest_exec_last_pc_was_fallback;
+    return elisa_guest_exec_last_pc_was_fallback ||
+           elisa_guest_exec_pc_source_is_fallback(elisa_guest_exec_last_pc_source);
+}
+
+uintptr_t ElisaGuestExec_SignalGuestPC(void) {
+    return elisa_guest_exec_signal_guest_pc;
+}
+
+uintptr_t ElisaGuestExec_FallbackGuestPC(void) {
+    return elisa_guest_exec_fallback_guest_pc;
+}
+
+int32_t ElisaGuestExec_LastPCSource(void) {
+    return elisa_guest_exec_last_pc_source;
 }
 
 uint32_t ElisaGuestExec_NativeRegionCount(void) {
@@ -1172,6 +1398,9 @@ void ElisaGuestExec_ResetCrashState(void) {
     elisa_guest_exec_prejump_rdi = 0;
     elisa_guest_exec_prejump_rsi = 0;
     elisa_guest_exec_prejump_rsp = 0;
+    elisa_guest_exec_signal_guest_pc = 0;
+    elisa_guest_exec_fallback_guest_pc = 0;
+    elisa_guest_exec_last_pc_source = ELISA_GUEST_EXEC_PC_SOURCE_NONE;
     elisa_guest_exec_fault_word0 = 0;
     elisa_guest_exec_fault_word1 = 0;
     elisa_guest_exec_signal_stack_word0 = 0;
@@ -1181,12 +1410,19 @@ void ElisaGuestExec_ResetCrashState(void) {
     elisa_guest_exec_last_pc_was_fallback = 0;
     elisa_guest_exec_boundary_callback_count = 0;
     elisa_guest_exec_boundary_callback_reason = 0;
+    elisa_guest_exec_failed_relocation_count = 0;
     elisa_guest_exec_synthetic_observed_argc = 0;
     elisa_guest_exec_synthetic_observed_argv0 = 0;
     elisa_guest_exec_synthetic_observed_entry = 0;
     elisa_guest_exec_synthetic_observed_params = 0;
     elisa_guest_exec_synthetic_observed_exit_func = 0;
     elisa_guest_exec_synthetic_observed_stack = 0;
+    elisa_guest_exec_aerolib_fallback_caller_pc = 0;
+    elisa_guest_exec_aerolib_fallback_slot_va = 0;
+    elisa_guest_exec_aerolib_fallback_callsite_bytes = 0;
+    elisa_guest_exec_aerolib_fallback_invocations = 0;
+    elisa_guest_exec_aerolib_fallback_plt_va = 0;
+    elisa_guest_exec_aerolib_fallback_plt_bytes = 0;
 #if !defined(_WIN32)
     elisa_guest_exec_timeout_fired = 0;
 #endif
@@ -1847,6 +2083,9 @@ void ElisaGuestExec_EmitCusaArtifactSummary(uint64_t module_count, uint64_t tota
     fprintf(stdout,
             "CUSA07399_ARTIFACT execution_stage=%d boundary_status=%d boundary_reason=%d\n",
             execution_stage, boundary_status, boundary_reason);
+    fprintf(stdout,
+            "CUSA07399_ARTIFACT failed_relocations=%llu\n",
+            (unsigned long long)elisa_guest_exec_failed_relocation_count);
     fflush(stdout);
 }
 
@@ -1899,6 +2138,10 @@ void ElisaGuestExec_EmitCusaArtifactKV(const char* key, uint64_t value) {
             key != NULL ? key : "key",
             (unsigned long long)value);
     fflush(stdout);
+}
+
+void ElisaGuestExec_SetFailedRelocationCount(uint64_t count) {
+    elisa_guest_exec_failed_relocation_count = count;
 }
 
 #if defined(ELISA_GUEST_EXEC_STANDALONE_TEST)

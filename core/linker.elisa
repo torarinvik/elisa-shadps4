@@ -67,6 +67,7 @@ struct Linker:
     last_prx_export_resolved_count: mutable usize
     last_aerolib_fallback_resolved_count: mutable usize
     last_malformed_import_count: mutable usize
+    last_failed_relocation_count: mutable usize
     last_started_module_index: mutable s32
     last_start_result: mutable s32
     last_entry_addr: mutable VAddr
@@ -86,6 +87,7 @@ global mutable linker_singleton: Linker = Linker(
     SymbolsResolver(zeroed),
     0,
     false,
+    0,
     0,
     0,
     0,
@@ -114,6 +116,7 @@ def Linker_New() -> Linker:
         SymbolsResolver_new(),
         0,
         false,
+        0,
         0,
         0,
         0,
@@ -267,6 +270,33 @@ def Linker_NameMatchesNid(name: static u8&, nid_or_symbol: static u8&) -> bool:
         i <- i + 1
     return nid_or_symbol[i] == 0 or nid_or_symbol[i] == '#'.u8()
 
+# Patch-time table mapping each fallback-patched GOT slot virtual address to the
+# import symbol name it was meant to resolve. Used to attribute the runtime
+# AeroLib fallback boundary (whose slot VA the native stub recovers) back to a
+# concrete unimplemented import. The table lives in the native runtime so the
+# relocation hot path does not need an arena/Memory effect scope to record into
+# it.
+@link_name(ElisaGuestExec_RecordFallbackSlot)
+extern c_GuestExec_RecordFallbackSlot(slot_va: u64, name: static u8&) -> void
+
+@link_name(ElisaGuestExec_ResetFallbackSlots)
+extern c_GuestExec_ResetFallbackSlots() -> void
+
+@link_name(ElisaGuestExec_FindFallbackSymbolBySlot)
+extern c_GuestExec_FindFallbackSymbolBySlot(slot_va: u64) -> static u8&?
+
+def Linker_RecordFallbackSlot(slot_va: u64, symbol_name: static u8&) -> void:
+    c_GuestExec_RecordFallbackSlot(slot_va, symbol_name)
+
+def Linker_ResetFallbackSlots() -> void:
+    c_GuestExec_ResetFallbackSlots()
+
+def Linker_FindFallbackSymbolBySlot(slot_va: u64) -> static u8&:
+    result: static u8&? = c_GuestExec_FindFallbackSymbolBySlot(slot_va)
+    if result == null:
+        return ""
+    return result
+
 def Linker_RuntimeLifecycleNoop() -> int:
     return 0
 
@@ -411,8 +441,21 @@ def Linker_ApplyRelocationEntry(self: mutable Linker&, module: mutable Module&, 
             if import_index >= 0 and module.import_symbols[import_index.usize()].resolved:
                 resolved_addr <- module.import_symbols[import_index.usize()].resolved_virtual_addr
                 resolved <- true
+        if not resolved and (rel_type == R_X86_64_JUMP_SLOT or rel_type == R_X86_64_GLOB_DAT):
+            # Unresolved function-slot relocation: patch with the native fallback
+            # stub to prevent a NULL pointer crash at address 0. The native stub
+            # records the guest call site so we can attribute the first boundary
+            # to a specific unimplemented import.
+            resolved_addr <- GuestExec_AeroLibFallbackStubAddress().u64()
+            resolved <- true
         if resolved:
             value: u64 = resolved_addr + addend.u64()
+            # Record every slot that ends up holding the fallback stub, no matter
+            # which resolution path produced it (Linker_Resolve's built-in final
+            # fallback also returns the stub address), so the runtime fallback
+            # boundary can be attributed back to this relocation's symbol.
+            if resolved_addr == GuestExec_AeroLibFallbackStubAddress().u64():
+                Linker_RecordFallbackSlot(rel_virtual_addr, symbol_name)
             if Module_WriteImageU64(module.ref[mutable Module&], rel_virtual_addr, value):
                 _ = MemoryManager_WriteU64(memory, rel_virtual_addr.uintptr(), value)
                 module.applied_relocation_count <- module.applied_relocation_count + 1
@@ -434,7 +477,8 @@ def Linker_ApplyRelocationTable(self: mutable Linker&, module: mutable Module&, 
         offset: u64 = table_offset + (i.u64() * entry_size)
         if offset + size_of(elf_relocation).u64() <= module.dynamic_data.count.u64():
             rel: elf_relocation = Module_ReadRelocationAt(module, offset.usize())
-            _ = Linker_ApplyRelocationEntry(self.ref[mutable Linker&], module.ref[mutable Module&], rel)
+            if not Linker_ApplyRelocationEntry(self.ref[mutable Linker&], module.ref[mutable Module&], rel):
+                self.last_failed_relocation_count <- self.last_failed_relocation_count + 1
 
 def Linker_ApplyModuleRelocations(self: mutable Linker&, module: mutable Module&) -> void:
     entry_size: u64 = Module_GetRelaEntrySize(module)
@@ -449,6 +493,8 @@ def Linker_RelocateAllImports(self: mutable Linker&) -> void:
     self.last_prx_export_resolved_count <- 0
     self.last_aerolib_fallback_resolved_count <- 0
     self.last_malformed_import_count <- 0
+    self.last_failed_relocation_count <- 0
+    Linker_ResetFallbackSlots()
     for i in 0..<self.modules.count:
         Linker_RelocateAnyImports(self.ref[mutable Linker&], self.modules[i].ref[mutable Module&])
     self.relocated_all_imports <- true
@@ -645,7 +691,7 @@ def Linker_Resolve(self: mutable Linker&, name: static u8&, module: mutable Modu
         if Module_FindDefinedSymbolAddress(self.modules[module_index].ref[mutable Module&], name, out_virtual_address.ref[mutable u64&]):
             out_resolution_kind <- IMPORT_RESOLUTION_PRX_EXPORT
             return true
-    out_virtual_address <- Linker_AeroLibFallbackStub.uintptr().u64()
+    out_virtual_address <- GuestExec_AeroLibFallbackStubAddress().u64()
     out_resolution_kind <- IMPORT_RESOLUTION_AEROLIB_FALLBACK
     return true
 
@@ -663,6 +709,7 @@ def Linker_Execute(self: mutable Linker&, args: darray[static u8&]) -> s32:
     if not self.relocated_all_imports:
         Linker_RelocateAllImports(self.ref[mutable Linker&])
     GuestExec_RecordLink()
+    GuestExec_SetFailedRelocationCount(self.last_failed_relocation_count.u64())
     memory: mutable MemoryManager& = Memory_Instance()
     MemoryManager_SetupMemoryRegions(memory, ORBIS_KERNEL_FLEXIBLE_MEMORY_SIZE, true, true)
     index: mutable s32 = 0

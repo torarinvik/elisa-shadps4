@@ -147,6 +147,9 @@ def validate_artifacts(artifacts: dict[str, str]) -> list[str]:
     last_pc = to_int(artifact_get(artifacts, "guest_exec_last_pc", "last_guest_pc"))
     last_sp = to_int(artifact_get(artifacts, "guest_exec_last_sp", "last_guest_sp"))
     last_signal = to_int(artifact_get(artifacts, "guest_exec_last_signal", "last_signal"))
+    signal_pc = to_int(artifact_get(artifacts, "guest_exec_signal_pc"))
+    fallback_pc = to_int(artifact_get(artifacts, "guest_exec_fallback_pc"))
+    pc_was_fallback = to_int(artifact_get(artifacts, "guest_exec_last_pc_was_fallback"))
     accepted_boundary = boundary_status in {1, 2, 3, 4}
     accepted_captured_fault = boundary_status == -10 and execution_stage >= 6 and last_signal != 0
     accepted_timeout = boundary_status == -3 and execution_stage >= 4
@@ -154,6 +157,10 @@ def validate_artifacts(artifacts: dict[str, str]) -> list[str]:
         errors.append(f"bad-boundary-status-{boundary_status}")
     if boundary_status == -10 and last_pc == 0:
         errors.append("missing-crash-pc")
+    if boundary_status == -10 and signal_pc == 0:
+        errors.append("missing-true-signal-pc")
+    if boundary_status == -10 and pc_was_fallback != 0 and fallback_pc == 0:
+        errors.append("missing-fallback-pc")
     if boundary_status == -10 and last_sp == 0:
         errors.append("missing-crash-sp")
     if execution_stage < 4:
@@ -181,7 +188,22 @@ def diagnose_artifacts(artifacts: dict[str, str]) -> str:
     pc_native_prot = to_int(artifact_get(artifacts, "guest_exec_last_pc_native_prot"))
     prejump_rdi = to_int(artifact_get(artifacts, "guest_exec_prejump_rdi"))
     pc_was_fallback = to_int(artifact_get(artifacts, "guest_exec_last_pc_was_fallback"))
+    signal_pc = to_int(artifact_get(artifacts, "guest_exec_signal_pc"))
+    fallback_pc = to_int(artifact_get(artifacts, "guest_exec_fallback_pc"))
+    pc_source = to_int(artifact_get(artifacts, "guest_exec_last_pc_source"))
     argc = to_int(artifact_get(artifacts, "guest_exec_last_argc", "last_argc"))
+    if boundary_status == -10 and signal_pc == 0:
+        notes.append("true-signal-pc-missing")
+    if boundary_status == -10 and signal_pc != 0 and last_pc != signal_pc:
+        notes.append("effective-pc-differs-from-signal-pc")
+    if boundary_status == -10 and fallback_pc != 0 and fallback_pc == main_entry:
+        notes.append("fallback-pc-equals-entry")
+    if boundary_status == -10 and pc_source == 2:
+        notes.append("pc-source-child-siglongjmp-fallback")
+    if boundary_status == -10 and pc_source == 3:
+        notes.append("pc-source-parent-silent-child-fallback")
+    if boundary_status == -10 and pc_source == 4:
+        notes.append("pc-source-parent-status-fallback")
     if boundary_status == -10 and expected_params != 0 and last_rdi != expected_params:
         notes.append("guest-entry-rdi-not-entryparams")
     if boundary_status == -10 and expected_params != 0 and prejump_rdi != expected_params:
@@ -316,6 +338,9 @@ def main() -> int:
             prejump_rsp=artifact_get(artifacts, "guest_exec_prejump_rsp"),
             last_pc_native_prot=artifact_get(artifacts, "guest_exec_last_pc_native_prot"),
             last_pc_was_fallback=artifact_get(artifacts, "guest_exec_last_pc_was_fallback"),
+            signal_pc=artifact_get(artifacts, "guest_exec_signal_pc"),
+            fallback_pc=artifact_get(artifacts, "guest_exec_fallback_pc"),
+            pc_source=artifact_get(artifacts, "guest_exec_last_pc_source"),
             fault_word0=artifact_get(artifacts, "guest_exec_fault_word0"),
             fault_word1=artifact_get(artifacts, "guest_exec_fault_word1"),
             signal_stack_word0=artifact_get(artifacts, "guest_exec_signal_stack_word0"),
@@ -360,6 +385,9 @@ def main() -> int:
         prejump_rsp=artifact_get(artifacts, "guest_exec_prejump_rsp"),
         last_pc_native_prot=artifact_get(artifacts, "guest_exec_last_pc_native_prot"),
         last_pc_was_fallback=artifact_get(artifacts, "guest_exec_last_pc_was_fallback"),
+        signal_pc=artifact_get(artifacts, "guest_exec_signal_pc"),
+        fallback_pc=artifact_get(artifacts, "guest_exec_fallback_pc"),
+        pc_source=artifact_get(artifacts, "guest_exec_last_pc_source"),
         fault_word0=artifact_get(artifacts, "guest_exec_fault_word0"),
         fault_word1=artifact_get(artifacts, "guest_exec_fault_word1"),
         signal_stack_word0=artifact_get(artifacts, "guest_exec_signal_stack_word0"),
