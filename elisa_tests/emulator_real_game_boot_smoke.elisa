@@ -10,6 +10,13 @@ const REAL_GAME_BOOT_EBOOT: static u8& = "/Users/torarinvikbjarko/Documents/Codi
 const REAL_GAME_BOOT_ARTIFACT_PATH: static u8& = "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/elisa-shad-ps4-from-scratch/cusa07399_artifacts.txt"
 const REAL_GAME_BOOT_HANDOFF_MANIFEST_PATH: static u8& = "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/elisa-shad-ps4-from-scratch/cusa07399_handoff_manifest.txt"
 
+global mutable dbg_reloc_boot_count: u64 = 0
+global mutable dbg_reloc_boot_fp: u64 = 0
+global mutable dbg_reloc_pass_a_count: u64 = 0
+global mutable dbg_reloc_pass_b_count: u64 = 0
+global mutable dbg_reloc_pass_a_fp: u64 = 0
+global mutable dbg_reloc_pass_b_fp: u64 = 0
+
 def RealGameBoot_Check(cond: bool, message: static u8&) -> void:
     if not cond:
         panic(message)
@@ -24,6 +31,27 @@ def RealGameBoot_EmitArtifactKV(file: mutable IOFile&, key: static u8&, value: u
         line: mutable u8[128] = zeroed
         written: int = snprintf(line[0].ref[mutable u8&], 128usize, "CUSA07399_ARTIFACT %s=%llu", key, value)
         RealGameBoot_WriteLine(file, line[0].ref[mutable u8&], written)
+
+# Dump the complete patch-time AeroLib fallback slot table. Because import
+# resolution is currently nondeterministic (which slots fall to the fallback
+# stub varies run to run), the full table lets us cross-reference whatever slot
+# the guest happens to call first against every unimplemented import, keyed by
+# owning module + .dynsym symbol index (the ELF symbol name is usually empty).
+def RealGameBoot_EmitFallbackSlotTable(file: mutable IOFile&) -> void:
+    can Memory.Allocate, Console.Format:
+        count: u32 = Linker_FallbackSlotCount()
+        limit: mutable usize = count.usize()
+        if limit > 256usize:
+            limit <- 256usize
+        i: mutable usize = 0
+        while i < limit:
+            idx: u32 = i.u32()
+            line: mutable u8[512] = zeroed
+            module_text: static u8& = Linker_FallbackSlotModuleAt(idx)
+            symbol_text: static u8& = Linker_FallbackSlotSymbolAt(idx)
+            written: int = snprintf(line[0].ref[mutable u8&], 512usize, "CUSA07399_ARTIFACT fallback_slot index=%llu slot_va=%llu module=%s symbol=%s symbol_index=%llu rel_type=%llu", i.u64(), Linker_FallbackSlotVaAt(idx), module_text, symbol_text, Linker_FallbackSlotSymbolIndexAt(idx).u64(), Linker_FallbackSlotRelTypeAt(idx).u64())
+            RealGameBoot_WriteLine(file, line[0].ref[mutable u8&], written)
+            i <- i + 1
 
 def RealGameBoot_EmitArtifactSignedKV(file: mutable IOFile&, key: static u8&, value: s32) -> void:
     can Memory.Allocate, Console.Format:
@@ -251,7 +279,25 @@ def RealGameBoot_EmitArtifacts(linker: Linker&, guarded_status: s32) -> void:
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "aerolib_fallback_callsite_bytes", GuestExec_AeroLibFallbackCallsiteBytes())
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "aerolib_fallback_plt_va", GuestExec_AeroLibFallbackPltVa())
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "aerolib_fallback_plt_bytes", GuestExec_AeroLibFallbackPltBytes())
-        RealGameBoot_EmitArtifactStringKV(file.ref[mutable IOFile&], "aerolib_fallback_symbol", Linker_FindFallbackSymbolBySlot(GuestExec_AeroLibFallbackSlotVa()))
+        hit_slot: u64 = GuestExec_AeroLibFallbackSlotVa()
+        RealGameBoot_EmitArtifactSignedKV(file.ref[mutable IOFile&], "aerolib_fallback_slot_index", Linker_FindFallbackSlotIndexBySlot(hit_slot))
+        RealGameBoot_EmitArtifactStringKV(file.ref[mutable IOFile&], "aerolib_fallback_module", Linker_FindFallbackModuleBySlot(hit_slot))
+        RealGameBoot_EmitArtifactStringKV(file.ref[mutable IOFile&], "aerolib_fallback_symbol", Linker_FindFallbackSymbolBySlot(hit_slot))
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "aerolib_fallback_symbol_index", Linker_FindFallbackSymbolIndexBySlot(hit_slot).u64())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "aerolib_fallback_rel_type", Linker_FindFallbackRelTypeBySlot(hit_slot).u64())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "aerolib_fallback_slot_table_count", Linker_FallbackSlotCount().u64())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "dbg_hle_symbols_checksum", Linker_HleSymbolsStringChecksum(linker))
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "dbg_reloc_boot_count", dbg_reloc_boot_count)
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "dbg_reloc_boot_fp", dbg_reloc_boot_fp)
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "dbg_reloc_pass_a_count", dbg_reloc_pass_a_count)
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "dbg_reloc_pass_b_count", dbg_reloc_pass_b_count)
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "dbg_reloc_pass_a_fp", dbg_reloc_pass_a_fp)
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "dbg_reloc_pass_b_fp", dbg_reloc_pass_b_fp)
+        dbg_mod: mutable usize = 0
+        while dbg_mod < linker.modules.count:
+            RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "dbg_mod_dyndata_checksum", Module_DynamicDataChecksum(linker.modules[dbg_mod].ref[Module&]))
+            dbg_mod <- dbg_mod + 1
+        RealGameBoot_EmitFallbackSlotTable(file.ref[mutable IOFile&])
         RealGameBoot_EmitUserServiceArtifacts(file.ref[mutable IOFile&])
         i: mutable usize = 0
         limit: mutable usize = linker.modules.count
@@ -441,4 +487,12 @@ def emulator_real_game_boot_smoke_guarded_game_entry_reports_host_status() -> vo
             RealGameBoot_Check(GuestExec_IsProbeOnly(), "expected probe-only mode on unsupported host")
             RealGameBoot_Check(stage_code == GUEST_EXEC_STAGE_GUARDED_ENTRY, "expected unsupported host guarded run to report guarded-entry stage")
         can Memory.Allocate, Abort.Panic, Console:
+            # Determinism probe: re-run import relocation twice in this same
+            # process and capture the fallback-slot count + a fingerprint of the
+            # unresolved symbol-index multiset each time. If the two passes
+            # differ here (same process), the nondeterminism is an
+            # uninitialized/use-after-free read; if they match but vary across
+            # process runs, it is ASLR-dependent.
+            dbg_reloc_boot_count <- Linker_FallbackSlotCount().u64()
+            dbg_reloc_boot_fp <- Linker_FallbackTableFingerprint()
             RealGameBoot_EmitArtifacts(linker, status)

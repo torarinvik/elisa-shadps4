@@ -491,16 +491,20 @@ def Elf_LoadSegment(self: mutable Elf&, virtual_addr: uintptr, file_offset: u64,
         return IOFile_ReadRaw(self.f, virtual_addr.cast[mutable void&], 1, size) == size
     return false
 
-def Elf_LoadSegmentBytes(self: mutable Elf&, out: mutable darray[u8]&, file_offset: u64, size: usize) -> bool:
+def Elf_LoadSegmentBytes(self: mutable Elf&, out: mutable darray[u8]&, file_offset: u64, size: usize, target_arena: mutable Arena&) -> bool:
     if not Elf_SeekSegment(self.ref[mutable Elf&], file_offset):
         return false
-    i: mutable usize = 0
-    while i < size:
-        b: u8 = Elf_ReadU8(self.f)
-        arena: Arena = zeroed
-        in arena:
+    # Grow the destination buffer in the arena chosen by the caller. Segment
+    # data that outlives the load (dynamic data, symbol/relocation tables, the
+    # module image) must use a persistent arena; using a transient local arena
+    # here previously freed the backing on return, so symbol/relocation reads
+    # hit use-after-free memory and import resolution was nondeterministic.
+    in target_arena:
+        i: mutable usize = 0
+        while i < size:
+            b: u8 = Elf_ReadU8(self.f)
             out.push(b)
-        i <- i + 1
+            i <- i + 1
     return true
 
 def Elf_SeekSegment(self: mutable Elf&, file_offset: u64) -> bool:

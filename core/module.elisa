@@ -320,9 +320,11 @@ def Module_LoadElfSegments(self: mutable Module&, elf: mutable Elf&, memory: mut
             if not Module_MapImageSegment(self.ref[mutable Module&], memory, phdr, false):
                 return false
         if phdr.p_type == PT_DYNAMIC and phdr.p_filesz > 0:
-            loaded_dynamic <- Elf_LoadSegmentBytes(elf, self.dynamic_segment.ref[mutable darray[u8]&], phdr.p_offset, phdr.p_filesz.usize())
+            dyn_owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
+            loaded_dynamic <- Elf_LoadSegmentBytes(elf, self.dynamic_segment.ref[mutable darray[u8]&], phdr.p_offset, phdr.p_filesz.usize(), dyn_owner)
         if phdr.p_type == PT_SCE_DYNLIBDATA and phdr.p_filesz > 0:
-            _ = Elf_LoadSegmentBytes(elf, self.dynamic_data.ref[mutable darray[u8]&], phdr.p_offset, phdr.p_filesz.usize())
+            data_owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
+            _ = Elf_LoadSegmentBytes(elf, self.dynamic_data.ref[mutable darray[u8]&], phdr.p_offset, phdr.p_filesz.usize(), data_owner)
         if phdr.p_type == PT_TLS:
             self.tls.init_image_size <- phdr.p_filesz.u32()
             self.tls.align <- phdr.p_align.u32()
@@ -421,8 +423,12 @@ def Module_LoadImageSegment(self: mutable Module&, elf: mutable Elf&, memory: mu
     offset: u64 = phdr.p_vaddr - self.image_virtual_base
     if offset + phdr.p_filesz > self.image_virtual_size:
         return false
+    # This staging buffer is transient: it is copied into self.image and the
+    # guest memory map below, then discarded when this function returns. Keep it
+    # in a function-scoped arena that stays alive through those reads.
+    seg_arena: Arena = zeroed
     segment: mutable darray[u8] = []
-    loaded: bool = Elf_LoadSegmentBytes(elf, segment.ref[mutable darray[u8]&], phdr.p_offset, phdr.p_filesz.usize())
+    loaded: bool = Elf_LoadSegmentBytes(elf, segment.ref[mutable darray[u8]&], phdr.p_offset, phdr.p_filesz.usize(), seg_arena.ref[mutable Arena&])
     if not loaded:
         return false
     for i in 0..<segment.count:
@@ -432,10 +438,26 @@ def Module_LoadImageSegment(self: mutable Module&, elf: mutable Elf&, memory: mu
     return true
 
 def Module_ResizeBytes(out: mutable darray[u8]&, size: usize) -> void:
-    while out.count < size:
-        arena: Arena = zeroed
-        in arena:
+    # Grows persistent module buffers (e.g. self.image); allocate the backing
+    # from the persistent metadata arena rather than a per-byte transient arena
+    # that would free the buffer on return.
+    owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
+    in owner:
+        while out.count < size:
             out.push(0)
+
+def Module_DynamicDataChecksum(self: Module&) -> u64:
+    # FNV-1a over the dynamic data buffer; used to detect nondeterministic
+    # (use-after-free) corruption of the symbol/relocation/string tables.
+    hash: mutable u64 = 0xcbf29ce484222325u64
+    i: mutable usize = 0
+    while i < self.dynamic_data.count:
+        hash <- (hash ^ self.dynamic_data[i].u64()) * 0x100000001b3u64
+        i <- i + 1
+    return hash
+
+def Module_DynamicDataLen(self: Module&) -> u64:
+    return self.dynamic_data.count.u64()
 
 def Module_DynamicAt(self: Module&, offset: usize) -> elf_dynamic&:
     return self.dynamic_segment[offset].ref[u8&].cast[elf_dynamic&]

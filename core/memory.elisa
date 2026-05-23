@@ -83,6 +83,16 @@ struct MemoryManager:
     pool_budget: mutable u64
     prt_areas: mutable PrtArea[3]
 
+# Persistent arena owning the memory manager's bookkeeping darrays (physical/
+# virtual area tables) and, critically, the guest memory backing buffers. These
+# all outlive the calls that grow them, so they must NOT be grown inside a
+# transient local arena (which is freed on return, leaving the guest memory map
+# and GOT in use-after-free storage and making guest execution nondeterministic).
+global mutable memory_arena: Arena = zeroed
+
+def Memory_ResetArena() -> void:
+    memory_arena <- zeroed
+
 global mutable memory_singleton: MemoryManager = MemoryManager(
     AddressSpace_New(),
     zeroed,
@@ -119,6 +129,7 @@ def MemoryManager_ResetNativeMappings(self: mutable MemoryManager&) -> void:
 
 def Memory_Reset() -> void:
     MemoryManager_ResetNativeMappings(memory_singleton.ref[mutable MemoryManager&])
+    Memory_ResetArena()
     memory_singleton <- MemoryManager_New()
 
 def MemoryManager_GetAddressSpace(self: mutable MemoryManager&) -> mutable AddressSpace&:
@@ -259,8 +270,8 @@ def MemoryManager_PoolExpand(self: mutable MemoryManager&, search_start: PAddr, 
 def MemoryManager_Allocate(self: mutable MemoryManager&, search_start: PAddr, search_end: PAddr, size: u64, alignment: u64, memory_type: s32) -> PAddr:
     _ = search_end
     _ = alignment
-    arena: Arena = zeroed
-    in arena:
+    owner: mutable Arena& = memory_arena.ref[mutable Arena&]
+    in owner:
         self.dmem_areas.push(PhysicalMemoryArea(search_start, size, memory_type, PhysicalMemoryType_Allocated))
     return search_start
 
@@ -290,8 +301,8 @@ def MemoryManager_MapMemory(self: mutable MemoryManager&, out_addr: mutable VAdd
         return -1
     if GuestExec_IsEnabled() and GuestExec_IsSupported() and not GuestExec_MapRegion(mapped, size, effective_prot):
         return -1
-    arena: Arena = zeroed
-    in arena:
+    map_owner: mutable Arena& = memory_arena.ref[mutable Arena&]
+    in map_owner:
         self.vma_areas.push(VirtualMemoryArea(mapped, size, vma_type, effective_prot, name, 0, false))
     if vma_type != VMAType_Reserved:
         MemoryManager_AddBacking(self.ref[mutable MemoryManager&], mapped, size)
@@ -306,8 +317,8 @@ def MemoryManager_MapFile(self: mutable MemoryManager&, out_addr: mutable VAddr&
         return -1
     if GuestExec_IsEnabled() and GuestExec_IsSupported() and not GuestExec_MapRegion(mapped, size, effective_prot):
         return -1
-    arena: Arena = zeroed
-    in arena:
+    file_owner: mutable Arena& = memory_arena.ref[mutable Arena&]
+    in file_owner:
         self.vma_areas.push(VirtualMemoryArea(mapped, size, VMAType_File, effective_prot, "file", fd, false))
     MemoryManager_AddBacking(self.ref[mutable MemoryManager&], mapped, size)
     return 0
@@ -378,12 +389,10 @@ def MemoryManager_AddBacking(self: mutable MemoryManager&, base: VAddr, size: u6
     if size == 0:
         return
     bytes: mutable darray[u8] = []
-    while bytes.count < size.usize():
-        arena: Arena = zeroed
-        in arena:
+    backing_owner: mutable Arena& = memory_arena.ref[mutable Arena&]
+    in backing_owner:
+        while bytes.count < size.usize():
             bytes.push(0)
-    arena: Arena = zeroed
-    in arena:
         self.mapped_bytes.push(MappedMemoryBytes(base, size, bytes))
 
 def MemoryManager_RemoveBacking(self: mutable MemoryManager&, base: VAddr, size: u64) -> void:

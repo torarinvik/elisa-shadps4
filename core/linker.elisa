@@ -134,6 +134,28 @@ def Linker_New() -> Linker:
         null
     )
 
+def Linker_HleSymbolsStringChecksum(self: Linker&) -> u64:
+    # FNV-1a over every HLE symbol's name + nid strings (NOT callable_address,
+    # which is ASLR-randomized). Detects use-after-free corruption of the HLE
+    # resolver table independent of address-space layout.
+    hash: mutable u64 = 0xcbf29ce484222325u64
+    i: mutable usize = 0
+    while i < self.hle_symbols.symbols.count:
+        sym: SymbolRecord = self.hle_symbols.symbols[i]
+        n: mutable usize = 0
+        nl: usize = static_strlen(sym.name)
+        while n < nl:
+            hash <- (hash ^ sym.name[n].u64()) * 0x100000001b3u64
+            n <- n + 1
+        m: mutable usize = 0
+        ml: usize = static_strlen(sym.nid_name)
+        while m < ml:
+            hash <- (hash ^ sym.nid_name[m].u64()) * 0x100000001b3u64
+            m <- m + 1
+        hash <- hash ^ 0xffu64
+        i <- i + 1
+    return hash
+
 def Linker_GetInstance() -> mutable Linker&:
     return linker_singleton.ref[mutable Linker&]
 
@@ -151,8 +173,12 @@ def SymbolsResolver_AddSymbol(self: mutable SymbolsResolver&, nid: static u8&, n
     SymbolsResolver_AddBoundSymbol(self, nid, name, virtual_address, virtual_address)
 
 def SymbolsResolver_AddBoundSymbol(self: mutable SymbolsResolver&, nid: static u8&, name: static u8&, virtual_address: u64, callable_address: u64) -> void:
-    arena: Arena = zeroed
-    in arena:
+    # The HLE symbol table outlives this call, so its backing storage must be
+    # allocated from the persistent metadata arena. Using a transient local
+    # arena here freed the darray backing on return, leaving the resolver table
+    # in use-after-free memory and making import resolution nondeterministic.
+    owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
+    in owner:
         self.symbols.push(SymbolRecord(nid, name, virtual_address, callable_address))
 
 def SymbolsResolver_Count(self: SymbolsResolver&) -> usize:
@@ -200,9 +226,11 @@ def Linker_SetApp0HostRoot(self: mutable Linker&, root: static u8&) -> void:
     self.app0_host_root <- root
 
 def Linker_Substr(input: static u8&, start: usize, len: usize) -> static u8&:
-    arena: Arena = zeroed
+    # The returned string outlives this call, so build it in the persistent
+    # metadata arena; a transient local arena would free the buffer on return.
     out: mutable darray[u8] = []
-    in arena:
+    owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
+    in owner:
         for i in 0..<len:
             out.push(input[start + i])
         out.push(0)
@@ -211,9 +239,11 @@ def Linker_Substr(input: static u8&, start: usize, len: usize) -> static u8&:
 def Linker_Concat2(lhs: static u8&, rhs: static u8&) -> static u8&:
     lhs_len: usize = static_strlen(lhs)
     rhs_len: usize = static_strlen(rhs)
-    arena: Arena = zeroed
+    # The returned string outlives this call, so build it in the persistent
+    # metadata arena; a transient local arena would free the buffer on return.
     out: mutable darray[u8] = []
-    in arena:
+    owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
+    in owner:
         for i in 0..<lhs_len:
             out.push(lhs[i])
         for j in 0..<rhs_len:
@@ -277,7 +307,7 @@ def Linker_NameMatchesNid(name: static u8&, nid_or_symbol: static u8&) -> bool:
 # relocation hot path does not need an arena/Memory effect scope to record into
 # it.
 @link_name(ElisaGuestExec_RecordFallbackSlot)
-extern c_GuestExec_RecordFallbackSlot(slot_va: u64, name: static u8&) -> void
+extern c_GuestExec_RecordFallbackSlot(slot_va: u64, name: static u8&, symbol_index: u32, rel_type: u32, module_name: static u8&) -> void
 
 @link_name(ElisaGuestExec_ResetFallbackSlots)
 extern c_GuestExec_ResetFallbackSlots() -> void
@@ -285,8 +315,38 @@ extern c_GuestExec_ResetFallbackSlots() -> void
 @link_name(ElisaGuestExec_FindFallbackSymbolBySlot)
 extern c_GuestExec_FindFallbackSymbolBySlot(slot_va: u64) -> static u8&?
 
-def Linker_RecordFallbackSlot(slot_va: u64, symbol_name: static u8&) -> void:
-    c_GuestExec_RecordFallbackSlot(slot_va, symbol_name)
+@link_name(ElisaGuestExec_FindFallbackModuleBySlot)
+extern c_GuestExec_FindFallbackModuleBySlot(slot_va: u64) -> static u8&?
+
+@link_name(ElisaGuestExec_FindFallbackSymbolIndexBySlot)
+extern c_GuestExec_FindFallbackSymbolIndexBySlot(slot_va: u64) -> u32
+
+@link_name(ElisaGuestExec_FindFallbackRelTypeBySlot)
+extern c_GuestExec_FindFallbackRelTypeBySlot(slot_va: u64) -> u32
+
+@link_name(ElisaGuestExec_FindFallbackSlotIndexBySlot)
+extern c_GuestExec_FindFallbackSlotIndexBySlot(slot_va: u64) -> s32
+
+@link_name(ElisaGuestExec_FallbackSlotCount)
+extern c_GuestExec_FallbackSlotCount() -> u32
+
+@link_name(ElisaGuestExec_FallbackSlotVaAt)
+extern c_GuestExec_FallbackSlotVaAt(index: u32) -> u64
+
+@link_name(ElisaGuestExec_FallbackSlotSymbolAt)
+extern c_GuestExec_FallbackSlotSymbolAt(index: u32) -> static u8&?
+
+@link_name(ElisaGuestExec_FallbackSlotModuleAt)
+extern c_GuestExec_FallbackSlotModuleAt(index: u32) -> static u8&?
+
+@link_name(ElisaGuestExec_FallbackSlotSymbolIndexAt)
+extern c_GuestExec_FallbackSlotSymbolIndexAt(index: u32) -> u32
+
+@link_name(ElisaGuestExec_FallbackSlotRelTypeAt)
+extern c_GuestExec_FallbackSlotRelTypeAt(index: u32) -> u32
+
+def Linker_RecordFallbackSlot(slot_va: u64, symbol_name: static u8&, symbol_index: u32, rel_type: u32, module_name: static u8&) -> void:
+    c_GuestExec_RecordFallbackSlot(slot_va, symbol_name, symbol_index, rel_type, module_name)
 
 def Linker_ResetFallbackSlots() -> void:
     c_GuestExec_ResetFallbackSlots()
@@ -296,6 +356,58 @@ def Linker_FindFallbackSymbolBySlot(slot_va: u64) -> static u8&:
     if result == null:
         return ""
     return result
+
+def Linker_FindFallbackModuleBySlot(slot_va: u64) -> static u8&:
+    result: static u8&? = c_GuestExec_FindFallbackModuleBySlot(slot_va)
+    if result == null:
+        return ""
+    return result
+
+def Linker_FindFallbackSymbolIndexBySlot(slot_va: u64) -> u32:
+    return c_GuestExec_FindFallbackSymbolIndexBySlot(slot_va)
+
+def Linker_FindFallbackRelTypeBySlot(slot_va: u64) -> u32:
+    return c_GuestExec_FindFallbackRelTypeBySlot(slot_va)
+
+def Linker_FindFallbackSlotIndexBySlot(slot_va: u64) -> s32:
+    return c_GuestExec_FindFallbackSlotIndexBySlot(slot_va)
+
+def Linker_FallbackSlotCount() -> u32:
+    return c_GuestExec_FallbackSlotCount()
+
+def Linker_FallbackSlotVaAt(index: u32) -> u64:
+    return c_GuestExec_FallbackSlotVaAt(index)
+
+def Linker_FallbackSlotSymbolAt(index: u32) -> static u8&:
+    result: static u8&? = c_GuestExec_FallbackSlotSymbolAt(index)
+    if result == null:
+        return ""
+    return result
+
+def Linker_FallbackSlotModuleAt(index: u32) -> static u8&:
+    result: static u8&? = c_GuestExec_FallbackSlotModuleAt(index)
+    if result == null:
+        return ""
+    return result
+
+def Linker_FallbackSlotSymbolIndexAt(index: u32) -> u32:
+    return c_GuestExec_FallbackSlotSymbolIndexAt(index)
+
+def Linker_FallbackSlotRelTypeAt(index: u32) -> u32:
+    return c_GuestExec_FallbackSlotRelTypeAt(index)
+
+def Linker_FallbackTableFingerprint() -> u64:
+    # Order-independent fingerprint of the fallback slot table: sum of a per-slot
+    # FNV-style mix of (slot_va, symbol_index). Used to compare the unresolved
+    # set across relocation passes / process runs.
+    acc: mutable u64 = 0
+    count: u32 = Linker_FallbackSlotCount()
+    i: mutable u32 = 0
+    while i < count:
+        mix: u64 = (Linker_FallbackSlotVaAt(i) ^ (Linker_FallbackSlotSymbolIndexAt(i).u64() * 0x9e3779b97f4a7c15u64)) * 0x100000001b3u64
+        acc <- acc + mix
+        i <- i + 1
+    return acc
 
 def Linker_RuntimeLifecycleNoop() -> int:
     return 0
@@ -455,7 +567,7 @@ def Linker_ApplyRelocationEntry(self: mutable Linker&, module: mutable Module&, 
             # fallback also returns the stub address), so the runtime fallback
             # boundary can be attributed back to this relocation's symbol.
             if resolved_addr == GuestExec_AeroLibFallbackStubAddress().u64():
-                Linker_RecordFallbackSlot(rel_virtual_addr, symbol_name)
+                Linker_RecordFallbackSlot(rel_virtual_addr, symbol_name, symbol_index, rel_type, module.name)
             if Module_WriteImageU64(module.ref[mutable Module&], rel_virtual_addr, value):
                 _ = MemoryManager_WriteU64(memory, rel_virtual_addr.uintptr(), value)
                 module.applied_relocation_count <- module.applied_relocation_count + 1
@@ -570,8 +682,10 @@ def Linker_LoadModuleFromHost(self: mutable Linker&, guest_name: static u8&, hos
         return -1
     if not is_dynamic:
         self.num_static_modules <- self.num_static_modules + 1
-    arena: Arena = zeroed
-    in arena:
+    # The module table is persistent linker state; allocate its backing from the
+    # persistent metadata arena rather than a transient local arena.
+    owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
+    in owner:
         self.modules.push(module)
     return (self.modules.count - 1).s32()
 
@@ -735,8 +849,8 @@ def Linker_Execute(self: mutable Linker&, args: darray[static u8&]) -> s32:
 
 def Linker_DebugDump(self: Linker&) -> darray[static u8&]:
     out: mutable darray[static u8&] = []
-    arena: Arena = zeroed
-    in arena:
+    owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
+    in owner:
         for i in 0..<self.modules.count:
             out.push(self.modules[i].name)
     return out
