@@ -51,15 +51,38 @@ def spirv_backend_binding_and_header_are_deterministic() -> void:
         assert binding.user_data == 0u32
 
 @test
-def spirv_backend_core_type_ids_follow_context_allocation_order() -> void:
+def spirv_backend_arithmetic_type_ids_follow_cpp_order() -> void:
     can Abort.Panic:
         ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
-        SpirvEmitContext_DefineCoreTypes(ctx)
+        SpirvEmitContext_DefineArithmeticTypes(ctx)
+        # Scalar types (fp16/fp64 disabled by default), matching the C++ order.
         assert ctx.void_id == 1u32
         assert ctx.u1_id == 2u32
-        assert ctx.u32_id == 3u32
+        assert ctx.u8_id == 3u32
+        assert ctx.s8_id == 4u32
+        assert ctx.u16_id == 5u32
+        assert ctx.s16_id == 6u32
+        assert ctx.f32_id == 7u32
+        assert ctx.s32_id == 8u32
+        assert ctx.u32_id == 9u32
+        assert ctx.u64_id == 10u32
+        # Vector types, component counts 2..4.
+        assert ctx.f32x2_id == 11u32
+        assert ctx.u1x2_id == 14u32
+        assert ctx.f32x4_id == 19u32
+        assert ctx.u1x4_id == 22u32
+        # Constants, then input/output pointers, then struct result types.
+        assert ctx.true_value == 23u32
+        assert ctx.u32_zero_value == 29u32
+        assert ctx.pi_x2 == 33u32
+        assert ctx.input_f32 == 34u32
+        assert ctx.output_s32 == 39u32
+        assert ctx.full_result_i32x2 == 40u32
+        assert ctx.frexp_result_f32 == 42u32
+        # Next free id after the arithmetic-type section.
+        assert ctx.next_id == 43u32
         assert SpirvTypeId(ctx, SHADER_IR_TYPE_U1) == 2u32
-        assert SpirvTypeId(ctx, SHADER_IR_TYPE_U32) == 3u32
+        assert SpirvTypeId(ctx, SHADER_IR_TYPE_U32) == 9u32
         assert SpirvTypeId(ctx, SHADER_IR_TYPE_VOID) == SPIRV_INVALID_ID
 
 @test
@@ -71,13 +94,13 @@ def spirv_backend_word_packs_count_and_opcode() -> void:
 def spirv_backend_emit_select_matches_cpp_opselect() -> void:
     can Abort.Panic, Memory.Allocate:
         ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
-        SpirvEmitContext_DefineCoreTypes(ctx)
-        # void=1, u1=2, u32=3, f32=4 -> next free id is 5
-        assert ctx.f32_id == 4u32
+        SpirvEmitContext_DefineArithmeticTypes(ctx)
+        # Arithmetic types occupy ids 1..42; f32 is id 7, next free id is 43.
+        assert ctx.f32_id == 7u32
         before: usize = ctx.words.count
         result: u32 = SpirvEmitSelectU32(ctx, 10u32, 11u32, 12u32)
-        # OpSelect emits 6 words and allocates the result id (5).
-        assert result == 5u32
+        # OpSelect emits 6 words and allocates the result id (43).
+        assert result == 43u32
         assert ctx.words.count == before + 6usize
         assert ctx.words[before] == SpirvWord(SPIRV_OP_SELECT, 6u16)
         assert ctx.words[before + 1usize] == ctx.u32_id
@@ -97,11 +120,10 @@ def spirv_backend_emit_select_matches_cpp_opselect() -> void:
 def spirv_backend_emit_composite_matches_cpp() -> void:
     can Abort.Panic, Memory.Allocate:
         ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
-        SpirvEmitContext_DefineCoreTypes(ctx)
-        SpirvEmitContext_DefineCompositeTypes(ctx)
-        # void=1,u1=2,u32=3,f32=4 -> u32x2=5,u32x3=6,u32x4=7,f32x2=8,f32x3=9,f32x4=10.
-        assert ctx.u32x2_id == 5u32
-        assert ctx.f32x4_id == 10u32
+        SpirvEmitContext_DefineArithmeticTypes(ctx)
+        # Vector types come from the arithmetic-type section: u32x2=13, f32x4=19.
+        assert ctx.u32x2_id == 13u32
+        assert ctx.f32x4_id == 19u32
         # --- Construct U32x4: 7 words. ---
         b0: usize = ctx.words.count
         v: u32 = SpirvEmitCompositeConstructU32x4(ctx, 11u32, 12u32, 13u32, 14u32)
@@ -152,7 +174,7 @@ def spirv_backend_emit_composite_matches_cpp() -> void:
 def spirv_backend_emit_integer_matches_cpp() -> void:
     can Abort.Panic, Memory.Allocate:
         ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
-        SpirvEmitContext_DefineCoreTypes(ctx)
+        SpirvEmitContext_DefineArithmeticTypes(ctx)
         SpirvEmitContext_DefineExtInst(ctx)
         # --- Core binary arithmetic: 5-word op with U32 result type. ---
         b0: usize = ctx.words.count
@@ -215,10 +237,10 @@ def spirv_backend_emit_integer_matches_cpp() -> void:
 def spirv_backend_emit_floating_point_matches_cpp() -> void:
     can Abort.Panic, Memory.Allocate:
         ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
-        SpirvEmitContext_DefineCoreTypes(ctx)
+        SpirvEmitContext_DefineArithmeticTypes(ctx)
         SpirvEmitContext_DefineExtInst(ctx)
-        # void=1,u1=2,u32=3,f32=4 -> GLSL.std.450 import id = 5.
-        assert ctx.glsl_std_450_id == 5u32
+        # Arithmetic types occupy ids 1..42; the GLSL.std.450 import id is 43.
+        assert ctx.glsl_std_450_id == 43u32
         # --- Core arithmetic: 5-word binary op with the F32 result type. ---
         b0: usize = ctx.words.count
         add: u32 = SpirvEmitFPAdd32(ctx, 10u32, 11u32)
@@ -284,7 +306,7 @@ def spirv_backend_emit_floating_point_matches_cpp() -> void:
 def spirv_backend_emit_special_matches_cpp() -> void:
     can Abort.Panic, Memory.Allocate:
         ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
-        SpirvEmitContext_DefineCoreTypes(ctx)
+        SpirvEmitContext_DefineArithmeticTypes(ctx)
         # Zero-operand void ops are a single word.
         b0: usize = ctx.words.count
         SpirvEmitDiscard(ctx)
@@ -326,11 +348,12 @@ def spirv_backend_emit_special_matches_cpp() -> void:
 def spirv_backend_emit_warp_matches_cpp() -> void:
     can Abort.Panic, Memory.Allocate:
         ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
-        SpirvEmitContext_DefineCoreTypes(ctx)
-        SpirvEmitContext_DefineWarpTypes(ctx)
-        # void=1,u1=2,u32=3,f32=4 -> u32x4=5, subgroup_local_invocation_id=6.
-        assert ctx.u32x4_id == 5u32
-        assert ctx.subgroup_local_invocation_id == 6u32
+        SpirvEmitContext_DefineArithmeticTypes(ctx)
+        SpirvEmitContext_DefineWarpInputs(ctx)
+        # u32x4 is part of the arithmetic types (id 21); the subgroup invocation
+        # input id is the first allocation after the type section (id 43).
+        assert ctx.u32x4_id == 21u32
+        assert ctx.subgroup_local_invocation_id == 43u32
         # EmitLaneId: OpLoad U32 from the subgroup pointer (4-word unary op).
         b0: usize = ctx.words.count
         lane: u32 = SpirvEmitLaneId(ctx)
@@ -379,7 +402,7 @@ def spirv_backend_emit_warp_matches_cpp() -> void:
 def spirv_backend_emit_barriers_match_cpp() -> void:
     can Abort.Panic, Memory.Allocate:
         ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
-        SpirvEmitContext_DefineCoreTypes(ctx)
+        SpirvEmitContext_DefineArithmeticTypes(ctx)
         # --- EmitBarrier (non-tessellation): two ConstU32 + OpControlBarrier ---
         b0: usize = ctx.words.count
         SpirvEmitBarrier(ctx, false)
@@ -420,12 +443,12 @@ def spirv_backend_emit_barriers_match_cpp() -> void:
 def spirv_backend_emit_undefined_matches_cpp() -> void:
     can Abort.Panic, Memory.Allocate:
         ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
-        SpirvEmitContext_DefineCoreTypes(ctx)
-        # void=1, u1=2, u32=3, f32=4 -> next free id is 5
+        SpirvEmitContext_DefineArithmeticTypes(ctx)
+        # Arithmetic types occupy ids 1..42; next free id is 43.
         b0: usize = ctx.words.count
         u1u: u32 = SpirvEmitUndefU1(ctx)
         # OpUndef emits 3 words and allocates the result id.
-        assert u1u == 5u32
+        assert u1u == 43u32
         assert ctx.words.count == b0 + 3usize
         assert ctx.words[b0] == SpirvWord(SPIRV_OP_UNDEF, 3u16)
         assert ctx.words[b0 + 1usize] == ctx.u1_id
@@ -433,7 +456,7 @@ def spirv_backend_emit_undefined_matches_cpp() -> void:
         # The U32 variant picks the U32 result type.
         b1: usize = ctx.words.count
         u32u: u32 = SpirvEmitUndefU32(ctx)
-        assert u32u == 6u32
+        assert u32u == 44u32
         assert ctx.words[b1] == SpirvWord(SPIRV_OP_UNDEF, 3u16)
         assert ctx.words[b1 + 1usize] == ctx.u32_id
         assert ctx.words[b1 + 2usize] == u32u
@@ -442,7 +465,7 @@ def spirv_backend_emit_undefined_matches_cpp() -> void:
 def spirv_backend_emit_logical_matches_cpp() -> void:
     can Abort.Panic, Memory.Allocate:
         ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
-        SpirvEmitContext_DefineCoreTypes(ctx)
+        SpirvEmitContext_DefineArithmeticTypes(ctx)
         # Binary logical ops emit 5 words with the U1 result type.
         b0: usize = ctx.words.count
         _or: u32 = SpirvEmitLogicalOr(ctx, 10u32, 11u32)

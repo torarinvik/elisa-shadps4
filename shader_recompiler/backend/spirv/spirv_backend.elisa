@@ -174,23 +174,79 @@ def SpirvBackend_SetUseFfiBridge(enabled: bool) -> void:
 struct SpirvVectorIds:
     ids: mutable u32[4]
 
+# Mirrors Shader::Backend::SPIRV::EmitContext. The arithmetic type ids are
+# allocated in exactly the order of EmitContext::DefineArithmeticTypes so that
+# every downstream emit op references the same ids as the C++ backend. Emitting
+# the OpType*/OpConstant declaration words is deferred to module assembly.
 struct SpirvEmitContext:
     next_id: mutable u32
-    void_id: mutable u32
-    u1_id: mutable u32
-    u32_id: mutable u32
-    f32_id: mutable u32
     last_label: mutable u32
     interfaces: mutable darray[u32]
     words: mutable darray[u32]
-    u32x4_id: mutable u32
-    subgroup_local_invocation_id: mutable u32
-    glsl_std_450_id: mutable u32
-    u32x2_id: mutable u32
-    u32x3_id: mutable u32
+    # Feature flags (gate optional fp16/fp64/dma types, like Info::uses_*).
+    uses_fp16: mutable bool
+    uses_fp64: mutable bool
+    uses_dma: mutable bool
+    # Scalar types.
+    void_id: mutable u32
+    u1_id: mutable u32
+    u8_id: mutable u32
+    s8_id: mutable u32
+    u16_id: mutable u32
+    s16_id: mutable u32
+    f16_id: mutable u32
+    f64_id: mutable u32
+    f32_id: mutable u32
+    s32_id: mutable u32
+    u32_id: mutable u32
+    u64_id: mutable u32
+    # Vector types (component counts 2..4).
+    f16x2_id: mutable u32
+    f16x3_id: mutable u32
+    f16x4_id: mutable u32
+    f64x2_id: mutable u32
+    f64x3_id: mutable u32
+    f64x4_id: mutable u32
     f32x2_id: mutable u32
     f32x3_id: mutable u32
     f32x4_id: mutable u32
+    s32x2_id: mutable u32
+    s32x3_id: mutable u32
+    s32x4_id: mutable u32
+    u32x2_id: mutable u32
+    u32x3_id: mutable u32
+    u32x4_id: mutable u32
+    u1x2_id: mutable u32
+    u1x3_id: mutable u32
+    u1x4_id: mutable u32
+    # Struct result types.
+    full_result_i32x2: mutable u32
+    full_result_u32x2: mutable u32
+    frexp_result_f32: mutable u32
+    frexp_result_f64: mutable u32
+    # Common constants.
+    pi_x2: mutable u32
+    true_value: mutable u32
+    false_value: mutable u32
+    u8_one_value: mutable u32
+    u8_zero_value: mutable u32
+    u16_zero_value: mutable u32
+    u32_one_value: mutable u32
+    u32_zero_value: mutable u32
+    f32_zero_value: mutable u32
+    u64_one_value: mutable u32
+    u64_zero_value: mutable u32
+    # Pointer types for input/output scalars + physical storage.
+    input_f32: mutable u32
+    input_u32: mutable u32
+    input_s32: mutable u32
+    output_f32: mutable u32
+    output_u32: mutable u32
+    output_s32: mutable u32
+    physical_pointer_type_u32: mutable u32
+    # Misc imports / interface ids defined outside the arithmetic-type section.
+    subgroup_local_invocation_id: mutable u32
+    glsl_std_450_id: mutable u32
 
 struct SpirvEmitResult:
     words: mutable darray[u32]
@@ -238,22 +294,91 @@ def SpirvGetOutputPrimitiveExecutionMode(output_type: u32) -> u32:
     return 0u32
 
 def SpirvEmitContext_Default() -> SpirvEmitContext:
-    return SpirvEmitContext(1u32, 0u32, 0u32, 0u32, 0u32, 0u32, [], [], 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32)
+    ctx: mutable SpirvEmitContext = zeroed
+    ctx.next_id <- 1u32
+    return ctx
 
 def SpirvEmitContext_AllocateId(ctx: mutable SpirvEmitContext&) -> u32:
     id: u32 = ctx.next_id
     ctx.next_id <- ctx.next_id + 1u32
     return id
 
-def SpirvEmitContext_DefineCoreTypes(ctx: mutable SpirvEmitContext&) -> void:
-    if ctx.void_id == 0u32:
-        ctx.void_id <- SpirvEmitContext_AllocateId(ctx)
-    if ctx.u1_id == 0u32:
-        ctx.u1_id <- SpirvEmitContext_AllocateId(ctx)
-    if ctx.u32_id == 0u32:
-        ctx.u32_id <- SpirvEmitContext_AllocateId(ctx)
-    if ctx.f32_id == 0u32:
-        ctx.f32_id <- SpirvEmitContext_AllocateId(ctx)
+# EmitContext::DefineArithmeticTypes. Allocates the scalar/vector/struct types,
+# common constants, and input/output pointer types in the exact order of the
+# C++ so downstream emit ops reference matching ids. fp16/fp64/dma types are
+# only allocated when the corresponding feature flag is set (Info::uses_*).
+def SpirvEmitContext_DefineArithmeticTypes(ctx: mutable SpirvEmitContext&) -> void:
+    ctx.void_id <- SpirvEmitContext_AllocateId(ctx)
+    ctx.u1_id <- SpirvEmitContext_AllocateId(ctx)
+    ctx.u8_id <- SpirvEmitContext_AllocateId(ctx)
+    ctx.s8_id <- SpirvEmitContext_AllocateId(ctx)
+    ctx.u16_id <- SpirvEmitContext_AllocateId(ctx)
+    ctx.s16_id <- SpirvEmitContext_AllocateId(ctx)
+    if ctx.uses_fp16:
+        ctx.f16_id <- SpirvEmitContext_AllocateId(ctx)
+    if ctx.uses_fp64:
+        ctx.f64_id <- SpirvEmitContext_AllocateId(ctx)
+    ctx.f32_id <- SpirvEmitContext_AllocateId(ctx)
+    ctx.s32_id <- SpirvEmitContext_AllocateId(ctx)
+    ctx.u32_id <- SpirvEmitContext_AllocateId(ctx)
+    ctx.u64_id <- SpirvEmitContext_AllocateId(ctx)
+    # Vector types, component counts 2..4 (matches the C++ for-loop order).
+    if ctx.uses_fp16:
+        ctx.f16x2_id <- SpirvEmitContext_AllocateId(ctx)
+    if ctx.uses_fp64:
+        ctx.f64x2_id <- SpirvEmitContext_AllocateId(ctx)
+    ctx.f32x2_id <- SpirvEmitContext_AllocateId(ctx)
+    ctx.s32x2_id <- SpirvEmitContext_AllocateId(ctx)
+    ctx.u32x2_id <- SpirvEmitContext_AllocateId(ctx)
+    ctx.u1x2_id <- SpirvEmitContext_AllocateId(ctx)
+    if ctx.uses_fp16:
+        ctx.f16x3_id <- SpirvEmitContext_AllocateId(ctx)
+    if ctx.uses_fp64:
+        ctx.f64x3_id <- SpirvEmitContext_AllocateId(ctx)
+    ctx.f32x3_id <- SpirvEmitContext_AllocateId(ctx)
+    ctx.s32x3_id <- SpirvEmitContext_AllocateId(ctx)
+    ctx.u32x3_id <- SpirvEmitContext_AllocateId(ctx)
+    ctx.u1x3_id <- SpirvEmitContext_AllocateId(ctx)
+    if ctx.uses_fp16:
+        ctx.f16x4_id <- SpirvEmitContext_AllocateId(ctx)
+    if ctx.uses_fp64:
+        ctx.f64x4_id <- SpirvEmitContext_AllocateId(ctx)
+    ctx.f32x4_id <- SpirvEmitContext_AllocateId(ctx)
+    ctx.s32x4_id <- SpirvEmitContext_AllocateId(ctx)
+    ctx.u32x4_id <- SpirvEmitContext_AllocateId(ctx)
+    ctx.u1x4_id <- SpirvEmitContext_AllocateId(ctx)
+    # Common constants.
+    ctx.true_value <- SpirvEmitContext_AllocateId(ctx)
+    ctx.false_value <- SpirvEmitContext_AllocateId(ctx)
+    ctx.u8_one_value <- SpirvEmitContext_AllocateId(ctx)
+    ctx.u8_zero_value <- SpirvEmitContext_AllocateId(ctx)
+    ctx.u16_zero_value <- SpirvEmitContext_AllocateId(ctx)
+    ctx.u32_one_value <- SpirvEmitContext_AllocateId(ctx)
+    ctx.u32_zero_value <- SpirvEmitContext_AllocateId(ctx)
+    ctx.f32_zero_value <- SpirvEmitContext_AllocateId(ctx)
+    ctx.u64_one_value <- SpirvEmitContext_AllocateId(ctx)
+    ctx.u64_zero_value <- SpirvEmitContext_AllocateId(ctx)
+    ctx.pi_x2 <- SpirvEmitContext_AllocateId(ctx)
+    # Input/output scalar pointer types.
+    ctx.input_f32 <- SpirvEmitContext_AllocateId(ctx)
+    ctx.input_u32 <- SpirvEmitContext_AllocateId(ctx)
+    ctx.input_s32 <- SpirvEmitContext_AllocateId(ctx)
+    ctx.output_f32 <- SpirvEmitContext_AllocateId(ctx)
+    ctx.output_u32 <- SpirvEmitContext_AllocateId(ctx)
+    ctx.output_s32 <- SpirvEmitContext_AllocateId(ctx)
+    # Struct result types.
+    ctx.full_result_i32x2 <- SpirvEmitContext_AllocateId(ctx)
+    ctx.full_result_u32x2 <- SpirvEmitContext_AllocateId(ctx)
+    ctx.frexp_result_f32 <- SpirvEmitContext_AllocateId(ctx)
+    if ctx.uses_fp64:
+        ctx.frexp_result_f64 <- SpirvEmitContext_AllocateId(ctx)
+    if ctx.uses_dma:
+        ctx.physical_pointer_type_u32 <- SpirvEmitContext_AllocateId(ctx)
+
+# Subgroup invocation-id input variable (defined in EmitContext::DefineInputs).
+def SpirvEmitContext_DefineWarpInputs(ctx: mutable SpirvEmitContext&) -> void:
+    if ctx.subgroup_local_invocation_id == 0u32:
+        ctx.subgroup_local_invocation_id <- SpirvEmitContext_AllocateId(ctx)
 
 def SpirvTypeId(ctx: SpirvEmitContext, ir_type: u32) -> u32:
     if ir_type == SHADER_IR_TYPE_U1:
@@ -428,14 +553,6 @@ def SpirvEmitTernaryOp(ctx: mutable SpirvEmitContext&, opcode: u16, result_type:
     SpirvEmitContext_AppendWord(ctx, b)
     SpirvEmitContext_AppendWord(ctx, c)
     return result_id
-
-# emit_spirv_warp.cpp: subgroup/warp intrinsics. Allocate the uvec4 ballot
-# type and the SubgroupLocalInvocationId input pointer used by these ops.
-def SpirvEmitContext_DefineWarpTypes(ctx: mutable SpirvEmitContext&) -> void:
-    if ctx.u32x4_id == 0u32:
-        ctx.u32x4_id <- SpirvEmitContext_AllocateId(ctx)
-    if ctx.subgroup_local_invocation_id == 0u32:
-        ctx.subgroup_local_invocation_id <- SpirvEmitContext_AllocateId(ctx)
 
 # SubgroupScope: ctx.ConstU32(spv::Scope::Subgroup).
 def SpirvSubgroupScope(ctx: mutable SpirvEmitContext&) -> u32:
@@ -727,21 +844,6 @@ def SpirvEmitSGreaterThanEqual32(ctx: mutable SpirvEmitContext&, lhs: u32, rhs: 
 def SpirvEmitUGreaterThanEqual32(ctx: mutable SpirvEmitContext&, lhs: u32, rhs: u32) -> u32:
     return SpirvEmitBinaryOp(ctx, SPIRV_OP_U_GREATER_THAN_EQUAL, ctx.u1_id, lhs, rhs)
 
-# emit_spirv_composite.cpp: define the vector type ids used by composite ops.
-def SpirvEmitContext_DefineCompositeTypes(ctx: mutable SpirvEmitContext&) -> void:
-    if ctx.u32x2_id == 0u32:
-        ctx.u32x2_id <- SpirvEmitContext_AllocateId(ctx)
-    if ctx.u32x3_id == 0u32:
-        ctx.u32x3_id <- SpirvEmitContext_AllocateId(ctx)
-    if ctx.u32x4_id == 0u32:
-        ctx.u32x4_id <- SpirvEmitContext_AllocateId(ctx)
-    if ctx.f32x2_id == 0u32:
-        ctx.f32x2_id <- SpirvEmitContext_AllocateId(ctx)
-    if ctx.f32x3_id == 0u32:
-        ctx.f32x3_id <- SpirvEmitContext_AllocateId(ctx)
-    if ctx.f32x4_id == 0u32:
-        ctx.f32x4_id <- SpirvEmitContext_AllocateId(ctx)
-
 # OpCompositeConstruct: <ResultType> <ResultId> <Constituents...>. Word count
 # is 3 + constituent count. The C++ uses ConstantComposite when all args are
 # immediates; this models the runtime (non-constant) OpCompositeConstruct path.
@@ -935,7 +1037,7 @@ def SpirvBackend_FreeWordsViaFfi(words: mutable void&?) -> void:
 
 def SpirvEmitMinimalModule(binding: mutable ShaderBackendBindings&) -> SpirvEmitResult:
     ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
-    SpirvEmitContext_DefineCoreTypes(ctx)
+    SpirvEmitContext_DefineArithmeticTypes(ctx)
     _unified: u32 = ShaderBackendBindings_AllocateUnified(binding)
     _buffer: u32 = ShaderBackendBindings_AllocateBuffer(binding)
     can Memory.Allocate, Abort.Panic:
