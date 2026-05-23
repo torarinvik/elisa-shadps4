@@ -94,6 +94,47 @@ def spirv_backend_emit_select_matches_cpp_opselect() -> void:
         _ = f32_sel
 
 @test
+def spirv_backend_emit_barriers_match_cpp() -> void:
+    can Abort.Panic, Memory.Allocate:
+        ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()
+        SpirvEmitContext_DefineCoreTypes(ctx)
+        # --- EmitBarrier (non-tessellation): two ConstU32 + OpControlBarrier ---
+        b0: usize = ctx.words.count
+        SpirvEmitBarrier(ctx, false)
+        # execution=Workgroup const, memory=Workgroup const, semantics const, then barrier.
+        assert ctx.words.count == b0 + 4usize + 4usize + 4usize + 4usize
+        assert ctx.words[b0] == SpirvWord(SPIRV_OP_CONSTANT, 4u16)
+        assert ctx.words[b0 + 3usize] == SPIRV_SCOPE_WORKGROUP
+        assert ctx.words[b0 + 7usize] == SPIRV_SCOPE_WORKGROUP
+        assert ctx.words[b0 + 11usize] == (SPIRV_MEM_SEM_ACQUIRE_RELEASE | SPIRV_MEM_SEM_WORKGROUP_MEMORY)
+        cb: usize = b0 + 12usize
+        assert ctx.words[cb] == SpirvWord(SPIRV_OP_CONTROL_BARRIER, 4u16)
+        # The three operands are the const ids allocated above.
+        assert ctx.words[cb + 1usize] == ctx.words[b0 + 2usize]
+        assert ctx.words[cb + 2usize] == ctx.words[b0 + 6usize]
+        assert ctx.words[cb + 3usize] == ctx.words[b0 + 10usize]
+        # --- EmitBarrier (tessellation control): Invocation scope, no semantics ---
+        b1: usize = ctx.words.count
+        SpirvEmitBarrier(ctx, true)
+        assert ctx.words[b1 + 7usize] == SPIRV_SCOPE_INVOCATION
+        assert ctx.words[b1 + 11usize] == SPIRV_MEM_SEM_NONE
+        # --- EmitWorkgroupMemoryBarrier: two ConstU32 + OpMemoryBarrier ---
+        b2: usize = ctx.words.count
+        SpirvEmitWorkgroupMemoryBarrier(ctx)
+        assert ctx.words.count == b2 + 4usize + 4usize + 3usize
+        assert ctx.words[b2 + 3usize] == SPIRV_SCOPE_WORKGROUP
+        assert ctx.words[b2 + 7usize] == SpirvMemoryBarrierSemantics()
+        mb: usize = b2 + 8usize
+        assert ctx.words[mb] == SpirvWord(SPIRV_OP_MEMORY_BARRIER, 3u16)
+        assert ctx.words[mb + 1usize] == ctx.words[b2 + 2usize]
+        assert ctx.words[mb + 2usize] == ctx.words[b2 + 6usize]
+        # --- EmitDeviceMemoryBarrier: scope = Device ---
+        b3: usize = ctx.words.count
+        SpirvEmitDeviceMemoryBarrier(ctx)
+        assert ctx.words[b3 + 3usize] == SPIRV_SCOPE_DEVICE
+        assert ctx.words[b3 + 7usize] == SpirvMemoryBarrierSemantics()
+
+@test
 def spirv_backend_emit_undefined_matches_cpp() -> void:
     can Abort.Panic, Memory.Allocate:
         ctx: mutable SpirvEmitContext = SpirvEmitContext_Default()

@@ -55,6 +55,22 @@ const SPIRV_OP_LOGICAL_AND: u16 = 167u16
 const SPIRV_OP_LOGICAL_NOT: u16 = 168u16
 const SPIRV_OP_SELECT: u16 = 169u16
 const SPIRV_OP_UNDEF: u16 = 1u16
+const SPIRV_OP_CONSTANT: u16 = 43u16
+const SPIRV_OP_CONTROL_BARRIER: u16 = 224u16
+const SPIRV_OP_MEMORY_BARRIER: u16 = 225u16
+
+# spv::Scope
+const SPIRV_SCOPE_DEVICE: u32 = 1u32
+const SPIRV_SCOPE_WORKGROUP: u32 = 2u32
+const SPIRV_SCOPE_INVOCATION: u32 = 4u32
+
+# spv::MemorySemanticsMask
+const SPIRV_MEM_SEM_NONE: u32 = 0u32
+const SPIRV_MEM_SEM_ACQUIRE_RELEASE: u32 = 0x8u32
+const SPIRV_MEM_SEM_UNIFORM_MEMORY: u32 = 0x40u32
+const SPIRV_MEM_SEM_WORKGROUP_MEMORY: u32 = 0x100u32
+const SPIRV_MEM_SEM_ATOMIC_COUNTER_MEMORY: u32 = 0x400u32
+const SPIRV_MEM_SEM_IMAGE_MEMORY: u32 = 0x800u32
 
 global mutable g_spirv_backend_use_ffi_bridge: bool = false
 
@@ -249,6 +265,56 @@ def SpirvEmitUndefU1(ctx: mutable SpirvEmitContext&) -> u32:
 
 def SpirvEmitUndefU32(ctx: mutable SpirvEmitContext&) -> u32:
     return SpirvEmitOpUndef(ctx, ctx.u32_id)
+
+# OpConstant: <ResultType=u32> <ResultId> <Value> (4 words). Mirrors
+# EmitContext::ConstU32 (without the C++ constant-dedup cache).
+def SpirvEmitConstU32(ctx: mutable SpirvEmitContext&, value: u32) -> u32:
+    result_id: u32 = SpirvEmitContext_AllocateId(ctx)
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(SPIRV_OP_CONSTANT, 4u16))
+    SpirvEmitContext_AppendWord(ctx, ctx.u32_id)
+    SpirvEmitContext_AppendWord(ctx, result_id)
+    SpirvEmitContext_AppendWord(ctx, value)
+    return result_id
+
+# OpMemoryBarrier: <Memory> <Semantics> (3 words, no result id).
+def SpirvEmitMemoryBarrier(ctx: mutable SpirvEmitContext&, scope: u32, semantics: u32) -> void:
+    mem_id: u32 = SpirvEmitConstU32(ctx, scope)
+    sem_id: u32 = SpirvEmitConstU32(ctx, semantics)
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(SPIRV_OP_MEMORY_BARRIER, 3u16))
+    SpirvEmitContext_AppendWord(ctx, mem_id)
+    SpirvEmitContext_AppendWord(ctx, sem_id)
+
+# OpControlBarrier: <Execution> <Memory> <Semantics> (4 words, no result id).
+def SpirvEmitControlBarrier(ctx: mutable SpirvEmitContext&, execution: u32, memory: u32, semantics: u32) -> void:
+    exec_id: u32 = SpirvEmitConstU32(ctx, execution)
+    mem_id: u32 = SpirvEmitConstU32(ctx, memory)
+    sem_id: u32 = SpirvEmitConstU32(ctx, semantics)
+    SpirvEmitContext_AppendWord(ctx, SpirvWord(SPIRV_OP_CONTROL_BARRIER, 4u16))
+    SpirvEmitContext_AppendWord(ctx, exec_id)
+    SpirvEmitContext_AppendWord(ctx, mem_id)
+    SpirvEmitContext_AppendWord(ctx, sem_id)
+
+# emit_spirv_barriers.cpp: combined semantics used by the memory-barrier helper.
+def SpirvMemoryBarrierSemantics() -> u32:
+    return SPIRV_MEM_SEM_ACQUIRE_RELEASE | SPIRV_MEM_SEM_UNIFORM_MEMORY | SPIRV_MEM_SEM_WORKGROUP_MEMORY | SPIRV_MEM_SEM_ATOMIC_COUNTER_MEMORY | SPIRV_MEM_SEM_IMAGE_MEMORY
+
+# EmitBarrier: workgroup execution barrier. TessellationControl uses an
+# Invocation memory scope with no semantics; everything else uses a workgroup
+# acquire/release on workgroup memory.
+def SpirvEmitBarrier(ctx: mutable SpirvEmitContext&, is_tessellation_control: bool) -> void:
+    execution: u32 = SPIRV_SCOPE_WORKGROUP
+    memory: mutable u32 = SPIRV_SCOPE_WORKGROUP
+    semantics: mutable u32 = SPIRV_MEM_SEM_ACQUIRE_RELEASE | SPIRV_MEM_SEM_WORKGROUP_MEMORY
+    if is_tessellation_control:
+        memory <- SPIRV_SCOPE_INVOCATION
+        semantics <- SPIRV_MEM_SEM_NONE
+    SpirvEmitControlBarrier(ctx, execution, memory, semantics)
+
+def SpirvEmitWorkgroupMemoryBarrier(ctx: mutable SpirvEmitContext&) -> void:
+    SpirvEmitMemoryBarrier(ctx, SPIRV_SCOPE_WORKGROUP, SpirvMemoryBarrierSemantics())
+
+def SpirvEmitDeviceMemoryBarrier(ctx: mutable SpirvEmitContext&) -> void:
+    SpirvEmitMemoryBarrier(ctx, SPIRV_SCOPE_DEVICE, SpirvMemoryBarrierSemantics())
 
 def SpirvBackend_EmitWordsViaFfi(profile: void&?, runtime_info: void&?, program: void&?, bindings: mutable void&?, out_words: mutable void&?, out_word_count: mutable usize&) -> int:
     return elisa_spirv_backend_emit_words(profile, runtime_info, program, bindings, out_words, out_word_count)
