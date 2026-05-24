@@ -164,7 +164,6 @@ static int32_t elisa_guest_exec_last_errno = 0;
 static volatile int32_t elisa_guest_exec_last_native_phase = ELISA_GUEST_EXEC_PHASE_NONE;
 static int32_t elisa_guest_exec_boundary_callback_count = 0;
 static uint64_t elisa_guest_exec_boundary_callback_reason = 0;
-static uint64_t elisa_guest_exec_failed_relocation_count = 0;
 static int32_t elisa_guest_exec_synthetic_observed_argc = 0;
 static uintptr_t elisa_guest_exec_synthetic_observed_argv0 = 0;
 static uintptr_t elisa_guest_exec_synthetic_observed_entry = 0;
@@ -1476,7 +1475,6 @@ void ElisaGuestExec_ResetCrashState(void) {
     elisa_guest_exec_last_pc_was_fallback = 0;
     elisa_guest_exec_boundary_callback_count = 0;
     elisa_guest_exec_boundary_callback_reason = 0;
-    elisa_guest_exec_failed_relocation_count = 0;
     elisa_guest_exec_synthetic_observed_argc = 0;
     elisa_guest_exec_synthetic_observed_argv0 = 0;
     elisa_guest_exec_synthetic_observed_entry = 0;
@@ -2116,102 +2114,4 @@ int32_t ElisaGuestExec_RunMainEntryGuarded(ElisaGuestEntryParams* params, uint32
     elisa_guest_exec_last_status = -2;
     return -2;
 #endif
-}
-
-void ElisaGuestExec_EmitCusaArtifactStage(void) {
-    fprintf(stdout, "CUSA07399_EXEC_STAGE stage=load link=pass handoff=pass\n");
-    fflush(stdout);
-}
-
-void ElisaGuestExec_EmitCusaArtifactSummary(uint64_t module_count, uint64_t total_imports,
-                                            uint64_t unresolved_imports,
-                                            uint64_t relocated_imports,
-                                            uint64_t native_hle_resolved,
-                                            uint64_t prx_export_resolved,
-                                            uint64_t aerolib_fallback_resolved,
-                                            uint64_t hle_symbols, uint64_t entry,
-                                            uint64_t main_entry, int32_t guarded_status,
-                                            int32_t last_signal, uint64_t fault_address,
-                                            uint64_t last_guest_pc,
-                                            int32_t boundary_status,
-                                            int32_t boundary_reason,
-                                            int32_t execution_stage) {
-    fprintf(stdout,
-            "CUSA07399_ARTIFACT module_count=%llu total_imports=%llu "
-            "unresolved_imports=%llu relocated_imports=%llu native_hle=%llu "
-            "prx_export=%llu aerolib_fallback=%llu hle_symbols=%llu\n",
-            (unsigned long long)module_count, (unsigned long long)total_imports,
-            (unsigned long long)unresolved_imports,
-            (unsigned long long)relocated_imports,
-            (unsigned long long)native_hle_resolved,
-            (unsigned long long)prx_export_resolved,
-            (unsigned long long)aerolib_fallback_resolved,
-            (unsigned long long)hle_symbols);
-    fprintf(stdout,
-            "CUSA07399_ARTIFACT entry=0x%llx main_entry=0x%llx guarded_status=%d "
-            "last_signal=%d fault=0x%llx last_guest_pc=0x%llx\n",
-            (unsigned long long)entry, (unsigned long long)main_entry, guarded_status,
-            last_signal, (unsigned long long)fault_address, (unsigned long long)last_guest_pc);
-    fprintf(stdout,
-            "CUSA07399_ARTIFACT execution_stage=%d boundary_status=%d boundary_reason=%d\n",
-            execution_stage, boundary_status, boundary_reason);
-    fprintf(stdout,
-            "CUSA07399_ARTIFACT failed_relocations=%llu\n",
-            (unsigned long long)elisa_guest_exec_failed_relocation_count);
-    fflush(stdout);
-}
-
-void ElisaGuestExec_EmitCusaArtifactModule(const char* module, const char* host, int32_t shared,
-                                           uint64_t relocations, uint64_t imports,
-                                           uint64_t resolved, uint64_t native_hle,
-                                           uint64_t prx_export, uint64_t aerolib_fallback,
-                                           uint64_t malformed, uint64_t unresolved) {
-    fprintf(stdout,
-            "CUSA07399_ARTIFACT module=%s host=%s shared=%d relocations=%llu "
-            "imports=%llu resolved=%llu native_hle=%llu prx_export=%llu "
-            "aerolib_fallback=%llu malformed=%llu unresolved=%llu\n",
-            module != NULL ? module : "", host != NULL ? host : "", shared,
-            (unsigned long long)relocations, (unsigned long long)imports,
-            (unsigned long long)resolved, (unsigned long long)native_hle,
-            (unsigned long long)prx_export, (unsigned long long)aerolib_fallback,
-            (unsigned long long)malformed, (unsigned long long)unresolved);
-    fflush(stdout);
-}
-
-void ElisaGuestExec_EmitCusaArtifactImport(const char* source, const char* nid,
-                                           const char* library, const char* module,
-                                           const char* subsystem,
-                                           uint64_t resolution) {
-    fprintf(stdout,
-            "CUSA07399_ARTIFACT fallback_import source=%s nid=%s library=%s "
-            "module=%s subsystem=%s resolution=%llu\n",
-            source != NULL ? source : "", nid != NULL ? nid : "",
-            library != NULL ? library : "", module != NULL ? module : "",
-            subsystem != NULL ? subsystem : "",
-            (unsigned long long)resolution);
-    fflush(stdout);
-}
-
-void ElisaGuestExec_EmitCusaArtifactLastHle(const char* module, const char* symbol) {
-    fprintf(stdout, "CUSA07399_ARTIFACT last_hle_module=%s last_hle_symbol=%s\n",
-            module != NULL ? module : "", symbol != NULL ? symbol : "");
-    fflush(stdout);
-}
-
-void ElisaGuestExec_EmitCusaArtifactStringKV(const char* key, const char* value) {
-    fprintf(stdout, "CUSA07399_ARTIFACT %s=%s\n",
-            key != NULL ? key : "key",
-            value != NULL ? value : "");
-    fflush(stdout);
-}
-
-void ElisaGuestExec_EmitCusaArtifactKV(const char* key, uint64_t value) {
-    fprintf(stdout, "CUSA07399_ARTIFACT %s=%llu\n",
-            key != NULL ? key : "key",
-            (unsigned long long)value);
-    fflush(stdout);
-}
-
-void ElisaGuestExec_SetFailedRelocationCount(uint64_t count) {
-    elisa_guest_exec_failed_relocation_count = count;
 }

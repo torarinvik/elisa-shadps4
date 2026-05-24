@@ -6,6 +6,9 @@ include "../common/arch.elisa"
 
 const GUEST_EXEC_MAX_ARGS: usize = 33
 
+extern snprintf(buf: mutable u8&?, bufsize: usize, fmt: u8&, ...) -> int effects[Console.Format]
+extern puts(s: u8&) -> int effects[Console.Write]
+
 @fixed_layout
 struct GuestEntryParams:
     argc: mutable s32
@@ -342,9 +345,6 @@ extern c_GuestExec_SignalPCValid() -> s32
 @link_name(ElisaGuestExec_LastPCSource)
 extern c_GuestExec_LastPCSource() -> s32
 
-@link_name(ElisaGuestExec_SetFailedRelocationCount)
-extern c_GuestExec_SetFailedRelocationCount(count: u64) -> void
-
 @link_name(ElisaGuestExec_RecordRuntimeHle)
 extern c_GuestExec_RecordRuntimeHle(module: static u8&?, symbol: static u8&?, arg0: uintptr, arg1: uintptr, arg2: uintptr, ret: uintptr) -> void
 
@@ -366,33 +366,13 @@ extern c_GuestExec_RuntimeHleArg2() -> uintptr
 @link_name(ElisaGuestExec_RuntimeHleRet)
 extern c_GuestExec_RuntimeHleRet() -> uintptr
 
-@link_name(ElisaGuestExec_EmitCusaArtifactStage)
-extern c_GuestExec_EmitCusaArtifactStage() -> void
-
-@link_name(ElisaGuestExec_EmitCusaArtifactSummary)
-extern c_GuestExec_EmitCusaArtifactSummary(module_count: u64, total_imports: u64, unresolved_imports: u64, relocated_imports: u64, native_hle_resolved: u64, prx_export_resolved: u64, aerolib_fallback_resolved: u64, hle_symbols: u64, entry: u64, main_entry: u64, guarded_status: s32, last_signal: s32, fault_address: u64, last_guest_pc: u64, boundary_status: s32, boundary_reason: s32, execution_stage: s32) -> void
-
-@link_name(ElisaGuestExec_EmitCusaArtifactModule)
-extern c_GuestExec_EmitCusaArtifactModule(module: static u8&?, host: static u8&?, shared: s32, relocations: u64, imports: u64, resolved: u64, native_hle: u64, prx_export: u64, aerolib_fallback: u64, malformed: u64, unresolved: u64) -> void
-
-@link_name(ElisaGuestExec_EmitCusaArtifactImport)
-extern c_GuestExec_EmitCusaArtifactImport(source: static u8&?, nid: static u8&?, library: static u8&?, module: static u8&?, subsystem: static u8&?, resolution: u64) -> void
-
-@link_name(ElisaGuestExec_EmitCusaArtifactLastHle)
-extern c_GuestExec_EmitCusaArtifactLastHle(module: static u8&?, symbol: static u8&?) -> void
-
-@link_name(ElisaGuestExec_EmitCusaArtifactStringKV)
-extern c_GuestExec_EmitCusaArtifactStringKV(key: static u8&?, value: static u8&?) -> void
-
-@link_name(ElisaGuestExec_EmitCusaArtifactKV)
-extern c_GuestExec_EmitCusaArtifactKV(key: static u8&?, value: u64) -> void
-
 global mutable guest_exec_enabled: bool = false
 global mutable guest_exec_probe_mode: bool = false
 global mutable guest_exec_last_map_result: s32 = 0
 global mutable guest_exec_last_entry_addr: VAddr = 0.uintptr()
 global mutable guest_exec_last_argc: int = 0
 global mutable guest_exec_run_count: usize = 0
+global mutable guest_exec_failed_relocation_count: u64 = 0
 global mutable guest_exec_last_main_entry_addr: VAddr = 0.uintptr()
 global mutable guest_exec_main_run_count: usize = 0
 global mutable guest_exec_last_game_execution_status: s32 = 0
@@ -889,8 +869,11 @@ def GuestExec_SignalPCValid() -> bool:
 def GuestExec_LastPCSource() -> s32:
     return c_GuestExec_LastPCSource()
 
+def ElisaGuestExec_SetFailedRelocationCount(count: u64) -> void:
+    guest_exec_failed_relocation_count <- count
+
 def GuestExec_SetFailedRelocationCount(count: u64) -> void:
-    c_GuestExec_SetFailedRelocationCount(count)
+    ElisaGuestExec_SetFailedRelocationCount(count)
 
 def GuestExec_RecordLoad() -> void:
     if guest_exec_execution_stage < GUEST_EXEC_STAGE_LOAD:
@@ -1022,22 +1005,83 @@ def GuestExec_ClassifyFirstBoundary() -> s32:
     return GUEST_EXEC_BOUNDARY_EXITED_BEFORE_BOUNDARY
 
 def GuestExec_EmitCusaArtifactStage() -> void:
-    c_GuestExec_EmitCusaArtifactStage()
+    ElisaGuestExec_EmitCusaArtifactStage()
 
 def GuestExec_EmitCusaArtifactSummary(module_count: u64, total_imports: u64, unresolved_imports: u64, relocated_imports: u64, native_hle_resolved: u64, prx_export_resolved: u64, aerolib_fallback_resolved: u64, hle_symbols: u64, entry: u64, main_entry: u64, guarded_status: s32, last_signal: s32, fault_address: u64) -> void:
-    c_GuestExec_EmitCusaArtifactSummary(module_count, total_imports, unresolved_imports, relocated_imports, native_hle_resolved, prx_export_resolved, aerolib_fallback_resolved, hle_symbols, entry, main_entry, guarded_status, last_signal, fault_address, GuestExec_LastGuestPC().u64(), GuestExec_ClassifyFirstBoundary(), GuestExec_FirstBoundaryReason(), GuestExec_ExecutionStage())
+    ElisaGuestExec_EmitCusaArtifactSummary(module_count, total_imports, unresolved_imports, relocated_imports, native_hle_resolved, prx_export_resolved, aerolib_fallback_resolved, hle_symbols, entry, main_entry, guarded_status, last_signal, fault_address, GuestExec_LastGuestPC().u64(), GuestExec_ClassifyFirstBoundary(), GuestExec_FirstBoundaryReason(), GuestExec_ExecutionStage())
 
 def GuestExec_EmitCusaArtifactModule(module: static u8&?, host: static u8&?, shared: s32, relocations: u64, imports: u64, resolved: u64, native_hle: u64, prx_export: u64, aerolib_fallback: u64, malformed: u64, unresolved: u64) -> void:
-    c_GuestExec_EmitCusaArtifactModule(module, host, shared, relocations, imports, resolved, native_hle, prx_export, aerolib_fallback, malformed, unresolved)
+    ElisaGuestExec_EmitCusaArtifactModule(module, host, shared, relocations, imports, resolved, native_hle, prx_export, aerolib_fallback, malformed, unresolved)
 
 def GuestExec_EmitCusaArtifactImport(source: static u8&?, nid: static u8&?, library: static u8&?, module: static u8&?, subsystem: static u8&?, resolution: u64) -> void:
-    c_GuestExec_EmitCusaArtifactImport(source, nid, library, module, subsystem, resolution)
+    ElisaGuestExec_EmitCusaArtifactImport(source, nid, library, module, subsystem, resolution)
 
 def GuestExec_EmitCusaArtifactLastHle(module: static u8&?, symbol: static u8&?) -> void:
-    c_GuestExec_EmitCusaArtifactLastHle(module, symbol)
+    ElisaGuestExec_EmitCusaArtifactLastHle(module, symbol)
 
 def GuestExec_EmitCusaArtifactStringKV(key: static u8&?, value: static u8&?) -> void:
-    c_GuestExec_EmitCusaArtifactStringKV(key, value)
+    ElisaGuestExec_EmitCusaArtifactStringKV(key, value)
 
 def GuestExec_EmitCusaArtifactKV(key: static u8&?, value: u64) -> void:
-    c_GuestExec_EmitCusaArtifactKV(key, value)
+    ElisaGuestExec_EmitCusaArtifactKV(key, value)
+
+def GuestExec_CusaPutFormatted(line: mutable u8&, size: usize, written: int) -> void:
+    if written > 0 and written.usize() < size:
+        _ = puts(line) can Console.Write
+
+def ElisaGuestExec_EmitCusaArtifactStage() -> void:
+    _ = puts("CUSA07399_EXEC_STAGE stage=load link=pass handoff=pass") can Console.Write
+
+def ElisaGuestExec_EmitCusaArtifactSummary(module_count: u64, total_imports: u64, unresolved_imports: u64, relocated_imports: u64, native_hle_resolved: u64, prx_export_resolved: u64, aerolib_fallback_resolved: u64, hle_symbols: u64, entry: u64, main_entry: u64, guarded_status: s32, last_signal: s32, fault_address: u64, last_guest_pc: u64, boundary_status: s32, boundary_reason: s32, execution_stage: s32) -> void:
+    can Console.Format, Console.Write:
+        line: mutable u8[512] = zeroed
+        written: mutable int = snprintf(line[0].ref[mutable u8&], 512usize, "CUSA07399_ARTIFACT module_count=%llu total_imports=%llu unresolved_imports=%llu relocated_imports=%llu native_hle=%llu prx_export=%llu aerolib_fallback=%llu hle_symbols=%llu", module_count, total_imports, unresolved_imports, relocated_imports, native_hle_resolved, prx_export_resolved, aerolib_fallback_resolved, hle_symbols)
+        GuestExec_CusaPutFormatted(line[0].ref[mutable u8&], 512usize, written)
+        written <- snprintf(line[0].ref[mutable u8&], 512usize, "CUSA07399_ARTIFACT entry=0x%llx main_entry=0x%llx guarded_status=%d last_signal=%d fault=0x%llx last_guest_pc=0x%llx", entry, main_entry, guarded_status, last_signal, fault_address, last_guest_pc)
+        GuestExec_CusaPutFormatted(line[0].ref[mutable u8&], 512usize, written)
+        written <- snprintf(line[0].ref[mutable u8&], 512usize, "CUSA07399_ARTIFACT execution_stage=%d boundary_status=%d boundary_reason=%d", execution_stage, boundary_status, boundary_reason)
+        GuestExec_CusaPutFormatted(line[0].ref[mutable u8&], 512usize, written)
+        written <- snprintf(line[0].ref[mutable u8&], 512usize, "CUSA07399_ARTIFACT failed_relocations=%llu", guest_exec_failed_relocation_count)
+        GuestExec_CusaPutFormatted(line[0].ref[mutable u8&], 512usize, written)
+
+def ElisaGuestExec_EmitCusaArtifactModule(module: static u8&?, host: static u8&?, shared: s32, relocations: u64, imports: u64, resolved: u64, native_hle: u64, prx_export: u64, aerolib_fallback: u64, malformed: u64, unresolved: u64) -> void:
+    can Console.Format, Console.Write:
+        line: mutable u8[512] = zeroed
+        module_text: static u8& = module if module != null else ""
+        host_text: static u8& = host if host != null else ""
+        written: int = snprintf(line[0].ref[mutable u8&], 512usize, "CUSA07399_ARTIFACT module=%s host=%s shared=%d relocations=%llu imports=%llu resolved=%llu native_hle=%llu prx_export=%llu aerolib_fallback=%llu malformed=%llu unresolved=%llu", module_text, host_text, shared, relocations, imports, resolved, native_hle, prx_export, aerolib_fallback, malformed, unresolved)
+        GuestExec_CusaPutFormatted(line[0].ref[mutable u8&], 512usize, written)
+
+def ElisaGuestExec_EmitCusaArtifactImport(source: static u8&?, nid: static u8&?, library: static u8&?, module: static u8&?, subsystem: static u8&?, resolution: u64) -> void:
+    can Console.Format, Console.Write:
+        line: mutable u8[512] = zeroed
+        source_text: static u8& = source if source != null else ""
+        nid_text: static u8& = nid if nid != null else ""
+        library_text: static u8& = library if library != null else ""
+        module_text: static u8& = module if module != null else ""
+        subsystem_text: static u8& = subsystem if subsystem != null else ""
+        written: int = snprintf(line[0].ref[mutable u8&], 512usize, "CUSA07399_ARTIFACT fallback_import source=%s nid=%s library=%s module=%s subsystem=%s resolution=%llu", source_text, nid_text, library_text, module_text, subsystem_text, resolution)
+        GuestExec_CusaPutFormatted(line[0].ref[mutable u8&], 512usize, written)
+
+def ElisaGuestExec_EmitCusaArtifactLastHle(module: static u8&?, symbol: static u8&?) -> void:
+    can Console.Format, Console.Write:
+        line: mutable u8[256] = zeroed
+        module_text: static u8& = module if module != null else ""
+        symbol_text: static u8& = symbol if symbol != null else ""
+        written: int = snprintf(line[0].ref[mutable u8&], 256usize, "CUSA07399_ARTIFACT last_hle_module=%s last_hle_symbol=%s", module_text, symbol_text)
+        GuestExec_CusaPutFormatted(line[0].ref[mutable u8&], 256usize, written)
+
+def ElisaGuestExec_EmitCusaArtifactStringKV(key: static u8&?, value: static u8&?) -> void:
+    can Console.Format, Console.Write:
+        line: mutable u8[256] = zeroed
+        key_text: static u8& = key if key != null else "key"
+        value_text: static u8& = value if value != null else ""
+        written: int = snprintf(line[0].ref[mutable u8&], 256usize, "CUSA07399_ARTIFACT %s=%s", key_text, value_text)
+        GuestExec_CusaPutFormatted(line[0].ref[mutable u8&], 256usize, written)
+
+def ElisaGuestExec_EmitCusaArtifactKV(key: static u8&?, value: u64) -> void:
+    can Console.Format, Console.Write:
+        line: mutable u8[256] = zeroed
+        key_text: static u8& = key if key != null else "key"
+        written: int = snprintf(line[0].ref[mutable u8&], 256usize, "CUSA07399_ARTIFACT %s=%llu", key_text, value)
+        GuestExec_CusaPutFormatted(line[0].ref[mutable u8&], 256usize, written)
