@@ -679,6 +679,249 @@ def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
     if ge_guard_active != 0:
         ge_siglongjmp(ge_jmp_buf[0usize].ref[void&], 1)
 
+# ---- Orchestration plumbing (atomic core, part 2a; inert until swap) ----
+@link_name(sigsetjmp)
+extern ge_sigsetjmp(env: void&?, savemask: int) -> int
+@link_name(pthread_self)
+extern ge_pthread_self() -> uintptr
+@link_name(_exit)
+extern ge_exit_now(code: int) -> void
+@link_name(pause)
+extern ge_pause() -> int
+@link_name(memset)
+extern ge_memset(dst: void&?, value: int, n: usize) -> void&?
+extern ElisaGuestExec_CurrentStackPointerAsm() -> uintptr
+extern ElisaGuestExec_EnterMainEntryAsm(params: uintptr, exit_func: uintptr) -> void
+extern ElisaGuestExec_CallMainEntryAsm(entry: uintptr, params: uintptr, exit_func: uintptr) -> void
+extern ElisaGuestExec_JumpMainEntryAsm(entry: uintptr, params: uintptr, exit_func: uintptr) -> void
+
+global mutable ge_fork_report_addr: uintptr = 0.uintptr()
+global mutable ge_guard_target_thread: uintptr = 0.uintptr()
+
+def ge_record_fallback_pc(pc: uintptr, source: s32) -> void:
+    if pc == 0.uintptr():
+        return
+    ge_fallback_guest_pc <- pc
+    ge_last_guest_pc <- pc
+    ge_last_pc_was_fallback <- 1
+    ge_last_pc_source <- source
+    fr: ElisaGuestExecForkReport&? = ge_fork_report
+    if fr != null:
+        fr.fallback_guest_pc <- pc
+        fr.guest_pc <- pc
+        fr.pc_source <- source
+        fr.pc_was_fallback <- 1
+
+def ge_current_stack_pointer() -> uintptr:
+    static if ARCH_X86_64 and not PLATFORM_WINDOWS:
+        return ElisaGuestExec_CurrentStackPointerAsm()
+    static else:
+        return 0.uintptr()
+
+def ge_map_shared_anon_flags() -> int:
+    static if PLATFORM_APPLE:
+        return 0x0001 | 0x1000
+    static else:
+        return 0x0001 | 0x20
+
+def ge_reset_fork_report() -> void:
+    if ge_fork_report != null:
+        _ = ge_memset(ge_addr_to_ptr(ge_fork_report_addr), 0, 4096usize)
+
+def ge_ensure_fork_report() -> s32:
+    static if PLATFORM_WINDOWS:
+        return 0
+    static else:
+        if ge_fork_report != null:
+            ge_reset_fork_report()
+            return 0
+        mapped: uintptr = ge_mmap(0.uintptr(), 4096usize, 3, ge_map_shared_anon_flags(), -1, 0i64)
+        if mapped == ge_map_failed():
+            ge_fork_report <- null
+            ge_fork_report_addr <- 0.uintptr()
+            return -1
+        ge_fork_report_addr <- mapped
+        trusted Unsafe.PointerCast:
+            ge_fork_report <- mapped.cast[ElisaGuestExecForkReport&?]
+        ge_reset_fork_report()
+        return 0
+
+@c_abi(c)
+def ge_default_exit(code: int) -> void:
+    _ = code
+    while true:
+        _ = ge_pause()
+
+@c_abi(c)
+def ge_guarded_exit(code: int) -> void:
+    _ = code
+    ge_last_status <- 0
+    fr: ElisaGuestExecForkReport&? = ge_fork_report
+    if fr != null:
+        if fr.execution_stage < 4:
+            fr.execution_stage <- 4
+
+def ge_call_main_entry(params: mutable GuestEntryParams&, exit_func: uintptr) -> void:
+    ef: mutable uintptr = exit_func
+    if ef == 0.uintptr():
+        ef <- ge_default_exit as uintptr
+    ElisaGuestExec_CallMainEntryAsm(params.entry_addr, params.ref[void&].uintptr(), ef)
+
+def ge_jump_main_entry(params: mutable GuestEntryParams&, exit_func: uintptr) -> void:
+    ef: mutable uintptr = exit_func
+    if ef == 0.uintptr():
+        ef <- ge_default_exit as uintptr
+    ge_prejump_rdi <- params.ref[void&].uintptr()
+    ge_prejump_rsi <- ef
+    ge_prejump_rsp <- ge_current_stack_pointer()
+    fr: ElisaGuestExecForkReport&? = ge_fork_report
+    if fr != null:
+        fr.prejump_rdi <- ge_prejump_rdi
+        fr.prejump_rsi <- ge_prejump_rsi
+        fr.prejump_rsp <- ge_prejump_rsp
+    ElisaGuestExec_JumpMainEntryAsm(params.entry_addr, ge_prejump_rdi, ef)
+
+def ge_absorb_fork_report() -> void:
+    fr: ElisaGuestExecForkReport&? = ge_fork_report
+    if fr == null:
+        return
+    if fr.status == 0 and fr.signal == 0 and fr.execution_stage >= 4:
+        fr.status <- -11
+        if fr.guest_pc == 0.uintptr() and fr.signal_pc_valid == 0:
+            ge_record_fallback_pc(fr.entry_addr, GE_PC_SOURCE_FALLBACK_PARENT_SILENT_CHILD)
+    if fr.status < 0 and fr.guest_pc == 0.uintptr() and fr.signal_pc_valid == 0 and fr.entry_addr != 0.uintptr():
+        ge_record_fallback_pc(fr.entry_addr, GE_PC_SOURCE_FALLBACK_PARENT_STATUS)
+    if fr.status != 0:
+        ge_last_status <- fr.status
+    if fr.signal != 0:
+        ge_last_signal <- fr.signal
+    if fr.fault_address != 0.uintptr() or fr.status < 0:
+        ge_last_fault_address <- fr.fault_address
+    if fr.guest_pc != 0.uintptr():
+        ge_last_guest_pc <- fr.guest_pc
+    if fr.guest_sp != 0.uintptr():
+        ge_last_guest_sp <- fr.guest_sp
+    if fr.guest_bp != 0.uintptr():
+        ge_last_guest_bp <- fr.guest_bp
+    if fr.guest_rdi != 0.uintptr():
+        ge_last_guest_rdi <- fr.guest_rdi
+    if fr.guest_rsi != 0.uintptr():
+        ge_last_guest_rsi <- fr.guest_rsi
+    if fr.guest_rax != 0.uintptr():
+        ge_last_guest_rax <- fr.guest_rax
+    if fr.guest_rbx != 0.uintptr():
+        ge_last_guest_rbx <- fr.guest_rbx
+    if fr.guest_rdx != 0.uintptr():
+        ge_last_guest_rdx <- fr.guest_rdx
+    if fr.guest_rcx != 0.uintptr():
+        ge_last_guest_rcx <- fr.guest_rcx
+    if fr.guest_r8 != 0.uintptr():
+        ge_last_guest_r8 <- fr.guest_r8
+    if fr.guest_r9 != 0.uintptr():
+        ge_last_guest_r9 <- fr.guest_r9
+    if fr.expected_entry_params != 0.uintptr():
+        ge_expected_entry_params <- fr.expected_entry_params
+    if fr.signal_pc_valid != 0:
+        ge_signal_pc_valid <- 1
+        ge_signal_guest_pc <- fr.signal_guest_pc
+        if fr.pc_was_fallback == 0:
+            ge_last_guest_pc <- ge_signal_guest_pc
+    if fr.fallback_guest_pc != 0.uintptr():
+        ge_fallback_guest_pc <- fr.fallback_guest_pc
+    if fr.aerolib_fallback_invocations != 0u64:
+        ge_aerolib_fallback_invocations <- fr.aerolib_fallback_invocations
+        ge_aerolib_fallback_caller_pc <- fr.aerolib_fallback_caller_pc
+        ge_aerolib_fallback_slot_va <- fr.aerolib_fallback_slot_va
+        ge_aerolib_fallback_callsite_bytes <- fr.aerolib_fallback_callsite_bytes
+        ge_aerolib_fallback_plt_va <- fr.aerolib_fallback_plt_va
+        ge_aerolib_fallback_plt_bytes <- fr.aerolib_fallback_plt_bytes
+    if fr.pc_source != 0:
+        ge_last_pc_source <- fr.pc_source
+    if fr.fault_word0 != 0.uintptr() or fr.fault_word1 != 0.uintptr():
+        ge_fault_word0 <- fr.fault_word0
+        ge_fault_word1 <- fr.fault_word1
+    if fr.signal_stack_symbol0 != null:
+        ge_signal_stack_symbol0 <- fr.signal_stack_symbol0
+    if fr.signal_stack_image0 != null:
+        ge_signal_stack_image0 <- fr.signal_stack_image0
+    if fr.signal_pc_symbol != null:
+        ge_signal_pc_symbol <- fr.signal_pc_symbol
+    if fr.signal_pc_image != null:
+        ge_signal_pc_image <- fr.signal_pc_image
+    if fr.pc_native_prot != 0u32:
+        ge_pc_native_prot <- fr.pc_native_prot
+    if fr.pc_was_fallback != 0:
+        ge_last_pc_was_fallback <- 1
+    if fr.native_phase != 0:
+        ge_last_native_phase <- fr.native_phase
+    if fr.runtime_hle_symbol != null:
+        ge_runtime_hle_module <- fr.runtime_hle_module
+        ge_runtime_hle_symbol <- fr.runtime_hle_symbol
+        ge_runtime_hle_arg0 <- fr.runtime_hle_arg0
+        ge_runtime_hle_arg1 <- fr.runtime_hle_arg1
+        ge_runtime_hle_arg2 <- fr.runtime_hle_arg2
+        ge_runtime_hle_ret <- fr.runtime_hle_ret
+
+def ge_run_child_main_entry(params: mutable GuestEntryParams&) -> void:
+    ge_set_native_phase(GE_PHASE_CHILD_BRANCH_ENTERED)
+    ge_install_guards()
+    ge_guard_active <- 1
+    ge_guard_target_thread <- ge_pthread_self()
+    ge_set_native_phase(GE_PHASE_CHILD_GUARDS_INSTALLED)
+    fr: ElisaGuestExecForkReport&? = ge_fork_report
+    if fr != null:
+        ge_expected_entry_params <- params.ref[void&].uintptr()
+        ge_expected_stack_word0 <- params.argc.u32().uintptr()
+        ge_expected_stack_word1 <- params.argv[0].uintptr()
+        ge_entry_stack_word0 <- ge_expected_stack_word0
+        ge_entry_stack_word1 <- ge_expected_stack_word1
+        ge_entry_native_word0 <- ge_read_native_word(params.entry_addr)
+        ge_entry_native_word1 <- ge_read_native_word(params.entry_addr + 8.uintptr())
+        ge_entry_native_prot <- ge_native_prot_at(params.entry_addr, 8u64)
+        fr.expected_entry_params <- ge_expected_entry_params
+        fr.expected_stack_word0 <- ge_expected_stack_word0
+        fr.expected_stack_word1 <- ge_expected_stack_word1
+        fr.entry_stack_word0 <- ge_entry_stack_word0
+        fr.entry_stack_word1 <- ge_entry_stack_word1
+        fr.entry_native_word0 <- ge_entry_native_word0
+        fr.entry_native_word1 <- ge_entry_native_word1
+        fr.entry_native_prot <- ge_entry_native_prot
+        fr.entry_addr <- params.entry_addr
+        if fr.execution_stage < 4:
+            fr.execution_stage <- 4
+    ge_set_native_phase(GE_PHASE_CHILD_ENTRY_SNAPSHOT)
+    ge_set_native_phase(GE_PHASE_CHILD_BEFORE_SIGSETJMP)
+    if ge_sigsetjmp(ge_jmp_buf[0usize].ref[void&], 1) != 0:
+        ge_set_native_phase(GE_PHASE_CHILD_SIGLONGJMP)
+        status: mutable s32 = ge_last_status
+        sig: mutable s32 = ge_last_signal
+        fr2: ElisaGuestExecForkReport&? = ge_fork_report
+        if fr2 != null:
+            if fr2.status != 0:
+                status <- fr2.status
+            if fr2.signal != 0:
+                sig <- fr2.signal
+        if status == 0 and sig == 0:
+            status <- -11
+            ge_last_status <- status
+        if fr2 != null:
+            if fr2.status == 0:
+                fr2.status <- status
+            if fr2.signal == 0:
+                fr2.signal <- sig
+            if fr2.guest_pc == 0.uintptr() and fr2.signal_pc_valid == 0:
+                ge_record_fallback_pc(params.entry_addr, GE_PC_SOURCE_FALLBACK_CHILD_SIGLONGJMP)
+        ge_guard_active <- 0
+        ge_restore_guards()
+        if sig > 0 and sig < 128:
+            ge_exit_now(128 + sig.int())
+        if status < 0 and (0 - status) < 128:
+            ge_exit_now((0 - status).int())
+        ge_exit_now(1)
+        return
+    ge_set_native_phase(GE_PHASE_CHILD_BEFORE_MAIN_ENTRY)
+    ge_jump_main_entry(params, ge_guarded_exit as uintptr)
+
 @link_name(ElisaGuestExec_RunMainEntry)
 extern c_GuestExec_RunMainEntry(params: mutable GuestEntryParams&, exit_func: void&?) -> void
 
