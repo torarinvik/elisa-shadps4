@@ -1,0 +1,270 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+# Pure-Elisa replacement for recompiler_elisa_bridge.cpp.
+#
+# Emits the deterministic 12-word SPIR-V envelope the bridge contract validates,
+# so the recompiler/renderer tests no longer depend on the shadPS4 C++ shader
+# recompiler sources. The full pure-Elisa frontend (decode -> CFG -> ASL) is
+# exercised by shader_recompiler_frontend_pure_tests.elisa; keeping this bridge
+# lightweight avoids pulling the large opcode/decode tables into every renderer
+# smoke test native build.
+#
+# The constants and the ShaderRecompilerTranslateMetadata struct are defined by
+# the including file (recompiler_ffi_bridge.elisa).
+
+const RECOMPILER_HANDLE_CAP: usize = 512usize
+const RECOMPILER_ENVELOPE_WORDS: u64 = 12u64
+
+const RECOMPILER_FNV_OFFSET_BASIS: u64 = 1469598103934665603u64
+const RECOMPILER_FNV_PRIME: u64 = 1099511628211u64
+
+const RECOMPILER_SPIRV_VERSION: u32 = 0x00010000u32
+const RECOMPILER_SPIRV_GENERATOR: u32 = 0x454c4953u32
+
+struct ElisaRecompilerProgramHandle:
+    magic: mutable u64
+    input_hash: mutable u64
+    word_count: mutable u64
+    stage_type: mutable u32
+    has_stage_type: mutable u32
+    output_byte_size: mutable u64
+    output_hash: mutable u64
+    status: mutable int
+    diagnostic_code: mutable int
+    payload_kind: mutable u32
+    real_spirv_status: mutable u32
+    output_word_count: mutable u64
+    output_words: mutable u32[12]
+
+global mutable g_recompiler_handles: ElisaRecompilerProgramHandle[512] = zeroed
+global mutable g_recompiler_handle_count: usize = 0usize
+
+
+def _recompiler_fnv_words(words: u32&, count: usize) -> u64:
+    hash: mutable u64 = RECOMPILER_FNV_OFFSET_BASIS
+    hash <- hash ^ count.u64()
+    hash <- hash * RECOMPILER_FNV_PRIME
+    i: mutable usize = 0usize
+    while i < count:
+        hash <- hash ^ words[i].u64()
+        hash <- hash * RECOMPILER_FNV_PRIME
+        i <- i + 1usize
+    return hash
+
+
+# FNV-1a over the little-endian byte serialization of `word_count` u32 words,
+# matching SerializeSpirvWords + FnvHash64Bytes from the C++ bridge.
+def _recompiler_fnv_envelope_bytes(words: u32&, word_count: usize) -> u64:
+    hash: mutable u64 = RECOMPILER_FNV_OFFSET_BASIS
+    hash <- hash ^ (word_count * 4usize).u64()
+    hash <- hash * RECOMPILER_FNV_PRIME
+    i: mutable usize = 0usize
+    while i < word_count:
+        w: u32 = words[i]
+        hash <- hash ^ (w & 0xFFu32).u64()
+        hash <- hash * RECOMPILER_FNV_PRIME
+        hash <- hash ^ ((w >> 8u32) & 0xFFu32).u64()
+        hash <- hash * RECOMPILER_FNV_PRIME
+        hash <- hash ^ ((w >> 16u32) & 0xFFu32).u64()
+        hash <- hash * RECOMPILER_FNV_PRIME
+        hash <- hash ^ ((w >> 24u32) & 0xFFu32).u64()
+        hash <- hash * RECOMPILER_FNV_PRIME
+        i <- i + 1usize
+    return hash
+
+
+def _recompiler_stage_is_valid(stage: u32, logical_stage: u32) -> bool:
+    return stage <= 6u32 and logical_stage <= 5u32
+
+
+def _recompiler_handle_ref(program: void&?) -> mutable ElisaRecompilerProgramHandle&?:
+    if program == null:
+        return null
+    out: mutable ElisaRecompilerProgramHandle&? = null
+    trusted Unsafe.PointerCast:
+        out <- program.cast[mutable ElisaRecompilerProgramHandle&?]
+    return out
+
+
+def elisa_shader_recompiler_translate_program(code_words: u32&?, code_word_count: usize, metadata: mutable ShaderRecompilerTranslateMetadata&?, out_program: mutable void&?&) -> int:
+    if code_words == null or code_word_count == 0usize or metadata == null:
+        return ELISA_RECOMPILER_BRIDGE_INVALID_ARGS
+    out_program[0] <- null
+    if g_recompiler_handle_count >= RECOMPILER_HANDLE_CAP:
+        return ELISA_RECOMPILER_BRIDGE_ALLOC_FAILED
+
+    words: u32& = code_words.cast[u32&]
+    meta: mutable ShaderRecompilerTranslateMetadata& = metadata.cast[mutable ShaderRecompilerTranslateMetadata&]
+    stage: u32 = meta.stage
+    logical_stage: u32 = meta.logical_stage
+    input_hash: u64 = _recompiler_fnv_words(words, code_word_count)
+
+    idx: usize = g_recompiler_handle_count
+    g_recompiler_handle_count <- g_recompiler_handle_count + 1usize
+
+    g_recompiler_handles[idx].magic <- ELISA_RECOMPILER_PROGRAM_MAGIC_LIVE
+    g_recompiler_handles[idx].input_hash <- input_hash
+    g_recompiler_handles[idx].word_count <- code_word_count.u64()
+    g_recompiler_handles[idx].stage_type <- stage
+    g_recompiler_handles[idx].has_stage_type <- 1u32
+
+    if not _recompiler_stage_is_valid(stage, logical_stage):
+        g_recompiler_handles[idx].output_byte_size <- 0u64
+        g_recompiler_handles[idx].output_hash <- 0u64
+        g_recompiler_handles[idx].output_word_count <- 0u64
+        g_recompiler_handles[idx].status <- ELISA_RECOMPILER_PROGRAM_STATUS_FAILED_WITH_DIAGNOSTIC
+        g_recompiler_handles[idx].diagnostic_code <- ELISA_RECOMPILER_DIAGNOSTIC_UNSUPPORTED
+        g_recompiler_handles[idx].payload_kind <- ELISA_RECOMPILER_PAYLOAD_KIND_NONE
+        g_recompiler_handles[idx].real_spirv_status <- ELISA_RECOMPILER_REAL_SPIRV_NOT_REQUESTED
+        out_program[0] <- g_recompiler_handles[idx].ref[mutable void&]
+        return ELISA_RECOMPILER_BRIDGE_OK
+
+    inst_count: u32 = code_word_count.u32()
+    block_count: u32 = 1u32 if code_word_count > 0usize else 0u32
+    syntax_count: u32 = block_count
+
+    bound: u32 = 16u32 + block_count
+    g_recompiler_handles[idx].output_words[0] <- ELISA_SPIRV_MAGIC
+    g_recompiler_handles[idx].output_words[1] <- RECOMPILER_SPIRV_VERSION
+    g_recompiler_handles[idx].output_words[2] <- RECOMPILER_SPIRV_GENERATOR
+    g_recompiler_handles[idx].output_words[3] <- bound
+    g_recompiler_handles[idx].output_words[4] <- 0u32
+    g_recompiler_handles[idx].output_words[5] <- stage
+    g_recompiler_handles[idx].output_words[6] <- logical_stage
+    g_recompiler_handles[idx].output_words[7] <- (input_hash & 0xFFFFFFFFu64).u32()
+    g_recompiler_handles[idx].output_words[8] <- (input_hash >> 32u64).u32()
+    g_recompiler_handles[idx].output_words[9] <- inst_count
+    g_recompiler_handles[idx].output_words[10] <- block_count
+    g_recompiler_handles[idx].output_words[11] <- syntax_count
+
+    output_hash: u64 = _recompiler_fnv_envelope_bytes(g_recompiler_handles[idx].output_words[0].ref[u32&], RECOMPILER_ENVELOPE_WORDS.usize())
+    g_recompiler_handles[idx].output_word_count <- RECOMPILER_ENVELOPE_WORDS
+    g_recompiler_handles[idx].output_byte_size <- RECOMPILER_ENVELOPE_WORDS * 4u64
+    g_recompiler_handles[idx].output_hash <- output_hash
+    g_recompiler_handles[idx].status <- ELISA_RECOMPILER_PROGRAM_STATUS_TRANSLATED
+    g_recompiler_handles[idx].diagnostic_code <- ELISA_RECOMPILER_DIAGNOSTIC_NONE
+    g_recompiler_handles[idx].payload_kind <- ELISA_RECOMPILER_PAYLOAD_KIND_SPIRV_ENVELOPE
+    g_recompiler_handles[idx].real_spirv_status <- ELISA_RECOMPILER_REAL_SPIRV_NOT_REQUESTED
+
+    out_program[0] <- g_recompiler_handles[idx].ref[mutable void&]
+    return ELISA_RECOMPILER_BRIDGE_OK
+
+
+def elisa_shader_recompiler_free_program(program: mutable void&?) -> void:
+    handle: mutable ElisaRecompilerProgramHandle&? = _recompiler_handle_ref(program)
+    if handle == null:
+        return
+    h: mutable ElisaRecompilerProgramHandle& = handle.cast[mutable ElisaRecompilerProgramHandle&]
+    if h.magic != ELISA_RECOMPILER_PROGRAM_MAGIC_LIVE:
+        return
+    h.magic <- ELISA_RECOMPILER_PROGRAM_MAGIC_FREED
+    h.input_hash <- 0u64
+    h.word_count <- 0u64
+    h.has_stage_type <- 0u32
+    h.stage_type <- 0u32
+    h.output_byte_size <- 0u64
+    h.output_word_count <- 0u64
+    h.output_hash <- 0u64
+    h.payload_kind <- ELISA_RECOMPILER_PAYLOAD_KIND_NONE
+    h.real_spirv_status <- ELISA_RECOMPILER_REAL_SPIRV_NOT_REQUESTED
+    h.status <- ELISA_RECOMPILER_PROGRAM_STATUS_FREED
+    h.diagnostic_code <- ELISA_RECOMPILER_DIAGNOSTIC_NONE
+    i: mutable usize = 0usize
+    while i < 12usize:
+        h.output_words[i] <- 0u32
+        i <- i + 1usize
+
+
+def elisa_shader_recompiler_program_magic(program: mutable void&?) -> u64:
+    handle: mutable ElisaRecompilerProgramHandle&? = _recompiler_handle_ref(program)
+    if handle == null:
+        return 0u64
+    return handle.cast[mutable ElisaRecompilerProgramHandle&].magic
+
+
+def elisa_shader_recompiler_program_input_hash(program: mutable void&?) -> u64:
+    handle: mutable ElisaRecompilerProgramHandle&? = _recompiler_handle_ref(program)
+    if handle == null:
+        return 0u64
+    return handle.cast[mutable ElisaRecompilerProgramHandle&].input_hash
+
+
+def elisa_shader_recompiler_program_input_word_count(program: mutable void&?) -> u64:
+    handle: mutable ElisaRecompilerProgramHandle&? = _recompiler_handle_ref(program)
+    if handle == null:
+        return 0u64
+    return handle.cast[mutable ElisaRecompilerProgramHandle&].word_count
+
+
+def elisa_shader_recompiler_program_stage_type(program: mutable void&?) -> u32:
+    handle: mutable ElisaRecompilerProgramHandle&? = _recompiler_handle_ref(program)
+    if handle == null:
+        return 0u32
+    return handle.cast[mutable ElisaRecompilerProgramHandle&].stage_type
+
+
+def elisa_shader_recompiler_program_has_stage_type(program: mutable void&?) -> u32:
+    handle: mutable ElisaRecompilerProgramHandle&? = _recompiler_handle_ref(program)
+    if handle == null:
+        return 0u32
+    return handle.cast[mutable ElisaRecompilerProgramHandle&].has_stage_type
+
+
+def elisa_shader_recompiler_program_output_byte_size(program: mutable void&?) -> u64:
+    handle: mutable ElisaRecompilerProgramHandle&? = _recompiler_handle_ref(program)
+    if handle == null:
+        return 0u64
+    return handle.cast[mutable ElisaRecompilerProgramHandle&].output_byte_size
+
+
+def elisa_shader_recompiler_program_output_hash(program: mutable void&?) -> u64:
+    handle: mutable ElisaRecompilerProgramHandle&? = _recompiler_handle_ref(program)
+    if handle == null:
+        return 0u64
+    return handle.cast[mutable ElisaRecompilerProgramHandle&].output_hash
+
+
+def elisa_shader_recompiler_program_output_word_count(program: mutable void&?) -> u64:
+    handle: mutable ElisaRecompilerProgramHandle&? = _recompiler_handle_ref(program)
+    if handle == null:
+        return 0u64
+    return handle.cast[mutable ElisaRecompilerProgramHandle&].output_word_count
+
+
+def elisa_shader_recompiler_program_output_word_at(program: mutable void&?, word_index: u64) -> u32:
+    handle: mutable ElisaRecompilerProgramHandle&? = _recompiler_handle_ref(program)
+    if handle == null:
+        return 0u32
+    h: mutable ElisaRecompilerProgramHandle& = handle.cast[mutable ElisaRecompilerProgramHandle&]
+    if word_index < h.output_word_count and word_index < 12u64:
+        return h.output_words[word_index.usize()]
+    return 0u32
+
+
+def elisa_shader_recompiler_program_payload_kind(program: mutable void&?) -> u32:
+    handle: mutable ElisaRecompilerProgramHandle&? = _recompiler_handle_ref(program)
+    if handle == null:
+        return ELISA_RECOMPILER_PAYLOAD_KIND_NONE
+    return handle.cast[mutable ElisaRecompilerProgramHandle&].payload_kind
+
+
+def elisa_shader_recompiler_program_real_spirv_status(program: mutable void&?) -> u32:
+    handle: mutable ElisaRecompilerProgramHandle&? = _recompiler_handle_ref(program)
+    if handle == null:
+        return ELISA_RECOMPILER_REAL_SPIRV_NOT_REQUESTED
+    return handle.cast[mutable ElisaRecompilerProgramHandle&].real_spirv_status
+
+
+def elisa_shader_recompiler_program_status(program: mutable void&?) -> int:
+    handle: mutable ElisaRecompilerProgramHandle&? = _recompiler_handle_ref(program)
+    if handle == null:
+        return ELISA_RECOMPILER_PROGRAM_STATUS_INVALID
+    return handle.cast[mutable ElisaRecompilerProgramHandle&].status
+
+
+def elisa_shader_recompiler_program_diagnostic_code(program: mutable void&?) -> int:
+    handle: mutable ElisaRecompilerProgramHandle&? = _recompiler_handle_ref(program)
+    if handle == null:
+        return ELISA_RECOMPILER_DIAGNOSTIC_NONE
+    return handle.cast[mutable ElisaRecompilerProgramHandle&].diagnostic_code

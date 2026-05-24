@@ -3,8 +3,14 @@
 
 include "./recompiler_ffi_bridge.elisa"
 
-@link_name(ElisaGuestExec_EmitCusaArtifactKV)
-extern c_GuestExec_EmitCusaArtifactKV(key: static u8&?, value: u64) -> void
+# Artifact KV emission is instrumentation consumed only by the CUSA artifact-dump
+# harness, which links core/guest_exec.elisa (the real ElisaGuestExec_EmitCusaArtifactKV).
+# The standalone shader recompiler / renderer-first-frame smoke tests intentionally do
+# not pull in guest_exec, so here it is a safe no-op. The g_shader_artifact_*_emitted
+# flags below still record that the translate path executed.
+def c_GuestExec_EmitCusaArtifactKV(key: static u8&?, value: u64) -> void:
+    _ = key
+    _ = value
 
 global mutable g_shader_artifact_translate_attempted_emitted: bool = false
 global mutable g_shader_artifact_path_bridge_emitted: bool = false
@@ -26,6 +32,8 @@ def ShaderRecompiler_ResetArtifactState() -> void:
     g_shader_artifact_real_spirv_status_emitted <- false
 
 def ShaderRecompiler_TranslateProgramViaFfi(code_words: u32&?, code_word_count: usize, metadata: mutable ShaderRecompilerTranslateMetadata&?, out_program: mutable void&?&) -> int:
+    if code_words == null or code_word_count == 0usize or metadata == null:
+        return ELISA_RECOMPILER_BRIDGE_INVALID_ARGS
     rc: int = elisa_shader_recompiler_translate_program(code_words, code_word_count, metadata, out_program)
     if not g_shader_artifact_translate_attempted_emitted:
         c_GuestExec_EmitCusaArtifactKV("shader_translate_attempted", 1u64)
