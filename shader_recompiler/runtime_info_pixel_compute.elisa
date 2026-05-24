@@ -1,0 +1,141 @@
+# SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Native Elisa port of the geometry/fragment/compute per-stage RuntimeInfo
+# structs from shader_recompiler/runtime_info.h (lines ~135-219):
+# GsMaxOutputStreams, GeometryRuntimeInfo, PsColorBuffer, FragmentRuntimeInfo
+# (with its nested PsInput, lifted to a top-level struct here), and
+# ComputeRuntimeInfo, plus their equality operators (free functions).
+#
+# The Output / MrtSwizzle enums and MaxColorBuffers constant live in
+# runtime_info.elisa (SHADER_OUTPUT_* / SHADER_MRT_SWIZZLE_* /
+# SHADER_MAX_COLOR_BUFFERS) and are reused via the include below.
+#
+# The RuntimeInfo union aggregate (the parent struct that selects one of the
+# per-stage infos) is DEFERRED: the parent agent assembles it.
+#
+# Modeling notes:
+#  - C++ enum-typed fields (AmdGpu::PrimitiveType, GsOutputPrimitiveType,
+#    GsScenario, DataFormat, NumberFormat, NumberConversion,
+#    ShaderExportFormat, CompMapping, AmdGpu::PsInput) are modeled as plain
+#    u32 (AmdGpu register files are not included to avoid collisions).
+#  - C++ bitfields are modeled as ordinary u32 (no packing).
+#  - std::array<OutputMap,3> (OutputMap = array<Output,4>) is flattened to a
+#    u32[12], indexed as map*4 + comp.
+#  - std::span<const u32> vs_copy -> darray[u32].
+
+include "runtime_info.elisa"
+
+const GsMaxOutputStreams: u32 = 4u32
+
+struct GeometryRuntimeInfo:
+    num_outputs: mutable u32
+    # std::array<OutputMap,3>, OutputMap = array<Output,4>; flattened map*4+comp.
+    outputs: mutable u32[12]
+    num_invocations: mutable u32
+    output_vertices: mutable u32
+    in_vertex_data_size: mutable u32
+    out_vertex_data_size: mutable u32
+    in_primitive: mutable u32       # AmdGpu::PrimitiveType
+    out_primitive: mutable u32[4]   # std::array<AmdGpu::GsOutputPrimitiveType,4>
+    mode: mutable u32               # AmdGpu::GsScenario
+    vs_copy: mutable darray[u32]    # std::span<const u32>
+    vs_copy_hash: mutable u64
+
+struct PsColorBuffer:
+    data_format: mutable u32      # AmdGpu::DataFormat : 6
+    num_format: mutable u32       # AmdGpu::NumberFormat : 4
+    num_conversion: mutable u32   # AmdGpu::NumberConversion : 3
+    export_format: mutable u32    # AmdGpu::ShaderExportFormat : 4
+    swizzle: mutable u32          # AmdGpu::CompMapping
+
+# FragmentRuntimeInfo::PsInput, lifted to a top-level struct.
+struct PsInput:
+    param_index: mutable u8
+    is_default: mutable bool
+    is_flat: mutable bool
+    default_value: mutable u8
+
+def PsInput_IsDefault(self: PsInput&) -> bool:
+    return self.is_default and (not self.is_flat)
+
+struct FragmentRuntimeInfo:
+    en_flags: mutable u32     # AmdGpu::PsInput
+    addr_flags: mutable u32   # AmdGpu::PsInput
+    num_inputs: mutable u32
+    inputs: mutable PsInput[32]
+    color_buffers: mutable PsColorBuffer[8]
+    z_export_format: mutable u32   # AmdGpu::ShaderExportFormat
+    mrtz_mask: mutable u8
+    dual_source_blending: mutable bool
+    clip_distance_emulation: mutable bool
+
+struct ComputeRuntimeInfo:
+    shared_memory_size: mutable u32
+    workgroup_size: mutable u32[3]
+    tgid_enable: mutable bool[3]
+
+# ---- Equality operators (ported from the C++ operator== overloads) ----
+
+def PsColorBuffer_Equal(a: PsColorBuffer&, b: PsColorBuffer&) -> bool:
+    return (a.data_format == b.data_format) and (a.num_format == b.num_format) and (a.num_conversion == b.num_conversion) and (a.export_format == b.export_format) and (a.swizzle == b.swizzle)
+
+def PsInput_Equal(a: PsInput&, b: PsInput&) -> bool:
+    return (a.param_index == b.param_index) and (a.is_default == b.is_default) and (a.is_flat == b.is_flat) and (a.default_value == b.default_value)
+
+# C++ only compares workgroup_size & tgid_enable (shared_memory_size ignored).
+def ComputeRuntimeInfo_Equal(a: ComputeRuntimeInfo&, b: ComputeRuntimeInfo&) -> bool:
+    return (a.workgroup_size[0usize] == b.workgroup_size[0usize]) and (a.workgroup_size[1usize] == b.workgroup_size[1usize]) and (a.workgroup_size[2usize] == b.workgroup_size[2usize]) and (a.tgid_enable[0usize] == b.tgid_enable[0usize]) and (a.tgid_enable[1usize] == b.tgid_enable[1usize]) and (a.tgid_enable[2usize] == b.tgid_enable[2usize])
+
+# Faithful port of the C++ operator==. Note the C++ quirk:
+# `num_invocations && other.num_invocations` is truthiness (both nonzero),
+# replicated as (a.num_invocations != 0) and (b.num_invocations != 0).
+# It does NOT compare vs_copy contents or the data-size fields.
+def GeometryRuntimeInfo_Equal(a: GeometryRuntimeInfo&, b: GeometryRuntimeInfo&) -> bool:
+    if not (a.num_outputs == b.num_outputs):
+        return false
+    i: mutable usize = 0usize
+    while i < 12usize:
+        if not (a.outputs[i] == b.outputs[i]):
+            return false
+        i <- i + 1usize
+    if not ((a.num_invocations != 0u32) and (b.num_invocations != 0u32)):
+        return false
+    if not (a.output_vertices == b.output_vertices):
+        return false
+    if not (a.in_primitive == b.in_primitive):
+        return false
+    j: mutable usize = 0usize
+    while j < 4usize:
+        if not (a.out_primitive[j] == b.out_primitive[j]):
+            return false
+        j <- j + 1usize
+    return a.vs_copy_hash == b.vs_copy_hash
+
+# Compares color_buffers (all 8), the scalar fields, and inputs[0..num_inputs).
+def FragmentRuntimeInfo_Equal(a: FragmentRuntimeInfo&, b: FragmentRuntimeInfo&) -> bool:
+    i: mutable usize = 0usize
+    while i < 8usize:
+        if not PsColorBuffer_Equal(a.color_buffers[i].ref[PsColorBuffer&], b.color_buffers[i].ref[PsColorBuffer&]):
+            return false
+        i <- i + 1usize
+    if not (a.en_flags == b.en_flags):
+        return false
+    if not (a.addr_flags == b.addr_flags):
+        return false
+    if not (a.num_inputs == b.num_inputs):
+        return false
+    if not (a.z_export_format == b.z_export_format):
+        return false
+    if not (a.mrtz_mask == b.mrtz_mask):
+        return false
+    if not (a.dual_source_blending == b.dual_source_blending):
+        return false
+    if not (a.clip_distance_emulation == b.clip_distance_emulation):
+        return false
+    k: mutable usize = 0usize
+    while k < a.num_inputs.usize():
+        if not PsInput_Equal(a.inputs[k].ref[PsInput&], b.inputs[k].ref[PsInput&]):
+            return false
+        k <- k + 1usize
+    return true
