@@ -387,6 +387,298 @@ def c_GuestExec_AddressNativeProt(address: uintptr) -> u32:
 def c_GuestExec_ReadNativeU64(address: uintptr) -> uintptr:
     return ge_read_native_word(address)
 
+# ============================================================
+# x86_64 signal/ucontext crash-capture foundation (Stage C+D+E, part 1).
+# Inert until the atomic swap wires it in; the signal handler and guards mirror
+# guest_exec_runtime.c. ucontext register extraction uses raw offset reads (no
+# struct modeling) — the same fields upstream shadPS4 reads via uc_mcontext->__ss.
+# ============================================================
+@link_name(sigaction)
+extern ge_sigaction(signum: int, act: void&?, oldact: void&?) -> int
+@link_name(siglongjmp)
+extern ge_siglongjmp(env: void&?, val: int) -> void
+@link_name(dladdr)
+extern ge_dladdr(addr: void&?, info: void&?) -> int
+
+# macOS struct sigaction (16 bytes): handler ptr, sa_mask (u32), sa_flags (int).
+# Linux's is larger/different — modeled for the validated macOS path; Linux is
+# a follow-up (like the Windows memory stubs).
+@fixed_layout
+struct GeSigaction:
+    handler: mutable void&?
+    mask: mutable u32
+    flags: mutable int
+
+# Dl_info: { const char* dli_fname; void* dli_fbase; const char* dli_sname; void* dli_saddr; }
+@fixed_layout
+struct GeDlInfo:
+    dli_fname: mutable static u8&?
+    dli_fbase: mutable void&?
+    dli_sname: mutable static u8&?
+    dli_saddr: mutable void&?
+
+global mutable ge_guard_active: s32 = 0
+global mutable ge_old_segv: GeSigaction = zeroed
+global mutable ge_old_bus: GeSigaction = zeroed
+global mutable ge_old_ill: GeSigaction = zeroed
+global mutable ge_old_fpe: GeSigaction = zeroed
+global mutable ge_old_trap: GeSigaction = zeroed
+global mutable ge_old_alrm: GeSigaction = zeroed
+global mutable ge_jmp_buf: u8[256] = zeroed
+
+const GE_SIG_SEGV: int = 11
+const GE_SIG_ILL: int = 4
+const GE_SIG_FPE: int = 8
+const GE_SIG_TRAP: int = 5
+const GE_SIG_ALRM: int = 14
+def ge_sig_bus() -> int:
+    static if PLATFORM_APPLE:
+        return 10
+    static else:
+        return 7
+def ge_sa_siginfo() -> int:
+    return 0x40
+
+def ge_set_native_phase(phase: s32) -> void:
+    ge_last_native_phase <- phase
+    fr: ElisaGuestExecForkReport&? = ge_fork_report
+    if fr != null:
+        fr.native_phase <- phase
+
+# Raw read of a uintptr at an arbitrary host address (signal/stack context).
+def ge_read_context_word(address: uintptr) -> uintptr:
+    if address == 0.uintptr():
+        return 0.uintptr()
+    out: mutable u64 = 0u64
+    _ = ge_memcpy(out.ref[void&], ge_addr_to_ptr(address), 8usize)
+    return out.uintptr()
+
+def ge_uctx_word(uctx: void&?, offset: u64) -> uintptr:
+    if uctx == null:
+        return 0.uintptr()
+    return ge_read_context_word(uctx.uintptr() + offset.uintptr())
+
+# x86_64 ucontext register extraction (raw offsets). macOS: uc_mcontext ptr at
+# uctx+48 -> mcontext64.__ss regs. Linux: inline uc_mcontext.gregs at uctx+40.
+def ge_extract_pc(uctx: void&?) -> uintptr:
+    static if ARCH_X86_64 and PLATFORM_APPLE:
+        mctx: uintptr = ge_uctx_word(uctx, 48u64)
+        return ge_read_context_word(mctx + 144.uintptr())
+    static elif ARCH_X86_64 and PLATFORM_LINUX:
+        return ge_uctx_word(uctx, 40u64 + 16u64 * 8u64)
+    static else:
+        return 0.uintptr()
+
+def ge_extract_sp(uctx: void&?) -> uintptr:
+    static if ARCH_X86_64 and PLATFORM_APPLE:
+        mctx: uintptr = ge_uctx_word(uctx, 48u64)
+        return ge_read_context_word(mctx + 72.uintptr())
+    static elif ARCH_X86_64 and PLATFORM_LINUX:
+        return ge_uctx_word(uctx, 40u64 + 15u64 * 8u64)
+    static else:
+        return 0.uintptr()
+
+def ge_extract_bp(uctx: void&?) -> uintptr:
+    static if ARCH_X86_64 and PLATFORM_APPLE:
+        mctx: uintptr = ge_uctx_word(uctx, 48u64)
+        return ge_read_context_word(mctx + 64.uintptr())
+    static elif ARCH_X86_64 and PLATFORM_LINUX:
+        return ge_uctx_word(uctx, 40u64 + 10u64 * 8u64)
+    static else:
+        return 0.uintptr()
+
+# reg index: 0=rdi 1=rsi 2=rax 3=rbx 4=rdx 5=rcx 6=r8 7=r9
+def ge_extract_greg(uctx: void&?, reg: int) -> uintptr:
+    static if ARCH_X86_64 and PLATFORM_APPLE:
+        mctx: uintptr = ge_uctx_word(uctx, 48u64)
+        off: mutable u64 = 0u64
+        if reg == 0:
+            off <- 48u64
+        elif reg == 1:
+            off <- 56u64
+        elif reg == 2:
+            off <- 16u64
+        elif reg == 3:
+            off <- 24u64
+        elif reg == 4:
+            off <- 40u64
+        elif reg == 5:
+            off <- 32u64
+        elif reg == 6:
+            off <- 80u64
+        elif reg == 7:
+            off <- 88u64
+        else:
+            return 0.uintptr()
+        return ge_read_context_word(mctx + off.uintptr())
+    static elif ARCH_X86_64 and PLATFORM_LINUX:
+        gi: mutable u64 = 0u64
+        if reg == 0:
+            gi <- 8u64
+        elif reg == 1:
+            gi <- 9u64
+        elif reg == 2:
+            gi <- 13u64
+        elif reg == 3:
+            gi <- 11u64
+        elif reg == 4:
+            gi <- 12u64
+        elif reg == 5:
+            gi <- 14u64
+        elif reg == 6:
+            gi <- 0u64
+        elif reg == 7:
+            gi <- 1u64
+        else:
+            return 0.uintptr()
+        return ge_uctx_word(uctx, 40u64 + gi * 8u64)
+    static else:
+        return 0.uintptr()
+
+def ge_has_signal_pc(uctx: void&?) -> s32:
+    if uctx == null:
+        return 0
+    static if ARCH_X86_64 and PLATFORM_APPLE:
+        return 1 if ge_uctx_word(uctx, 48u64) != 0.uintptr() else 0
+    static elif ARCH_X86_64 and PLATFORM_LINUX:
+        return 1
+    static else:
+        return 0
+
+# si_addr lives at a per-OS offset inside siginfo_t (macOS 24, Linux 16).
+def ge_siginfo_fault_addr(info: void&?) -> uintptr:
+    if info == null:
+        return 0.uintptr()
+    static if PLATFORM_APPLE:
+        return ge_read_context_word(info.uintptr() + 24.uintptr())
+    static elif PLATFORM_LINUX:
+        return ge_read_context_word(info.uintptr() + 16.uintptr())
+    static else:
+        return 0.uintptr()
+
+# dladdr a code address into symbol + image name; store into the stack-context
+# or pc-context globals.
+def ge_resolve_pc_symbol(address: uintptr, is_stack: bool) -> void:
+    sym: mutable static u8&? = ""
+    img: mutable static u8&? = ""
+    if address != 0.uintptr():
+        info: mutable GeDlInfo = zeroed
+        if ge_dladdr(ge_addr_to_ptr(address), info.ref[void&]) != 0:
+            if info.dli_sname != null:
+                sym <- info.dli_sname
+            if info.dli_fname != null:
+                img <- info.dli_fname
+    if is_stack:
+        ge_signal_stack_symbol0 <- sym
+        ge_signal_stack_image0 <- img
+    else:
+        ge_signal_pc_symbol <- sym
+        ge_signal_pc_image <- img
+
+def ge_install_guards() -> void:
+    sa: mutable GeSigaction = zeroed
+    sa.handler <- ge_signal_handler as void&?
+    sa.mask <- 0u32
+    sa.flags <- ge_sa_siginfo()
+    _ = ge_sigaction(GE_SIG_SEGV, sa.ref[void&], ge_old_segv.ref[void&])
+    _ = ge_sigaction(ge_sig_bus(), sa.ref[void&], ge_old_bus.ref[void&])
+    _ = ge_sigaction(GE_SIG_ILL, sa.ref[void&], ge_old_ill.ref[void&])
+    _ = ge_sigaction(GE_SIG_FPE, sa.ref[void&], ge_old_fpe.ref[void&])
+    _ = ge_sigaction(GE_SIG_TRAP, sa.ref[void&], ge_old_trap.ref[void&])
+    alarm_sa: mutable GeSigaction = zeroed
+    alarm_sa.handler <- ge_alarm_handler as void&?
+    alarm_sa.mask <- 0u32
+    alarm_sa.flags <- 0
+    _ = ge_sigaction(GE_SIG_ALRM, alarm_sa.ref[void&], ge_old_alrm.ref[void&])
+
+def ge_restore_guards() -> void:
+    _ = ge_sigaction(GE_SIG_SEGV, ge_old_segv.ref[void&], null)
+    _ = ge_sigaction(ge_sig_bus(), ge_old_bus.ref[void&], null)
+    _ = ge_sigaction(GE_SIG_ILL, ge_old_ill.ref[void&], null)
+    _ = ge_sigaction(GE_SIG_FPE, ge_old_fpe.ref[void&], null)
+    _ = ge_sigaction(GE_SIG_TRAP, ge_old_trap.ref[void&], null)
+    _ = ge_sigaction(GE_SIG_ALRM, ge_old_alrm.ref[void&], null)
+
+@c_abi(c)
+def ge_alarm_handler(sig: int) -> void:
+    _ = sig
+    ge_set_native_phase(GE_PHASE_ALARM_HANDLER_ENTERED)
+    ge_timeout_fired <- 1
+    ge_last_status <- -3
+    ge_last_signal <- GE_SIG_ALRM.s32()
+    fr: ElisaGuestExecForkReport&? = ge_fork_report
+    if fr != null:
+        fr.status <- -3
+        fr.signal <- GE_SIG_ALRM.s32()
+        if fr.execution_stage < 4:
+            fr.execution_stage <- 4
+    if ge_guard_active != 0:
+        ge_siglongjmp(ge_jmp_buf[0usize].ref[void&], 1)
+
+@c_abi(c)
+def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
+    ge_set_native_phase(GE_PHASE_SIGNAL_HANDLER_ENTERED)
+    ge_last_status <- (0 - sig).s32()
+    ge_last_signal <- sig.s32()
+    ge_last_fault_address <- ge_siginfo_fault_addr(info)
+    ge_signal_pc_valid <- ge_has_signal_pc(uctx)
+    ge_signal_guest_pc <- ge_extract_pc(uctx)
+    ge_fallback_guest_pc <- 0.uintptr()
+    ge_last_pc_was_fallback <- 0
+    ge_last_pc_source <- (GE_PC_SOURCE_SIGNAL_UCONTEXT if ge_signal_pc_valid != 0 else GE_PC_SOURCE_NONE)
+    ge_last_guest_pc <- ge_signal_guest_pc
+    ge_last_guest_sp <- ge_extract_sp(uctx)
+    ge_last_guest_bp <- ge_extract_bp(uctx)
+    ge_last_guest_rdi <- ge_extract_greg(uctx, 0)
+    ge_last_guest_rsi <- ge_extract_greg(uctx, 1)
+    ge_last_guest_rax <- ge_extract_greg(uctx, 2)
+    ge_last_guest_rbx <- ge_extract_greg(uctx, 3)
+    ge_last_guest_rdx <- ge_extract_greg(uctx, 4)
+    ge_last_guest_rcx <- ge_extract_greg(uctx, 5)
+    ge_last_guest_r8 <- ge_extract_greg(uctx, 6)
+    ge_last_guest_r9 <- ge_extract_greg(uctx, 7)
+    ge_pc_native_prot <- ge_native_prot_at(ge_last_guest_pc, 8u64)
+    ge_fault_word0 <- ge_read_native_word(ge_last_guest_pc)
+    ge_fault_word1 <- ge_read_native_word(ge_last_guest_pc + 8.uintptr())
+    ge_signal_stack_word0 <- ge_read_context_word(ge_last_guest_sp)
+    ge_signal_stack_word1 <- ge_read_context_word(ge_last_guest_sp + 8.uintptr())
+    ge_resolve_pc_symbol(ge_signal_stack_word0, true)
+    ge_resolve_pc_symbol(ge_last_guest_pc, false)
+    fr: ElisaGuestExecForkReport&? = ge_fork_report
+    if fr != null:
+        fr.status <- ge_last_status
+        fr.signal <- sig.s32()
+        fr.fault_address <- ge_last_fault_address
+        fr.guest_pc <- ge_last_guest_pc
+        fr.guest_sp <- ge_last_guest_sp
+        fr.guest_bp <- ge_last_guest_bp
+        fr.guest_rdi <- ge_last_guest_rdi
+        fr.guest_rsi <- ge_last_guest_rsi
+        fr.guest_rdx <- ge_last_guest_rdx
+        fr.guest_rcx <- ge_last_guest_rcx
+        fr.guest_r8 <- ge_last_guest_r8
+        fr.guest_r9 <- ge_last_guest_r9
+        fr.guest_rax <- ge_last_guest_rax
+        fr.guest_rbx <- ge_last_guest_rbx
+        fr.fault_word0 <- ge_fault_word0
+        fr.fault_word1 <- ge_fault_word1
+        fr.signal_stack_word0 <- ge_signal_stack_word0
+        fr.signal_stack_word1 <- ge_signal_stack_word1
+        fr.signal_stack_symbol0 <- ge_signal_stack_symbol0
+        fr.signal_stack_image0 <- ge_signal_stack_image0
+        fr.signal_pc_symbol <- ge_signal_pc_symbol
+        fr.signal_pc_image <- ge_signal_pc_image
+        fr.signal_guest_pc <- ge_signal_guest_pc
+        fr.fallback_guest_pc <- ge_fallback_guest_pc
+        fr.signal_pc_valid <- ge_signal_pc_valid
+        fr.pc_source <- ge_last_pc_source
+        fr.pc_was_fallback <- ge_last_pc_was_fallback
+        fr.pc_native_prot <- ge_pc_native_prot
+        if fr.execution_stage < 6:
+            fr.execution_stage <- 6
+    if ge_guard_active != 0:
+        ge_siglongjmp(ge_jmp_buf[0usize].ref[void&], 1)
+
 @link_name(ElisaGuestExec_RunMainEntry)
 extern c_GuestExec_RunMainEntry(params: mutable GuestEntryParams&, exit_func: void&?) -> void
 
@@ -663,6 +955,40 @@ const GE_PC_SOURCE_SIGNAL_UCONTEXT: s32 = 1
 const GE_PC_SOURCE_FALLBACK_CHILD_SIGLONGJMP: s32 = 2
 const GE_PC_SOURCE_FALLBACK_PARENT_SILENT_CHILD: s32 = 3
 const GE_PC_SOURCE_FALLBACK_PARENT_STATUS: s32 = 4
+
+# Native-phase breadcrumbs (mirror the C enum)
+const GE_PHASE_NONE: s32 = 0
+const GE_PHASE_FUNCTION_ENTRY: s32 = 100
+const GE_PHASE_RETURN_BAD_PARAMS: s32 = 101
+const GE_PHASE_AFTER_RESET: s32 = 110
+const GE_PHASE_SYNTHETIC_ENTRY: s32 = 120
+const GE_PHASE_SYNTHETIC_BEFORE_SIGSETJMP: s32 = 121
+const GE_PHASE_SYNTHETIC_BEFORE_MAIN_ENTRY: s32 = 122
+const GE_PHASE_BEFORE_FORK_REPORT_SETUP: s32 = 200
+const GE_PHASE_RETURN_FORK_REPORT_SETUP_FAILED: s32 = 201
+const GE_PHASE_AFTER_FORK_REPORT_SETUP: s32 = 202
+const GE_PHASE_BEFORE_FORK: s32 = 210
+const GE_PHASE_RETURN_FORK_FAILED: s32 = 211
+const GE_PHASE_CHILD_BRANCH_ENTERED: s32 = 220
+const GE_PHASE_CHILD_GUARDS_INSTALLED: s32 = 221
+const GE_PHASE_CHILD_BEFORE_SIGSETJMP: s32 = 222
+const GE_PHASE_CHILD_SIGLONGJMP: s32 = 223
+const GE_PHASE_CHILD_BEFORE_MAIN_ENTRY: s32 = 224
+const GE_PHASE_CHILD_AFTER_MAIN_ENTRY: s32 = 225
+const GE_PHASE_CHILD_ENTRY_SNAPSHOT: s32 = 226
+const GE_PHASE_SIGNAL_HANDLER_ENTERED: s32 = 300
+const GE_PHASE_ALARM_HANDLER_ENTERED: s32 = 310
+const GE_PHASE_PARENT_BRANCH_ENTERED: s32 = 400
+const GE_PHASE_PARENT_WAITPID_CHILD: s32 = 401
+const GE_PHASE_PARENT_WIFSIGNALED: s32 = 402
+const GE_PHASE_PARENT_WIFEXITED: s32 = 403
+const GE_PHASE_PARENT_WAIT_STATUS_OTHER: s32 = 404
+const GE_PHASE_PARENT_WAITPID_ERROR: s32 = 410
+const GE_PHASE_PARENT_WAITPID_EINTR: s32 = 411
+const GE_PHASE_PARENT_TIMEOUT: s32 = 420
+const GE_PHASE_NATIVE_BOUNDARY_REPORTED: s32 = 500
+const GE_PHASE_UNSUPPORTED_RETURN: s32 = 900
+global mutable ge_timeout_fired: s32 = 0
 
 global mutable ge_last_status: s32 = 0
 global mutable ge_last_signal: s32 = 0
