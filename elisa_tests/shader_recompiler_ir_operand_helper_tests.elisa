@@ -1,0 +1,59 @@
+# SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../shader_recompiler/ir/operand_helper.elisa"
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+
+@test
+def operand_helper_arg_indices_match_cpp() -> void:
+    can Abort.Panic:
+        assert IR_BUFFER_ARG_HANDLE == 0u32
+        assert IR_BUFFER_ARG_ADDRESS == 1u32
+        assert IR_STORE_BUFFER_ARG_DATA == 2u32
+
+@test
+def operand_helper_extracts_address_components() -> void:
+    can Abort.Panic, Memory.Allocate:
+        info: ShaderIrProgramInfo = zeroed
+        program: mutable heap ShaderIrProgram& = ShaderIrProgram_New(info)
+        b: u32 = ShaderIrProgram_AddBlock(program)
+        # Address = CompositeConstructU32x3(index=11, voffset=22, soffset=33).
+        addr_args: mutable ShaderIrValue[6] = zeroed
+        addr_args[0usize] <- ShaderIrValue_FromU32(11u32)
+        addr_args[1usize] <- ShaderIrValue_FromU32(22u32)
+        addr_args[2usize] <- ShaderIrValue_FromU32(33u32)
+        addr_idx: u32 = ShaderIrProgram_AppendInst(program, b, IR_OPCODE_COMPOSITECONSTRUCTU32X3, addr_args, 3u32, 0u64)
+        # LoadBufferU32(handle, address).
+        buf_args: mutable ShaderIrValue[6] = zeroed
+        buf_args[0usize] <- ShaderIrValue_FromU32(7u32)
+        buf_args[1usize] <- ShaderIrValue_FromInst(b, addr_idx)
+        buf_idx: u32 = ShaderIrProgram_AppendInst(program, b, IR_OPCODE_LOADBUFFERU32, buf_args, 2u32, 0u64)
+        idx_arg: ShaderIrValue = ShaderIrOperand_GetBufferIndexArg(program, b, buf_idx)
+        voff_arg: ShaderIrValue = ShaderIrOperand_GetBufferVOffsetArg(program, b, buf_idx)
+        soff_arg: ShaderIrValue = ShaderIrOperand_GetBufferSOffsetArg(program, b, buf_idx)
+        assert idx_arg.imm_u32 == 11u32
+        assert voff_arg.imm_u32 == 22u32
+        assert soff_arg.imm_u32 == 33u32
+
+@test
+def operand_helper_resolves_through_identity() -> void:
+    can Abort.Panic, Memory.Allocate:
+        info: ShaderIrProgramInfo = zeroed
+        program: mutable heap ShaderIrProgram& = ShaderIrProgram_New(info)
+        b: u32 = ShaderIrProgram_AddBlock(program)
+        addr_args: mutable ShaderIrValue[6] = zeroed
+        addr_args[0usize] <- ShaderIrValue_FromU32(101u32)
+        addr_args[1usize] <- ShaderIrValue_FromU32(102u32)
+        addr_args[2usize] <- ShaderIrValue_FromU32(103u32)
+        addr_idx: u32 = ShaderIrProgram_AppendInst(program, b, IR_OPCODE_COMPOSITECONSTRUCTU32X3, addr_args, 3u32, 0u64)
+        # Identity(addr): the buffer's address arg points at an Identity wrapper.
+        id_args: mutable ShaderIrValue[6] = zeroed
+        id_args[0usize] <- ShaderIrValue_FromInst(b, addr_idx)
+        id_idx: u32 = ShaderIrProgram_AppendInst(program, b, IR_OPCODE_IDENTITY, id_args, 1u32, 0u64)
+        buf_args: mutable ShaderIrValue[6] = zeroed
+        buf_args[0usize] <- ShaderIrValue_FromU32(7u32)
+        buf_args[1usize] <- ShaderIrValue_FromInst(b, id_idx)
+        buf_idx: u32 = ShaderIrProgram_AppendInst(program, b, IR_OPCODE_LOADBUFFERU32, buf_args, 2u32, 0u64)
+        # Resolve must fold the Identity to reach the composite.
+        assert ShaderIrOperand_GetBufferIndexArg(program, b, buf_idx).imm_u32 == 101u32
+        assert ShaderIrOperand_GetBufferSOffsetArg(program, b, buf_idx).imm_u32 == 103u32

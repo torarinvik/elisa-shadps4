@@ -1,0 +1,72 @@
+# SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Native Elisa port of shader_recompiler/ir/operand_helper.h: named operand
+# indices for Load/StoreBuffer instructions and helpers to extract the buffer
+# address components. Includes the small Value::IsIdentity / InstRecursive /
+# Resolve IR primitives the C++ helpers rely on (kept local here so no shared
+# IR file is disturbed; they can be promoted if other ports need them).
+
+include "./type.elisa"
+include "./opcodes.elisa"
+include "./program.elisa"
+
+# Argument indices (C++ LoadBufferArgs / StoreBufferArgs namespaces). The handle
+# and address slots line up across the load and store variants.
+const IR_BUFFER_ARG_HANDLE: u32 = 0u32
+const IR_BUFFER_ARG_ADDRESS: u32 = 1u32
+const IR_STORE_BUFFER_ARG_DATA: u32 = 2u32
+
+
+# Value::IsIdentity: the value references an instruction whose opcode is Identity.
+def ShaderIrValue_RefIsIdentity(program: ShaderIrProgram&, value: ShaderIrValue) -> bool:
+    if value.type_bits != IR_TYPE_OPAQUE:
+        return false
+    if value.inst_block >= program.block_count:
+        return false
+    if value.inst_index >= program.blocks[value.inst_block.usize()].inst_count:
+        return false
+    return program.blocks[value.inst_block.usize()].insts[value.inst_index.usize()].opcode == IR_OPCODE_IDENTITY
+
+
+# Value::Resolve / InstRecursive: fold Identity chains. Resolve returns the
+# underlying value (which may be an immediate); InstRecursive expects the result
+# to reference a real instruction. Both share this fold; the bound guards against
+# a malformed cyclic chain.
+def ShaderIrValue_ResolveRef(program: ShaderIrProgram&, value: ShaderIrValue) -> ShaderIrValue:
+    can Abort.Panic:
+        cur: mutable ShaderIrValue = value
+        guard: mutable u32 = 0u32
+        while guard < IR_MAX_BLOCK_INSTRUCTIONS and ShaderIrValue_RefIsIdentity(program, cur):
+            cur <- ShaderIrInst_Arg(program.blocks[cur.inst_block.usize()].insts[cur.inst_index.usize()], 0u32)
+            guard <- guard + 1u32
+        return cur
+
+
+# GetBufferAddressComponent: the buffer address argument is a u32x3 composite
+# built before sharp tracking; pull out one of its components (index, voffset,
+# soffset), resolving through any Identity wrappers as the C++ does.
+def ShaderIrOperand_GetBufferAddressComponent(program: ShaderIrProgram&, buffer_block: u32, buffer_index: u32, comp: u32) -> ShaderIrValue:
+    can Abort.Panic:
+        assert buffer_block < program.block_count
+        assert buffer_index < program.blocks[buffer_block.usize()].inst_count
+        address_arg: ShaderIrValue = ShaderIrInst_Arg(program.blocks[buffer_block.usize()].insts[buffer_index.usize()], IR_BUFFER_ARG_ADDRESS)
+        address_ref: ShaderIrValue = ShaderIrValue_ResolveRef(program, address_arg)
+        assert address_ref.type_bits == IR_TYPE_OPAQUE
+        assert address_ref.inst_block < program.block_count
+        assert address_ref.inst_index < program.blocks[address_ref.inst_block.usize()].inst_count
+        assert program.blocks[address_ref.inst_block.usize()].insts[address_ref.inst_index.usize()].opcode == IR_OPCODE_COMPOSITECONSTRUCTU32X3
+        component: ShaderIrValue = ShaderIrInst_Arg(program.blocks[address_ref.inst_block.usize()].insts[address_ref.inst_index.usize()], comp)
+        return ShaderIrValue_ResolveRef(program, component)
+
+
+def ShaderIrOperand_GetBufferIndexArg(program: ShaderIrProgram&, buffer_block: u32, buffer_index: u32) -> ShaderIrValue:
+    return ShaderIrOperand_GetBufferAddressComponent(program, buffer_block, buffer_index, 0u32)
+
+
+def ShaderIrOperand_GetBufferVOffsetArg(program: ShaderIrProgram&, buffer_block: u32, buffer_index: u32) -> ShaderIrValue:
+    return ShaderIrOperand_GetBufferAddressComponent(program, buffer_block, buffer_index, 1u32)
+
+
+def ShaderIrOperand_GetBufferSOffsetArg(program: ShaderIrProgram&, buffer_block: u32, buffer_index: u32) -> ShaderIrValue:
+    return ShaderIrOperand_GetBufferAddressComponent(program, buffer_block, buffer_index, 2u32)
