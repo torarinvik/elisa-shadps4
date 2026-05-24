@@ -1313,40 +1313,6 @@ int32_t ElisaGuestExec_LastNativePhase(void) {
     return elisa_guest_exec_last_native_phase;
 }
 
-uint64_t ElisaGuestExec_EntryParamsSize(void) {
-    return (uint64_t)sizeof(ElisaGuestEntryParams);
-}
-
-uint64_t ElisaGuestExec_EntryParamsArgcOffset(void) {
-    return (uint64_t)offsetof(ElisaGuestEntryParams, argc);
-}
-
-uint64_t ElisaGuestExec_EntryParamsArgvOffset(void) {
-    return (uint64_t)offsetof(ElisaGuestEntryParams, argv);
-}
-
-uint64_t ElisaGuestExec_EntryParamsEntryAddrOffset(void) {
-    return (uint64_t)offsetof(ElisaGuestEntryParams, entry_addr);
-}
-
-uint64_t ElisaGuestExec_ProbeEntryParams(ElisaGuestEntryParams* params) {
-    if (params == NULL) {
-        return 0;
-    }
-    uint64_t result = 0xE100000000000000ull;
-    result |= ((uint64_t)(uint32_t)params->argc) & 0xFFFFull;
-    if (params->padding == 0xA5A5A5A5u) {
-        result |= 1ull << 16;
-    }
-    if ((uintptr_t)params->argv[0] == (uintptr_t)0x12345678ull) {
-        result |= 1ull << 17;
-    }
-    if (params->entry_addr == (uintptr_t)0x8877665544332211ull) {
-        result |= 1ull << 18;
-    }
-    return result;
-}
-
 uintptr_t ElisaGuestExec_LastFaultAddress(void) {
     return elisa_guest_exec_last_fault_address;
 }
