@@ -8,6 +8,9 @@ const GUEST_EXEC_MAX_ARGS: usize = 33
 
 extern snprintf(buf: mutable u8&?, bufsize: usize, fmt: u8&, ...) -> int effects[Console.Format]
 extern puts(s: u8&) -> int effects[Console.Write]
+extern popen(command: u8&, mode: u8&) -> void&?
+extern pclose(stream: void&) -> int
+extern fgets(s: mutable u8&, size: int, stream: void&) -> mutable u8&?
 
 @fixed_layout
 struct GuestEntryParams:
@@ -19,8 +22,8 @@ struct GuestEntryParams:
 # Platform-capability queries: ported from native C to pure Elisa using the
 # compile-time target facts (common/arch.elisa). These resolve entirely at build
 # time via `static if`, so the unselected branches are eliminated (no runtime
-# checks, no FFI). HostCanRunX64Subprocess stays native: it shells out via popen
-# to probe Rosetta on Apple Silicon.
+# checks). HostCanRunX64Subprocess uses libc process I/O FFI only for the Apple
+# Silicon Rosetta probe.
 def c_GuestExec_IsSupported() -> s32:
     static if PLATFORM_WINDOWS:
         return 0
@@ -52,8 +55,34 @@ def c_GuestExec_HostMode() -> static u8&?:
     static else:
         return "unknown"
 
-@link_name(ElisaGuestExec_HostCanRunX64Subprocess)
-extern c_GuestExec_HostCanRunX64Subprocess() -> s32
+def c_GuestExec_HostCanRunX64Subprocess() -> s32:
+    static if ARCH_X86_64:
+        return 1
+    static elif PLATFORM_APPLE and ARCH_ARM64:
+        line: mutable u8[64] = zeroed
+        proc: void&? = popen("/usr/bin/arch -x86_64 /usr/bin/uname -m 2>/dev/null", "r")
+        if proc == null:
+            return 0
+        has_x64: mutable s32 = 0
+        read_result: mutable u8&? = fgets(line[0].ref[mutable u8&], 64, proc.cast[void&])
+        if read_result != null:
+            i: mutable usize = 0
+            while i < 64usize:
+                if line[i] == 0:
+                    i <- 64usize
+                elif line[i] == '\n' or line[i] == '\r':
+                    line[i] <- 0
+                    i <- 64usize
+                else:
+                    i <- i + 1
+            if streq(line[0].ref[u8&].cast[static u8&], "x86_64") == 1:
+                has_x64 <- 1
+        status: int = pclose(proc.cast[void&])
+        if status != 0:
+            return 0
+        return has_x64
+    static else:
+        return 0
 
 @link_name(ElisaGuestExec_AeroLibFallbackStubAddress)
 extern c_GuestExec_AeroLibFallbackStubAddress() -> uintptr
