@@ -1142,6 +1142,257 @@ def ge_get_synthetic_boundary_callback_address() -> uintptr:
 def ge_get_non_synthetic_main_report_boundary_address() -> uintptr:
     return ge_non_synthetic_main_report_boundary as uintptr
 
+# ---- Run orchestration + crash getters (atomic core, part 2c; inert) ----
+@link_name(fork)
+extern ge_fork() -> int
+@link_name(waitpid)
+extern ge_waitpid(pid: int, status: mutable int&, options: int) -> int
+@link_name(kill)
+extern ge_kill(pid: int, sig: int) -> int
+@link_name(usleep)
+extern ge_usleep(usec: u32) -> int
+@link_name(setitimer)
+extern ge_setitimer(which: int, value: void&?, old: void&?) -> int
+
+@fixed_layout
+struct GeTimeval:
+    tv_sec: mutable i64
+    tv_usec: mutable i32
+    tv_pad: mutable i32
+@fixed_layout
+struct GeItimerval:
+    interval: mutable GeTimeval
+    value: mutable GeTimeval
+
+const GE_WNOHANG: int = 1
+const GE_ITIMER_REAL: int = 0
+const GE_SENTINEL_MAX: u64 = 0xFFFFFFFFFFFFFFFFu64
+
+def ge_wif_signaled(status: int) -> bool:
+    low: int = status & 0x7f
+    return low != 0 and low != 0x7f
+def ge_wtermsig(status: int) -> int:
+    return status & 0x7f
+def ge_wif_exited(status: int) -> bool:
+    return (status & 0x7f) == 0
+def ge_wexitstatus(status: int) -> int:
+    return (status >> 8) & 0xff
+def ge_wif_stopped(status: int) -> bool:
+    return (status & 0xff) == 0x7f
+
+def ge_arm_timer(timeout_ms: u32) -> void:
+    if timeout_ms != 0u32:
+        timer: mutable GeItimerval = zeroed
+        timer.value.tv_sec <- (timeout_ms / 1000u32).i64()
+        timer.value.tv_usec <- ((timeout_ms % 1000u32) * 1000u32).i32()
+        _ = ge_setitimer(GE_ITIMER_REAL, timer.ref[void&], null)
+
+def ge_disarm_timer() -> void:
+    timer_off: mutable GeItimerval = zeroed
+    _ = ge_setitimer(GE_ITIMER_REAL, timer_off.ref[void&], null)
+
+def ge_run_synthetic_function(entry_addr: uintptr, arg0: u64, arg1: u64) -> u64:
+    if entry_addr == 0.uintptr():
+        ge_last_status <- -1
+        return GE_SENTINEL_MAX
+    static if ARCH_X86_64 and not PLATFORM_WINDOWS:
+        ge_reset_crash_state()
+        ge_install_guards()
+        ge_guard_active <- 1
+        if ge_sigsetjmp(ge_jmp_buf[0usize].ref[void&], 1) != 0:
+            ge_guard_active <- 0
+            ge_restore_guards()
+            return GE_SENTINEL_MAX - 2u64
+        result: u64 = ElisaGuestExec_CallTestFnAsm(entry_addr, arg0, arg1)
+        ge_guard_active <- 0
+        ge_restore_guards()
+        ge_last_status <- 1
+        return result
+    static else:
+        _ = arg0
+        _ = arg1
+        ge_last_status <- -2
+        return GE_SENTINEL_MAX - 1u64
+
+def ge_run_synthetic_function_with_timeout(entry_addr: uintptr, arg0: u64, arg1: u64, timeout_ms: u32) -> u64:
+    if entry_addr == 0.uintptr():
+        ge_last_status <- -1
+        return GE_SENTINEL_MAX
+    static if ARCH_X86_64 and not PLATFORM_WINDOWS:
+        ge_reset_crash_state()
+        ge_install_guards()
+        ge_guard_active <- 1
+        ge_guard_target_thread <- ge_pthread_self()
+        ge_arm_timer(timeout_ms)
+        if ge_sigsetjmp(ge_jmp_buf[0usize].ref[void&], 1) != 0:
+            ge_disarm_timer()
+            ge_guard_active <- 0
+            ge_restore_guards()
+            if ge_timeout_fired != 0:
+                ge_last_status <- -3
+                return GE_SENTINEL_MAX - 3u64
+            return GE_SENTINEL_MAX - 2u64
+        result: u64 = ElisaGuestExec_CallTestFnAsm(entry_addr, arg0, arg1)
+        ge_disarm_timer()
+        ge_guard_active <- 0
+        ge_restore_guards()
+        ge_last_status <- 1
+        return result
+    static else:
+        _ = arg0
+        _ = arg1
+        _ = timeout_ms
+        ge_last_status <- -2
+        return GE_SENTINEL_MAX - 1u64
+
+def ge_run_main_entry(params: mutable GuestEntryParams&, exit_func: void&?) -> void:
+    static if ARCH_X86_64 and not PLATFORM_WINDOWS:
+        ef: mutable uintptr = exit_func.uintptr()
+        if ef == 0.uintptr():
+            ef <- ge_default_exit as uintptr
+        ElisaGuestExec_EnterMainEntryAsm(params.ref[void&].uintptr(), ef)
+    static else:
+        _ = params
+        _ = exit_func
+
+def ge_run_main_entry_guarded(params: mutable GuestEntryParams&, timeout_ms: u32) -> s32:
+    ge_set_native_phase(GE_PHASE_FUNCTION_ENTRY)
+    if params.entry_addr == 0.uintptr():
+        ge_reset_crash_state()
+        ge_set_native_phase(GE_PHASE_RETURN_BAD_PARAMS)
+        ge_last_status <- -1
+        return -1
+    static if ARCH_X86_64 and not PLATFORM_WINDOWS:
+        ge_reset_crash_state()
+        ge_set_native_phase(GE_PHASE_AFTER_RESET)
+        ge_last_errno <- -100
+        if ge_is_synthetic_main_entry(params.entry_addr):
+            ge_set_native_phase(GE_PHASE_SYNTHETIC_ENTRY)
+            ge_install_guards()
+            ge_guard_active <- 1
+            ge_guard_target_thread <- ge_pthread_self()
+            ge_arm_timer(timeout_ms)
+            ge_set_native_phase(GE_PHASE_SYNTHETIC_BEFORE_SIGSETJMP)
+            if ge_sigsetjmp(ge_jmp_buf[0usize].ref[void&], 1) != 0:
+                ge_disarm_timer()
+                ge_guard_active <- 0
+                ge_restore_guards()
+                if ge_timeout_fired != 0:
+                    ge_last_status <- -3
+                return ge_last_status
+            ge_set_native_phase(GE_PHASE_SYNTHETIC_BEFORE_MAIN_ENTRY)
+            ge_call_main_entry(params, ge_guarded_exit as uintptr)
+            ge_disarm_timer()
+            ge_guard_active <- 0
+            ge_restore_guards()
+            ge_last_status <- 1
+            return 1
+        ge_set_native_phase(GE_PHASE_BEFORE_FORK_REPORT_SETUP)
+        if ge_ensure_fork_report() != 0:
+            ge_set_native_phase(GE_PHASE_RETURN_FORK_REPORT_SETUP_FAILED)
+            ge_last_errno <- -101
+            ge_last_status <- -1
+            return -1
+        ge_set_native_phase(GE_PHASE_AFTER_FORK_REPORT_SETUP)
+        ge_last_errno <- -102
+        ge_set_native_phase(GE_PHASE_BEFORE_FORK)
+        child: int = ge_fork()
+        if child < 0:
+            ge_set_native_phase(GE_PHASE_RETURN_FORK_FAILED)
+            ge_last_errno <- -103
+            ge_last_status <- -1
+            return -1
+        if child == 0:
+            ge_run_child_main_entry(params)
+        ge_set_native_phase(GE_PHASE_PARENT_BRANCH_ENTERED)
+        waited_ms: mutable u32 = 0u32
+        status: mutable int = 0
+        while true:
+            result: int = ge_waitpid(child, status.ref[mutable int&], GE_WNOHANG)
+            if result == child:
+                ge_set_native_phase(GE_PHASE_PARENT_WAITPID_CHILD)
+                ge_last_errno <- -104
+                if ge_wif_signaled(status):
+                    ge_set_native_phase(GE_PHASE_PARENT_WIFSIGNALED)
+                    sig: int = ge_wtermsig(status)
+                    fr: ElisaGuestExecForkReport&? = ge_fork_report
+                    if fr != null:
+                        if fr.status == 0:
+                            fr.status <- (0 - sig).s32()
+                        if fr.signal == 0:
+                            fr.signal <- sig.s32()
+                    ge_absorb_fork_report()
+                    if ge_last_status == 0:
+                        ge_last_status <- (0 - sig).s32()
+                    if ge_last_signal == 0:
+                        ge_last_signal <- sig.s32()
+                    return ge_last_status
+                if ge_wif_exited(status):
+                    ge_set_native_phase(GE_PHASE_PARENT_WIFEXITED)
+                    code: int = ge_wexitstatus(status)
+                    fr2: ElisaGuestExecForkReport&? = ge_fork_report
+                    if fr2 != null:
+                        if fr2.status == 0:
+                            fr2.status <- (-11 if code == 0 else ((0 - (code - 128)) if code >= 128 else (0 - code))).s32()
+                        if code >= 128 and fr2.signal == 0:
+                            fr2.signal <- (code - 128).s32()
+                    ge_absorb_fork_report()
+                    if ge_last_status == 0:
+                        ge_last_status <- (-11 if code == 0 else (0 - code)).s32()
+                    return ge_last_status
+                if ge_wif_stopped(status):
+                    ge_set_native_phase(GE_PHASE_PARENT_WAIT_STATUS_OTHER)
+                    continue
+                ge_set_native_phase(GE_PHASE_PARENT_WAIT_STATUS_OTHER)
+                ge_last_errno <- status.s32()
+                ge_absorb_fork_report()
+                if ge_last_status == 0:
+                    ge_last_status <- -1
+                return ge_last_status
+            if result < 0:
+                ge_set_native_phase(GE_PHASE_PARENT_WAITPID_ERROR)
+                ge_last_errno <- -105
+                ge_absorb_fork_report()
+                if ge_last_status == 0:
+                    ge_last_status <- -1
+                return ge_last_status
+            if timeout_ms != 0u32 and waited_ms >= timeout_ms:
+                ge_set_native_phase(GE_PHASE_PARENT_TIMEOUT)
+                _ = ge_kill(child, 9)
+                _ = ge_waitpid(child, status.ref[mutable int&], 0)
+                ge_timeout_fired <- 1
+                ge_last_status <- -3
+                ge_last_signal <- GE_SIG_ALRM.s32()
+                fr3: ElisaGuestExecForkReport&? = ge_fork_report
+                if fr3 != null:
+                    fr3.status <- -3
+                    fr3.signal <- GE_SIG_ALRM.s32()
+                ge_absorb_fork_report()
+                return -3
+            _ = ge_usleep(1000u32)
+            waited_ms <- waited_ms + 1u32
+        return ge_last_status
+    static else:
+        _ = timeout_ms
+        ge_reset_crash_state()
+        ge_set_native_phase(GE_PHASE_UNSUPPORTED_RETURN)
+        ge_last_status <- -2
+        return -2
+
+def ge_get_last_status() -> s32:
+    return ge_last_status
+def ge_get_last_signal() -> s32:
+    return ge_last_signal
+def ge_get_last_errno() -> s32:
+    return ge_last_errno
+def ge_get_last_native_phase() -> s32:
+    fr: ElisaGuestExecForkReport&? = ge_fork_report
+    if fr != null and fr.native_phase != 0:
+        return fr.native_phase
+    return ge_last_native_phase
+def ge_get_last_fault_address() -> uintptr:
+    return ge_last_fault_address
+
 @link_name(ElisaGuestExec_RunMainEntry)
 extern c_GuestExec_RunMainEntry(params: mutable GuestEntryParams&, exit_func: void&?) -> void
 
