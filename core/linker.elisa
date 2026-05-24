@@ -331,44 +331,119 @@ def Linker_NameMatchesNid(name: static u8&, nid_or_symbol: static u8&) -> bool:
 # concrete unimplemented import. The table lives in the native runtime so the
 # relocation hot path does not need an arena/Memory effect scope to record into
 # it.
-@link_name(ElisaGuestExec_RecordFallbackSlot)
-extern c_GuestExec_RecordFallbackSlot(slot_va: u64, name: static u8&, symbol_index: u32, rel_type: u32, module_name: static u8&) -> void
+# Ported from native/guest_exec_runtime.c to pure Elisa. The table is plain
+# parent-side bookkeeping (populated during relocation, queried after a guarded
+# run); it never touches the fork-report shared memory, signals, or mmap, so it
+# carries no allocation/effect requirement — fixed global arrays keep the
+# relocation hot path arena-free, exactly as the native version intended.
+const FALLBACK_SLOT_CAP: u32 = 8192u32
 
-@link_name(ElisaGuestExec_ResetFallbackSlots)
-extern c_GuestExec_ResetFallbackSlots() -> void
+global mutable g_fallback_slot_addrs: u64[8192] = zeroed
+global mutable g_fallback_slot_names: static u8&?[8192] = zeroed
+global mutable g_fallback_slot_modules: static u8&?[8192] = zeroed
+global mutable g_fallback_slot_symbol_indices: u32[8192] = zeroed
+global mutable g_fallback_slot_rel_types: u32[8192] = zeroed
+global mutable g_fallback_slot_count: u32 = 0u32
 
-@link_name(ElisaGuestExec_FindFallbackSymbolBySlot)
-extern c_GuestExec_FindFallbackSymbolBySlot(slot_va: u64) -> static u8&?
+def _fallback_slot_is_empty(s: static u8&?) -> bool:
+    return s == null or static_strlen(s) == 0usize
 
-@link_name(ElisaGuestExec_FindFallbackModuleBySlot)
-extern c_GuestExec_FindFallbackModuleBySlot(slot_va: u64) -> static u8&?
+def _fallback_find_index(slot_va: u64) -> s32:
+    if slot_va == 0u64:
+        return -1
+    i: mutable u32 = 0u32
+    while i < g_fallback_slot_count and i < FALLBACK_SLOT_CAP:
+        if g_fallback_slot_addrs[i.usize()] == slot_va:
+            return i.s32()
+        i <- i + 1u32
+    return -1
 
-@link_name(ElisaGuestExec_FindFallbackSymbolIndexBySlot)
-extern c_GuestExec_FindFallbackSymbolIndexBySlot(slot_va: u64) -> u32
+def c_GuestExec_RecordFallbackSlot(slot_va: u64, name: static u8&, symbol_index: u32, rel_type: u32, module_name: static u8&) -> void:
+    if slot_va == 0u64:
+        return
+    # De-duplicate: relocation passes can run more than once. Prefer a
+    # non-empty symbol name / valid index if a later pass supplies one.
+    existing: s32 = _fallback_find_index(slot_va)
+    if existing >= 0:
+        idx: u32 = existing.u32()
+        if idx < FALLBACK_SLOT_CAP:
+            if _fallback_slot_is_empty(g_fallback_slot_names[idx.usize()]) and not _fallback_slot_is_empty(name):
+                g_fallback_slot_names[idx.usize()] <- name
+            if g_fallback_slot_symbol_indices[idx.usize()] == 0u32 and symbol_index != 0u32:
+                g_fallback_slot_symbol_indices[idx.usize()] <- symbol_index
+            if g_fallback_slot_rel_types[idx.usize()] == 0u32 and rel_type != 0u32:
+                g_fallback_slot_rel_types[idx.usize()] <- rel_type
+            if _fallback_slot_is_empty(g_fallback_slot_modules[idx.usize()]) and not _fallback_slot_is_empty(module_name):
+                g_fallback_slot_modules[idx.usize()] <- module_name
+        return
+    if g_fallback_slot_count >= FALLBACK_SLOT_CAP:
+        return
+    idx: u32 = g_fallback_slot_count
+    if idx < FALLBACK_SLOT_CAP:
+        g_fallback_slot_addrs[idx.usize()] <- slot_va
+        g_fallback_slot_names[idx.usize()] <- name
+        g_fallback_slot_modules[idx.usize()] <- module_name
+        g_fallback_slot_symbol_indices[idx.usize()] <- symbol_index
+        g_fallback_slot_rel_types[idx.usize()] <- rel_type
+        g_fallback_slot_count <- g_fallback_slot_count + 1u32
 
-@link_name(ElisaGuestExec_FindFallbackRelTypeBySlot)
-extern c_GuestExec_FindFallbackRelTypeBySlot(slot_va: u64) -> u32
+def c_GuestExec_ResetFallbackSlots() -> void:
+    g_fallback_slot_count <- 0u32
 
-@link_name(ElisaGuestExec_FindFallbackSlotIndexBySlot)
-extern c_GuestExec_FindFallbackSlotIndexBySlot(slot_va: u64) -> s32
+def c_GuestExec_FindFallbackSymbolBySlot(slot_va: u64) -> static u8&?:
+    index: s32 = _fallback_find_index(slot_va)
+    if index >= 0 and index.u32() < FALLBACK_SLOT_CAP:
+        return g_fallback_slot_names[index.usize()]
+    return null
 
-@link_name(ElisaGuestExec_FallbackSlotCount)
-extern c_GuestExec_FallbackSlotCount() -> u32
+def c_GuestExec_FindFallbackModuleBySlot(slot_va: u64) -> static u8&?:
+    index: s32 = _fallback_find_index(slot_va)
+    if index >= 0 and index.u32() < FALLBACK_SLOT_CAP:
+        return g_fallback_slot_modules[index.usize()]
+    return null
 
-@link_name(ElisaGuestExec_FallbackSlotVaAt)
-extern c_GuestExec_FallbackSlotVaAt(index: u32) -> u64
+def c_GuestExec_FindFallbackSymbolIndexBySlot(slot_va: u64) -> u32:
+    index: s32 = _fallback_find_index(slot_va)
+    if index >= 0 and index.u32() < FALLBACK_SLOT_CAP:
+        return g_fallback_slot_symbol_indices[index.usize()]
+    return 0u32
 
-@link_name(ElisaGuestExec_FallbackSlotSymbolAt)
-extern c_GuestExec_FallbackSlotSymbolAt(index: u32) -> static u8&?
+def c_GuestExec_FindFallbackRelTypeBySlot(slot_va: u64) -> u32:
+    index: s32 = _fallback_find_index(slot_va)
+    if index >= 0 and index.u32() < FALLBACK_SLOT_CAP:
+        return g_fallback_slot_rel_types[index.usize()]
+    return 0u32
 
-@link_name(ElisaGuestExec_FallbackSlotModuleAt)
-extern c_GuestExec_FallbackSlotModuleAt(index: u32) -> static u8&?
+def c_GuestExec_FindFallbackSlotIndexBySlot(slot_va: u64) -> s32:
+    return _fallback_find_index(slot_va)
 
-@link_name(ElisaGuestExec_FallbackSlotSymbolIndexAt)
-extern c_GuestExec_FallbackSlotSymbolIndexAt(index: u32) -> u32
+def c_GuestExec_FallbackSlotCount() -> u32:
+    return g_fallback_slot_count
 
-@link_name(ElisaGuestExec_FallbackSlotRelTypeAt)
-extern c_GuestExec_FallbackSlotRelTypeAt(index: u32) -> u32
+def c_GuestExec_FallbackSlotVaAt(index: u32) -> u64:
+    if index < g_fallback_slot_count and index < FALLBACK_SLOT_CAP:
+        return g_fallback_slot_addrs[index.usize()]
+    return 0u64
+
+def c_GuestExec_FallbackSlotSymbolAt(index: u32) -> static u8&?:
+    if index < g_fallback_slot_count and index < FALLBACK_SLOT_CAP:
+        return g_fallback_slot_names[index.usize()]
+    return null
+
+def c_GuestExec_FallbackSlotModuleAt(index: u32) -> static u8&?:
+    if index < g_fallback_slot_count and index < FALLBACK_SLOT_CAP:
+        return g_fallback_slot_modules[index.usize()]
+    return null
+
+def c_GuestExec_FallbackSlotSymbolIndexAt(index: u32) -> u32:
+    if index < g_fallback_slot_count and index < FALLBACK_SLOT_CAP:
+        return g_fallback_slot_symbol_indices[index.usize()]
+    return 0u32
+
+def c_GuestExec_FallbackSlotRelTypeAt(index: u32) -> u32:
+    if index < g_fallback_slot_count and index < FALLBACK_SLOT_CAP:
+        return g_fallback_slot_rel_types[index.usize()]
+    return 0u32
 
 def Linker_RecordFallbackSlot(slot_va: u64, symbol_name: static u8&, symbol_index: u32, rel_type: u32, module_name: static u8&) -> void:
     c_GuestExec_RecordFallbackSlot(slot_va, symbol_name, symbol_index, rel_type, module_name)
