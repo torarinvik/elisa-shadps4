@@ -106,32 +106,286 @@ def c_GuestExec_AeroLibFallbackPltVa() -> uintptr:
 def c_GuestExec_AeroLibFallbackPltBytes() -> u64:
     return ge_aerolib_fallback_plt_bytes
 
-@link_name(ElisaGuestExec_MapRegion)
-extern c_GuestExec_MapRegion(address: uintptr, size: u64, prot: u32) -> s32
+# ============================================================
+# Guest memory ops + native-region table + writable-page cache (ported from
+# guest_exec_runtime.c). POSIX path (mmap/mprotect/munmap) is the validated
+# path on macOS/Linux; the Windows branch is a typed stub (deferred — not built
+# on this host). libc externs are @link_name-aliased to ge_* names to avoid
+# colliding with other units' declarations (e.g. avplayer's memcpy).
+# ============================================================
+@link_name(mmap)
+extern ge_mmap(addr: uintptr, length: usize, prot: int, flags: int, fd: int, offset: i64) -> uintptr
+@link_name(mprotect)
+extern ge_mprotect(addr: uintptr, length: usize, prot: int) -> int
+@link_name(munmap)
+extern ge_munmap(addr: uintptr, length: usize) -> int
+@link_name(memcpy)
+extern ge_memcpy(dst: void&?, src: void&?, n: usize) -> void&?
+@link_name(sysconf)
+extern ge_sysconf(name: int) -> i64
+@link_name(sys_icache_invalidate)
+extern ge_sys_icache_invalidate(start: uintptr, len: usize) -> void
 
-@link_name(ElisaGuestExec_ProtectRegion)
-extern c_GuestExec_ProtectRegion(address: uintptr, size: u64, prot: u32) -> s32
+const GE_NATIVE_REGION_CAP: u32 = 8192u32
+const GE_WRITABLE_PAGE_CAP: u64 = 65536u64
 
-@link_name(ElisaGuestExec_UnmapRegion)
-extern c_GuestExec_UnmapRegion(address: uintptr, size: u64) -> s32
+struct GeNativeRegion:
+    base: mutable uintptr
+    size: mutable u64
+    prot: mutable u32
+    active: mutable u32
 
-@link_name(ElisaGuestExec_AllocateRegion)
-extern c_GuestExec_AllocateRegion(size: u64, prot: u32) -> uintptr
+global mutable ge_native_regions: GeNativeRegion[8192] = zeroed
+global mutable ge_native_region_count: u32 = 0u32
+global mutable ge_writable_pages: uintptr[65536] = zeroed
+global mutable ge_writable_page_count: u32 = 0u32
 
-@link_name(ElisaGuestExec_WriteBytes)
-extern c_GuestExec_WriteBytes(address: uintptr, data: void&?, size: u64) -> s32
+def ge_map_failed() -> uintptr:
+    return 0xFFFFFFFFFFFFFFFFu64.uintptr()
 
-@link_name(ElisaGuestExec_WriteU64)
-extern c_GuestExec_WriteU64(address: uintptr, value: u64) -> s32
+# Reinterpret a raw guest/host address as an opaque pointer for libc calls.
+def ge_addr_to_ptr(address: uintptr) -> void&?:
+    p: mutable void&? = null
+    trusted Unsafe.PointerCast:
+        p <- address.cast[void&?]
+    return p
 
-@link_name(ElisaGuestExec_NativeRegionCount)
-extern c_GuestExec_NativeRegionCount() -> u32
+def ge_native_prot(prot: u32) -> int:
+    np: mutable int = 0
+    if (prot & 1u32) != 0u32:
+        np <- np | 1
+    if (prot & 2u32) != 0u32:
+        np <- np | 2
+    if (prot & 4u32) != 0u32:
+        np <- np | 4
+    return np
 
-@link_name(ElisaGuestExec_AddressNativeProt)
-extern c_GuestExec_AddressNativeProt(address: uintptr) -> u32
+def ge_mmap_anon_flags() -> int:
+    static if PLATFORM_APPLE:
+        return 0x0002 | 0x1000
+    static else:
+        return 0x0002 | 0x20
 
-@link_name(ElisaGuestExec_ReadNativeU64)
-extern c_GuestExec_ReadNativeU64(address: uintptr) -> uintptr
+def ge_mmap_fixed_flags() -> int:
+    static if PLATFORM_APPLE:
+        return 0x0002 | 0x1000 | 0x0010
+    static elif PLATFORM_LINUX:
+        return 0x0002 | 0x20 | 0x100000
+    static else:
+        return 0x0002 | 0x20 | 0x0010
+
+def ge_page_size() -> uintptr:
+    static if PLATFORM_APPLE:
+        ps: i64 = ge_sysconf(29)
+        return ps.uintptr() if ps > 0i64 else 4096.uintptr()
+    static elif PLATFORM_LINUX:
+        ps: i64 = ge_sysconf(30)
+        return ps.uintptr() if ps > 0i64 else 4096.uintptr()
+    static else:
+        return 4096.uintptr()
+
+def ge_flush_instruction_cache(address: uintptr, size: u64) -> void:
+    static if PLATFORM_APPLE and ARCH_ARM64:
+        ge_sys_icache_invalidate(address, size.usize())
+    static else:
+        _ = address
+        _ = size
+
+def ge_region_contains(base: uintptr, rsize: u64, address: uintptr, size: u64) -> bool:
+    if base == 0.uintptr() or rsize == 0u64:
+        return false
+    if address.u64() < base.u64():
+        return false
+    offset: u64 = address.u64() - base.u64()
+    return offset <= rsize and size <= (rsize - offset)
+
+def ge_find_native_region(address: uintptr, size: u64) -> s32:
+    best: mutable s32 = -1
+    best_size: mutable u64 = 0xFFFFFFFFFFFFFFFFu64
+    i: mutable u32 = 0u32
+    while i < ge_native_region_count and i < GE_NATIVE_REGION_CAP:
+        r: GeNativeRegion = ge_native_regions[i.usize()]
+        if r.active != 0u32 and ge_region_contains(r.base, r.size, address, size):
+            if r.size < best_size:
+                best <- i.s32()
+                best_size <- r.size
+        i <- i + 1u32
+    return best
+
+def ge_record_native_region(base: uintptr, size: u64, prot: u32) -> void:
+    if base == 0.uintptr() or size == 0u64:
+        return
+    existing: s32 = ge_find_native_region(base, size)
+    if existing >= 0 and existing.u32() < GE_NATIVE_REGION_CAP:
+        idx: u32 = existing.u32()
+        cur: GeNativeRegion = ge_native_regions[idx.usize()]
+        if cur.base == base and cur.size == size:
+            ge_native_regions[idx.usize()] <- GeNativeRegion(base, size, prot, 1u32)
+            return
+    if ge_native_region_count >= GE_NATIVE_REGION_CAP:
+        return
+    idx: u32 = ge_native_region_count
+    if idx < GE_NATIVE_REGION_CAP:
+        ge_native_regions[idx.usize()] <- GeNativeRegion(base, size, prot, 1u32)
+        ge_native_region_count <- ge_native_region_count + 1u32
+
+def ge_forget_native_region(base: uintptr, size: u64) -> void:
+    i: mutable u32 = 0u32
+    while i < ge_native_region_count and i < GE_NATIVE_REGION_CAP:
+        cur: GeNativeRegion = ge_native_regions[i.usize()]
+        if cur.active != 0u32 and cur.base == base and cur.size == size:
+            ge_native_regions[i.usize()] <- GeNativeRegion(base, size, cur.prot, 0u32)
+            return
+        i <- i + 1u32
+
+def ge_native_prot_at(address: uintptr, size: u64) -> u32:
+    index: s32 = ge_find_native_region(address, size)
+    if index >= 0 and index.u32() < GE_NATIVE_REGION_CAP:
+        return ge_native_regions[index.usize()].prot
+    return 0xffffffffu32
+
+def ge_read_native_word(address: uintptr) -> uintptr:
+    if address == 0.uintptr():
+        return 0.uintptr()
+    index: s32 = ge_find_native_region(address, 8u64)
+    if index < 0 or index.u32() >= GE_NATIVE_REGION_CAP:
+        return 0.uintptr()
+    if (ge_native_regions[index.usize()].prot & 1u32) == 0u32:
+        return 0.uintptr()
+    out: mutable u64 = 0u64
+    _ = ge_memcpy(out.ref[void&], ge_addr_to_ptr(address), 8usize)
+    return out.uintptr()
+
+def ge_clear_writable_page_cache() -> void:
+    i: mutable usize = 0usize
+    while i < 65536usize:
+        ge_writable_pages[i] <- 0.uintptr()
+        i <- i + 1usize
+    ge_writable_page_count <- 0u32
+
+def ge_page_cached_writable(page: uintptr) -> bool:
+    slot: u64 = (page.u64() >> 12u64) % GE_WRITABLE_PAGE_CAP
+    if slot < GE_WRITABLE_PAGE_CAP:
+        return ge_writable_pages[slot.usize()] == page
+    return false
+
+def ge_cache_writable_page(page: uintptr) -> void:
+    slot: u64 = (page.u64() >> 12u64) % GE_WRITABLE_PAGE_CAP
+    if slot < GE_WRITABLE_PAGE_CAP:
+        if ge_writable_pages[slot.usize()] == 0.uintptr():
+            ge_writable_page_count <- ge_writable_page_count + 1u32
+        ge_writable_pages[slot.usize()] <- page
+
+def ge_make_writable_cached(address: uintptr, size: u64) -> s32:
+    if address == 0.uintptr() or size == 0u64:
+        return 0
+    ps: uintptr = ge_page_size()
+    ps64: u64 = ps.u64()
+    mask: u64 = 0xFFFFFFFFFFFFFFFFu64 ^ (ps64 - 1u64)
+    start: u64 = address.u64() & mask
+    end: u64 = (address.u64() + size + ps64 - 1u64) & mask
+    page: mutable u64 = start
+    while page < end:
+        if not ge_page_cached_writable(page.uintptr()):
+            static if PLATFORM_WINDOWS:
+                return -1
+            static else:
+                if ge_mprotect(page.uintptr(), ps.usize(), 7) != 0:
+                    return -1
+            ge_cache_writable_page(page.uintptr())
+        page <- page + ps64
+    return 0
+
+def c_GuestExec_MapRegion(address: uintptr, size: u64, prot: u32) -> s32:
+    if address == 0.uintptr() or size == 0u64:
+        return -1
+    ge_clear_writable_page_cache()
+    static if PLATFORM_WINDOWS:
+        return -1
+    static else:
+        np: int = ge_native_prot(prot)
+        result: uintptr = ge_mmap(address, size.usize(), np, ge_mmap_fixed_flags(), -1, 0i64)
+        if result != ge_map_failed() and result == address:
+            ge_record_native_region(address, size, prot)
+            return 0
+        # Reservation+commit overlap (Linux MAP_FIXED_NOREPLACE EEXIST, etc.):
+        # promote the existing subrange via mprotect instead of leaving it.
+        if ge_mprotect(address, size.usize(), np) == 0:
+            ge_record_native_region(address, size, prot)
+            return 0
+        return -1
+
+def c_GuestExec_ProtectRegion(address: uintptr, size: u64, prot: u32) -> s32:
+    if address == 0.uintptr() or size == 0u64:
+        return -1
+    ge_clear_writable_page_cache()
+    static if PLATFORM_WINDOWS:
+        return -1
+    static else:
+        np: int = ge_native_prot(prot)
+        if ge_mprotect(address, size.usize(), np) == 0:
+            ge_record_native_region(address, size, prot)
+            return 0
+        return -1
+
+def c_GuestExec_UnmapRegion(address: uintptr, size: u64) -> s32:
+    if address == 0.uintptr() or size == 0u64:
+        return -1
+    static if PLATFORM_WINDOWS:
+        return -1
+    static else:
+        if ge_munmap(address, size.usize()) == 0:
+            ge_forget_native_region(address, size)
+            return 0
+        return -1
+
+def c_GuestExec_AllocateRegion(size: u64, prot: u32) -> uintptr:
+    if size == 0u64:
+        return 0.uintptr()
+    static if PLATFORM_WINDOWS:
+        return 0.uintptr()
+    static else:
+        np: int = ge_native_prot(prot)
+        result: uintptr = ge_mmap(0.uintptr(), size.usize(), np, ge_mmap_anon_flags(), -1, 0i64)
+        if result == ge_map_failed():
+            return 0.uintptr()
+        ge_record_native_region(result, size, prot)
+        return result
+
+def c_GuestExec_WriteBytes(address: uintptr, data: void&?, size: u64) -> s32:
+    if address == 0.uintptr() or (data == null and size != 0u64):
+        return -1
+    if size != 0u64:
+        if ge_make_writable_cached(address, size) != 0:
+            return -1
+        _ = ge_memcpy(ge_addr_to_ptr(address), data, size.usize())
+        ge_flush_instruction_cache(address, size)
+    return 0
+
+def c_GuestExec_WriteU64(address: uintptr, value: u64) -> s32:
+    if address == 0.uintptr():
+        return -1
+    if ge_make_writable_cached(address, 8u64) != 0:
+        return -1
+    v: mutable u64 = value
+    _ = ge_memcpy(ge_addr_to_ptr(address), v.ref[void&], 8usize)
+    ge_flush_instruction_cache(address, 8u64)
+    return 0
+
+def c_GuestExec_NativeRegionCount() -> u32:
+    n: mutable u32 = 0u32
+    i: mutable u32 = 0u32
+    while i < ge_native_region_count and i < GE_NATIVE_REGION_CAP:
+        if ge_native_regions[i.usize()].active != 0u32:
+            n <- n + 1u32
+        i <- i + 1u32
+    return n
+
+def c_GuestExec_AddressNativeProt(address: uintptr) -> u32:
+    return ge_native_prot_at(address, 8u64)
+
+def c_GuestExec_ReadNativeU64(address: uintptr) -> uintptr:
+    return ge_read_native_word(address)
 
 @link_name(ElisaGuestExec_RunMainEntry)
 extern c_GuestExec_RunMainEntry(params: mutable GuestEntryParams&, exit_func: void&?) -> void
