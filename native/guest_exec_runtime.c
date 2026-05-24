@@ -71,6 +71,12 @@ typedef void (*ElisaGuestExecBoundaryFunc)(uint64_t);
 #if defined(__x86_64__) && !defined(_WIN32)
 __attribute__((noreturn)) static void elisa_guest_exec_enter_main_entry_asm(
     ElisaGuestEntryParams* params, ElisaGuestExitFunc exit_func);
+extern uintptr_t ElisaGuestExec_CurrentStackPointerAsm(void);
+extern void ElisaGuestExec_EnterMainEntryAsm(uintptr_t params, uintptr_t exit_func) __attribute__((noreturn));
+extern void ElisaGuestExec_CallMainEntryAsm(uintptr_t entry, uintptr_t params, uintptr_t exit_func);
+extern void ElisaGuestExec_JumpMainEntryAsm(uintptr_t entry,
+                                            uintptr_t params,
+                                            uintptr_t exit_func) __attribute__((noreturn));
 #endif
 
 enum {
@@ -709,14 +715,8 @@ static void __attribute__((unused)) elisa_guest_exec_start_watchdog(uint32_t tim
 #endif
 
 static uintptr_t elisa_guest_exec_current_stack_pointer(void) {
-#if defined(__x86_64__) || defined(_M_X64)
-    uintptr_t sp = 0;
-#if defined(_MSC_VER)
-    sp = (uintptr_t)_AddressOfReturnAddress();
-#else
-    __asm__ volatile("movq %%rsp, %0" : "=r"(sp));
-#endif
-    return sp;
+#if defined(__x86_64__) && !defined(_WIN32)
+    return ElisaGuestExec_CurrentStackPointerAsm();
 #else
     return 0;
 #endif
@@ -1102,45 +1102,17 @@ static void __attribute__((unused)) elisa_guest_exec_guarded_exit(int32_t code) 
 }
 
 #if defined(__x86_64__) && !defined(_WIN32)
-__attribute__((naked, noreturn)) static void elisa_guest_exec_enter_main_entry_asm(
+__attribute__((noreturn)) static void elisa_guest_exec_enter_main_entry_asm(
     ElisaGuestEntryParams* params, ElisaGuestExitFunc exit_func) {
-    /* ELISA_ABI_LINT_ALLOW(inline-asm-stack-without-memory-clobber): naked guest-entry trampoline cannot use extended-asm clobbers. */
-    __asm__(
-        "movq 272(%rdi), %r11\n"
-        "movq %rdi, %r10\n"
-        "movq %rsi, %r9\n"
-        "andq $-16, %rsp\n"
-        "subq $8, %rsp\n"
-        "pushq 8(%r10)\n"
-        "pushq 0(%r10)\n"
-        "movq %r10, %rdi\n"
-        "movq %r9, %rsi\n"
-        "jmp *%r11\n"
-    );
+    ElisaGuestExec_EnterMainEntryAsm((uintptr_t)params, (uintptr_t)exit_func);
 }
 
 static void elisa_guest_exec_call_main_entry(ElisaGuestEntryParams* params,
                                              ElisaGuestExitFunc exit_func) {
-    /* ELISA_ABI_LINT_ALLOW(guest-entry-call-mangles-stack): synthetic guarded tests need to return. */
     if (exit_func == NULL) {
         exit_func = elisa_guest_exec_default_exit;
     }
-    void* entry = (void*)params->entry_addr;
-    __asm__ volatile(
-        "movq %[entry], %%r11\n"
-        "movq %[params], %%r10\n"
-        "movq %[exit_func], %%r9\n"
-        "andq $-16, %%rsp\n"
-        "subq $8, %%rsp\n"
-        "movq %%r10, %%rdi\n"
-        "movq %%r9, %%rsi\n"
-        "pushq 8(%%r10)\n"
-        "pushq 0(%%r10)\n"
-        "call *%%r11\n"
-        "addq $24, %%rsp\n"
-        :
-        : [entry] "r"(entry), [params] "r"(params), [exit_func] "r"(exit_func)
-        : "rax", "r9", "r10", "r11", "rsi", "rdi", "memory");
+    ElisaGuestExec_CallMainEntryAsm(params->entry_addr, (uintptr_t)params, (uintptr_t)exit_func);
 }
 
 
@@ -1157,23 +1129,7 @@ static void __attribute__((noreturn)) elisa_guest_exec_jump_main_entry(ElisaGues
         elisa_guest_exec_fork_report->prejump_rsi = elisa_guest_exec_prejump_rsi;
         elisa_guest_exec_fork_report->prejump_rsp = elisa_guest_exec_prejump_rsp;
     }
-    void* entry = (void*)params->entry_addr;
-    /* ELISA_ABI_LINT_ALLOW(guest-entry-jump-not-noreturn): this helper is noreturn and ends in an explicit jmp + unreachable. */
-    __asm__ volatile(
-        "movq %[entry], %%r11\n"
-        "movq %[params], %%r10\n"
-        "movq %[exit_func], %%r9\n"
-        "andq $-16, %%rsp\n"
-        "subq $8, %%rsp\n"
-        "pushq 8(%%r10)\n"
-        "pushq 0(%%r10)\n"
-        "movq %%r10, %%rdi\n"
-        "movq %%r9, %%rsi\n"
-        "jmp *%%r11\n"
-        :
-        : [entry] "r"(entry), [params] "r"(params), [exit_func] "r"(exit_func)
-        : "rax", "r9", "r10", "r11", "rsi", "rdi", "memory");
-    __builtin_unreachable();
+    ElisaGuestExec_JumpMainEntryAsm(params->entry_addr, (uintptr_t)params, (uintptr_t)exit_func);
 }
 
 static void __attribute__((noreturn)) elisa_guest_exec_run_child_main_entry(
