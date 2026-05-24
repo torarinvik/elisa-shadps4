@@ -1,0 +1,426 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+# Pure-Elisa port of native/guest_exec_runtime.c. The guest execution runtime
+# captures crash/boundary state when handing control to a loaded PS4 module.
+# Guest code only runs on x86_64 hosts; the signal-handler / ucontext / fork /
+# trampoline machinery is therefore gated behind `static if ARCH_X86_64` and is
+# inert (and unreachable) on other hosts, exactly like the original C file's
+# `#if defined(__x86_64__)` guards.
+#
+# This file provides the `c_GuestExec_*` functions that core/guest_exec.elisa
+# and core/linker.elisa previously declared `extern` against the C symbols
+# `ElisaGuestExec_*`. Being whole-program Elisa, the calls bind to these defs
+# directly; no C ABI boundary remains for the Elisa->runtime calls.
+
+include "../common/types.elisa"
+include "../common/arch.elisa"
+
+# --- Native phase codes (diagnostic breadcrumbs through the run path) ---
+const GE_PHASE_NONE: s32 = 0
+const GE_PHASE_FUNCTION_ENTRY: s32 = 100
+const GE_PHASE_RETURN_BAD_PARAMS: s32 = 101
+const GE_PHASE_AFTER_RESET: s32 = 110
+const GE_PHASE_SYNTHETIC_ENTRY: s32 = 120
+const GE_PHASE_SYNTHETIC_BEFORE_SIGSETJMP: s32 = 121
+const GE_PHASE_SYNTHETIC_BEFORE_MAIN_ENTRY: s32 = 122
+const GE_PHASE_BEFORE_FORK_REPORT_SETUP: s32 = 200
+const GE_PHASE_RETURN_FORK_REPORT_SETUP_FAILED: s32 = 201
+const GE_PHASE_AFTER_FORK_REPORT_SETUP: s32 = 202
+const GE_PHASE_BEFORE_FORK: s32 = 210
+const GE_PHASE_RETURN_FORK_FAILED: s32 = 211
+const GE_PHASE_CHILD_BRANCH_ENTERED: s32 = 220
+const GE_PHASE_CHILD_GUARDS_INSTALLED: s32 = 221
+const GE_PHASE_CHILD_BEFORE_SIGSETJMP: s32 = 222
+const GE_PHASE_CHILD_SIGLONGJMP: s32 = 223
+const GE_PHASE_CHILD_BEFORE_MAIN_ENTRY: s32 = 224
+const GE_PHASE_CHILD_AFTER_MAIN_ENTRY: s32 = 225
+const GE_PHASE_CHILD_ENTRY_SNAPSHOT: s32 = 226
+const GE_PHASE_SIGNAL_HANDLER_ENTERED: s32 = 300
+const GE_PHASE_ALARM_HANDLER_ENTERED: s32 = 310
+const GE_PHASE_PARENT_BRANCH_ENTERED: s32 = 400
+const GE_PHASE_PARENT_WAITPID_CHILD: s32 = 401
+const GE_PHASE_PARENT_WIFSIGNALED: s32 = 402
+const GE_PHASE_PARENT_WIFEXITED: s32 = 403
+const GE_PHASE_PARENT_WAIT_STATUS_OTHER: s32 = 404
+const GE_PHASE_PARENT_WAITPID_ERROR: s32 = 410
+const GE_PHASE_PARENT_WAITPID_EINTR: s32 = 411
+const GE_PHASE_PARENT_TIMEOUT: s32 = 420
+const GE_PHASE_NATIVE_BOUNDARY_REPORTED: s32 = 500
+const GE_PHASE_UNSUPPORTED_RETURN: s32 = 900
+
+# --- PC source codes ---
+const GE_PC_SOURCE_NONE: s32 = 0
+const GE_PC_SOURCE_SIGNAL_UCONTEXT: s32 = 1
+const GE_PC_SOURCE_FALLBACK_CHILD_SIGLONGJMP: s32 = 2
+const GE_PC_SOURCE_FALLBACK_PARENT_SILENT_CHILD: s32 = 3
+const GE_PC_SOURCE_FALLBACK_PARENT_STATUS: s32 = 4
+
+# --- Parent-process crash/boundary state (set from the captured fork report) ---
+global mutable ge_last_status: s32 = 0
+global mutable ge_last_signal: s32 = 0
+global mutable ge_last_fault_address: uintptr = 0.uintptr()
+global mutable ge_last_guest_pc: uintptr = 0.uintptr()
+global mutable ge_last_guest_sp: uintptr = 0.uintptr()
+global mutable ge_last_guest_bp: uintptr = 0.uintptr()
+global mutable ge_last_guest_rdi: uintptr = 0.uintptr()
+global mutable ge_last_guest_rsi: uintptr = 0.uintptr()
+global mutable ge_last_guest_rdx: uintptr = 0.uintptr()
+global mutable ge_last_guest_rcx: uintptr = 0.uintptr()
+global mutable ge_last_guest_r8: uintptr = 0.uintptr()
+global mutable ge_last_guest_r9: uintptr = 0.uintptr()
+global mutable ge_last_guest_rax: uintptr = 0.uintptr()
+global mutable ge_last_guest_rbx: uintptr = 0.uintptr()
+global mutable ge_expected_entry_params: uintptr = 0.uintptr()
+global mutable ge_expected_stack_word0: uintptr = 0.uintptr()
+global mutable ge_expected_stack_word1: uintptr = 0.uintptr()
+global mutable ge_entry_stack_word0: uintptr = 0.uintptr()
+global mutable ge_entry_stack_word1: uintptr = 0.uintptr()
+global mutable ge_entry_native_word0: uintptr = 0.uintptr()
+global mutable ge_entry_native_word1: uintptr = 0.uintptr()
+global mutable ge_fault_word0: uintptr = 0.uintptr()
+global mutable ge_fault_word1: uintptr = 0.uintptr()
+global mutable ge_signal_stack_word0: uintptr = 0.uintptr()
+global mutable ge_signal_stack_word1: uintptr = 0.uintptr()
+global mutable ge_signal_stack_symbol0: static u8&? = ""
+global mutable ge_signal_stack_image0: static u8&? = ""
+global mutable ge_signal_pc_symbol: static u8&? = ""
+global mutable ge_signal_pc_image: static u8&? = ""
+global mutable ge_prejump_rdi: uintptr = 0.uintptr()
+global mutable ge_prejump_rsi: uintptr = 0.uintptr()
+global mutable ge_prejump_rsp: uintptr = 0.uintptr()
+global mutable ge_signal_guest_pc: uintptr = 0.uintptr()
+global mutable ge_fallback_guest_pc: uintptr = 0.uintptr()
+global mutable ge_signal_pc_valid: s32 = 0
+global mutable ge_entry_native_prot: u32 = 0xffffffffu32
+global mutable ge_pc_native_prot: u32 = 0xffffffffu32
+global mutable ge_last_pc_was_fallback: s32 = 0
+global mutable ge_last_pc_source: s32 = 0
+global mutable ge_last_errno: s32 = 0
+global mutable ge_last_native_phase: s32 = 0
+global mutable ge_boundary_callback_count: s32 = 0
+global mutable ge_boundary_callback_reason: u64 = 0u64
+global mutable ge_synthetic_observed_argc: s32 = 0
+global mutable ge_synthetic_observed_argv0: uintptr = 0.uintptr()
+global mutable ge_synthetic_observed_entry: uintptr = 0.uintptr()
+global mutable ge_synthetic_observed_params: uintptr = 0.uintptr()
+global mutable ge_synthetic_observed_exit_func: uintptr = 0.uintptr()
+global mutable ge_synthetic_observed_stack: uintptr = 0.uintptr()
+global mutable ge_aerolib_fallback_caller_pc: uintptr = 0.uintptr()
+global mutable ge_aerolib_fallback_slot_va: uintptr = 0.uintptr()
+global mutable ge_aerolib_fallback_callsite_bytes: u64 = 0u64
+global mutable ge_aerolib_fallback_invocations: u64 = 0u64
+global mutable ge_aerolib_fallback_plt_va: uintptr = 0.uintptr()
+global mutable ge_aerolib_fallback_plt_bytes: u64 = 0u64
+global mutable ge_runtime_hle_module: static u8&? = ""
+global mutable ge_runtime_hle_symbol: static u8&? = ""
+global mutable ge_runtime_hle_arg0: uintptr = 0.uintptr()
+global mutable ge_runtime_hle_arg1: uintptr = 0.uintptr()
+global mutable ge_runtime_hle_arg2: uintptr = 0.uintptr()
+global mutable ge_runtime_hle_ret: uintptr = 0.uintptr()
+global mutable ge_failed_relocation_count: u64 = 0u64
+
+# --- Cross-process fork report (mmap MAP_SHARED). Layout shared between the
+# forked child (which runs the guest) and the parent (which reads it back). ---
+@fixed_layout
+struct ElisaGuestExecForkReport:
+    boundary_reached: mutable s32
+    boundary_reason: mutable s32
+    execution_stage: mutable s32
+    status: mutable s32
+    signal: mutable s32
+    fault_address: mutable uintptr
+    guest_pc: mutable uintptr
+    guest_sp: mutable uintptr
+    guest_bp: mutable uintptr
+    guest_rdi: mutable uintptr
+    guest_rsi: mutable uintptr
+    guest_rdx: mutable uintptr
+    guest_rcx: mutable uintptr
+    guest_r8: mutable uintptr
+    guest_r9: mutable uintptr
+    guest_rax: mutable uintptr
+    guest_rbx: mutable uintptr
+    expected_entry_params: mutable uintptr
+    expected_stack_word0: mutable uintptr
+    expected_stack_word1: mutable uintptr
+    entry_stack_word0: mutable uintptr
+    entry_stack_word1: mutable uintptr
+    entry_native_word0: mutable uintptr
+    entry_native_word1: mutable uintptr
+    fault_word0: mutable uintptr
+    fault_word1: mutable uintptr
+    signal_stack_word0: mutable uintptr
+    signal_stack_word1: mutable uintptr
+    signal_stack_symbol0: mutable static u8&?
+    signal_stack_image0: mutable static u8&?
+    signal_pc_symbol: mutable static u8&?
+    signal_pc_image: mutable static u8&?
+    prejump_rdi: mutable uintptr
+    prejump_rsi: mutable uintptr
+    prejump_rsp: mutable uintptr
+    signal_guest_pc: mutable uintptr
+    fallback_guest_pc: mutable uintptr
+    signal_pc_valid: mutable s32
+    pc_source: mutable s32
+    entry_native_prot: mutable u32
+    pc_native_prot: mutable u32
+    entry_addr: mutable uintptr
+    native_phase: mutable s32
+    pc_was_fallback: mutable s32
+    aerolib_fallback_caller_pc: mutable uintptr
+    aerolib_fallback_slot_va: mutable uintptr
+    aerolib_fallback_callsite_bytes: mutable u64
+    aerolib_fallback_invocations: mutable u64
+    aerolib_fallback_plt_va: mutable uintptr
+    aerolib_fallback_plt_bytes: mutable u64
+    runtime_hle_module: mutable static u8&?
+    runtime_hle_symbol: mutable static u8&?
+    runtime_hle_arg0: mutable uintptr
+    runtime_hle_arg1: mutable uintptr
+    runtime_hle_arg2: mutable uintptr
+    runtime_hle_ret: mutable uintptr
+
+global mutable ge_fork_report: ElisaGuestExecForkReport&? = null
+
+def ge_set_native_phase(phase: s32) -> void:
+    ge_last_native_phase <- phase
+    fr: ElisaGuestExecForkReport&? = ge_fork_report
+    if fr != null:
+        fr.native_phase <- phase
+
+def ge_pc_source_is_fallback(source: s32) -> bool:
+    return source == GE_PC_SOURCE_FALLBACK_CHILD_SIGLONGJMP or source == GE_PC_SOURCE_FALLBACK_PARENT_SILENT_CHILD or source == GE_PC_SOURCE_FALLBACK_PARENT_STATUS
+
+# ============================================================
+# Trivial state getters (parent-side reads of captured state)
+# ============================================================
+
+def c_GuestExec_ReportedBoundaryReached() -> s32:
+    fr: ElisaGuestExecForkReport&? = ge_fork_report
+    return fr.boundary_reached if fr != null else 0
+
+def c_GuestExec_ReportedBoundaryReason() -> s32:
+    fr: ElisaGuestExecForkReport&? = ge_fork_report
+    return fr.boundary_reason if fr != null else 0
+
+def c_GuestExec_ReportedExecutionStage() -> s32:
+    fr: ElisaGuestExecForkReport&? = ge_fork_report
+    return fr.execution_stage if fr != null else 0
+
+def c_GuestExec_ReportedStatus() -> s32:
+    fr: ElisaGuestExecForkReport&? = ge_fork_report
+    return fr.status if fr != null else 0
+
+def c_GuestExec_ReportedSignal() -> s32:
+    fr: ElisaGuestExecForkReport&? = ge_fork_report
+    return fr.signal if fr != null else 0
+
+def c_GuestExec_ReportedFaultAddress() -> uintptr:
+    fr: ElisaGuestExecForkReport&? = ge_fork_report
+    return fr.fault_address if fr != null else 0.uintptr()
+
+def c_GuestExec_ReportedGuestPC() -> uintptr:
+    fr: ElisaGuestExecForkReport&? = ge_fork_report
+    return fr.guest_pc if fr != null else 0.uintptr()
+
+def c_GuestExec_ReportedGuestSP() -> uintptr:
+    fr: ElisaGuestExecForkReport&? = ge_fork_report
+    return fr.guest_sp if fr != null else 0.uintptr()
+
+def c_GuestExec_ReportedGuestBP() -> uintptr:
+    fr: ElisaGuestExecForkReport&? = ge_fork_report
+    return fr.guest_bp if fr != null else 0.uintptr()
+
+def c_GuestExec_ReportedNativePhase() -> s32:
+    fr: ElisaGuestExecForkReport&? = ge_fork_report
+    return fr.native_phase if fr != null else 0
+
+def c_GuestExec_LastStatus() -> s32:
+    return ge_last_status
+
+def c_GuestExec_LastSignal() -> s32:
+    return ge_last_signal
+
+def c_GuestExec_LastErrno() -> s32:
+    return ge_last_errno
+
+def c_GuestExec_LastNativePhase() -> s32:
+    return ge_last_native_phase
+
+def c_GuestExec_LastFaultAddress() -> uintptr:
+    return ge_last_fault_address
+
+def c_GuestExec_LastGuestPC() -> uintptr:
+    return ge_last_guest_pc
+
+def c_GuestExec_LastGuestSP() -> uintptr:
+    return ge_last_guest_sp
+
+def c_GuestExec_LastGuestBP() -> uintptr:
+    return ge_last_guest_bp
+
+def c_GuestExec_LastGuestRDI() -> uintptr:
+    return ge_last_guest_rdi
+
+def c_GuestExec_LastGuestRSI() -> uintptr:
+    return ge_last_guest_rsi
+
+def c_GuestExec_LastGuestRAX() -> uintptr:
+    return ge_last_guest_rax
+
+def c_GuestExec_LastGuestRBX() -> uintptr:
+    return ge_last_guest_rbx
+
+def c_GuestExec_LastGuestRDX() -> uintptr:
+    return ge_last_guest_rdx
+
+def c_GuestExec_LastGuestRCX() -> uintptr:
+    return ge_last_guest_rcx
+
+def c_GuestExec_LastGuestR8() -> uintptr:
+    return ge_last_guest_r8
+
+def c_GuestExec_LastGuestR9() -> uintptr:
+    return ge_last_guest_r9
+
+def c_GuestExec_ExpectedEntryParams() -> uintptr:
+    return ge_expected_entry_params
+
+def c_GuestExec_ExpectedStackWord0() -> uintptr:
+    return ge_expected_stack_word0
+
+def c_GuestExec_ExpectedStackWord1() -> uintptr:
+    return ge_expected_stack_word1
+
+def c_GuestExec_EntryStackWord0() -> uintptr:
+    return ge_entry_stack_word0
+
+def c_GuestExec_EntryStackWord1() -> uintptr:
+    return ge_entry_stack_word1
+
+def c_GuestExec_EntryNativeWord0() -> uintptr:
+    return ge_entry_native_word0
+
+def c_GuestExec_EntryNativeWord1() -> uintptr:
+    return ge_entry_native_word1
+
+def c_GuestExec_PreJumpRDI() -> uintptr:
+    return ge_prejump_rdi
+
+def c_GuestExec_PreJumpRSI() -> uintptr:
+    return ge_prejump_rsi
+
+def c_GuestExec_PreJumpRSP() -> uintptr:
+    return ge_prejump_rsp
+
+def c_GuestExec_FaultWord0() -> uintptr:
+    return ge_fault_word0
+
+def c_GuestExec_FaultWord1() -> uintptr:
+    return ge_fault_word1
+
+def c_GuestExec_SignalStackWord0() -> uintptr:
+    return ge_signal_stack_word0
+
+def c_GuestExec_SignalStackWord1() -> uintptr:
+    return ge_signal_stack_word1
+
+def c_GuestExec_SignalStackSymbol0() -> static u8&:
+    s: static u8&? = ge_signal_stack_symbol0
+    return s if s != null else ""
+
+def c_GuestExec_SignalStackImage0() -> static u8&:
+    s: static u8&? = ge_signal_stack_image0
+    return s if s != null else ""
+
+def c_GuestExec_SignalPCSymbol() -> static u8&:
+    s: static u8&? = ge_signal_pc_symbol
+    return s if s != null else ""
+
+def c_GuestExec_SignalPCImage() -> static u8&:
+    s: static u8&? = ge_signal_pc_image
+    return s if s != null else ""
+
+def c_GuestExec_EntryNativeProt() -> u32:
+    return ge_entry_native_prot
+
+def c_GuestExec_LastPCNativeProt() -> u32:
+    return ge_pc_native_prot
+
+def c_GuestExec_LastPCWasFallback() -> s32:
+    return ge_last_pc_was_fallback
+
+def c_GuestExec_SignalGuestPC() -> uintptr:
+    return ge_signal_guest_pc
+
+def c_GuestExec_FallbackGuestPC() -> uintptr:
+    return ge_fallback_guest_pc
+
+def c_GuestExec_SignalPCValid() -> s32:
+    return ge_signal_pc_valid
+
+def c_GuestExec_LastPCSource() -> s32:
+    return ge_last_pc_source
+
+def c_GuestExec_BoundaryCallbackCount() -> s32:
+    return ge_boundary_callback_count
+
+def c_GuestExec_BoundaryCallbackReason() -> u64:
+    return ge_boundary_callback_reason
+
+def c_GuestExec_SyntheticObservedArgc() -> s32:
+    return ge_synthetic_observed_argc
+
+def c_GuestExec_SyntheticObservedArgv0() -> uintptr:
+    return ge_synthetic_observed_argv0
+
+def c_GuestExec_SyntheticObservedEntry() -> uintptr:
+    return ge_synthetic_observed_entry
+
+def c_GuestExec_SyntheticObservedParams() -> uintptr:
+    return ge_synthetic_observed_params
+
+def c_GuestExec_SyntheticObservedExitFunc() -> uintptr:
+    return ge_synthetic_observed_exit_func
+
+def c_GuestExec_SyntheticObservedStack() -> uintptr:
+    return ge_synthetic_observed_stack
+
+def c_GuestExec_AeroLibFallbackCallerPc() -> uintptr:
+    return ge_aerolib_fallback_caller_pc
+
+def c_GuestExec_AeroLibFallbackSlotVa() -> uintptr:
+    return ge_aerolib_fallback_slot_va
+
+def c_GuestExec_AeroLibFallbackCallsiteBytes() -> u64:
+    return ge_aerolib_fallback_callsite_bytes
+
+def c_GuestExec_AeroLibFallbackInvocations() -> u64:
+    return ge_aerolib_fallback_invocations
+
+def c_GuestExec_AeroLibFallbackPltVa() -> uintptr:
+    return ge_aerolib_fallback_plt_va
+
+def c_GuestExec_AeroLibFallbackPltBytes() -> u64:
+    return ge_aerolib_fallback_plt_bytes
+
+def c_GuestExec_RuntimeHleModule() -> static u8&:
+    s: static u8&? = ge_runtime_hle_module
+    return s if s != null else ""
+
+def c_GuestExec_RuntimeHleSymbol() -> static u8&:
+    s: static u8&? = ge_runtime_hle_symbol
+    return s if s != null else ""
+
+def c_GuestExec_RuntimeHleArg0() -> uintptr:
+    return ge_runtime_hle_arg0
+
+def c_GuestExec_RuntimeHleArg1() -> uintptr:
+    return ge_runtime_hle_arg1
+
+def c_GuestExec_RuntimeHleArg2() -> uintptr:
+    return ge_runtime_hle_arg2
+
+def c_GuestExec_RuntimeHleRet() -> uintptr:
+    return ge_runtime_hle_ret
