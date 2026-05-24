@@ -1,0 +1,157 @@
+# SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Native Elisa port of shader_recompiler/ir/reinterpret.h. Texture component
+# swizzling and read/write number-format conversions, built on the IR emitter.
+# The C++ `IREmitter& ir` is split here into the (program, emitter) pair the
+# Elisa emitter uses.
+
+include "./ir_emitter.elisa"
+
+# AmdGpu::NumberConversion (video_core/amdgpu/pixel_format.h).
+const IR_NUMBER_CONVERSION_NONE: u32 = 0u32
+const IR_NUMBER_CONVERSION_UINT_TO_USCALED: u32 = 1u32
+const IR_NUMBER_CONVERSION_SINT_TO_SSCALED: u32 = 2u32
+const IR_NUMBER_CONVERSION_UNORM_TO_UBNORM: u32 = 3u32
+const IR_NUMBER_CONVERSION_SINT8_TO_SNORM_NZ: u32 = 4u32
+const IR_NUMBER_CONVERSION_SINT16_TO_SNORM_NZ: u32 = 5u32
+const IR_NUMBER_CONVERSION_UINT32_TO_UNORM: u32 = 6u32
+const IR_NUMBER_CONVERSION_SRGB_TO_NORM: u32 = 7u32
+
+# Numeric limits used as float maxima by the conversions.
+const IR_U8_MAX_F32: f32 = 255.0f32
+const IR_U16_MAX_F32: f32 = 65535.0f32
+const IR_U32_MAX_F32: f32 = 4294967295.0f32
+
+# AmdGpu::CompMapping: a 4-component swizzle (r, g, b, a) of CompSwizzle indices.
+struct ShaderCompMapping:
+    r: mutable u32
+    g: mutable u32
+    b: mutable u32
+    a: mutable u32
+
+
+# Applies a component swizzle to a vec4. Constants are indexed as 0 and 1, and
+# components are 4-7, so a swizzle is one constants vector + one components
+# vector fed through a shuffle.
+def ShaderIrReinterpret_ApplySwizzle(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, vector: ShaderIrValue, swizzle: ShaderCompMapping) -> ShaderIrValue:
+    zero: ShaderIrValue = ShaderIrEmitter_Imm32FromF32(0.0f32)
+    one: ShaderIrValue = ShaderIrEmitter_Imm32FromF32(1.0f32)
+    constants_vec: ShaderIrValue = ShaderIrEmitter_CompositeConstruct_3(program, emitter, zero, one, zero, zero)
+    return ShaderIrEmitter_CompositeShuffle_3(program, emitter, constants_vec, vector,
+        ShaderIrEmitter_Imm32FromU32(swizzle.r),
+        ShaderIrEmitter_Imm32FromU32(swizzle.g),
+        ShaderIrEmitter_Imm32FromU32(swizzle.b),
+        ShaderIrEmitter_Imm32FromU32(swizzle.a))
+
+
+# Converts a gamma-corrected value to linear space.
+def ShaderIrReinterpret_ApplyGammaToLinear(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, c: ShaderIrValue) -> ShaderIrValue:
+    sum: ShaderIrValue = ShaderIrEmitter_FPAdd(program, emitter, c, ShaderIrEmitter_Imm32FromF32(0.055f32))
+    scaled: ShaderIrValue = ShaderIrEmitter_FPMul(program, emitter, sum, ShaderIrEmitter_Imm32FromF32(1.0f32 / 1.055f32))
+    a: ShaderIrValue = ShaderIrEmitter_FPPow(program, emitter, scaled, ShaderIrEmitter_Imm32FromF32(2.4f32))
+    b: ShaderIrValue = ShaderIrEmitter_FPMul(program, emitter, c, ShaderIrEmitter_Imm32FromF32(1.0f32 / 12.92f32))
+    cond: ShaderIrValue = ShaderIrEmitter_FPGreaterThan(program, emitter, c, ShaderIrEmitter_Imm32FromF32(0.04045f32), ShaderIrValue_FromU1(true))
+    return ShaderIrEmitter_Select(program, emitter, cond, a, b)
+
+
+def ShaderIrReinterpret_ApplyForceDegamma(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue) -> ShaderIrValue:
+    x: ShaderIrValue = ShaderIrEmitter_CompositeExtract(program, emitter, value, ShaderIrEmitter_Imm32FromU32(0u32))
+    y: ShaderIrValue = ShaderIrEmitter_CompositeExtract(program, emitter, value, ShaderIrEmitter_Imm32FromU32(1u32))
+    z: ShaderIrValue = ShaderIrEmitter_CompositeExtract(program, emitter, value, ShaderIrEmitter_Imm32FromU32(2u32))
+    w: ShaderIrValue = ShaderIrEmitter_CompositeExtract(program, emitter, value, ShaderIrEmitter_Imm32FromU32(3u32))
+    # Gamma correction is only applied to the RGB components.
+    rx: ShaderIrValue = ShaderIrReinterpret_ApplyGammaToLinear(program, emitter, x)
+    ry: ShaderIrValue = ShaderIrReinterpret_ApplyGammaToLinear(program, emitter, y)
+    rz: ShaderIrValue = ShaderIrReinterpret_ApplyGammaToLinear(program, emitter, z)
+    return ShaderIrEmitter_CompositeConstruct_3(program, emitter, rx, ry, rz, w)
+
+
+# Applies a number conversion in the read direction.
+def ShaderIrReinterpret_ApplyReadNumberConversion(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue, conversion: u32) -> ShaderIrValue:
+    bits32: ShaderIrValue = ShaderIrEmitter_Imm32FromU32(32u32)
+    if conversion == IR_NUMBER_CONVERSION_NONE:
+        return value
+    if conversion == IR_NUMBER_CONVERSION_UINT_TO_USCALED:
+        return ShaderIrEmitter_ConvertUToF(program, emitter, bits32, bits32, ShaderIrEmitter_BitCastU32F32(program, emitter, value))
+    if conversion == IR_NUMBER_CONVERSION_SINT_TO_SSCALED:
+        return ShaderIrEmitter_ConvertSToF(program, emitter, bits32, bits32, ShaderIrEmitter_BitCastU32F32(program, emitter, value))
+    if conversion == IR_NUMBER_CONVERSION_UNORM_TO_UBNORM:
+        # Convert 0..1 to -1..1.
+        scaled: ShaderIrValue = ShaderIrEmitter_FPMul(program, emitter, value, ShaderIrEmitter_Imm32FromF32(2.0f32))
+        return ShaderIrEmitter_FPSub(program, emitter, scaled, ShaderIrEmitter_Imm32FromF32(1.0f32))
+    if conversion == IR_NUMBER_CONVERSION_SINT8_TO_SNORM_NZ:
+        doubled: ShaderIrValue = ShaderIrEmitter_IMul(program, emitter, ShaderIrEmitter_BitCastU32F32(program, emitter, value), ShaderIrEmitter_Imm32FromU32(2u32))
+        addition: ShaderIrValue = ShaderIrEmitter_IAdd(program, emitter, doubled, ShaderIrEmitter_Imm32FromU32(1u32))
+        left: ShaderIrValue = ShaderIrEmitter_ConvertSToF(program, emitter, bits32, bits32, addition)
+        return ShaderIrEmitter_FPDiv(program, emitter, left, ShaderIrEmitter_Imm32FromF32(IR_U8_MAX_F32))
+    if conversion == IR_NUMBER_CONVERSION_SINT16_TO_SNORM_NZ:
+        doubled: ShaderIrValue = ShaderIrEmitter_IMul(program, emitter, ShaderIrEmitter_BitCastU32F32(program, emitter, value), ShaderIrEmitter_Imm32FromU32(2u32))
+        addition: ShaderIrValue = ShaderIrEmitter_IAdd(program, emitter, doubled, ShaderIrEmitter_Imm32FromU32(1u32))
+        left: ShaderIrValue = ShaderIrEmitter_ConvertSToF(program, emitter, bits32, bits32, addition)
+        return ShaderIrEmitter_FPDiv(program, emitter, left, ShaderIrEmitter_Imm32FromF32(IR_U16_MAX_F32))
+    if conversion == IR_NUMBER_CONVERSION_UINT32_TO_UNORM:
+        float_val: ShaderIrValue = ShaderIrEmitter_ConvertUToF(program, emitter, bits32, bits32, ShaderIrEmitter_BitCastU32F32(program, emitter, value))
+        return ShaderIrEmitter_FPDiv(program, emitter, float_val, ShaderIrEmitter_Imm32FromF32(IR_U32_MAX_F32))
+    if conversion == IR_NUMBER_CONVERSION_SRGB_TO_NORM:
+        return ShaderIrReinterpret_ApplyGammaToLinear(program, emitter, value)
+    return value
+
+
+def ShaderIrReinterpret_ApplyReadNumberConversionVec4(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue, conversion: u32) -> ShaderIrValue:
+    if conversion == IR_NUMBER_CONVERSION_NONE:
+        return value
+    x: ShaderIrValue = ShaderIrReinterpret_ApplyReadNumberConversion(program, emitter, ShaderIrEmitter_CompositeExtract(program, emitter, value, ShaderIrEmitter_Imm32FromU32(0u32)), conversion)
+    y: ShaderIrValue = ShaderIrReinterpret_ApplyReadNumberConversion(program, emitter, ShaderIrEmitter_CompositeExtract(program, emitter, value, ShaderIrEmitter_Imm32FromU32(1u32)), conversion)
+    z: ShaderIrValue = ShaderIrReinterpret_ApplyReadNumberConversion(program, emitter, ShaderIrEmitter_CompositeExtract(program, emitter, value, ShaderIrEmitter_Imm32FromU32(2u32)), conversion)
+    w: ShaderIrValue = ShaderIrReinterpret_ApplyReadNumberConversion(program, emitter, ShaderIrEmitter_CompositeExtract(program, emitter, value, ShaderIrEmitter_Imm32FromU32(3u32)), conversion)
+    return ShaderIrEmitter_CompositeConstruct_3(program, emitter, x, y, z, w)
+
+
+# Applies a number conversion in the write direction.
+def ShaderIrReinterpret_ApplyWriteNumberConversion(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue, conversion: u32) -> ShaderIrValue:
+    bits32: ShaderIrValue = ShaderIrEmitter_Imm32FromU32(32u32)
+    neg_one: ShaderIrValue = ShaderIrEmitter_Imm32FromF32(-1.0f32)
+    pos_one: ShaderIrValue = ShaderIrEmitter_Imm32FromF32(1.0f32)
+    two_f: ShaderIrValue = ShaderIrEmitter_Imm32FromF32(2.0f32)
+    if conversion == IR_NUMBER_CONVERSION_NONE:
+        return value
+    if conversion == IR_NUMBER_CONVERSION_UINT_TO_USCALED:
+        # Return float type to maintain IR semantics.
+        return ShaderIrEmitter_BitCastF32U32(program, emitter, ShaderIrEmitter_ConvertFToU(program, emitter, bits32, value))
+    if conversion == IR_NUMBER_CONVERSION_SINT_TO_SSCALED:
+        return ShaderIrEmitter_BitCastF32U32(program, emitter, ShaderIrEmitter_ConvertFToS(program, emitter, bits32, value))
+    if conversion == IR_NUMBER_CONVERSION_UNORM_TO_UBNORM:
+        # Convert -1..1 to 0..1.
+        shifted: ShaderIrValue = ShaderIrEmitter_FPAdd(program, emitter, value, pos_one)
+        return ShaderIrEmitter_FPDiv(program, emitter, shifted, two_f)
+    if conversion == IR_NUMBER_CONVERSION_SINT8_TO_SNORM_NZ:
+        max_v: ShaderIrValue = ShaderIrEmitter_Imm32FromF32(IR_U8_MAX_F32)
+        clamped: ShaderIrValue = ShaderIrEmitter_FPClamp(program, emitter, value, neg_one, pos_one)
+        mul: ShaderIrValue = ShaderIrEmitter_FPMul(program, emitter, clamped, max_v)
+        left: ShaderIrValue = ShaderIrEmitter_FPSub(program, emitter, mul, pos_one)
+        raw: ShaderIrValue = ShaderIrEmitter_ConvertFToS(program, emitter, bits32, ShaderIrEmitter_FPDiv(program, emitter, left, two_f))
+        return ShaderIrEmitter_BitCastF32U32(program, emitter, raw)
+    if conversion == IR_NUMBER_CONVERSION_SINT16_TO_SNORM_NZ:
+        max_v: ShaderIrValue = ShaderIrEmitter_Imm32FromF32(IR_U16_MAX_F32)
+        clamped: ShaderIrValue = ShaderIrEmitter_FPClamp(program, emitter, value, neg_one, pos_one)
+        mul: ShaderIrValue = ShaderIrEmitter_FPMul(program, emitter, clamped, max_v)
+        left: ShaderIrValue = ShaderIrEmitter_FPSub(program, emitter, mul, pos_one)
+        raw: ShaderIrValue = ShaderIrEmitter_ConvertFToS(program, emitter, bits32, ShaderIrEmitter_FPDiv(program, emitter, left, two_f))
+        return ShaderIrEmitter_BitCastF32U32(program, emitter, raw)
+    if conversion == IR_NUMBER_CONVERSION_UINT32_TO_UNORM:
+        zero_f: ShaderIrValue = ShaderIrEmitter_Imm32FromF32(0.0f32)
+        clamped: ShaderIrValue = ShaderIrEmitter_FPClamp(program, emitter, value, zero_f, pos_one)
+        unnormalized: ShaderIrValue = ShaderIrEmitter_FPMul(program, emitter, clamped, ShaderIrEmitter_Imm32FromF32(IR_U32_MAX_F32))
+        return ShaderIrEmitter_BitCastF32U32(program, emitter, ShaderIrEmitter_ConvertFToU(program, emitter, bits32, unnormalized))
+    return value
+
+
+def ShaderIrReinterpret_ApplyWriteNumberConversionVec4(program: mutable ShaderIrProgram&, emitter: mutable ShaderIrEmitter&, value: ShaderIrValue, conversion: u32) -> ShaderIrValue:
+    if conversion == IR_NUMBER_CONVERSION_NONE:
+        return value
+    x: ShaderIrValue = ShaderIrReinterpret_ApplyWriteNumberConversion(program, emitter, ShaderIrEmitter_CompositeExtract(program, emitter, value, ShaderIrEmitter_Imm32FromU32(0u32)), conversion)
+    y: ShaderIrValue = ShaderIrReinterpret_ApplyWriteNumberConversion(program, emitter, ShaderIrEmitter_CompositeExtract(program, emitter, value, ShaderIrEmitter_Imm32FromU32(1u32)), conversion)
+    z: ShaderIrValue = ShaderIrReinterpret_ApplyWriteNumberConversion(program, emitter, ShaderIrEmitter_CompositeExtract(program, emitter, value, ShaderIrEmitter_Imm32FromU32(2u32)), conversion)
+    w: ShaderIrValue = ShaderIrReinterpret_ApplyWriteNumberConversion(program, emitter, ShaderIrEmitter_CompositeExtract(program, emitter, value, ShaderIrEmitter_Imm32FromU32(3u32)), conversion)
+    return ShaderIrEmitter_CompositeConstruct_3(program, emitter, x, y, z, w)
