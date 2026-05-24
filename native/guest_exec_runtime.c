@@ -1210,20 +1210,6 @@ static void __attribute__((noreturn)) elisa_guest_exec_run_child_main_entry(
 }
 #endif
 
-int32_t ElisaGuestExec_IsSupported(void) {
-#if defined(_WIN32)
-    return 0;
-#elif defined(__x86_64__) || defined(_M_X64)
-    return 1;
-#else
-    return 0;
-#endif
-}
-
-int32_t ElisaGuestExec_SupportedNativeExecution(void) {
-    return ElisaGuestExec_IsSupported();
-}
-
 int32_t ElisaGuestExec_HostCanRunX64Subprocess(void) {
 #if defined(__x86_64__) || defined(_M_X64)
     return 1;
@@ -1257,40 +1243,6 @@ int32_t ElisaGuestExec_HostCanRunX64Subprocess(void) {
     return has_x64;
 #else
     return 0;
-#endif
-}
-
-const char* ElisaGuestExec_HostArchitecture(void) {
-#if defined(_WIN32)
-#if defined(_M_X64)
-    return "x86_64";
-#elif defined(_M_ARM64)
-    return "arm64";
-#else
-    return "unknown";
-#endif
-#elif defined(__x86_64__) || defined(_M_X64)
-    return "x86_64";
-#elif defined(__aarch64__) || defined(_M_ARM64)
-    return "arm64";
-#elif defined(__i386__) || defined(_M_IX86)
-    return "x86";
-#else
-    return "unknown";
-#endif
-}
-
-const char* ElisaGuestExec_HostMode(void) {
-#if defined(_WIN32)
-    return "Windows";
-#elif defined(__APPLE__)
-    return "macOS";
-#elif defined(__linux__)
-    return "Linux";
-#elif defined(__FreeBSD__)
-    return "FreeBSD";
-#else
-    return "unknown";
 #endif
 }
 
