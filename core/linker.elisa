@@ -68,6 +68,11 @@ struct Linker:
     last_aerolib_fallback_resolved_count: mutable usize
     last_malformed_import_count: mutable usize
     last_failed_relocation_count: mutable usize
+    last_failed_relocation_type: mutable u32
+    last_failed_relocation_symbol: mutable u32
+    last_failed_relocation_offset: mutable u64
+    last_failed_relocation_module: mutable static u8&?
+    last_failed_relocation_name: mutable static u8&?
     last_started_module_index: mutable s32
     last_start_result: mutable s32
     last_entry_addr: mutable VAddr
@@ -95,6 +100,11 @@ global mutable linker_singleton: Linker = Linker(
     0,
     0,
     0,
+    0,
+    0,
+    0u64,
+    null,
+    null,
     -1,
     0,
     0.uintptr(),
@@ -124,6 +134,11 @@ def Linker_New() -> Linker:
         0,
         0,
         0,
+        0,
+        0,
+        0u64,
+        null,
+        null,
         -1,
         0,
         0.uintptr(),
@@ -630,11 +645,11 @@ def Linker_ApplyRelocationEntry(self: mutable Linker&, module: mutable Module&, 
         addend: mutable i64 = rel.rel_addend
         if rel_type == R_X86_64_GLOB_DAT or rel_type == R_X86_64_JUMP_SLOT:
             addend <- 0
-        symbol_info: mutable u8 = 0
-        symbol_value: mutable u64 = 0
-        if Module_GetSymbolInfoByIndex(module, symbol_index, symbol_info.ref[mutable u8&], symbol_value.ref[mutable u64&]):
-            if (symbol_info >> 4) == STB_LOCAL:
-                value: u64 = module.base_virtual_addr.u64() + symbol_value + addend.u64()
+        symbol: mutable elf_symbol = zeroed
+        if Module_GetSymbolByIndex(module, symbol_index, symbol.ref[mutable elf_symbol&]):
+            symbol_bind: u8 = ElfSymbol_GetBind(symbol)
+            if symbol_bind == STB_LOCAL or ((symbol_bind == STB_GLOBAL or symbol_bind == STB_WEAK) and symbol.st_shndx != ELF_SHN_UNDEF and symbol.st_value != 0):
+                value: u64 = module.base_virtual_addr.u64() + symbol.st_value + addend.u64()
                 if Module_WriteImageU64(module.ref[mutable Module&], rel_virtual_addr, value):
                     _ = MemoryManager_WriteU64(memory, rel_virtual_addr.uintptr(), value)
                     module.applied_relocation_count <- module.applied_relocation_count + 1
@@ -687,6 +702,11 @@ def Linker_ApplyRelocationTable(self: mutable Linker&, module: mutable Module&, 
             rel: elf_relocation = Module_ReadRelocationAt(module, offset.usize())
             if not Linker_ApplyRelocationEntry(self.ref[mutable Linker&], module.ref[mutable Module&], rel):
                 self.last_failed_relocation_count <- self.last_failed_relocation_count + 1
+                self.last_failed_relocation_type <- (rel.rel_info & 0xffffffff.u64()).u32()
+                self.last_failed_relocation_symbol <- (rel.rel_info >> 32.u64()).u32()
+                self.last_failed_relocation_offset <- rel.rel_offset
+                self.last_failed_relocation_module <- module.name
+                self.last_failed_relocation_name <- Module_GetSymbolNameByIndex(module.ref[mutable Module&], self.last_failed_relocation_symbol)
 
 def Linker_ApplyModuleRelocations(self: mutable Linker&, module: mutable Module&) -> void:
     entry_size: u64 = Module_GetRelaEntrySize(module)
@@ -702,6 +722,11 @@ def Linker_RelocateAllImports(self: mutable Linker&) -> void:
     self.last_aerolib_fallback_resolved_count <- 0
     self.last_malformed_import_count <- 0
     self.last_failed_relocation_count <- 0
+    self.last_failed_relocation_type <- 0u32
+    self.last_failed_relocation_symbol <- 0u32
+    self.last_failed_relocation_offset <- 0u64
+    self.last_failed_relocation_module <- null
+    self.last_failed_relocation_name <- null
     Linker_ResetFallbackSlots()
     Linker_ResetResolutionFingerprint()
     for i in 0..<self.modules.count:

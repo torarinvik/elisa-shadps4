@@ -35,14 +35,16 @@ CUSA07399 stage:
 - CUSA07399 x64 real execution lane: ok
 - CUSA07399 x64 execution mode: cross-emit-rosetta-x86_64
 - CUSA07399 x64 boundary status: -10
-- CUSA07399 x64 last pc: 34359746608
-- CUSA07399 x64 last sp: 12980975896
-- CUSA07399 x64 last bp: 12980976048
+- CUSA07399 x64 last pc: 0
+- CUSA07399 x64 last sp: 12987210056
+- CUSA07399 x64 last bp: 12987210208
 - CUSA07399 x64 last rdi: 2
-- CUSA07399 x64 expected EntryParams: 12980976520
+- CUSA07399 x64 expected EntryParams: 12987210712
 - CUSA07399 x64 expected stack words: 2, 0
 - CUSA07399 x64 entry stack words: 2, 0
-- CUSA07399 x64 diagnostic: guest-entry-rdi-not-entryparams,entry-rdi-equals-argc,last-hle-recorded-before-crash
+- CUSA07399 x64 fault words: 0, 0
+- CUSA07399 x64 signal stack words: 0, 0
+- CUSA07399 x64 diagnostic: true-signal-pc-is-null,guest-entry-rdi-not-entryparams,last-pc-not-in-native-region,last-hle-recorded-before-crash
 - guest exec probe only: 1
 - guest exec started: 1
 - guest exec entry reached: 1
@@ -56,6 +58,8 @@ CUSA07399 stage:
 - guest exec expected EntryParams: 0x0
 - guest exec expected stack words: 0x0, 0x0
 - guest exec entry stack words: 0x0, 0x0
+- guest exec fault words: 0x0, 0x0
+- guest exec signal stack words: 0x0, 0x0
 - guest exec last signal: 0
 - guest exec last module: libc
 - guest exec last symbol: RpQJJVKTiFM
@@ -71,8 +75,8 @@ CUSA07399 stage:
 CUSA07399 artifact metrics:
 - CUSA module count: 4
 - imports total: 1152
-- native HLE count: 840
-- PRX export count: 312
+- native HLE count: 841
+- PRX export count: 311
 - AeroLib fallback count: 0
 - unresolved count: 0
 - malformed count: 0

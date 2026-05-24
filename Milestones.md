@@ -371,3 +371,27 @@ cd "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/eli
 - Result: `passed=27 failed=0 selected=27`
 - What improved: all 27 selected gate steps passed
 - Next blocker: promote execute/boundary/frame stages deeper into runtime coverage
+
+## 2026-05-23: Emulator Parity Gate Run
+
+- Date: 2026-05-23
+- Command run: `./emulator-cpp-parity --quick`
+- Result: `passed=25 failed=2 selected=27`
+- What improved: CUSA unresolved imports are zero
+- Next blocker: Gate step failed: CUSA07399 x64 real execution lane
+
+## 2026-05-24: Emulator Parity Gate Run
+
+- Date: 2026-05-24
+- Command run: `./emulator-cpp-parity --quick`
+- Result: `passed=26 failed=1 selected=27`
+- What improved: CUSA unresolved imports are zero
+- Next blocker: Gate step failed: elisacore test emulator-renderer-first-frame-smoke
+
+## 2026-05-24: Emulator Parity Gate Run
+
+- Date: 2026-05-24
+- Command run: `./emulator-cpp-parity --quick`
+- Result: `passed=27 failed=0 selected=27`
+- What improved: all 27 selected gate steps passed
+- Next blocker: promote execute/boundary/frame stages deeper into runtime coverage

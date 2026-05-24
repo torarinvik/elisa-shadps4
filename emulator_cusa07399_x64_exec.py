@@ -148,6 +148,7 @@ def validate_artifacts(artifacts: dict[str, str]) -> list[str]:
     last_sp = to_int(artifact_get(artifacts, "guest_exec_last_sp", "last_guest_sp"))
     last_signal = to_int(artifact_get(artifacts, "guest_exec_last_signal", "last_signal"))
     signal_pc = to_int(artifact_get(artifacts, "guest_exec_signal_pc"))
+    signal_pc_valid = to_int(artifact_get(artifacts, "guest_exec_signal_pc_valid"))
     fallback_pc = to_int(artifact_get(artifacts, "guest_exec_fallback_pc"))
     pc_was_fallback = to_int(artifact_get(artifacts, "guest_exec_last_pc_was_fallback"))
     accepted_boundary = boundary_status in {1, 2, 3, 4}
@@ -155,9 +156,9 @@ def validate_artifacts(artifacts: dict[str, str]) -> list[str]:
     accepted_timeout = boundary_status == -3 and execution_stage >= 4
     if not (accepted_boundary or accepted_captured_fault or accepted_timeout):
         errors.append(f"bad-boundary-status-{boundary_status}")
-    if boundary_status == -10 and last_pc == 0:
+    if boundary_status == -10 and last_pc == 0 and signal_pc_valid == 0:
         errors.append("missing-crash-pc")
-    if boundary_status == -10 and signal_pc == 0:
+    if boundary_status == -10 and signal_pc == 0 and signal_pc_valid == 0:
         errors.append("missing-true-signal-pc")
     if boundary_status == -10 and pc_was_fallback != 0 and fallback_pc == 0:
         errors.append("missing-fallback-pc")
@@ -189,11 +190,14 @@ def diagnose_artifacts(artifacts: dict[str, str]) -> str:
     prejump_rdi = to_int(artifact_get(artifacts, "guest_exec_prejump_rdi"))
     pc_was_fallback = to_int(artifact_get(artifacts, "guest_exec_last_pc_was_fallback"))
     signal_pc = to_int(artifact_get(artifacts, "guest_exec_signal_pc"))
+    signal_pc_valid = to_int(artifact_get(artifacts, "guest_exec_signal_pc_valid"))
     fallback_pc = to_int(artifact_get(artifacts, "guest_exec_fallback_pc"))
     pc_source = to_int(artifact_get(artifacts, "guest_exec_last_pc_source"))
     argc = to_int(artifact_get(artifacts, "guest_exec_last_argc", "last_argc"))
-    if boundary_status == -10 and signal_pc == 0:
+    if boundary_status == -10 and signal_pc == 0 and signal_pc_valid == 0:
         notes.append("true-signal-pc-missing")
+    if boundary_status == -10 and signal_pc == 0 and signal_pc_valid != 0:
+        notes.append("true-signal-pc-is-null")
     if boundary_status == -10 and signal_pc != 0 and last_pc != signal_pc:
         notes.append("effective-pc-differs-from-signal-pc")
     if boundary_status == -10 and fallback_pc != 0 and fallback_pc == main_entry:
@@ -319,6 +323,10 @@ def main() -> int:
             last_bp=artifact_get(artifacts, "guest_exec_last_bp", "last_guest_bp"),
             last_rdi=artifact_get(artifacts, "guest_exec_last_rdi", "last_guest_rdi"),
             last_rsi=artifact_get(artifacts, "guest_exec_last_rsi", "last_guest_rsi"),
+            last_rdx=artifact_get(artifacts, "guest_exec_last_rdx", "last_guest_rdx"),
+            last_rcx=artifact_get(artifacts, "guest_exec_last_rcx", "last_guest_rcx"),
+            last_r8=artifact_get(artifacts, "guest_exec_last_r8", "last_guest_r8"),
+            last_r9=artifact_get(artifacts, "guest_exec_last_r9", "last_guest_r9"),
             last_rax=artifact_get(artifacts, "guest_exec_last_rax", "last_guest_rax"),
             last_rbx=artifact_get(artifacts, "guest_exec_last_rbx", "last_guest_rbx"),
             expected_entry_params=artifact_get(artifacts, "guest_exec_expected_entry_params"),
@@ -345,10 +353,24 @@ def main() -> int:
             fault_word1=artifact_get(artifacts, "guest_exec_fault_word1"),
             signal_stack_word0=artifact_get(artifacts, "guest_exec_signal_stack_word0"),
             signal_stack_word1=artifact_get(artifacts, "guest_exec_signal_stack_word1"),
+            signal_stack_symbol0=artifact_get(artifacts, "guest_exec_signal_stack_symbol0", default=""),
+            signal_stack_image0=artifact_get(artifacts, "guest_exec_signal_stack_image0", default=""),
+            signal_pc_symbol=artifact_get(artifacts, "guest_exec_signal_pc_symbol", default=""),
+            signal_pc_image=artifact_get(artifacts, "guest_exec_signal_pc_image", default=""),
             fault=artifact_get(artifacts, "guest_exec_fault_address", "fault"),
             last_signal=artifact_get(artifacts, "guest_exec_last_signal", "last_signal"),
             last_hle_module=artifact_get(artifacts, "last_hle_module", default=""),
             last_hle_symbol=artifact_get(artifacts, "last_hle_symbol", default=""),
+            mutex_op=artifact_get(artifacts, "threads_sync_last_mutex_op", default=""),
+            mutex_slot=artifact_get(artifacts, "threads_sync_last_mutex_slot", default=""),
+            mutex_value=artifact_get(artifacts, "threads_sync_last_mutex_value", default=""),
+            mutex_ret=artifact_get(artifacts, "threads_sync_last_mutex_ret", default=""),
+            runtime_hle_module=artifact_get(artifacts, "guest_exec_runtime_hle_module", default=""),
+            runtime_hle_symbol=artifact_get(artifacts, "guest_exec_runtime_hle_symbol", default=""),
+            runtime_hle_arg0=artifact_get(artifacts, "guest_exec_runtime_hle_arg0", default=""),
+            runtime_hle_arg1=artifact_get(artifacts, "guest_exec_runtime_hle_arg1", default=""),
+            runtime_hle_arg2=artifact_get(artifacts, "guest_exec_runtime_hle_arg2", default=""),
+            runtime_hle_ret=artifact_get(artifacts, "guest_exec_runtime_hle_ret", default=""),
             diagnostic=diagnose_artifacts(artifacts),
         )
         return 1
@@ -366,6 +388,10 @@ def main() -> int:
         last_bp=artifact_get(artifacts, "guest_exec_last_bp", "last_guest_bp"),
         last_rdi=artifact_get(artifacts, "guest_exec_last_rdi", "last_guest_rdi"),
         last_rsi=artifact_get(artifacts, "guest_exec_last_rsi", "last_guest_rsi"),
+            last_rdx=artifact_get(artifacts, "guest_exec_last_rdx", "last_guest_rdx"),
+            last_rcx=artifact_get(artifacts, "guest_exec_last_rcx", "last_guest_rcx"),
+            last_r8=artifact_get(artifacts, "guest_exec_last_r8", "last_guest_r8"),
+            last_r9=artifact_get(artifacts, "guest_exec_last_r9", "last_guest_r9"),
         last_rax=artifact_get(artifacts, "guest_exec_last_rax", "last_guest_rax"),
         last_rbx=artifact_get(artifacts, "guest_exec_last_rbx", "last_guest_rbx"),
         expected_entry_params=artifact_get(artifacts, "guest_exec_expected_entry_params"),
@@ -392,10 +418,24 @@ def main() -> int:
         fault_word1=artifact_get(artifacts, "guest_exec_fault_word1"),
         signal_stack_word0=artifact_get(artifacts, "guest_exec_signal_stack_word0"),
         signal_stack_word1=artifact_get(artifacts, "guest_exec_signal_stack_word1"),
+        signal_stack_symbol0=artifact_get(artifacts, "guest_exec_signal_stack_symbol0", default=""),
+        signal_stack_image0=artifact_get(artifacts, "guest_exec_signal_stack_image0", default=""),
+            signal_pc_symbol=artifact_get(artifacts, "guest_exec_signal_pc_symbol", default=""),
+            signal_pc_image=artifact_get(artifacts, "guest_exec_signal_pc_image", default=""),
         fault=artifact_get(artifacts, "guest_exec_fault_address", "fault"),
         last_signal=artifact_get(artifacts, "guest_exec_last_signal", "last_signal"),
         last_hle_module=artifact_get(artifacts, "last_hle_module", default=""),
         last_hle_symbol=artifact_get(artifacts, "last_hle_symbol", default=""),
+            mutex_op=artifact_get(artifacts, "threads_sync_last_mutex_op", default=""),
+            mutex_slot=artifact_get(artifacts, "threads_sync_last_mutex_slot", default=""),
+            mutex_value=artifact_get(artifacts, "threads_sync_last_mutex_value", default=""),
+            mutex_ret=artifact_get(artifacts, "threads_sync_last_mutex_ret", default=""),
+        runtime_hle_module=artifact_get(artifacts, "guest_exec_runtime_hle_module", default=""),
+        runtime_hle_symbol=artifact_get(artifacts, "guest_exec_runtime_hle_symbol", default=""),
+        runtime_hle_arg0=artifact_get(artifacts, "guest_exec_runtime_hle_arg0", default=""),
+        runtime_hle_arg1=artifact_get(artifacts, "guest_exec_runtime_hle_arg1", default=""),
+        runtime_hle_arg2=artifact_get(artifacts, "guest_exec_runtime_hle_arg2", default=""),
+        runtime_hle_ret=artifact_get(artifacts, "guest_exec_runtime_hle_ret", default=""),
         diagnostic=diagnose_artifacts(artifacts),
     )
     return 0

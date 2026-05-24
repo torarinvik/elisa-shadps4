@@ -21,6 +21,7 @@
 #include <windows.h>
 #else
 #include <errno.h>
+#include <dlfcn.h>
 #include <signal.h>
 #include <pthread.h>
 #include <sys/mman.h>
@@ -122,6 +123,10 @@ static uintptr_t elisa_guest_exec_last_guest_sp = 0;
 static uintptr_t elisa_guest_exec_last_guest_bp = 0;
 static uintptr_t elisa_guest_exec_last_guest_rdi = 0;
 static uintptr_t elisa_guest_exec_last_guest_rsi = 0;
+static uintptr_t elisa_guest_exec_last_guest_rdx = 0;
+static uintptr_t elisa_guest_exec_last_guest_rcx = 0;
+static uintptr_t elisa_guest_exec_last_guest_r8 = 0;
+static uintptr_t elisa_guest_exec_last_guest_r9 = 0;
 static uintptr_t elisa_guest_exec_last_guest_rax = 0;
 static uintptr_t elisa_guest_exec_last_guest_rbx = 0;
 static uintptr_t elisa_guest_exec_expected_entry_params = 0;
@@ -135,11 +140,16 @@ static uintptr_t elisa_guest_exec_fault_word0 = 0;
 static uintptr_t elisa_guest_exec_fault_word1 = 0;
 static uintptr_t elisa_guest_exec_signal_stack_word0 = 0;
 static uintptr_t elisa_guest_exec_signal_stack_word1 = 0;
+static const char* elisa_guest_exec_signal_stack_symbol0 = "";
+static const char* elisa_guest_exec_signal_stack_image0 = "";
+static const char* elisa_guest_exec_signal_pc_symbol = "";
+static const char* elisa_guest_exec_signal_pc_image = "";
 static uintptr_t elisa_guest_exec_prejump_rdi = 0;
 static uintptr_t elisa_guest_exec_prejump_rsi = 0;
 static uintptr_t elisa_guest_exec_prejump_rsp = 0;
 static uintptr_t elisa_guest_exec_signal_guest_pc = 0;
 static uintptr_t elisa_guest_exec_fallback_guest_pc = 0;
+static int32_t elisa_guest_exec_signal_pc_valid = 0;
 static uint32_t elisa_guest_exec_entry_native_prot = 0xffffffffu;
 static uint32_t elisa_guest_exec_pc_native_prot = 0xffffffffu;
 static int32_t elisa_guest_exec_last_pc_was_fallback = 0;
@@ -161,6 +171,12 @@ static uint64_t elisa_guest_exec_aerolib_fallback_callsite_bytes = 0;
 static uint64_t elisa_guest_exec_aerolib_fallback_invocations = 0;
 static uintptr_t elisa_guest_exec_aerolib_fallback_plt_va = 0;
 static uint64_t elisa_guest_exec_aerolib_fallback_plt_bytes = 0;
+static const char* elisa_guest_exec_runtime_hle_module = "";
+static const char* elisa_guest_exec_runtime_hle_symbol = "";
+static uintptr_t elisa_guest_exec_runtime_hle_arg0 = 0;
+static uintptr_t elisa_guest_exec_runtime_hle_arg1 = 0;
+static uintptr_t elisa_guest_exec_runtime_hle_arg2 = 0;
+static uintptr_t elisa_guest_exec_runtime_hle_ret = 0;
 
 typedef struct ElisaGuestExecForkReport {
     volatile int32_t boundary_reached;
@@ -174,6 +190,10 @@ typedef struct ElisaGuestExecForkReport {
     volatile uintptr_t guest_bp;
     volatile uintptr_t guest_rdi;
     volatile uintptr_t guest_rsi;
+    volatile uintptr_t guest_rdx;
+    volatile uintptr_t guest_rcx;
+    volatile uintptr_t guest_r8;
+    volatile uintptr_t guest_r9;
     volatile uintptr_t guest_rax;
     volatile uintptr_t guest_rbx;
     volatile uintptr_t expected_entry_params;
@@ -187,11 +207,16 @@ typedef struct ElisaGuestExecForkReport {
     volatile uintptr_t fault_word1;
     volatile uintptr_t signal_stack_word0;
     volatile uintptr_t signal_stack_word1;
+    const char* signal_stack_symbol0;
+    const char* signal_stack_image0;
+    const char* signal_pc_symbol;
+    const char* signal_pc_image;
     volatile uintptr_t prejump_rdi;
     volatile uintptr_t prejump_rsi;
     volatile uintptr_t prejump_rsp;
     volatile uintptr_t signal_guest_pc;
     volatile uintptr_t fallback_guest_pc;
+    volatile int32_t signal_pc_valid;
     volatile int32_t pc_source;
     volatile uint32_t entry_native_prot;
     volatile uint32_t pc_native_prot;
@@ -204,6 +229,12 @@ typedef struct ElisaGuestExecForkReport {
     volatile uint64_t aerolib_fallback_invocations;
     volatile uintptr_t aerolib_fallback_plt_va;
     volatile uint64_t aerolib_fallback_plt_bytes;
+    const char* runtime_hle_module;
+    const char* runtime_hle_symbol;
+    volatile uintptr_t runtime_hle_arg0;
+    volatile uintptr_t runtime_hle_arg1;
+    volatile uintptr_t runtime_hle_arg2;
+    volatile uintptr_t runtime_hle_ret;
 } ElisaGuestExecForkReport;
 
 static ElisaGuestExecForkReport* elisa_guest_exec_fork_report = NULL;
@@ -332,6 +363,43 @@ static uintptr_t elisa_guest_exec_read_native_word(uintptr_t address) {
     return value;
 }
 
+static uintptr_t elisa_guest_exec_read_context_word(uintptr_t address) {
+    if (address == 0) {
+        return 0;
+    }
+    uintptr_t value = 0;
+    memcpy(&value, (const void*)address, sizeof(value));
+    return value;
+}
+
+static void elisa_guest_exec_resolve_context_symbol(uintptr_t address,
+                                                      const char** out_symbol,
+                                                      const char** out_image) {
+    if (out_symbol != NULL) {
+        *out_symbol = "";
+    }
+    if (out_image != NULL) {
+        *out_image = "";
+    }
+#if !defined(_WIN32)
+    if (address == 0) {
+        return;
+    }
+    Dl_info info;
+    memset(&info, 0, sizeof(info));
+    if (dladdr((const void*)address, &info) != 0) {
+        if (out_symbol != NULL && info.dli_sname != NULL) {
+            *out_symbol = info.dli_sname;
+        }
+        if (out_image != NULL && info.dli_fname != NULL) {
+            *out_image = info.dli_fname;
+        }
+    }
+#else
+    (void)address;
+#endif
+}
+
 static void elisa_guest_exec_flush_instruction_cache(uintptr_t address, uint64_t size) {
     if (address == 0 || size == 0) {
         return;
@@ -364,6 +432,24 @@ static uintptr_t elisa_guest_exec_extract_pc(void* uctx) {
 #elif defined(__linux__)
     ucontext_t* uc = (ucontext_t*)uctx;
     return (uintptr_t)(uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
+#else
+    (void)uctx;
+    return 0;
+#endif
+#else
+    (void)uctx;
+    return 0;
+#endif
+}
+
+static int32_t elisa_guest_exec_has_signal_pc(void* uctx) {
+    if (uctx == NULL) return 0;
+#if defined(__x86_64__)
+#if defined(__APPLE__)
+    ucontext_t* uc = (ucontext_t*)uctx;
+    return uc->uc_mcontext != NULL ? 1 : 0;
+#elif defined(__linux__)
+    return 1;
 #else
     (void)uctx;
     return 0;
@@ -422,6 +508,10 @@ static uintptr_t elisa_guest_exec_extract_greg(void* uctx, int reg) {
     case 1: return (uintptr_t)uc->uc_mcontext->__ss.__rsi;
     case 2: return (uintptr_t)uc->uc_mcontext->__ss.__rax;
     case 3: return (uintptr_t)uc->uc_mcontext->__ss.__rbx;
+    case 4: return (uintptr_t)uc->uc_mcontext->__ss.__rdx;
+    case 5: return (uintptr_t)uc->uc_mcontext->__ss.__rcx;
+    case 6: return (uintptr_t)uc->uc_mcontext->__ss.__r8;
+    case 7: return (uintptr_t)uc->uc_mcontext->__ss.__r9;
     default: return 0;
     }
 #elif defined(__linux__)
@@ -431,6 +521,10 @@ static uintptr_t elisa_guest_exec_extract_greg(void* uctx, int reg) {
     case 1: return (uintptr_t)uc->uc_mcontext.gregs[REG_RSI];
     case 2: return (uintptr_t)uc->uc_mcontext.gregs[REG_RAX];
     case 3: return (uintptr_t)uc->uc_mcontext.gregs[REG_RBX];
+    case 4: return (uintptr_t)uc->uc_mcontext.gregs[REG_RDX];
+    case 5: return (uintptr_t)uc->uc_mcontext.gregs[REG_RCX];
+    case 6: return (uintptr_t)uc->uc_mcontext.gregs[REG_R8];
+    case 7: return (uintptr_t)uc->uc_mcontext.gregs[REG_R9];
     default: return 0;
     }
 #else
@@ -449,10 +543,11 @@ static void elisa_guest_exec_signal_handler(int sig, siginfo_t* info, void* uctx
     elisa_guest_exec_last_status = -sig;
     elisa_guest_exec_last_signal = sig;
     elisa_guest_exec_last_fault_address = info != NULL ? (uintptr_t)info->si_addr : 0;
+    elisa_guest_exec_signal_pc_valid = elisa_guest_exec_has_signal_pc(uctx);
     elisa_guest_exec_signal_guest_pc = elisa_guest_exec_extract_pc(uctx);
     elisa_guest_exec_fallback_guest_pc = 0;
     elisa_guest_exec_last_pc_was_fallback = 0;
-    elisa_guest_exec_last_pc_source = elisa_guest_exec_signal_guest_pc != 0 ?
+    elisa_guest_exec_last_pc_source = elisa_guest_exec_signal_pc_valid != 0 ?
         ELISA_GUEST_EXEC_PC_SOURCE_SIGNAL_UCONTEXT : ELISA_GUEST_EXEC_PC_SOURCE_NONE;
     elisa_guest_exec_last_guest_pc = elisa_guest_exec_signal_guest_pc;
     elisa_guest_exec_last_guest_sp = elisa_guest_exec_extract_sp(uctx);
@@ -461,15 +556,25 @@ static void elisa_guest_exec_signal_handler(int sig, siginfo_t* info, void* uctx
     elisa_guest_exec_last_guest_rsi = elisa_guest_exec_extract_greg(uctx, 1);
     elisa_guest_exec_last_guest_rax = elisa_guest_exec_extract_greg(uctx, 2);
     elisa_guest_exec_last_guest_rbx = elisa_guest_exec_extract_greg(uctx, 3);
+    elisa_guest_exec_last_guest_rdx = elisa_guest_exec_extract_greg(uctx, 4);
+    elisa_guest_exec_last_guest_rcx = elisa_guest_exec_extract_greg(uctx, 5);
+    elisa_guest_exec_last_guest_r8 = elisa_guest_exec_extract_greg(uctx, 6);
+    elisa_guest_exec_last_guest_r9 = elisa_guest_exec_extract_greg(uctx, 7);
     elisa_guest_exec_pc_native_prot =
         elisa_guest_exec_native_prot_at(elisa_guest_exec_last_guest_pc, sizeof(uintptr_t));
     elisa_guest_exec_fault_word0 = elisa_guest_exec_read_native_word(elisa_guest_exec_last_guest_pc);
     elisa_guest_exec_fault_word1 =
         elisa_guest_exec_read_native_word(elisa_guest_exec_last_guest_pc + sizeof(uintptr_t));
     elisa_guest_exec_signal_stack_word0 =
-        elisa_guest_exec_read_native_word(elisa_guest_exec_last_guest_sp);
+        elisa_guest_exec_read_context_word(elisa_guest_exec_last_guest_sp);
     elisa_guest_exec_signal_stack_word1 =
-        elisa_guest_exec_read_native_word(elisa_guest_exec_last_guest_sp + sizeof(uintptr_t));
+        elisa_guest_exec_read_context_word(elisa_guest_exec_last_guest_sp + sizeof(uintptr_t));
+    elisa_guest_exec_resolve_context_symbol(elisa_guest_exec_signal_stack_word0,
+                                            &elisa_guest_exec_signal_stack_symbol0,
+                                            &elisa_guest_exec_signal_stack_image0);
+    elisa_guest_exec_resolve_context_symbol(elisa_guest_exec_last_guest_pc,
+                                            &elisa_guest_exec_signal_pc_symbol,
+                                            &elisa_guest_exec_signal_pc_image);
     if (elisa_guest_exec_fork_report != NULL) {
         elisa_guest_exec_fork_report->status = elisa_guest_exec_last_status;
         elisa_guest_exec_fork_report->signal = sig;
@@ -479,6 +584,10 @@ static void elisa_guest_exec_signal_handler(int sig, siginfo_t* info, void* uctx
         elisa_guest_exec_fork_report->guest_bp = elisa_guest_exec_last_guest_bp;
         elisa_guest_exec_fork_report->guest_rdi = elisa_guest_exec_last_guest_rdi;
         elisa_guest_exec_fork_report->guest_rsi = elisa_guest_exec_last_guest_rsi;
+        elisa_guest_exec_fork_report->guest_rdx = elisa_guest_exec_last_guest_rdx;
+        elisa_guest_exec_fork_report->guest_rcx = elisa_guest_exec_last_guest_rcx;
+        elisa_guest_exec_fork_report->guest_r8 = elisa_guest_exec_last_guest_r8;
+        elisa_guest_exec_fork_report->guest_r9 = elisa_guest_exec_last_guest_r9;
         elisa_guest_exec_fork_report->guest_rax = elisa_guest_exec_last_guest_rax;
         elisa_guest_exec_fork_report->guest_rbx = elisa_guest_exec_last_guest_rbx;
         elisa_guest_exec_fork_report->expected_entry_params = elisa_guest_exec_expected_entry_params;
@@ -490,11 +599,16 @@ static void elisa_guest_exec_signal_handler(int sig, siginfo_t* info, void* uctx
         elisa_guest_exec_fork_report->fault_word1 = elisa_guest_exec_fault_word1;
         elisa_guest_exec_fork_report->signal_stack_word0 = elisa_guest_exec_signal_stack_word0;
         elisa_guest_exec_fork_report->signal_stack_word1 = elisa_guest_exec_signal_stack_word1;
+        elisa_guest_exec_fork_report->signal_stack_symbol0 = elisa_guest_exec_signal_stack_symbol0;
+        elisa_guest_exec_fork_report->signal_stack_image0 = elisa_guest_exec_signal_stack_image0;
+        elisa_guest_exec_fork_report->signal_pc_symbol = elisa_guest_exec_signal_pc_symbol;
+        elisa_guest_exec_fork_report->signal_pc_image = elisa_guest_exec_signal_pc_image;
         elisa_guest_exec_fork_report->prejump_rdi = elisa_guest_exec_prejump_rdi;
         elisa_guest_exec_fork_report->prejump_rsi = elisa_guest_exec_prejump_rsi;
         elisa_guest_exec_fork_report->prejump_rsp = elisa_guest_exec_prejump_rsp;
         elisa_guest_exec_fork_report->signal_guest_pc = elisa_guest_exec_signal_guest_pc;
         elisa_guest_exec_fork_report->fallback_guest_pc = elisa_guest_exec_fallback_guest_pc;
+        elisa_guest_exec_fork_report->signal_pc_valid = elisa_guest_exec_signal_pc_valid;
         elisa_guest_exec_fork_report->pc_source = elisa_guest_exec_last_pc_source;
         elisa_guest_exec_fork_report->pc_was_fallback = elisa_guest_exec_last_pc_was_fallback;
         elisa_guest_exec_fork_report->pc_native_prot = elisa_guest_exec_pc_native_prot;
@@ -633,6 +747,38 @@ static int32_t __attribute__((unused)) elisa_guest_exec_ensure_fork_report(void)
     return 0;
 #endif
 }
+
+void ElisaGuestExec_RecordRuntimeHle(const char* module, const char* symbol,
+                                      uintptr_t arg0, uintptr_t arg1,
+                                      uintptr_t arg2, uintptr_t ret) {
+    elisa_guest_exec_runtime_hle_module = module != NULL ? module : "";
+    elisa_guest_exec_runtime_hle_symbol = symbol != NULL ? symbol : "";
+    elisa_guest_exec_runtime_hle_arg0 = arg0;
+    elisa_guest_exec_runtime_hle_arg1 = arg1;
+    elisa_guest_exec_runtime_hle_arg2 = arg2;
+    elisa_guest_exec_runtime_hle_ret = ret;
+    if (elisa_guest_exec_fork_report != NULL) {
+        elisa_guest_exec_fork_report->runtime_hle_module = elisa_guest_exec_runtime_hle_module;
+        elisa_guest_exec_fork_report->runtime_hle_symbol = elisa_guest_exec_runtime_hle_symbol;
+        elisa_guest_exec_fork_report->runtime_hle_arg0 = arg0;
+        elisa_guest_exec_fork_report->runtime_hle_arg1 = arg1;
+        elisa_guest_exec_fork_report->runtime_hle_arg2 = arg2;
+        elisa_guest_exec_fork_report->runtime_hle_ret = ret;
+    }
+}
+
+const char* ElisaGuestExec_RuntimeHleModule(void) {
+    return elisa_guest_exec_runtime_hle_module != NULL ? elisa_guest_exec_runtime_hle_module : "";
+}
+
+const char* ElisaGuestExec_RuntimeHleSymbol(void) {
+    return elisa_guest_exec_runtime_hle_symbol != NULL ? elisa_guest_exec_runtime_hle_symbol : "";
+}
+
+uintptr_t ElisaGuestExec_RuntimeHleArg0(void) { return elisa_guest_exec_runtime_hle_arg0; }
+uintptr_t ElisaGuestExec_RuntimeHleArg1(void) { return elisa_guest_exec_runtime_hle_arg1; }
+uintptr_t ElisaGuestExec_RuntimeHleArg2(void) { return elisa_guest_exec_runtime_hle_arg2; }
+uintptr_t ElisaGuestExec_RuntimeHleRet(void) { return elisa_guest_exec_runtime_hle_ret; }
 
 void ElisaGuestExec_ReportFirstBoundary(int32_t reason) {
     elisa_guest_exec_set_native_phase(ELISA_GUEST_EXEC_PHASE_NATIVE_BOUNDARY_REPORTED);
@@ -913,7 +1059,8 @@ static void __attribute__((unused)) elisa_guest_exec_absorb_fork_report(void) {
         elisa_guest_exec_fork_report->signal == 0 &&
         elisa_guest_exec_fork_report->execution_stage >= 4) {
         elisa_guest_exec_fork_report->status = -11;
-        if (elisa_guest_exec_fork_report->guest_pc == 0) {
+        if (elisa_guest_exec_fork_report->guest_pc == 0 &&
+            elisa_guest_exec_fork_report->signal_pc_valid == 0) {
             elisa_guest_exec_record_fallback_pc(
                 elisa_guest_exec_fork_report->entry_addr,
                 ELISA_GUEST_EXEC_PC_SOURCE_FALLBACK_PARENT_SILENT_CHILD);
@@ -921,6 +1068,7 @@ static void __attribute__((unused)) elisa_guest_exec_absorb_fork_report(void) {
     }
     if (elisa_guest_exec_fork_report->status < 0 &&
         elisa_guest_exec_fork_report->guest_pc == 0 &&
+        elisa_guest_exec_fork_report->signal_pc_valid == 0 &&
         elisa_guest_exec_fork_report->entry_addr != 0) {
         elisa_guest_exec_record_fallback_pc(
             elisa_guest_exec_fork_report->entry_addr,
@@ -977,7 +1125,8 @@ static void __attribute__((unused)) elisa_guest_exec_absorb_fork_report(void) {
         elisa_guest_exec_prejump_rsi = elisa_guest_exec_fork_report->prejump_rsi;
         elisa_guest_exec_prejump_rsp = elisa_guest_exec_fork_report->prejump_rsp;
     }
-    if (elisa_guest_exec_fork_report->signal_guest_pc != 0) {
+    if (elisa_guest_exec_fork_report->signal_pc_valid != 0) {
+        elisa_guest_exec_signal_pc_valid = 1;
         elisa_guest_exec_signal_guest_pc = elisa_guest_exec_fork_report->signal_guest_pc;
         if (!elisa_guest_exec_fork_report->pc_was_fallback) {
             elisa_guest_exec_last_guest_pc = elisa_guest_exec_signal_guest_pc;
@@ -1018,6 +1167,22 @@ static void __attribute__((unused)) elisa_guest_exec_absorb_fork_report(void) {
         elisa_guest_exec_signal_stack_word0 = elisa_guest_exec_fork_report->signal_stack_word0;
         elisa_guest_exec_signal_stack_word1 = elisa_guest_exec_fork_report->signal_stack_word1;
     }
+    if (elisa_guest_exec_fork_report->signal_stack_symbol0 != NULL) {
+        elisa_guest_exec_signal_stack_symbol0 =
+            elisa_guest_exec_fork_report->signal_stack_symbol0;
+    }
+    if (elisa_guest_exec_fork_report->signal_stack_image0 != NULL) {
+        elisa_guest_exec_signal_stack_image0 =
+            elisa_guest_exec_fork_report->signal_stack_image0;
+    }
+    if (elisa_guest_exec_fork_report->signal_pc_symbol != NULL) {
+        elisa_guest_exec_signal_pc_symbol =
+            elisa_guest_exec_fork_report->signal_pc_symbol;
+    }
+    if (elisa_guest_exec_fork_report->signal_pc_image != NULL) {
+        elisa_guest_exec_signal_pc_image =
+            elisa_guest_exec_fork_report->signal_pc_image;
+    }
     if (elisa_guest_exec_fork_report->entry_native_prot != 0) {
         elisa_guest_exec_entry_native_prot = elisa_guest_exec_fork_report->entry_native_prot;
     }
@@ -1029,6 +1194,14 @@ static void __attribute__((unused)) elisa_guest_exec_absorb_fork_report(void) {
     }
     if (elisa_guest_exec_fork_report->native_phase != 0) {
         elisa_guest_exec_last_native_phase = elisa_guest_exec_fork_report->native_phase;
+    }
+    if (elisa_guest_exec_fork_report->runtime_hle_symbol != NULL) {
+        elisa_guest_exec_runtime_hle_module = elisa_guest_exec_fork_report->runtime_hle_module;
+        elisa_guest_exec_runtime_hle_symbol = elisa_guest_exec_fork_report->runtime_hle_symbol;
+        elisa_guest_exec_runtime_hle_arg0 = elisa_guest_exec_fork_report->runtime_hle_arg0;
+        elisa_guest_exec_runtime_hle_arg1 = elisa_guest_exec_fork_report->runtime_hle_arg1;
+        elisa_guest_exec_runtime_hle_arg2 = elisa_guest_exec_fork_report->runtime_hle_arg2;
+        elisa_guest_exec_runtime_hle_ret = elisa_guest_exec_fork_report->runtime_hle_ret;
     }
 }
 
@@ -1045,16 +1218,15 @@ static void __attribute__((unused)) elisa_guest_exec_default_exit(int32_t code) 
 
 static void __attribute__((unused)) elisa_guest_exec_guarded_exit(int32_t code) {
     (void)code;
-    elisa_guest_exec_last_status = -11;
+    // Match C++ ProgramExitFunc: it reports/logs the callback but returns to
+    // guest code. Long-jumping here stops real games before the next actual
+    // HLE/import boundary or true fault can be observed.
+    elisa_guest_exec_last_status = 0;
 #if !defined(_WIN32)
     if (elisa_guest_exec_fork_report != NULL) {
-        elisa_guest_exec_fork_report->status = -11;
         if (elisa_guest_exec_fork_report->execution_stage < 4) {
             elisa_guest_exec_fork_report->execution_stage = 4;
         }
-    }
-    if (elisa_guest_exec_guard_active) {
-        siglongjmp(elisa_guest_exec_jmp, 1);
     }
 #endif
 }
@@ -1171,19 +1343,30 @@ static void __attribute__((noreturn)) elisa_guest_exec_run_child_main_entry(
         elisa_guest_exec_set_native_phase(ELISA_GUEST_EXEC_PHASE_CHILD_SIGLONGJMP);
         int32_t status = elisa_guest_exec_last_status;
         int32_t sig = elisa_guest_exec_last_signal;
-        if (elisa_guest_exec_fork_report != NULL && elisa_guest_exec_fork_report->status != 0) {
-            status = elisa_guest_exec_fork_report->status;
+        if (elisa_guest_exec_fork_report != NULL) {
+            if (elisa_guest_exec_fork_report->status != 0) {
+                status = elisa_guest_exec_fork_report->status;
+            }
+            if (elisa_guest_exec_fork_report->signal != 0) {
+                sig = elisa_guest_exec_fork_report->signal;
+            }
         }
         if (status == 0 && sig == 0) {
             status = -11;
             elisa_guest_exec_last_status = status;
-            if (elisa_guest_exec_fork_report != NULL) {
+        }
+        if (elisa_guest_exec_fork_report != NULL) {
+            if (elisa_guest_exec_fork_report->status == 0) {
                 elisa_guest_exec_fork_report->status = status;
-                if (elisa_guest_exec_fork_report->guest_pc == 0) {
-                    elisa_guest_exec_record_fallback_pc(
-                        params->entry_addr,
-                        ELISA_GUEST_EXEC_PC_SOURCE_FALLBACK_CHILD_SIGLONGJMP);
-                }
+            }
+            if (elisa_guest_exec_fork_report->signal == 0) {
+                elisa_guest_exec_fork_report->signal = sig;
+            }
+            if (elisa_guest_exec_fork_report->guest_pc == 0 &&
+                elisa_guest_exec_fork_report->signal_pc_valid == 0) {
+                elisa_guest_exec_record_fallback_pc(
+                    params->entry_addr,
+                    ELISA_GUEST_EXEC_PC_SOURCE_FALLBACK_CHILD_SIGLONGJMP);
             }
         }
         elisa_guest_exec_guard_active = 0;
@@ -1370,6 +1553,22 @@ uintptr_t ElisaGuestExec_LastGuestRBX(void) {
     return elisa_guest_exec_last_guest_rbx;
 }
 
+uintptr_t ElisaGuestExec_LastGuestRDX(void) {
+    return elisa_guest_exec_last_guest_rdx;
+}
+
+uintptr_t ElisaGuestExec_LastGuestRCX(void) {
+    return elisa_guest_exec_last_guest_rcx;
+}
+
+uintptr_t ElisaGuestExec_LastGuestR8(void) {
+    return elisa_guest_exec_last_guest_r8;
+}
+
+uintptr_t ElisaGuestExec_LastGuestR9(void) {
+    return elisa_guest_exec_last_guest_r9;
+}
+
 uintptr_t ElisaGuestExec_ExpectedEntryParams(void) {
     return elisa_guest_exec_expected_entry_params;
 }
@@ -1426,6 +1625,22 @@ uintptr_t ElisaGuestExec_SignalStackWord1(void) {
     return elisa_guest_exec_signal_stack_word1;
 }
 
+const char* ElisaGuestExec_SignalStackSymbol0(void) {
+    return elisa_guest_exec_signal_stack_symbol0 != NULL ? elisa_guest_exec_signal_stack_symbol0 : "";
+}
+
+const char* ElisaGuestExec_SignalStackImage0(void) {
+    return elisa_guest_exec_signal_stack_image0 != NULL ? elisa_guest_exec_signal_stack_image0 : "";
+}
+
+const char* ElisaGuestExec_SignalPCSymbol(void) {
+    return elisa_guest_exec_signal_pc_symbol != NULL ? elisa_guest_exec_signal_pc_symbol : "";
+}
+
+const char* ElisaGuestExec_SignalPCImage(void) {
+    return elisa_guest_exec_signal_pc_image != NULL ? elisa_guest_exec_signal_pc_image : "";
+}
+
 uint32_t ElisaGuestExec_EntryNativeProt(void) {
     return elisa_guest_exec_entry_native_prot;
 }
@@ -1445,6 +1660,10 @@ uintptr_t ElisaGuestExec_SignalGuestPC(void) {
 
 uintptr_t ElisaGuestExec_FallbackGuestPC(void) {
     return elisa_guest_exec_fallback_guest_pc;
+}
+
+int32_t ElisaGuestExec_SignalPCValid(void) {
+    return elisa_guest_exec_signal_pc_valid;
 }
 
 int32_t ElisaGuestExec_LastPCSource(void) {
@@ -1480,6 +1699,10 @@ void ElisaGuestExec_ResetCrashState(void) {
     elisa_guest_exec_last_guest_bp = 0;
     elisa_guest_exec_last_guest_rdi = 0;
     elisa_guest_exec_last_guest_rsi = 0;
+    elisa_guest_exec_last_guest_rdx = 0;
+    elisa_guest_exec_last_guest_rcx = 0;
+    elisa_guest_exec_last_guest_r8 = 0;
+    elisa_guest_exec_last_guest_r9 = 0;
     elisa_guest_exec_last_guest_rax = 0;
     elisa_guest_exec_last_guest_rbx = 0;
     elisa_guest_exec_expected_entry_params = 0;
@@ -1494,11 +1717,16 @@ void ElisaGuestExec_ResetCrashState(void) {
     elisa_guest_exec_prejump_rsp = 0;
     elisa_guest_exec_signal_guest_pc = 0;
     elisa_guest_exec_fallback_guest_pc = 0;
+    elisa_guest_exec_signal_pc_valid = 0;
     elisa_guest_exec_last_pc_source = ELISA_GUEST_EXEC_PC_SOURCE_NONE;
     elisa_guest_exec_fault_word0 = 0;
     elisa_guest_exec_fault_word1 = 0;
     elisa_guest_exec_signal_stack_word0 = 0;
     elisa_guest_exec_signal_stack_word1 = 0;
+    elisa_guest_exec_signal_stack_symbol0 = "";
+    elisa_guest_exec_signal_stack_image0 = "";
+    elisa_guest_exec_signal_pc_symbol = "";
+    elisa_guest_exec_signal_pc_image = "";
     elisa_guest_exec_entry_native_prot = 0xffffffffu;
     elisa_guest_exec_pc_native_prot = 0xffffffffu;
     elisa_guest_exec_last_pc_was_fallback = 0;
@@ -1517,6 +1745,12 @@ void ElisaGuestExec_ResetCrashState(void) {
     elisa_guest_exec_aerolib_fallback_invocations = 0;
     elisa_guest_exec_aerolib_fallback_plt_va = 0;
     elisa_guest_exec_aerolib_fallback_plt_bytes = 0;
+    elisa_guest_exec_runtime_hle_module = "";
+    elisa_guest_exec_runtime_hle_symbol = "";
+    elisa_guest_exec_runtime_hle_arg0 = 0;
+    elisa_guest_exec_runtime_hle_arg1 = 0;
+    elisa_guest_exec_runtime_hle_arg2 = 0;
+    elisa_guest_exec_runtime_hle_ret = 0;
 #if !defined(_WIN32)
     elisa_guest_exec_timeout_fired = 0;
 #endif
