@@ -1,0 +1,166 @@
+# SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Native Elisa port of shader_recompiler/ir/srt_gvn_table.h. Global value
+# numbering over the subset of instructions used for shader-resource-table
+# loads (GetUserData / CompositeConstructU32x2 / ReadConst / Phi). Structurally
+# identical instructions receive the same value number so equivalent SRT loads
+# can be deduplicated.
+#
+# The C++ uses two unordered_maps (IR::Value -> vn, InstVector -> vn). The GVN
+# tables touched by the SRT pass are small, so this port uses linear-scan
+# arrays keyed by a canonical u64 value key and by an inline instruction-word
+# vector -- avoiding any reliance on hashing/equality of compound keys.
+
+include "./breadth_first_search.elisa"
+include "./microinstruction.elisa"
+
+const SRT_GVN_MAX_IV_WORDS: u32 = 8u32
+
+struct SrtGvnValueEntry:
+    key: mutable u64
+    vn: mutable u32
+
+struct SrtGvnIvEntry:
+    word_count: mutable u32
+    words: mutable u32[8]
+    vn: mutable u32
+
+struct SrtGvnTable:
+    next_num: mutable u32
+    values: mutable darray[SrtGvnValueEntry]
+    ivs: mutable darray[SrtGvnIvEntry]
+
+
+def SrtGvnTable_New() -> SrtGvnTable:
+    out: mutable SrtGvnTable = zeroed
+    return out
+
+
+# Canonical key for a (resolved) value. Instruction references key on their
+# (block, index) handle; leaf values combine their type with the immediate
+# payload. Distinct kinds are separated by a tag in the high bits.
+def ShaderIrGvn_ValueKey(v: ShaderIrValue) -> u64:
+    if v.type_bits == IR_TYPE_OPAQUE:
+        return (1u64 << 56u32) | (v.inst_block.u64() << 32u32) | v.inst_index.u64()
+    return (2u64 << 56u32) | ((v.type_bits.u64() & 0xFFFFu64) << 40u32) | (v.imm_u32.u64() & 0xFFFFFFFFu64)
+
+
+def SrtGvnTable_LookupValue(table: SrtGvnTable&, key: u64) -> u32?:
+    i: mutable usize = 0usize
+    while i < table.values.count:
+        if table.values[i].key == key:
+            return table.values[i].vn
+        i <- i + 1usize
+    return null
+
+
+def SrtGvnTable_LookupIv(table: SrtGvnTable&, word_count: u32, words: u32[8]) -> u32?:
+    i: mutable usize = 0usize
+    while i < table.ivs.count:
+        if table.ivs[i].word_count == word_count:
+            same: mutable bool = true
+            w: mutable u32 = 0u32
+            while w < word_count:
+                if table.ivs[i].words[w.usize()] != words[w.usize()]:
+                    same <- false
+                    break
+                w <- w + 1u32
+            if same:
+                return table.ivs[i].vn
+        i <- i + 1usize
+    return null
+
+
+def SrtGvnTable_NextValueNumber(table: mutable SrtGvnTable&, key: u64) -> u32:
+    can Memory.Allocate, Abort.Panic:
+        rv: u32 = table.next_num
+        table.next_num <- table.next_num + 1u32
+        entry: mutable SrtGvnValueEntry = zeroed
+        entry.key <- key
+        entry.vn <- rv
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            table.values.push(entry)
+        return rv
+
+
+def SrtGvnTable_RecordValue(table: mutable SrtGvnTable&, key: u64, vn: u32) -> void:
+    can Memory.Allocate, Abort.Panic:
+        entry: mutable SrtGvnValueEntry = zeroed
+        entry.key <- key
+        entry.vn <- vn
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            table.values.push(entry)
+
+
+# Predicate for the Phi breadth-first search: the first GetUserData /
+# CompositeConstructU32x2 / ReadConst instruction feeding the phi.
+def SrtGvn_PhiSourcePred(program: ShaderIrProgram&, v: ShaderIrValue) -> ShaderIrValue?:
+    if v.type_bits != IR_TYPE_OPAQUE:
+        return null
+    if v.inst_block >= program.block_count:
+        return null
+    if v.inst_index >= program.blocks[v.inst_block.usize()].inst_count:
+        return null
+    op: u32 = program.blocks[v.inst_block.usize()].insts[v.inst_index.usize()].opcode
+    if op == IR_OPCODE_GETUSERDATA or op == IR_OPCODE_COMPOSITECONSTRUCTU32X2 or op == IR_OPCODE_READCONST:
+        return v
+    return null
+
+
+def SrtGvnTable_GetValueNumber(table: mutable SrtGvnTable&, program: ShaderIrProgram&, v: ShaderIrValue) -> u32:
+    can Memory.Allocate, Abort.Panic:
+        resolved: ShaderIrValue = ShaderIrValue_ResolveRef(program, v)
+        key: u64 = ShaderIrGvn_ValueKey(resolved)
+        existing: u32? = SrtGvnTable_LookupValue(table, key)
+        if existing != null:
+            return existing
+        is_inst: bool = resolved.type_bits == IR_TYPE_OPAQUE and resolved.inst_block < program.block_count and resolved.inst_index < program.blocks[resolved.inst_block.usize()].inst_count
+        if is_inst:
+            return SrtGvn_ComputeInstValueNumber(table, program, resolved, key)
+        return SrtGvnTable_NextValueNumber(table, key)
+
+
+def SrtGvn_ComputeInstValueNumber(table: mutable SrtGvnTable&, program: ShaderIrProgram&, v: ShaderIrValue, key: u64) -> u32:
+    can Memory.Allocate, Abort.Panic:
+        opcode: u32 = program.blocks[v.inst_block.usize()].insts[v.inst_index.usize()].opcode
+        if ShaderIrInst_MayHaveSideEffects(program.blocks[v.inst_block.usize()].insts[v.inst_index.usize()]):
+            return SrtGvnTable_NextValueNumber(table, key)
+
+        if opcode == IR_OPCODE_PHI:
+            source: ShaderIrValue? = ShaderIrBreadthFirstSearch[ShaderIrValue](program, v, SrtGvn_PhiSourcePred)
+            if source != null:
+                vn: u32 = SrtGvnTable_GetValueNumber(table, program, source)
+                SrtGvnTable_RecordValue(table, key, vn)
+                return vn
+            return SrtGvnTable_NextValueNumber(table, key)
+
+        if opcode == IR_OPCODE_GETUSERDATA or opcode == IR_OPCODE_COMPOSITECONSTRUCTU32X2 or opcode == IR_OPCODE_READCONST:
+            words: mutable u32[8] = zeroed
+            words[0usize] <- opcode
+            words[1usize] <- (program.blocks[v.inst_block.usize()].insts[v.inst_index.usize()].flags_u64 & 0xFFFFFFFFu64).u32()
+            nargs: u32 = ShaderIrInst_NumArgs(program.blocks[v.inst_block.usize()].insts[v.inst_index.usize()])
+            wc: mutable u32 = 2u32
+            a: mutable u32 = 0u32
+            while a < nargs and wc < SRT_GVN_MAX_IV_WORDS:
+                arg: ShaderIrValue = ShaderIrInst_Arg(program.blocks[v.inst_block.usize()].insts[v.inst_index.usize()], a)
+                words[wc.usize()] <- SrtGvnTable_GetValueNumber(table, program, arg)
+                wc <- wc + 1u32
+                a <- a + 1u32
+            existing_iv: u32? = SrtGvnTable_LookupIv(table, wc, words)
+            if existing_iv != null:
+                SrtGvnTable_RecordValue(table, key, existing_iv)
+                return existing_iv
+            vn2: u32 = SrtGvnTable_NextValueNumber(table, key)
+            iv: mutable SrtGvnIvEntry = zeroed
+            iv.word_count <- wc
+            iv.words <- words
+            iv.vn <- vn2
+            owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+            in owner:
+                table.ivs.push(iv)
+            return vn2
+
+        return SrtGvnTable_NextValueNumber(table, key)
