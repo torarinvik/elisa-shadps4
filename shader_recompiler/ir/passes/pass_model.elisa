@@ -215,8 +215,11 @@ struct ShaderIrPassInst:
     replacement_value: mutable u32
 
 struct ShaderIrPassBlock:
+    # inst_count is the logical instruction count and remains the source of
+    # truth; insts is a heap-backed darray that grows on demand (never shrinks),
+    # so a block no longer embeds a fixed 512 * sizeof(ShaderIrPassInst) array.
     inst_count: mutable u32
-    insts: mutable ShaderIrPassInst[512]
+    insts: mutable darray[ShaderIrPassInst]
     is_ssa_sealed: mutable bool
     cfg_block_id: mutable u32
 
@@ -345,7 +348,9 @@ def ShaderIrProgram_AddBlock(program: mutable ShaderIrProgram&) -> u32:
     if program.block_count >= IR_PASS_MAX_BLOCKS:
         return 0u32
     index: u32 = program.block_count
-    program.blocks[index.usize()] <- zeroed
+    # blocks[index] is already zero-initialized (the program is created zeroed
+    # and block_count only grows), so avoid re-assigning a zeroed value over the
+    # block's owned insts darray; just stamp the cfg id.
     program.blocks[index.usize()].cfg_block_id <- index
     program.block_count <- program.block_count + 1u32
     if program.post_order_count < IR_PASS_MAX_BLOCKS:
@@ -377,6 +382,24 @@ def ShaderIrPassInst_SetArgAttribute(inst: mutable ShaderIrPassInst&, index: u32
     if index + 1u32 > inst.arg_count:
         inst.arg_count <- index + 1u32
 
+# Ensure the backing darray physically holds at least `needed` instruction
+# slots. The darray only ever grows; logical removals just lower inst_count.
+def ShaderIrPassBlock_ReserveInstSlots(block: mutable ShaderIrPassBlock&, needed: u32) -> void:
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            # Reserve the block's full instruction capacity up front so the
+            # backing buffer never relocates as instructions are appended. The
+            # passes hold interior `ShaderIrPassInst&` references into this darray
+            # across AddInst calls (e.g. hull/resource transforms); a reallocating
+            # push would leave those references dangling. The cost is paid lazily
+            # per used block (~40KB) rather than for all 96 blocks up front.
+            if block.insts.capacity.u32() < IR_PASS_MAX_INSTS:
+                _ = block.insts.reserve(IR_PASS_MAX_INSTS.usize())
+            while block.insts.count.u32() < needed:
+                fresh: mutable ShaderIrPassInst = zeroed
+                block.insts.push(fresh)
+
 def ShaderIrProgram_AddInst(program: mutable ShaderIrProgram&, block_index: u32, opcode: u32) -> u32:
     if block_index >= program.block_count:
         return 0u32
@@ -384,6 +407,7 @@ def ShaderIrProgram_AddInst(program: mutable ShaderIrProgram&, block_index: u32,
     if block.inst_count >= IR_PASS_MAX_INSTS:
         return 0u32
     inst_index: u32 = block.inst_count
+    ShaderIrPassBlock_ReserveInstSlots(block, inst_index + 1u32)
     block.inst_count <- block.inst_count + 1u32
     block.insts[inst_index.usize()] <- zeroed
     block.insts[inst_index.usize()].opcode <- opcode
