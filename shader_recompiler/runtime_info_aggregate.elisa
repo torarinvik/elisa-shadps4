@@ -1,0 +1,97 @@
+# SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Native Elisa port of the RuntimeInfo aggregate from shader_recompiler/
+# runtime_info.h (~lines 226-282). RuntimeInfo is a C++ union over the per-stage
+# *RuntimeInfo structs discriminated by `stage`. Elisa has no untagged unions, so
+# every variant is held as its own field (over-allocating) and `stage` selects
+# which one is live. The per-stage structs come from runtime_info_vertex_hull.elisa
+# and runtime_info_pixel_compute.elisa.
+#
+# Also defines the per-stage equality helpers for Local/Export/Vertex/Hull that
+# the vertex/hull port left out (their C++ defaulted operator<=>/==), so the
+# stage-dispatched RuntimeInfo equality can be assembled.
+
+include "runtime_info_vertex_hull.elisa"
+include "runtime_info_pixel_compute.elisa"
+include "frontend/tessellation.elisa"
+
+# --- Per-stage equality helpers (C++ defaulted comparisons). ---
+
+def LocalRuntimeInfo_Equal(a: LocalRuntimeInfo&, b: LocalRuntimeInfo&) -> bool:
+    return a.ls_stride == b.ls_stride
+
+def ExportRuntimeInfo_Equal(a: ExportRuntimeInfo&, b: ExportRuntimeInfo&) -> bool:
+    return a.hs_output_cp_stride == b.hs_output_cp_stride and a.tess_type == b.tess_type and a.tess_topology == b.tess_topology and a.tess_partitioning == b.tess_partitioning and a.vertex_data_size == b.vertex_data_size
+
+def HullRuntimeInfo_Equal(a: HullRuntimeInfo&, b: HullRuntimeInfo&) -> bool:
+    return a.hs_output_cp_stride == b.hs_output_cp_stride and a.num_input_control_points == b.num_input_control_points and a.num_threads == b.num_threads and a.tess_type == b.tess_type and a.offchip_lds_enable == b.offchip_lds_enable and a.ls_stride == b.ls_stride and a.hs_output_base == b.hs_output_base
+
+def VertexRuntimeInfo_Equal(a: VertexRuntimeInfo&, b: VertexRuntimeInfo&) -> bool:
+    if a.hs_output_cp_stride != b.hs_output_cp_stride or a.tess_type != b.tess_type or a.tess_topology != b.tess_topology or a.tess_partitioning != b.tess_partitioning:
+        return false
+    if a.num_outputs != b.num_outputs or a.num_exports != b.num_exports:
+        return false
+    i: mutable usize = 0usize
+    while i < 12usize:
+        if a.outputs[i] != b.outputs[i]:
+            return false
+        i <- i + 1usize
+    return a.tess_emulated_primitive == b.tess_emulated_primitive and a.emulate_depth_negative_one_to_one == b.emulate_depth_negative_one_to_one and a.clip_disable == b.clip_disable and a.step_rate_0 == b.step_rate_0 and a.step_rate_1 == b.step_rate_1
+
+# --- RuntimeInfo aggregate (flattened union). ---
+
+struct RuntimeInfo:
+    stage: mutable u32  # Stage discriminant
+    num_user_data: mutable u32
+    num_input_vgprs: mutable u32
+    num_allocated_vgprs: mutable u32
+    fp_denorm_mode32: mutable u32     # AmdGpu::FpDenormMode
+    fp_denorm_mode16_64: mutable u32  # AmdGpu::FpDenormMode
+    fp_round_mode32: mutable u32      # AmdGpu::FpRoundMode
+    fp_round_mode16_64: mutable u32   # AmdGpu::FpRoundMode
+
+    # Flattened union variants (only the one matching `stage` is meaningful).
+    ls_info: mutable LocalRuntimeInfo
+    es_info: mutable ExportRuntimeInfo
+    vs_info: mutable VertexRuntimeInfo
+    hs_info: mutable HullRuntimeInfo
+    gs_info: mutable GeometryRuntimeInfo
+    fs_info: mutable FragmentRuntimeInfo
+    cs_info: mutable ComputeRuntimeInfo
+    hs_es_vs_info: mutable CommonHsEsVsRuntimeInfo
+    es_vs_info: mutable CommonEsVsRuntimeInfo
+
+# Reset to a zeroed RuntimeInfo carrying only the given stage.
+def RuntimeInfo_Initialize(self: mutable RuntimeInfo&, stage: u32) -> void:
+    fresh: mutable RuntimeInfo = zeroed
+    self <- fresh
+    self.stage <- stage
+
+# Stage-dispatched equality (mirrors RuntimeInfo::operator==).
+def RuntimeInfo_Equal(a: RuntimeInfo&, b: RuntimeInfo&) -> bool:
+    if a.stage == SHADER_STAGE_FRAGMENT:
+        return FragmentRuntimeInfo_Equal(a.fs_info.ref[FragmentRuntimeInfo&], b.fs_info.ref[FragmentRuntimeInfo&])
+    if a.stage == SHADER_STAGE_VERTEX:
+        return VertexRuntimeInfo_Equal(a.vs_info.ref[VertexRuntimeInfo&], b.vs_info.ref[VertexRuntimeInfo&])
+    if a.stage == SHADER_STAGE_COMPUTE:
+        return ComputeRuntimeInfo_Equal(a.cs_info.ref[ComputeRuntimeInfo&], b.cs_info.ref[ComputeRuntimeInfo&])
+    if a.stage == SHADER_STAGE_EXPORT:
+        return ExportRuntimeInfo_Equal(a.es_info.ref[ExportRuntimeInfo&], b.es_info.ref[ExportRuntimeInfo&])
+    if a.stage == SHADER_STAGE_GEOMETRY:
+        return GeometryRuntimeInfo_Equal(a.gs_info.ref[GeometryRuntimeInfo&], b.gs_info.ref[GeometryRuntimeInfo&])
+    if a.stage == SHADER_STAGE_HULL:
+        return HullRuntimeInfo_Equal(a.hs_info.ref[HullRuntimeInfo&], b.hs_info.ref[HullRuntimeInfo&])
+    if a.stage == SHADER_STAGE_LOCAL:
+        return LocalRuntimeInfo_Equal(a.ls_info.ref[LocalRuntimeInfo&], b.ls_info.ref[LocalRuntimeInfo&])
+    return true
+
+# Pull tessellation-pass results into the live stage info (RuntimeInfo::
+# InitFromTessConstants). hs_output_cp_stride lives on the common base, which we
+# replicate across the relevant variants.
+def RuntimeInfo_InitFromTessConstants(self: mutable RuntimeInfo&, tess: TessellationDataConstantBuffer&) -> void:
+    self.hs_es_vs_info.hs_output_cp_stride <- tess.hs_cp_stride
+    if self.stage == SHADER_STAGE_HULL:
+        self.hs_info.hs_output_cp_stride <- tess.hs_cp_stride
+        self.hs_info.ls_stride <- tess.ls_stride
+        self.hs_info.hs_output_base <- tess.hs_output_base
