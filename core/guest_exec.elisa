@@ -694,6 +694,8 @@ extern ElisaGuestExec_CurrentStackPointerAsm() -> uintptr
 extern ElisaGuestExec_EnterMainEntryAsm(params: uintptr, exit_func: uintptr) -> void
 extern ElisaGuestExec_CallMainEntryAsm(entry: uintptr, params: uintptr, exit_func: uintptr) -> void
 extern ElisaGuestExec_JumpMainEntryAsm(entry: uintptr, params: uintptr, exit_func: uintptr) -> void
+extern ElisaGuestExec_CallTestFnAsm(entry: uintptr, arg0: u64, arg1: u64) -> u64
+extern ElisaGuestExec_CallBoundaryFnAsm(fn: uintptr, reason: u64) -> void
 
 global mutable ge_fork_report_addr: uintptr = 0.uintptr()
 global mutable ge_guard_target_thread: uintptr = 0.uintptr()
@@ -921,6 +923,224 @@ def ge_run_child_main_entry(params: mutable GuestEntryParams&) -> void:
         return
     ge_set_native_phase(GE_PHASE_CHILD_BEFORE_MAIN_ENTRY)
     ge_jump_main_entry(params, ge_guarded_exit as uintptr)
+
+# ---- Crash-state reset / boundary report (atomic core, part 2b; inert) ----
+def ge_report_first_boundary(reason: s32) -> void:
+    ge_set_native_phase(GE_PHASE_NATIVE_BOUNDARY_REPORTED)
+    fr: ElisaGuestExecForkReport&? = ge_fork_report
+    if fr != null:
+        fr.boundary_reached <- 1
+        if fr.boundary_reason == 0:
+            fr.boundary_reason <- reason
+        fr.execution_stage <- 5
+
+def ge_reset_crash_state() -> void:
+    ge_last_status <- 0
+    ge_last_signal <- 0
+    ge_last_errno <- 0
+    ge_last_native_phase <- GE_PHASE_NONE
+    ge_last_fault_address <- 0.uintptr()
+    ge_last_guest_pc <- 0.uintptr()
+    ge_last_guest_sp <- 0.uintptr()
+    ge_last_guest_bp <- 0.uintptr()
+    ge_last_guest_rdi <- 0.uintptr()
+    ge_last_guest_rsi <- 0.uintptr()
+    ge_last_guest_rdx <- 0.uintptr()
+    ge_last_guest_rcx <- 0.uintptr()
+    ge_last_guest_r8 <- 0.uintptr()
+    ge_last_guest_r9 <- 0.uintptr()
+    ge_last_guest_rax <- 0.uintptr()
+    ge_last_guest_rbx <- 0.uintptr()
+    ge_expected_entry_params <- 0.uintptr()
+    ge_expected_stack_word0 <- 0.uintptr()
+    ge_expected_stack_word1 <- 0.uintptr()
+    ge_entry_stack_word0 <- 0.uintptr()
+    ge_entry_stack_word1 <- 0.uintptr()
+    ge_entry_native_word0 <- 0.uintptr()
+    ge_entry_native_word1 <- 0.uintptr()
+    ge_prejump_rdi <- 0.uintptr()
+    ge_prejump_rsi <- 0.uintptr()
+    ge_prejump_rsp <- 0.uintptr()
+    ge_signal_guest_pc <- 0.uintptr()
+    ge_fallback_guest_pc <- 0.uintptr()
+    ge_signal_pc_valid <- 0
+    ge_last_pc_source <- GE_PC_SOURCE_NONE
+    ge_fault_word0 <- 0.uintptr()
+    ge_fault_word1 <- 0.uintptr()
+    ge_signal_stack_word0 <- 0.uintptr()
+    ge_signal_stack_word1 <- 0.uintptr()
+    ge_signal_stack_symbol0 <- ""
+    ge_signal_stack_image0 <- ""
+    ge_signal_pc_symbol <- ""
+    ge_signal_pc_image <- ""
+    ge_entry_native_prot <- 0xffffffffu32
+    ge_pc_native_prot <- 0xffffffffu32
+    ge_last_pc_was_fallback <- 0
+    ge_boundary_callback_count <- 0
+    ge_boundary_callback_reason <- 0u64
+    ge_synthetic_observed_argc <- 0
+    ge_synthetic_observed_argv0 <- 0.uintptr()
+    ge_synthetic_observed_entry <- 0.uintptr()
+    ge_synthetic_observed_params <- 0.uintptr()
+    ge_synthetic_observed_exit_func <- 0.uintptr()
+    ge_synthetic_observed_stack <- 0.uintptr()
+    ge_aerolib_fallback_caller_pc <- 0.uintptr()
+    ge_aerolib_fallback_slot_va <- 0.uintptr()
+    ge_aerolib_fallback_callsite_bytes <- 0u64
+    ge_aerolib_fallback_invocations <- 0u64
+    ge_aerolib_fallback_plt_va <- 0.uintptr()
+    ge_aerolib_fallback_plt_bytes <- 0u64
+    ge_runtime_hle_module <- ""
+    ge_runtime_hle_symbol <- ""
+    ge_runtime_hle_arg0 <- 0.uintptr()
+    ge_runtime_hle_arg1 <- 0.uintptr()
+    ge_runtime_hle_arg2 <- 0.uintptr()
+    ge_runtime_hle_ret <- 0.uintptr()
+    ge_clear_writable_page_cache()
+    ge_timeout_fired <- 0
+
+# ---- Synthetic test fixtures (@c_abi(c), address-taken; atomic core 2b) ----
+@c_abi(c)
+def ge_synthetic_crash(arg0: u64, arg1: u64) -> u64:
+    _ = arg0
+    _ = arg1
+    out: mutable u64 = 0u64
+    trusted Unsafe.PointerCast:
+        r: u64& = 0.uintptr().cast[u64&]
+        out <- r
+    return out
+
+@c_abi(c)
+def ge_synthetic_add(arg0: u64, arg1: u64) -> u64:
+    return arg0 + arg1 + 0x1234u64
+
+@c_abi(c)
+def ge_synthetic_spin(arg0: u64, arg1: u64) -> u64:
+    sink: mutable u64 = arg0 ^ arg1
+    while true:
+        sink <- sink + 1u64
+    return sink
+
+@c_abi(c)
+def ge_synthetic_main_return(params: GuestEntryParams&?, exit_func: void&?) -> void:
+    ge_synthetic_observed_stack <- ge_current_stack_pointer()
+    ge_synthetic_observed_params <- params.uintptr()
+    ge_synthetic_observed_exit_func <- exit_func.uintptr()
+    if params != null:
+        ge_synthetic_observed_argc <- params.argc
+        ge_synthetic_observed_argv0 <- params.argv[0].uintptr()
+        ge_synthetic_observed_entry <- params.entry_addr
+    if params == null or params.argc != 77:
+        ge_last_status <- -4
+        return
+    ge_last_status <- 1
+
+@c_abi(c)
+def ge_synthetic_boundary_callback(reason: u64) -> void:
+    ge_boundary_callback_count <- ge_boundary_callback_count + 1
+    ge_boundary_callback_reason <- reason
+    ge_last_status <- 2
+
+@c_abi(c)
+def ge_synthetic_main_call_boundary(params: GuestEntryParams&?, exit_func: void&?) -> void:
+    _ = exit_func
+    if params == null or params.argc != 88 or params.argv[0] == null:
+        ge_last_status <- -5
+        return
+    static if ARCH_X86_64 and not PLATFORM_WINDOWS:
+        ElisaGuestExec_CallBoundaryFnAsm(params.argv[0].uintptr(), 0xB000000000000042u64)
+    static else:
+        _ = params
+
+@c_abi(c)
+def ge_non_synthetic_main_report_boundary(params: GuestEntryParams&?, exit_func: void&?) -> void:
+    _ = params
+    _ = exit_func
+    ge_report_first_boundary(1)
+
+def ge_is_synthetic_main_entry(entry_addr: uintptr) -> bool:
+    return entry_addr == (ge_synthetic_main_return as uintptr) or entry_addr == (ge_synthetic_main_call_boundary as uintptr)
+
+# ---- AeroLib fallback stub recorder ----
+# NOTE: the guest-reachable stub itself (which captures __builtin_return_address
+# and tail-calls this recorder) is deferred — it needs an EASM function that
+# `call`s back into Elisa, which the current EASM external-call path doesn't yet
+# emit cleanly. Until then ge_aerolib_fallback_stub_address returns 0 (real-game
+# import attribution degrades; synthetic tests don't use the stub). The recorder
+# logic below is kept for when the stub lands.
+def ge_read_byte(addr: uintptr) -> u8:
+    out: mutable u8 = 0u8
+    _ = ge_memcpy(out.ref[void&], ge_addr_to_ptr(addr), 1usize)
+    return out
+
+def ge_read_disp32(addr: uintptr) -> s32:
+    out: mutable u32 = 0u32
+    _ = ge_memcpy(out.ref[void&], ge_addr_to_ptr(addr), 4usize)
+    return out.s32()
+
+@c_abi(c)
+def ge_aerolib_fallback_record(caller_pc: uintptr) -> u64:
+    fr: ElisaGuestExecForkReport&? = ge_fork_report
+    if fr != null:
+        fr.aerolib_fallback_invocations <- fr.aerolib_fallback_invocations + 1u64
+        if fr.aerolib_fallback_caller_pc == 0.uintptr() and caller_pc != 0.uintptr():
+            fr.aerolib_fallback_caller_pc <- caller_pc
+            raw: mutable u64 = 0u64
+            i: mutable int = 1
+            while i <= 8:
+                raw <- (raw << 8u64) | ge_read_byte(caller_pc - i.uintptr()).u64()
+                i <- i + 1
+            fr.aerolib_fallback_callsite_bytes <- raw
+            slot_va: mutable uintptr = 0.uintptr()
+            b6: u8 = ge_read_byte(caller_pc - 6.uintptr())
+            b5: u8 = ge_read_byte(caller_pc - 5.uintptr())
+            if b6 == 0xFFu8 and b5 == 0x15u8:
+                disp: s32 = ge_read_disp32(caller_pc - 4.uintptr())
+                slot_va <- (caller_pc.i64() + disp.i64()).uintptr()
+            elif b5 == 0xE8u8:
+                rel: s32 = ge_read_disp32(caller_pc - 4.uintptr())
+                plt: uintptr = (caller_pc.i64() + rel.i64()).uintptr()
+                fr.aerolib_fallback_plt_va <- plt
+                pltraw: mutable u64 = 0u64
+                j: mutable int = 7
+                while j >= 0:
+                    pltraw <- (pltraw << 8u64) | ge_read_byte(plt + j.uintptr()).u64()
+                    j <- j - 1
+                fr.aerolib_fallback_plt_bytes <- pltraw
+                q0: u8 = ge_read_byte(plt)
+                q1: u8 = ge_read_byte(plt + 1.uintptr())
+                if q0 == 0xFFu8 and q1 == 0x25u8:
+                    disp2: s32 = ge_read_disp32(plt + 2.uintptr())
+                    slot_va <- (plt.i64() + 6i64 + disp2.i64()).uintptr()
+            fr.aerolib_fallback_slot_va <- slot_va
+    ge_report_first_boundary(2)
+    return 0u64
+
+def ge_aerolib_fallback_stub_address() -> uintptr:
+    # Deferred (see note above): no guest-reachable stub yet.
+    return 0.uintptr()
+
+# ---- Synthetic-fixture address getters (atomic core 2b) ----
+def ge_get_synthetic_add_address() -> uintptr:
+    return ge_synthetic_add as uintptr
+
+def ge_get_synthetic_crash_address() -> uintptr:
+    return ge_synthetic_crash as uintptr
+
+def ge_get_synthetic_spin_address() -> uintptr:
+    return ge_synthetic_spin as uintptr
+
+def ge_get_synthetic_main_return_address() -> uintptr:
+    return ge_synthetic_main_return as uintptr
+
+def ge_get_synthetic_main_call_boundary_address() -> uintptr:
+    return ge_synthetic_main_call_boundary as uintptr
+
+def ge_get_synthetic_boundary_callback_address() -> uintptr:
+    return ge_synthetic_boundary_callback as uintptr
+
+def ge_get_non_synthetic_main_report_boundary_address() -> uintptr:
+    return ge_non_synthetic_main_report_boundary as uintptr
 
 @link_name(ElisaGuestExec_RunMainEntry)
 extern c_GuestExec_RunMainEntry(params: mutable GuestEntryParams&, exit_func: void&?) -> void
