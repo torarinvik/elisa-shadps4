@@ -11,8 +11,12 @@ struct ShaderIrBlock:
     is_ssa_sealed: mutable bool
     cfg_block_id: mutable u32
 
+    # inst_count is the logical number of live instructions and remains the
+    # source of truth for iteration. insts is a heap-backed darray that grows on
+    # demand (it is never shrunk; removals just lower inst_count), so a block no
+    # longer embeds a fixed 1024 * sizeof(ShaderIrInst) (~8MB) array inline.
     inst_count: mutable u32
-    insts: mutable ShaderIrInst[1024]
+    insts: mutable darray[ShaderIrInst]
 
     imm_predecessor_count: mutable u32
     imm_predecessors: mutable u32[64]
@@ -25,9 +29,22 @@ struct ShaderIrBlock:
     ssa_vreg_values: mutable ShaderIrValue[256]
 
 
+# Ensure the backing darray physically holds at least `needed` instruction
+# slots. The darray only ever grows (never shrinks), so previously-allocated
+# slots are reused after instructions are logically removed (inst_count drops).
+def ShaderIrBlock_ReserveInstSlots(block: mutable ShaderIrBlock&, needed: u32) -> void:
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = scratch_arena.ref[mutable Arena&]
+        in owner:
+            while block.insts.count.u32() < needed:
+                fresh: mutable ShaderIrInst = zeroed
+                block.insts.push(fresh)
+
+
 def ShaderIrBlock_AppendNewInst(block: mutable ShaderIrBlock&, opcode: u32, args: ShaderIrValue[6], arg_count: u32) -> u32:
     assert block.inst_count < IR_MAX_BLOCK_INSTRUCTIONS
     idx: u32 = block.inst_count
+    ShaderIrBlock_ReserveInstSlots(block, idx + 1u32)
     block.inst_count <- block.inst_count + 1u32
     block.insts[idx.usize()] <- ShaderIrInst_New(opcode, 0u64)
     if opcode != IR_OPCODE_PHI:
@@ -42,6 +59,7 @@ def ShaderIrBlock_AppendNewInst(block: mutable ShaderIrBlock&, opcode: u32, args
 def ShaderIrBlock_PrependNewInstCopy(block: mutable ShaderIrBlock&, insertion_index: u32, base_inst: ShaderIrInst) -> u32:
     assert insertion_index <= block.inst_count
     assert block.inst_count < IR_MAX_BLOCK_INSTRUCTIONS
+    ShaderIrBlock_ReserveInstSlots(block, block.inst_count + 1u32)
     i: mutable u32 = block.inst_count
     while i > insertion_index:
         block.insts[i.usize()] <- block.insts[(i - 1u32).usize()]
@@ -54,6 +72,7 @@ def ShaderIrBlock_PrependNewInstCopy(block: mutable ShaderIrBlock&, insertion_in
 def ShaderIrBlock_PrependNewInst(block: mutable ShaderIrBlock&, insertion_index: u32, opcode: u32, args: ShaderIrValue[6], arg_count: u32, flags_u64: u64) -> u32:
     assert insertion_index <= block.inst_count
     assert block.inst_count < IR_MAX_BLOCK_INSTRUCTIONS
+    ShaderIrBlock_ReserveInstSlots(block, block.inst_count + 1u32)
     i: mutable u32 = block.inst_count
     while i > insertion_index:
         block.insts[i.usize()] <- block.insts[(i - 1u32).usize()]
