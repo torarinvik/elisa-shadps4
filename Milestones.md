@@ -157,7 +157,7 @@ go run ./src test emulator-core-boot-smoke --project ../elisa-shad-ps4-from-scra
 ```sh
 cd "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/elisa-shad-ps4-from-scratch"
 python3 -m json.tool project.json >/tmp/elisa_project_json_check.out
-clang -Wall -Wextra -Werror -c native/guest_exec_runtime.c -o /tmp/guest_exec_runtime.o
+../compiler/bin/elisacore test emulator-guest-exec-runtime-tests --project .
 ```
 
 ## Current North Star
@@ -199,7 +199,7 @@ cd "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/eli
 
 ## 2026-05-21: Guest-Exec Crash Guard Added
 
-- Added guarded synthetic guest execution with signal/fault capture in `native/guest_exec_runtime.c`.
+- Added guarded synthetic guest execution with signal/fault capture; this later moved from `native/guest_exec_runtime.c` into native Elisa guest-exec support.
 - Elisa now exposes guest-exec last status, last signal, and last fault address through `core/guest_exec.elisa`.
 - Added a deliberate synthetic crash test proving guarded execution recovers instead of killing the test process.
 - CUSA07399 probe now classifies the real game execution stage as armed on supported x86_64 hosts or `UNSUPPORTED_HOST` on arm64 hosts.

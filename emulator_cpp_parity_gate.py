@@ -85,9 +85,6 @@ def host_audio_backends_present() -> bool:
 
 
 def all_steps() -> list[Step]:
-    guest_exec_warning_cmd = ["clang", "-Wall", "-Wextra", "-Werror", "-c", "native/guest_exec_runtime.c", "-o", str(TMP_DIR / "guest_exec_runtime.o")]
-    if sys.platform == "darwin":
-        guest_exec_warning_cmd.insert(1, "-DMAP_ANONYMOUS=MAP_ANON")
     steps = [
         Step("project.json syntax", [sys.executable, "-m", "json.tool", str(PROJECT_PATH)], category="validation"),
         Step("parity ledger", [sys.executable, "parity_ledger_check.py", "--summary"], category="ledger"),
@@ -116,16 +113,6 @@ def all_steps() -> list[Step]:
         Step("bridge syntax", [sys.executable, "check_elisa_bridges.py"], category="bridge"),
         compiler_test("core-libraries-audio-parity-tests", category="audio"),
         compiler_test("core-libraries-np-parity-tests", category="hle"),
-        Step(
-            "native guest_exec_runtime warnings",
-            guest_exec_warning_cmd,
-            category="native",
-        ),
-        Step(
-            "guest exec x64 subprocess smoke",
-            [sys.executable, "guest_exec_x64_subprocess_smoke.py"],
-            category="guest-exec",
-        ),
         Step(
             "guest exec ABI smoke x64",
             [sys.executable, "emulator_guest_exec_abi_smoke.py", target_triple_for_x64_host()],
