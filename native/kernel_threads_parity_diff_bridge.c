@@ -5,7 +5,7 @@
 #include <string.h>
 #include <time.h>
 
-// Elisa runtime-backed API (from native/kernel_threads_runtime.c)
+// Elisa runtime-backed API (provided by core/libraries/kernel/threads/kt_runtime.elisa)
 extern void *elisa_kernel_thread_create(void *entry, void *arg, int *out_error);
 extern int elisa_kernel_thread_join(void *handle, void **retval);
 extern int elisa_kernel_thread_detach(void *handle);

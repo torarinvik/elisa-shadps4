@@ -1,15 +1,11 @@
 # SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 # SPDX-License-Identifier: GPL-2.0-or-later
 
-# Pure-Elisa port of native/kernel_threads_runtime.c (in progress).
+# Pure-Elisa port of the former native/kernel_threads_runtime.c.
 #
-# Staged port: functions are named kt_* (inert) so they coexist with the C
-# runtime (still linked) without symbol conflict. Once all primitives are ported
-# and validated, the elisa_kernel_* externs are swapped to @c_abi(c) defs and the
-# C file + bridge are removed.
-#
-# Stage 1: libc/pthread externs, handle layouts, errno mapping, deadline helpers,
-# and the mutex group.
+# The internal kt_* helpers keep the implementation testable without going
+# through the C-ABI surface. The elisa_kernel_* wrappers at the bottom are the
+# exported replacement for the removed C runtime.
 
 include "../../../../common/arch.elisa"
 
@@ -17,9 +13,19 @@ include "../../../../common/arch.elisa"
 
 @link_name(calloc)
 extern kt_calloc(count: usize, size: usize) -> mutable void&?
-# Wrapper: free a calloc'd handle through the elisacore runtime's existing
-# `free(ptr: heap void&)` extern. Re-declaring free here splits the symbol
-# (free.1 -> null -> crash), same as the pthread duplicate-symbol trap.
+# This file is intentionally self-contained for emulator builds. Do not include
+# elisacore runtime implementation fragments here: the runtime is linked as a
+# separate object, and including fragments in the emulator module duplicates
+# their definitions. The stage tests therefore include this file without the
+# runtime umbrella, avoiding same-TU duplicate libc/pthread externs.
+@c_opaque(pthread.h, pthread_mutex_t)
+extern KtPthreadMutexT
+
+@c_opaque(pthread.h, pthread_cond_t)
+extern KtPthreadCondT
+
+extern free(ptr: heap void&) effects[Memory.Release]
+
 def kt_heap_free(raw: void&?) -> void:
     if raw == null:
         return
@@ -29,17 +35,23 @@ def kt_heap_free(raw: void&?) -> void:
 @link_name(clock_gettime)
 extern kt_clock_gettime(clock_id: int, ts: void&?) -> int
 
-@link_name(pthread_self)
-extern kt_pthread_self() -> void&?
-@link_name(pthread_equal)
-extern kt_pthread_equal(t1: void&?, t2: void&?) -> int
+extern pthread_self() -> void&?
+extern pthread_equal(t1: void&?, t2: void&?) -> int
 
-# NOTE: pthread_mutex_init/destroy/lock/unlock and pthread_cond_* are declared by
-# the elisacore runtime (elisacore_runtime_concurrency.elisa) with PthreadMutexT&/
-# void& params. Re-declaring them here with different param types makes LLVM split
-# the symbol (e.g. pthread_mutex_init.2, unbacked -> null -> jump to 0x0). So this
-# module REUSES the runtime's declarations and only declares the ones the runtime
-# does not (mutexattr_*, trylock, self/equal, clock_gettime, calloc/free, rwlock,...).
+def kt_pthread_self() -> void&?:
+    return pthread_self()
+
+def kt_pthread_equal(t1: void&?, t2: void&?) -> int:
+    return pthread_equal(t1, t2)
+
+@link_name(pthread_mutex_init)
+extern kt_pthread_mutex_init(mutex: mutable KtPthreadMutexT&, attr: void&?) -> int effects[Memory.Allocate]
+@link_name(pthread_mutex_destroy)
+extern kt_pthread_mutex_destroy(mutex: mutable KtPthreadMutexT&) -> int effects[Memory.Release]
+@link_name(pthread_mutex_lock)
+extern kt_pthread_mutex_lock(mutex: void&) -> int effects[Sync.Lock]
+@link_name(pthread_mutex_unlock)
+extern kt_pthread_mutex_unlock(mutex: void&) -> int effects[Sync.Unlock]
 @link_name(pthread_mutex_trylock)
 extern kt_pthread_mutex_trylock(m: void&?) -> int
 
@@ -49,6 +61,24 @@ extern kt_pthread_mutexattr_init(a: void&?) -> int
 extern kt_pthread_mutexattr_settype(a: void&?, type: int) -> int
 @link_name(pthread_mutexattr_destroy)
 extern kt_pthread_mutexattr_destroy(a: void&?) -> int
+
+@link_name(pthread_cond_init)
+extern kt_pthread_cond_init(cond: mutable KtPthreadCondT&, attr: void&?) -> int effects[Memory.Allocate]
+@link_name(pthread_cond_destroy)
+extern kt_pthread_cond_destroy(cond: mutable KtPthreadCondT&) -> int effects[Memory.Release]
+@link_name(pthread_cond_wait)
+extern kt_pthread_cond_wait(cond: void&, mutex: void&) -> int effects[Sync.Wait]
+@link_name(pthread_cond_signal)
+extern kt_pthread_cond_signal(cond: void&) -> int effects[Sync.Notify]
+@link_name(pthread_cond_broadcast)
+extern kt_pthread_cond_broadcast(cond: void&) -> int effects[Sync.Notify]
+
+@link_name(pthread_create)
+extern kt_pthread_create(thread: mutable uintptr&, attr: void&?, start_routine: void&, arg: void&?) -> int effects[Thread.Spawn]
+@link_name(pthread_join)
+extern kt_pthread_join(thread: uintptr, retval: mutable void&?) -> int effects[Thread.Join]
+@link_name(pthread_detach)
+extern kt_pthread_detach(thread: uintptr) -> int effects[Thread.Detach]
 
 # --- platform constants -------------------------------------------------------
 
@@ -132,32 +162,32 @@ def kt_mutex_from_handle(handle: void&?) -> mutable KtMutex&?:
     return out
 
 # Effect-wrapping helpers that call the runtime's pthread mutex externs with the
-# expected param types (PthreadMutexT& / void&), keeping their Sync/Memory effects
+# expected param types (KtPthreadMutexT& / void&), keeping their Sync/Memory effects
 # contained so the kt_mutex_* API stays effect-free.
 def kt_pt_mutex_init_call(state: mutable KtMutex&, attr_ptr: void&?) -> int:
     result: mutable int = 22
     can Memory.Allocate:
-        m: mutable PthreadMutexT& = state.pmutex[0].ref[void&].cast[mutable PthreadMutexT&]
-        result <- pthread_mutex_init(m, attr_ptr)
+        m: mutable KtPthreadMutexT& = state.pmutex[0].ref[void&].cast[mutable KtPthreadMutexT&]
+        result <- kt_pthread_mutex_init(m, attr_ptr)
     return result
 
 def kt_pt_mutex_destroy_call(state: mutable KtMutex&) -> int:
     result: mutable int = 0
     can Memory.Release:
-        m: mutable PthreadMutexT& = state.pmutex[0].ref[void&].cast[mutable PthreadMutexT&]
-        result <- pthread_mutex_destroy(m)
+        m: mutable KtPthreadMutexT& = state.pmutex[0].ref[void&].cast[mutable KtPthreadMutexT&]
+        result <- kt_pthread_mutex_destroy(m)
     return result
 
 def kt_pt_mutex_lock_call(state: mutable KtMutex&) -> int:
     result: mutable int = 0
     can Sync.Lock:
-        result <- pthread_mutex_lock(state.pmutex[0].ref[void&])
+        result <- kt_pthread_mutex_lock(state.pmutex[0].ref[void&])
     return result
 
 def kt_pt_mutex_unlock_call(state: mutable KtMutex&) -> int:
     result: mutable int = 0
     can Sync.Unlock:
-        result <- pthread_mutex_unlock(state.pmutex[0].ref[void&])
+        result <- kt_pthread_mutex_unlock(state.pmutex[0].ref[void&])
     return result
 
 def kt_mutex_create(type: int, out_error: mutable int&?) -> mutable void&?:
@@ -323,33 +353,33 @@ def kt_cond_from_handle(handle: void&?) -> mutable KtCond&?:
 def kt_pt_cond_init_call(state: mutable KtCond&) -> int:
     result: mutable int = 22
     can Memory.Allocate:
-        c: mutable PthreadCondT& = state.pcond[0].ref[void&].cast[mutable PthreadCondT&]
-        result <- pthread_cond_init(c, null)
+        c: mutable KtPthreadCondT& = state.pcond[0].ref[void&].cast[mutable KtPthreadCondT&]
+        result <- kt_pthread_cond_init(c, null)
     return result
 
 def kt_pt_cond_destroy_call(state: mutable KtCond&) -> int:
     result: mutable int = 0
     can Memory.Release:
-        c: mutable PthreadCondT& = state.pcond[0].ref[void&].cast[mutable PthreadCondT&]
-        result <- pthread_cond_destroy(c)
+        c: mutable KtPthreadCondT& = state.pcond[0].ref[void&].cast[mutable KtPthreadCondT&]
+        result <- kt_pthread_cond_destroy(c)
     return result
 
 def kt_pt_cond_wait_call(cond: mutable KtCond&, mutex: mutable KtMutex&) -> int:
     result: mutable int = 0
     can Sync.Wait:
-        result <- pthread_cond_wait(cond.pcond[0].ref[void&], mutex.pmutex[0].ref[void&])
+        result <- kt_pthread_cond_wait(cond.pcond[0].ref[void&], mutex.pmutex[0].ref[void&])
     return result
 
 def kt_pt_cond_signal_call(cond: mutable KtCond&) -> int:
     result: mutable int = 0
     can Sync.Notify:
-        result <- pthread_cond_signal(cond.pcond[0].ref[void&])
+        result <- kt_pthread_cond_signal(cond.pcond[0].ref[void&])
     return result
 
 def kt_pt_cond_broadcast_call(cond: mutable KtCond&) -> int:
     result: mutable int = 0
     can Sync.Notify:
-        result <- pthread_cond_broadcast(cond.pcond[0].ref[void&])
+        result <- kt_pthread_cond_broadcast(cond.pcond[0].ref[void&])
     return result
 
 def kt_cond_create(out_error: mutable int&?) -> mutable void&?:
@@ -527,35 +557,35 @@ const KT_U64_MAX: u64 = 0xFFFFFFFFFFFFFFFFu64
 def kt_raw_mutex_init(pm: void&) -> int:
     r: mutable int = 0
     can Memory.Allocate:
-        r <- pthread_mutex_init(pm.cast[mutable PthreadMutexT&], null)
+        r <- kt_pthread_mutex_init(pm.cast[mutable KtPthreadMutexT&], null)
     return r
 
 def kt_raw_mutex_destroy(pm: void&) -> void:
     can Memory.Release:
-        _ = pthread_mutex_destroy(pm.cast[mutable PthreadMutexT&])
+        _ = kt_pthread_mutex_destroy(pm.cast[mutable KtPthreadMutexT&])
 
 def kt_raw_mutex_lock(pm: void&) -> void:
     can Sync.Lock:
-        _ = pthread_mutex_lock(pm)
+        _ = kt_pthread_mutex_lock(pm)
 
 def kt_raw_mutex_unlock(pm: void&) -> void:
     can Sync.Unlock:
-        _ = pthread_mutex_unlock(pm)
+        _ = kt_pthread_mutex_unlock(pm)
 
 def kt_raw_cond_init(pc: void&) -> int:
     r: mutable int = 0
     can Memory.Allocate:
-        r <- pthread_cond_init(pc.cast[mutable PthreadCondT&], null)
+        r <- kt_pthread_cond_init(pc.cast[mutable KtPthreadCondT&], null)
     return r
 
 def kt_raw_cond_destroy(pc: void&) -> void:
     can Memory.Release:
-        _ = pthread_cond_destroy(pc.cast[mutable PthreadCondT&])
+        _ = kt_pthread_cond_destroy(pc.cast[mutable KtPthreadCondT&])
 
 def kt_raw_cond_wait(pc: void&, pm: void&) -> int:
     r: mutable int = 0
     can Sync.Wait:
-        r <- pthread_cond_wait(pc, pm)
+        r <- kt_pthread_cond_wait(pc, pm)
     return r
 
 def kt_raw_cond_timedwait(pc: void&, pm: void&, ts: void&) -> int:
@@ -563,7 +593,7 @@ def kt_raw_cond_timedwait(pc: void&, pm: void&, ts: void&) -> int:
 
 def kt_raw_cond_broadcast(pc: void&) -> void:
     can Sync.Notify:
-        _ = pthread_cond_broadcast(pc)
+        _ = kt_pthread_cond_broadcast(pc)
 
 @fixed_layout
 struct KtSem:
@@ -1132,19 +1162,19 @@ def kt_pt_thread_create(state: mutable KtThread&, handle: void&?) -> int:
     can Thread.Spawn:
         trusted Unsafe.PointerCast:
             entry_fn: void& = kt_thread_trampoline as void&
-            r <- pthread_create(state.thread.ref[mutable uintptr&], null, entry_fn, handle)
+            r <- kt_pthread_create(state.thread.ref[mutable uintptr&], null, entry_fn, handle)
     return r
 
 def kt_pt_thread_join(thread: uintptr, result: mutable void&?) -> int:
     r: mutable int = 0
     can Thread.Join:
-        r <- pthread_join(thread, result)
+        r <- kt_pthread_join(thread, result)
     return r
 
 def kt_pt_thread_detach(thread: uintptr) -> int:
     r: mutable int = 0
     can Thread.Detach:
-        r <- pthread_detach(thread)
+        r <- kt_pthread_detach(thread)
     return r
 
 def kt_thread_create(entry: void&?, arg: void&?, out_error: mutable int&?) -> mutable void&?:

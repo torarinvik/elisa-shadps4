@@ -136,11 +136,6 @@ def all_steps() -> list[Step]:
             ],
             category="guest-exec",
         ),
-        Step(
-            "native kernel_threads_runtime warnings",
-            ["clang", "-Wall", "-Wextra", "-Werror", "-pthread", "-c", "native/kernel_threads_runtime.c", "-o", str(TMP_DIR / "kernel_threads_runtime.o")],
-            category="native",
-        ),
         compiler_test("emulator-core-boot-smoke", category="boot"),
         compiler_test("real-self-loader-tests", category="loader"),
         compiler_test("emulator-real-game-boot-smoke", category="cusa"),

@@ -11,7 +11,7 @@ static pthread_mutex_t g_slots_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_slots_cond = PTHREAD_COND_INITIALIZER;
 static int64_t g_slots[ELISA_KERNEL_TEST_SLOT_COUNT];
 
-// Elisa runtime-backed thread API (from native/kernel_threads_runtime.c via bridge target).
+// Elisa runtime-backed thread API (provided by core/libraries/kernel/threads/kt_runtime.elisa).
 extern void *elisa_kernel_thread_create(void *entry, void *arg, int *out_error);
 extern int elisa_kernel_thread_join(void *handle, void **retval);
 extern int elisa_kernel_thread_timedjoin(void *handle, void **retval, int64_t tv_sec, int64_t tv_nsec);
