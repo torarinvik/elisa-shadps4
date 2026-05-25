@@ -889,6 +889,8 @@ def summarize_progress(
         lines.append(f"- CUSA07399 x64 signal stack words: {x64_exec.get('signal_stack_word0', '0')}, {x64_exec.get('signal_stack_word1', '0')}")
     if x64_exec.get("diagnostic"):
         lines.append(f"- CUSA07399 x64 diagnostic: {x64_exec.get('diagnostic')}")
+    if x64_exec.get("signal_uctx") or x64_exec.get("signal_mctx"):
+        lines.append(f"- CUSA07399 x64 signal context: uctx={x64_exec.get('signal_uctx', '0')} mctx={x64_exec.get('signal_mctx', '0')} pc_valid={x64_exec.get('signal_pc_valid', '0')} rdi_valid={x64_exec.get('signal_rdi_valid', '0')} native_region_index={x64_exec.get('signal_native_region_index', '-1')}")
     lines.append(f"- guest exec probe only: {cusa['guest_exec_probe_only']}")
     lines.append(f"- guest exec started: {cusa['guest_exec_started']}")
     lines.append(f"- guest exec entry reached: {cusa['guest_exec_entry_reached']}")

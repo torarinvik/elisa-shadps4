@@ -207,6 +207,8 @@ def diagnose_artifacts(artifacts: dict[str, str]) -> str:
     pc_was_fallback = to_int(artifact_get(artifacts, "guest_exec_last_pc_was_fallback"))
     signal_pc = to_int(artifact_get(artifacts, "guest_exec_signal_pc"))
     signal_pc_valid = to_int(artifact_get(artifacts, "guest_exec_signal_pc_valid"))
+    signal_uctx = to_int(artifact_get(artifacts, "guest_exec_signal_uctx"))
+    signal_mctx = to_int(artifact_get(artifacts, "guest_exec_signal_mctx"))
     fallback_pc = to_int(artifact_get(artifacts, "guest_exec_fallback_pc"))
     pc_source = to_int(artifact_get(artifacts, "guest_exec_last_pc_source"))
     argc = to_int(artifact_get(artifacts, "guest_exec_last_argc", "last_argc"))
@@ -214,6 +216,10 @@ def diagnose_artifacts(artifacts: dict[str, str]) -> str:
         notes.append("true-signal-pc-missing")
     if boundary_status == -10 and signal_pc == 0 and signal_pc_valid != 0:
         notes.append("true-signal-pc-is-null")
+        if signal_uctx != 0:
+            notes.append("raw-ucontext-present")
+        if signal_mctx != 0:
+            notes.append("raw-mcontext-present")
     if boundary_status == -10 and signal_pc != 0 and last_pc != signal_pc:
         notes.append("effective-pc-differs-from-signal-pc")
     if boundary_status == -10 and fallback_pc != 0 and fallback_pc == main_entry:
@@ -246,6 +252,9 @@ def diagnose_artifacts(artifacts: dict[str, str]) -> str:
         notes.append("native-entry-parent-child-mismatch")
     if boundary_status == -10 and pc_native_prot == 0xFFFFFFFF:
         notes.append("last-pc-not-in-native-region")
+        native_index = to_int(artifact_get(artifacts, "guest_exec_signal_native_region_index", default="-1"))
+        if native_index < 0:
+            notes.append("signal-native-region-miss")
     elif boundary_status == -10 and (pc_native_prot & 1) == 0:
         notes.append("last-pc-not-readable")
     if boundary_status == -10 and pc_was_fallback != 0:
@@ -366,6 +375,15 @@ def main() -> int:
             last_pc_native_prot=artifact_get(artifacts, "guest_exec_last_pc_native_prot"),
             last_pc_was_fallback=artifact_get(artifacts, "guest_exec_last_pc_was_fallback"),
             signal_pc=artifact_get(artifacts, "guest_exec_signal_pc"),
+            signal_pc_valid=artifact_get(artifacts, "guest_exec_signal_pc_valid"),
+            signal_sp_valid=artifact_get(artifacts, "guest_exec_signal_sp_valid"),
+            signal_bp_valid=artifact_get(artifacts, "guest_exec_signal_bp_valid"),
+            signal_rdi_valid=artifact_get(artifacts, "guest_exec_signal_rdi_valid"),
+            signal_rsi_valid=artifact_get(artifacts, "guest_exec_signal_rsi_valid"),
+            signal_uctx=artifact_get(artifacts, "guest_exec_signal_uctx"),
+            signal_mctx=artifact_get(artifacts, "guest_exec_signal_mctx"),
+            signal_fault_addr_valid=artifact_get(artifacts, "guest_exec_signal_fault_addr_valid"),
+            signal_native_region_index=artifact_get(artifacts, "guest_exec_signal_native_region_index"),
             fallback_pc=artifact_get(artifacts, "guest_exec_fallback_pc"),
             pc_source=artifact_get(artifacts, "guest_exec_last_pc_source"),
             fault_word0=artifact_get(artifacts, "guest_exec_fault_word0"),
@@ -433,6 +451,15 @@ def main() -> int:
         last_pc_native_prot=artifact_get(artifacts, "guest_exec_last_pc_native_prot"),
         last_pc_was_fallback=artifact_get(artifacts, "guest_exec_last_pc_was_fallback"),
         signal_pc=artifact_get(artifacts, "guest_exec_signal_pc"),
+        signal_pc_valid=artifact_get(artifacts, "guest_exec_signal_pc_valid"),
+        signal_sp_valid=artifact_get(artifacts, "guest_exec_signal_sp_valid"),
+        signal_bp_valid=artifact_get(artifacts, "guest_exec_signal_bp_valid"),
+        signal_rdi_valid=artifact_get(artifacts, "guest_exec_signal_rdi_valid"),
+        signal_rsi_valid=artifact_get(artifacts, "guest_exec_signal_rsi_valid"),
+        signal_uctx=artifact_get(artifacts, "guest_exec_signal_uctx"),
+        signal_mctx=artifact_get(artifacts, "guest_exec_signal_mctx"),
+        signal_fault_addr_valid=artifact_get(artifacts, "guest_exec_signal_fault_addr_valid"),
+        signal_native_region_index=artifact_get(artifacts, "guest_exec_signal_native_region_index"),
         fallback_pc=artifact_get(artifacts, "guest_exec_fallback_pc"),
         pc_source=artifact_get(artifacts, "guest_exec_last_pc_source"),
         fault_word0=artifact_get(artifacts, "guest_exec_fault_word0"),

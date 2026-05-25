@@ -101,6 +101,42 @@ def emulator_guest_exec_mapped_guest_calls_host_hle_probe() -> void:
             panic("expected executable HLE-call test page unmap")
 
 @test
+def emulator_guest_exec_mapped_fault_reports_signal_context() -> void:
+    can Abort.Panic:
+        GuestExec_ResetState()
+        if not GuestExec_IsSupported():
+            return
+        GuestExec_Enable(true)
+        mapped_entry: VAddr = GuestExec_AllocateRegion(4096.u64(), 3.u32())
+        if mapped_entry == 0.uintptr():
+            panic("expected executable fault test page allocation")
+        code: mutable u8[2] = [0x0Fu8, 0x0Bu8] # ud2
+        if not GuestExec_WriteBytes(mapped_entry, code[0].ref[void&], 2.u64()):
+            panic("expected fault machine code write")
+        if not GuestExec_ProtectRegion(mapped_entry, 4096.u64(), 5.u32()):
+            panic("expected executable fault page protection")
+        sentinel_rdi: u64 = 0x123456789ABCDEF0u64
+        result: u64 = GuestExec_RunSyntheticFunction(mapped_entry, sentinel_rdi, 0.u64())
+        if result != 0xFFFFFFFFFFFFFFFD.u64():
+            panic("expected mapped fault sentinel")
+        if GuestExec_LastSignal() == 0:
+            panic("expected mapped fault signal")
+        if not GuestExec_SignalPCValid():
+            panic("expected mapped in-process fault to have signal pc")
+        if GuestExec_SignalGuestPC() < mapped_entry or GuestExec_SignalGuestPC() >= mapped_entry + 2.uintptr():
+            panic("expected signal pc inside mapped fault instruction")
+        if not GuestExec_SignalRDIValid():
+            panic("expected mapped fault rdi validity bit")
+        if GuestExec_LastGuestRDI() != sentinel_rdi.uintptr():
+            panic("expected mapped fault rdi to preserve arg0")
+        if GuestExec_SignalNativeRegionIndex() < 0:
+            panic("expected signal pc to resolve to native region")
+        if (GuestExec_LastPCNativeProt() & 5u32) != 5u32:
+            panic("expected signal pc native region to be readable/executable")
+        if not GuestExec_UnmapRegion(mapped_entry, 4096.u64()):
+            panic("expected executable fault test page unmap")
+
+@test
 def emulator_guest_exec_map_protect_unmap_validation_contracts() -> void:
     can Abort.Panic:
         GuestExec_ResetState()
@@ -356,6 +392,43 @@ def emulator_guest_exec_pre_boundary_fault_reports_crash_captured_stage() -> voi
             panic("expected host crash first-boundary reason")
         if GuestExec_ExecutionStage() != GUEST_EXEC_STAGE_CRASH_CAPTURED:
             panic("expected crash-captured execution stage")
+
+@test
+def emulator_guest_exec_guarded_entry_trap_reports_entry_params_context() -> void:
+    can Abort.Panic:
+        if not GuestExec_IsSupported():
+            return
+        GuestExec_ResetState()
+        GuestExec_Enable(true)
+        mapped_entry: VAddr = GuestExec_AllocateRegion(4096.u64(), 3.u32())
+        if mapped_entry == 0.uintptr():
+            panic("expected guarded trap page allocation")
+        code: mutable u8[2] = [0x0Fu8, 0x0Bu8] # ud2
+        if not GuestExec_WriteBytes(mapped_entry, code[0].ref[void&], 2.u64()):
+            panic("expected guarded trap machine code write")
+        if not GuestExec_ProtectRegion(mapped_entry, 4096.u64(), 5.u32()):
+            panic("expected guarded trap executable protection")
+        status: s32 = GuestExec_RunMainEntryGuarded(mapped_entry, 91, null, 100.u32())
+        if status >= 0:
+            panic("expected guarded trap to fail before boundary")
+        if GuestExec_ExpectedEntryParams() == 0.uintptr():
+            panic("expected guarded trap entry params")
+        if GuestExec_PreJumpRDI() != GuestExec_ExpectedEntryParams():
+            panic("expected guarded trap prejump rdi to be EntryParams")
+        if GuestExec_SignalPCValid():
+            if GuestExec_SignalGuestPC() >= mapped_entry and GuestExec_SignalGuestPC() < mapped_entry + 2.uintptr():
+                if GuestExec_SignalRDIValid() and GuestExec_LastGuestRDI() != GuestExec_ExpectedEntryParams():
+                    panic("expected guarded trap signal rdi to be EntryParams")
+                if GuestExec_SignalNativeRegionIndex() < 0:
+                    panic("expected guarded trap signal pc to resolve to native region")
+            else:
+                if GuestExec_SignalUContext() == 0.uintptr():
+                    panic("expected divergent guarded trap signal pc to preserve raw ucontext diagnostic")
+        else:
+            if GuestExec_SignalUContext() == 0.uintptr():
+                panic("expected missing signal pc to preserve raw ucontext diagnostic")
+        if not GuestExec_UnmapRegion(mapped_entry, 4096.u64()):
+            panic("expected guarded trap page unmap")
 
 @test
 def emulator_guest_exec_x64_subprocess_capability_probe_is_deterministic() -> void:

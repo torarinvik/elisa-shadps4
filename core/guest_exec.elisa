@@ -465,6 +465,15 @@ def ge_uctx_word(uctx: void&?, offset: u64) -> uintptr:
         return 0.uintptr()
     return ge_read_context_word(uctx.uintptr() + offset.uintptr())
 
+def ge_extract_mctx(uctx: void&?) -> uintptr:
+    static if ARCH_X86_64 and PLATFORM_APPLE:
+        return ge_uctx_word(uctx, 48u64)
+    static elif ARCH_X86_64 and PLATFORM_LINUX:
+        return uctx.uintptr() + 40.uintptr() if uctx != null else 0.uintptr()
+    static else:
+        _ = uctx
+        return 0.uintptr()
+
 # x86_64 ucontext register extraction (raw offsets). macOS: uc_mcontext ptr at
 # uctx+48 -> mcontext64.__ss regs. Linux: inline uc_mcontext.gregs at uctx+40.
 def ge_extract_pc(uctx: void&?) -> uintptr:
@@ -627,7 +636,10 @@ def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
     ge_set_native_phase(GE_PHASE_SIGNAL_HANDLER_ENTERED)
     ge_last_status <- (0 - sig).s32()
     ge_last_signal <- sig.s32()
+    ge_signal_uctx <- uctx.uintptr() if uctx != null else 0.uintptr()
+    ge_signal_mctx <- ge_extract_mctx(uctx)
     ge_last_fault_address <- ge_siginfo_fault_addr(info)
+    ge_signal_fault_addr_valid <- 1 if info != null else 0
     ge_signal_pc_valid <- ge_has_signal_pc(uctx)
     ge_signal_guest_pc <- ge_extract_pc(uctx)
     ge_fallback_guest_pc <- 0.uintptr()
@@ -644,6 +656,11 @@ def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
     ge_last_guest_rcx <- ge_extract_greg(uctx, 5)
     ge_last_guest_r8 <- ge_extract_greg(uctx, 6)
     ge_last_guest_r9 <- ge_extract_greg(uctx, 7)
+    ge_signal_sp_valid <- 1 if ge_signal_mctx != 0.uintptr() else 0
+    ge_signal_bp_valid <- ge_signal_sp_valid
+    ge_signal_rdi_valid <- ge_signal_sp_valid
+    ge_signal_rsi_valid <- ge_signal_sp_valid
+    ge_signal_native_region_index <- ge_find_native_region(ge_last_guest_pc, 8u64)
     ge_pc_native_prot <- ge_native_prot_at(ge_last_guest_pc, 8u64)
     ge_fault_word0 <- ge_read_native_word(ge_last_guest_pc)
     ge_fault_word1 <- ge_read_native_word(ge_last_guest_pc + 8.uintptr())
@@ -678,6 +695,14 @@ def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
         fr.signal_guest_pc <- ge_signal_guest_pc
         fr.fallback_guest_pc <- ge_fallback_guest_pc
         fr.signal_pc_valid <- ge_signal_pc_valid
+        fr.signal_sp_valid <- ge_signal_sp_valid
+        fr.signal_bp_valid <- ge_signal_bp_valid
+        fr.signal_rdi_valid <- ge_signal_rdi_valid
+        fr.signal_rsi_valid <- ge_signal_rsi_valid
+        fr.signal_uctx <- ge_signal_uctx
+        fr.signal_mctx <- ge_signal_mctx
+        fr.signal_fault_addr_valid <- ge_signal_fault_addr_valid
+        fr.signal_native_region_index <- ge_signal_native_region_index
         fr.pc_source <- ge_last_pc_source
         fr.pc_was_fallback <- ge_last_pc_was_fallback
         fr.pc_native_prot <- ge_pc_native_prot
@@ -858,6 +883,22 @@ def ge_absorb_fork_report() -> void:
         ge_signal_guest_pc <- fr.signal_guest_pc
         if fr.pc_was_fallback == 0:
             ge_last_guest_pc <- ge_signal_guest_pc
+    if fr.signal_sp_valid != 0:
+        ge_signal_sp_valid <- fr.signal_sp_valid
+    if fr.signal_bp_valid != 0:
+        ge_signal_bp_valid <- fr.signal_bp_valid
+    if fr.signal_rdi_valid != 0:
+        ge_signal_rdi_valid <- fr.signal_rdi_valid
+    if fr.signal_rsi_valid != 0:
+        ge_signal_rsi_valid <- fr.signal_rsi_valid
+    if fr.signal_uctx != 0.uintptr():
+        ge_signal_uctx <- fr.signal_uctx
+    if fr.signal_mctx != 0.uintptr():
+        ge_signal_mctx <- fr.signal_mctx
+    if fr.signal_fault_addr_valid != 0:
+        ge_signal_fault_addr_valid <- fr.signal_fault_addr_valid
+    if fr.signal_native_region_index >= 0:
+        ge_signal_native_region_index <- fr.signal_native_region_index
     if fr.fallback_guest_pc != 0.uintptr():
         ge_fallback_guest_pc <- fr.fallback_guest_pc
     if fr.aerolib_fallback_invocations != 0u64:
@@ -994,6 +1035,14 @@ def ge_reset_crash_state() -> void:
     ge_signal_guest_pc <- 0.uintptr()
     ge_fallback_guest_pc <- 0.uintptr()
     ge_signal_pc_valid <- 0
+    ge_signal_sp_valid <- 0
+    ge_signal_bp_valid <- 0
+    ge_signal_rdi_valid <- 0
+    ge_signal_rsi_valid <- 0
+    ge_signal_uctx <- 0.uintptr()
+    ge_signal_mctx <- 0.uintptr()
+    ge_signal_fault_addr_valid <- 0
+    ge_signal_native_region_index <- -1
     ge_last_pc_source <- GE_PC_SOURCE_NONE
     ge_fault_word0 <- 0.uintptr()
     ge_fault_word1 <- 0.uintptr()
@@ -1697,6 +1746,30 @@ def c_GuestExec_FallbackGuestPC() -> uintptr:
 def c_GuestExec_SignalPCValid() -> s32:
     return ge_signal_pc_valid
 
+def c_GuestExec_SignalSPValid() -> s32:
+    return ge_signal_sp_valid
+
+def c_GuestExec_SignalBPValid() -> s32:
+    return ge_signal_bp_valid
+
+def c_GuestExec_SignalRDIValid() -> s32:
+    return ge_signal_rdi_valid
+
+def c_GuestExec_SignalRSIValid() -> s32:
+    return ge_signal_rsi_valid
+
+def c_GuestExec_SignalUContext() -> uintptr:
+    return ge_signal_uctx
+
+def c_GuestExec_SignalMContext() -> uintptr:
+    return ge_signal_mctx
+
+def c_GuestExec_SignalFaultAddressValid() -> s32:
+    return ge_signal_fault_addr_valid
+
+def c_GuestExec_SignalNativeRegionIndex() -> s32:
+    return ge_signal_native_region_index
+
 def c_GuestExec_LastPCSource() -> s32:
     return ge_last_pc_source
 
@@ -1784,6 +1857,14 @@ global mutable ge_prejump_rsp: uintptr = 0.uintptr()
 global mutable ge_signal_guest_pc: uintptr = 0.uintptr()
 global mutable ge_fallback_guest_pc: uintptr = 0.uintptr()
 global mutable ge_signal_pc_valid: s32 = 0
+global mutable ge_signal_sp_valid: s32 = 0
+global mutable ge_signal_bp_valid: s32 = 0
+global mutable ge_signal_rdi_valid: s32 = 0
+global mutable ge_signal_rsi_valid: s32 = 0
+global mutable ge_signal_uctx: uintptr = 0.uintptr()
+global mutable ge_signal_mctx: uintptr = 0.uintptr()
+global mutable ge_signal_fault_addr_valid: s32 = 0
+global mutable ge_signal_native_region_index: s32 = -1
 global mutable ge_entry_native_prot: u32 = 0xffffffffu32
 global mutable ge_pc_native_prot: u32 = 0xffffffffu32
 global mutable ge_last_pc_was_fallback: s32 = 0
@@ -1852,6 +1933,14 @@ struct ElisaGuestExecForkReport:
     signal_guest_pc: mutable uintptr
     fallback_guest_pc: mutable uintptr
     signal_pc_valid: mutable s32
+    signal_sp_valid: mutable s32
+    signal_bp_valid: mutable s32
+    signal_rdi_valid: mutable s32
+    signal_rsi_valid: mutable s32
+    signal_uctx: mutable uintptr
+    signal_mctx: mutable uintptr
+    signal_fault_addr_valid: mutable s32
+    signal_native_region_index: mutable s32
     pc_source: mutable s32
     entry_native_prot: mutable u32
     pc_native_prot: mutable u32
@@ -2415,6 +2504,30 @@ def GuestExec_FallbackGuestPC() -> VAddr:
 
 def GuestExec_SignalPCValid() -> bool:
     return c_GuestExec_SignalPCValid() != 0
+
+def GuestExec_SignalSPValid() -> bool:
+    return c_GuestExec_SignalSPValid() != 0
+
+def GuestExec_SignalBPValid() -> bool:
+    return c_GuestExec_SignalBPValid() != 0
+
+def GuestExec_SignalRDIValid() -> bool:
+    return c_GuestExec_SignalRDIValid() != 0
+
+def GuestExec_SignalRSIValid() -> bool:
+    return c_GuestExec_SignalRSIValid() != 0
+
+def GuestExec_SignalUContext() -> VAddr:
+    return c_GuestExec_SignalUContext()
+
+def GuestExec_SignalMContext() -> VAddr:
+    return c_GuestExec_SignalMContext()
+
+def GuestExec_SignalFaultAddressValid() -> bool:
+    return c_GuestExec_SignalFaultAddressValid() != 0
+
+def GuestExec_SignalNativeRegionIndex() -> s32:
+    return c_GuestExec_SignalNativeRegionIndex()
 
 def GuestExec_LastPCSource() -> s32:
     return c_GuestExec_LastPCSource()
