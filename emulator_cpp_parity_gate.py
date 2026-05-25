@@ -662,7 +662,15 @@ def failing_scenario_ids(results: list[Result]) -> list[str]:
     return ids
 
 
-def validate_rules(results: list[Result], cusa: dict[str, int | str], fallback_rows: list[dict[str, str | int]], require_first_boundary: bool, require_x64_real_exec: bool) -> list[str]:
+def validate_rules(
+    results: list[Result],
+    cusa: dict[str, int | str],
+    fallback_rows: list[dict[str, str | int]],
+    require_first_boundary: bool,
+    require_x64_real_exec: bool,
+    require_runtime_services: bool,
+    require_first_frame: bool,
+) -> list[str]:
     errors: list[str] = []
 
     workqueue = load_workqueue_rows()
@@ -672,14 +680,48 @@ def validate_rules(results: list[Result], cusa: dict[str, int | str], fallback_r
 
     if int(cusa.get("unresolved_imports", 0)) > 0:
         errors.append(f"No unresolved imports in CUSA gate violated: unresolved={cusa['unresolved_imports']}")
-    if require_first_boundary:
-        boundary_status = int(cusa.get("boundary_status", 0))
-        first_boundary_reached = int(cusa.get("guest_exec_first_boundary_reached", 0))
-        if boundary_status != 1 and first_boundary_reached == 0:
-            errors.append("First-boundary probe requested but CUSA07399 did not reach the first guarded boundary")
     x64_exec = parse_x64_exec_status(results)
     if require_x64_real_exec and x64_exec.get("status") != "ok":
         errors.append(f"CUSA07399 x64 real execution requested but lane status is {x64_exec.get('status', 'unknown')}")
+    if require_first_boundary:
+        boundary_status = int(cusa.get("boundary_status", 0))
+        first_boundary_reached = int(cusa.get("guest_exec_first_boundary_reached", 0))
+        x64_first_boundary_ok = to_int(x64_exec.get("first_boundary_ok"))
+        x64_boundary_status = to_int(x64_exec.get("boundary_status"))
+        x64_stage = to_int(x64_exec.get("execution_stage"))
+        x64_last_hle = x64_exec.get("last_hle_symbol", "") or x64_exec.get("runtime_hle_symbol", "")
+        host_boundary_ok = boundary_status == 1 and first_boundary_reached == 1
+        if not host_boundary_ok and x64_first_boundary_ok != 1:
+            errors.append(
+                "First-boundary gate requested but CUSA07399 did not reach a real x64 HLE boundary "
+                f"(host_boundary={boundary_status}/{first_boundary_reached}, "
+                f"x64_boundary={x64_boundary_status}, x64_stage={x64_stage}, x64_hle={x64_last_hle or 'none'})"
+            )
+    if require_runtime_services:
+        runtime_requirements = {
+            "user service initialized": int(cusa.get("user_service_initialized", 0)),
+            "pad initialized": int(cusa.get("pad_initialized", 0)),
+            "pad open attempted": int(cusa.get("pad_open_attempted", 0)),
+            "pad read attempted": int(cusa.get("pad_read_attempted", 0)),
+            "audio output attempted": int(cusa.get("audio_output_attempted", 0)),
+            "audio input attempted": int(cusa.get("audio_input_attempted", 0)),
+        }
+        missing = [name for name, value in runtime_requirements.items() if value == 0]
+        if missing:
+            errors.append("Runtime-service gate requested but CUSA07399 did not reach: " + ", ".join(missing))
+    if require_first_frame:
+        first_frame_requirements = {
+            "shader_translate_attempted": int(cusa.get("shader_translate_attempted", 0)),
+            "shader_path": max(int(cusa.get("shader_translate_path_bridge", 0)), int(cusa.get("shader_translate_path_native", 0))),
+            "VIDEO_STAGE_opened": int(cusa.get("video_stage_opened", 0)),
+            "VIDEO_STAGE_buffers_registered": int(cusa.get("video_stage_buffers_registered", 0)),
+            "VIDEO_STAGE_flip_submitted": int(cusa.get("video_stage_flip_submitted", 0)),
+            "VIDEO_STAGE_flip_completed": int(cusa.get("video_stage_flip_completed", 0)),
+            "VIDEO_STAGE_first_frame_candidate": int(cusa.get("video_stage_first_frame_candidate", 0)),
+        }
+        missing = [name for name, value in first_frame_requirements.items() if value == 0]
+        if missing:
+            errors.append("First-frame gate requested but CUSA07399 did not reach: " + ", ".join(missing))
 
     ledger_raw = load_json(LEDGER_PATH)
     if isinstance(ledger_raw, dict):
@@ -754,13 +796,27 @@ def score_summary(results: list[Result], cusa: dict[str, int | str], errors: lis
     return passed, total
 
 
-def summarize_progress(results: list[Result], require_first_boundary: bool = False, require_x64_real_exec: bool = False) -> tuple[str, dict[str, list[dict[str, str | int]]], dict[str, int | str], list[str], list[dict[str, str | int]]]:
+def summarize_progress(
+    results: list[Result],
+    require_first_boundary: bool = False,
+    require_x64_real_exec: bool = False,
+    require_runtime_services: bool = False,
+    require_first_frame: bool = False,
+) -> tuple[str, dict[str, list[dict[str, str | int]]], dict[str, int | str], list[str], list[dict[str, str | int]]]:
     lines: list[str] = []
     ledger_counts = count_ledger_statuses()
     cusa = parse_cusa_metrics(results)
     fallback_rows = fallback_symbols(results)
     queues = build_fallback_queues(fallback_rows)
-    rules = validate_rules(results, cusa, fallback_rows, require_first_boundary, require_x64_real_exec)
+    rules = validate_rules(
+        results,
+        cusa,
+        fallback_rows,
+        require_first_boundary,
+        require_x64_real_exec,
+        require_runtime_services,
+        require_first_frame,
+    )
     stages = cusa_stage_summary(results, cusa)
     x64_exec = parse_x64_exec_status(results)
 
@@ -809,6 +865,10 @@ def summarize_progress(results: list[Result], require_first_boundary: bool = Fal
         lines.append(f"- CUSA07399 x64 execution reason: {x64_exec.get('reason')}")
     if x64_exec.get("boundary_status"):
         lines.append(f"- CUSA07399 x64 boundary status: {x64_exec.get('boundary_status')}")
+    if x64_exec.get("first_boundary_reached"):
+        lines.append(f"- CUSA07399 x64 first boundary reached: {x64_exec.get('first_boundary_reached')}")
+    if x64_exec.get("first_boundary_ok"):
+        lines.append(f"- CUSA07399 x64 first boundary ok: {x64_exec.get('first_boundary_ok')}")
     if x64_exec.get("last_pc"):
         lines.append(f"- CUSA07399 x64 last pc: {x64_exec.get('last_pc')}")
     if x64_exec.get("last_sp"):
@@ -1055,6 +1115,8 @@ def main() -> int:
     parser.add_argument("--no-milestones", action="store_true", help="Do not append milestones.")
     parser.add_argument("--require-first-boundary", action="store_true", help="Fail when CUSA07399 does not reach the first guarded guest boundary.")
     parser.add_argument("--require-x64-real-exec", action="store_true", help="Fail unless CUSA07399 runs in an x86_64 Elisa emulator process past handoff.")
+    parser.add_argument("--require-runtime-services", action="store_true", help="Fail unless real CUSA reaches user, pad, and audio service probes.")
+    parser.add_argument("--require-first-frame", action="store_true", help="Fail unless real CUSA reaches the full shader/video first-frame ladder.")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose command output.")
     args = parser.parse_args()
 
@@ -1086,7 +1148,13 @@ def main() -> int:
             if args.fail_fast:
                 break
 
-    progress, queues, cusa, rules, fallback_rows = summarize_progress(results, args.require_first_boundary, args.require_x64_real_exec)
+    progress, queues, cusa, rules, fallback_rows = summarize_progress(
+        results,
+        args.require_first_boundary,
+        args.require_x64_real_exec,
+        args.require_runtime_services,
+        args.require_first_frame,
+    )
     passed = sum(1 for r in results if r.passed)
     failed = len(results) - passed
 

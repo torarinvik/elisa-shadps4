@@ -169,6 +169,22 @@ def validate_artifacts(artifacts: dict[str, str]) -> list[str]:
     return errors
 
 
+def first_boundary_reached(artifacts: dict[str, str]) -> bool:
+    boundary_status = to_int(artifact_get(artifacts, "boundary_status"))
+    boundary_reason = artifact_get(artifacts, "guest_exec_boundary_reason_name", "boundary_reason", default="")
+    first_boundary = to_int(artifact_get(artifacts, "guest_exec_first_boundary_reached"))
+    execution_stage = to_int(artifact_get(artifacts, "execution_stage"))
+    last_hle = artifact_get(artifacts, "last_hle_symbol", default="")
+    runtime_hle = artifact_get(artifacts, "guest_exec_runtime_hle_symbol", default="")
+    return (
+        first_boundary == 1
+        and boundary_status == 1
+        and execution_stage >= 5
+        and boundary_reason in {"native-hle", "1"}
+        and (last_hle != "" or runtime_hle != "")
+    )
+
+
 def diagnose_artifacts(artifacts: dict[str, str]) -> str:
     notes: list[str] = []
     boundary_status = to_int(artifact_get(artifacts, "boundary_status"))
@@ -316,6 +332,7 @@ def main() -> int:
             guarded_status=artifact_get(artifacts, "guarded_status"),
             boundary_status=artifact_get(artifacts, "boundary_status"),
             boundary_reason=artifact_get(artifacts, "guest_exec_boundary_reason_name", "boundary_reason", default="unknown"),
+            first_boundary_reached=artifact_get(artifacts, "guest_exec_first_boundary_reached"),
             execution_stage=artifact_get(artifacts, "execution_stage"),
             native_phase=artifact_get(artifacts, "guest_exec_native_phase"),
             last_pc=artifact_get(artifacts, "guest_exec_last_pc", "last_guest_pc"),
@@ -381,6 +398,8 @@ def main() -> int:
         guarded_status=artifact_get(artifacts, "guarded_status"),
         boundary_status=artifact_get(artifacts, "boundary_status"),
         boundary_reason=artifact_get(artifacts, "guest_exec_boundary_reason_name", "boundary_reason", default="unknown"),
+        first_boundary_reached=artifact_get(artifacts, "guest_exec_first_boundary_reached"),
+        first_boundary_ok=1 if first_boundary_reached(artifacts) else 0,
         execution_stage=artifact_get(artifacts, "execution_stage"),
         native_phase=artifact_get(artifacts, "guest_exec_native_phase"),
         last_pc=artifact_get(artifacts, "guest_exec_last_pc", "last_guest_pc"),
