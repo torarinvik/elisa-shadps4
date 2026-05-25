@@ -17,19 +17,6 @@ const ORBIS_PNG_DEC_IMAGE_FLAG_TRNS_CHUNK_EXIST: u32 = 2
 const ORBIS_PNG_DEC_PIXEL_FORMAT_R8G8B8A8: u16 = 0
 const ORBIS_PNG_DEC_PIXEL_FORMAT_B8G8R8A8: u16 = 1
 
-struct ElisaPngDecImageInfo layout c:
-    image_width: mutable u32
-    image_height: mutable u32
-    color_space: mutable u16
-    bit_depth: mutable u16
-    image_flag: mutable u32
-
-@link_name(ElisaPngDecParseHeader)
-extern c_elisa_png_dec_parse_header(png_mem_addr: u8&?, png_mem_size: u32, image_info: mutable ElisaPngDecImageInfo&?) -> int
-
-@link_name(ElisaPngDecDecode)
-extern c_elisa_png_dec_decode(png_mem_addr: u8&?, png_mem_size: u32, image_mem_addr: mutable u8&?, image_mem_size: u32, pixel_format: u16, alpha_value: u16, image_pitch: u32, image_info: mutable ElisaPngDecImageInfo&?) -> int
-
 @fixed_layout
 struct OrbisPngDecParseParam:
     png_mem_addr: mutable u8&?
@@ -86,6 +73,12 @@ struct PngDecAncillary:
     trns_red: mutable u16
     trns_green: mutable u16
     trns_blue: mutable u16
+
+global mutable pngdec_idat_scratch: u8[2097152] = zeroed
+global mutable pngdec_raw_scratch: u8[4194304] = zeroed
+global mutable pngdec_plte_scratch: u8[768] = zeroed
+global mutable pngdec_trns_scratch: u8[256] = zeroed
+global mutable pngdec_handle_slots: OrbisPngDecHandleInternal[16] = zeroed
 
 def PngDec_IsPngSignature(buf: u8&?, size: u32) -> bool:
     if buf == null or size < 8:
@@ -464,9 +457,6 @@ def PngDec_ParseHeader(addr: u8&?, size: u32, info: mutable OrbisPngDecImageInfo
         return ORBIS_PNG_DEC_ERROR_INVALID_DATA
     if addr == null or size < 33:
         return ORBIS_PNG_DEC_ERROR_INVALID_DATA
-    native_info: mutable ElisaPngDecImageInfo = zeroed
-    if c_elisa_png_dec_parse_header(addr, size, native_info.ref[mutable ElisaPngDecImageInfo&]) != ORBIS_OK:
-        return ORBIS_PNG_DEC_ERROR_INVALID_DATA
     p: mutable u8& = addr
     ihdr_len: mutable u32 = PngDec_ReadBe32(p, 8)
     if ihdr_len != 13:
@@ -831,8 +821,10 @@ def PngDec_ReadRgbaAt(header: PngDecHeader&, anc: PngDecAncillary&, plte_rgb: mu
         r <- plte_rgb[(pal_idx * 3).usize()]
         g <- plte_rgb[(pal_idx * 3 + 1).usize()]
         b <- plte_rgb[(pal_idx * 3 + 2).usize()]
-        if anc.has_trns and pal_idx < anc.trns_count:
-            a <- trns_alpha[pal_idx.usize()]
+        if anc.has_trns:
+            a <- 255.u8()
+            if pal_idx < anc.trns_count:
+                a <- trns_alpha[pal_idx.usize()]
     elif header.color_type == 4.u8():
         if header.bit_depth == 8.u8():
             gray8a: mutable u8 = row[(x * 2).usize()]
@@ -1059,13 +1051,16 @@ def scePngDecCreate(param: OrbisPngDecCreateParam&?, memory_address: mutable voi
         return ORBIS_PNG_DEC_ERROR_INVALID_ADDR
     if param.max_image_width == 0 or (param.max_image_width - 1) > 1000000:
         return ORBIS_PNG_DEC_ERROR_INVALID_SIZE
-    mem: mutable void& = memory_address
-    h: mutable OrbisPngDecHandleInternal& = mem.cast[mutable OrbisPngDecHandleInternal&]
-    h.self_ptr <- h
-    h.max_image_width <- param.max_image_width
-    h.attribute <- param.attribute
-    handle <- h
-    return ORBIS_OK
+    i: mutable usize = 0
+    while i < 16:
+        if pngdec_handle_slots[i].self_ptr == null:
+            pngdec_handle_slots[i].self_ptr <- pngdec_handle_slots[i].ref[mutable OrbisPngDecHandleInternal&]
+            pngdec_handle_slots[i].max_image_width <- param.max_image_width
+            pngdec_handle_slots[i].attribute <- param.attribute
+            handle <- pngdec_handle_slots[i].ref[mutable OrbisPngDecHandleInternal&]
+            return ORBIS_OK
+        i <- i + 1
+    return ORBIS_PNG_DEC_ERROR_INVALID_SIZE
 
 def scePngDecDecode(handle: OrbisPngDecHandle, param: OrbisPngDecDecodeParam&?, image_info: mutable OrbisPngDecImageInfo&?) -> int:
     handle_ret: mutable int = PngDec_ValidateHandle(handle)
@@ -1087,15 +1082,50 @@ def scePngDecDecode(handle: OrbisPngDecHandle, param: OrbisPngDecDecodeParam&?, 
         dst_stride <- parsed.image_width * 4
     if parsed.image_height.u64() * dst_stride.u64() > param.image_mem_size.u64():
         return ORBIS_PNG_DEC_ERROR_INVALID_SIZE
-    native_info: mutable ElisaPngDecImageInfo = zeroed
-    decode_ret: mutable int = c_elisa_png_dec_decode(param.png_mem_addr, param.png_mem_size, dst, param.image_mem_size, param.pixel_format, param.alpha_value, dst_stride, native_info.ref[mutable ElisaPngDecImageInfo&])
+    src: mutable u8& = param.png_mem_addr
+    idat_ret: mutable int = PngDec_GatherIdat(src, param.png_mem_size, pngdec_idat_scratch.ref[mutable u8&], 2097152)
+    if idat_ret < 0:
+        return idat_ret
+
+    bits_per_px: mutable u32 = 0
+    if header.color_type == 0.u8():
+        bits_per_px <- header.bit_depth.u32()
+    elif header.color_type == 2.u8():
+        bits_per_px <- header.bit_depth.u32() * 3
+    elif header.color_type == 3.u8():
+        bits_per_px <- header.bit_depth.u32()
+    elif header.color_type == 4.u8():
+        bits_per_px <- header.bit_depth.u32() * 2
+    elif header.color_type == 6.u8():
+        bits_per_px <- header.bit_depth.u32() * 4
+    else:
+        return ORBIS_PNG_DEC_ERROR_UNSUPPORT_DATA
+
+    row_bits: mutable u32 = parsed.image_width * bits_per_px
+    row_bytes: mutable u32 = (row_bits + 7) / 8
+    raw_cap: mutable u32 = (row_bytes + 1) * parsed.image_height
+    if raw_cap > 4194304:
+        return ORBIS_PNG_DEC_ERROR_INVALID_SIZE
+    inflate_ret: mutable int = PngDec_InflateStored(pngdec_idat_scratch.ref[mutable u8&], idat_ret.u32(), pngdec_raw_scratch.ref[mutable u8&], raw_cap)
+    if inflate_ret < 0:
+        return inflate_ret
+
+    anc: mutable PngDecAncillary = zeroed
+    anc_ret: mutable int = PngDec_ParseAncillary(src, param.png_mem_size, anc.ref[mutable PngDecAncillary&], pngdec_plte_scratch.ref[mutable u8&], 768, pngdec_trns_scratch.ref[mutable u8&], 256)
+    if anc_ret != ORBIS_OK:
+        return anc_ret
+    decode_ret: mutable int = PngDec_DecodeRows(header, anc, pngdec_plte_scratch.ref[mutable u8&], pngdec_trns_scratch.ref[mutable u8&], pngdec_raw_scratch.ref[mutable u8&], inflate_ret.u32(), dst, param.image_mem_size, dst_stride, param.pixel_format, param.alpha_value)
     if image_info != null:
-        image_info.image_width <- native_info.image_width
-        image_info.image_height <- native_info.image_height
-        image_info.color_space <- native_info.color_space
-        image_info.bit_depth <- native_info.bit_depth
-        image_info.image_flag <- native_info.image_flag
-    return decode_ret
+        image_info.image_width <- parsed.image_width
+        image_info.image_height <- parsed.image_height
+        image_info.color_space <- parsed.color_space
+        image_info.bit_depth <- parsed.bit_depth
+        image_info.image_flag <- parsed.image_flag
+    if decode_ret != ORBIS_OK:
+        return decode_ret
+    if parsed.image_width > 32767 or parsed.image_height > 32767:
+        return 0
+    return ((parsed.image_width << 16) | parsed.image_height).i32()
 
 def scePngDecDecodeWithInputControl() -> int:
     return ORBIS_OK
