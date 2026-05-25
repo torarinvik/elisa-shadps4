@@ -44,6 +44,18 @@ global mutable linker_tiny_pointer_first_type: u32 = 0u32
 global mutable linker_tiny_pointer_first_name: static u8&? = null
 global mutable linker_tiny_pointer_first_module: static u8&? = null
 
+# TLS-base provenance: record __tls_get_addr inputs and the resolved per-thread
+# DTV block, so a module_index==0 (failed DTPMOD64) or a null/garbage DTV gets
+# surfaced in the artifact instead of silently returning a bad TLS pointer.
+global mutable linker_tls_get_addr_calls: u64 = 0
+global mutable linker_tls_last_module_index: u64 = 0
+global mutable linker_tls_last_offset: u64 = 0
+global mutable linker_tls_last_dtv_base: uintptr = 0.uintptr()
+global mutable linker_tls_last_block_pointer: uintptr = 0.uintptr()
+global mutable linker_tls_last_result: uintptr = 0.uintptr()
+global mutable linker_tls_module0_calls: u64 = 0
+global mutable linker_tls_null_dtv_calls: u64 = 0
+
 struct SymbolRecord:
     name: mutable static u8&
     nid_name: mutable static u8&
@@ -860,6 +872,30 @@ def Linker_TinyPointerFirstName() -> static u8&?:
 def Linker_TinyPointerFirstModule() -> static u8&?:
     return linker_tiny_pointer_first_module
 
+def Linker_TlsGetAddrCalls() -> u64:
+    return linker_tls_get_addr_calls
+
+def Linker_TlsLastModuleIndex() -> u64:
+    return linker_tls_last_module_index
+
+def Linker_TlsLastOffset() -> u64:
+    return linker_tls_last_offset
+
+def Linker_TlsLastDtvBase() -> u64:
+    return linker_tls_last_dtv_base.u64()
+
+def Linker_TlsLastBlockPointer() -> u64:
+    return linker_tls_last_block_pointer.u64()
+
+def Linker_TlsLastResult() -> u64:
+    return linker_tls_last_result.u64()
+
+def Linker_TlsModule0Calls() -> u64:
+    return linker_tls_module0_calls
+
+def Linker_TlsNullDtvCalls() -> u64:
+    return linker_tls_null_dtv_calls
+
 def Linker_IsQualifiedImportSymbol(raw_symbol: static u8&) -> bool:
     parsed_nid: mutable static u8& = ""
     parsed_library: mutable static u8& = ""
@@ -1208,15 +1244,51 @@ def Linker_AdvanceGenerationCounter(self: mutable Linker&) -> void:
 
 def Linker_TlsGetAddr(self: Linker&, module_index: u64, offset: u64) -> uintptr:
     GuestExec_RecordFirstBoundary(GUEST_EXEC_BOUNDARY_REASON_NATIVE_HLE)
+    linker_tls_get_addr_calls <- linker_tls_get_addr_calls + 1u64
+    linker_tls_last_module_index <- module_index
+    linker_tls_last_offset <- offset
+    linker_tls_last_dtv_base <- 0.uintptr()
+    linker_tls_last_block_pointer <- 0.uintptr()
     if module_index == 0u64:
-        return offset.uintptr()
+        # A TLS access with module id 0 means its DTPMOD64 relocation never
+        # landed (the GOT pair still holds its link-time 0). shadPS4 always has
+        # module_index >= 1. Returning the bare offset here hands the guest a
+        # near-NULL bogus pointer (e.g. offset 0x1f4) -- the exact 0x1f4-class
+        # bug. Surface it and return NULL so downstream null-checks catch it
+        # instead of letting a tiny pointer flow into a mutex/TLS slot.
+        linker_tls_module0_calls <- linker_tls_module0_calls + 1u64
+        linker_tls_last_result <- 0.uintptr()
+        return 0.uintptr()
+    # Faithful path (shadPS4 Linker::TlsGetAddr): the per-thread TLS block lives
+    # in the DTV, NOT in the module's shared static init image. Read
+    # tcb_dtv[module_index + 1].pointer + offset.
+    tcb: mutable Tcb& = GetTcbBase()
+    dtv_base: uintptr = tcb.tcb_dtv
+    linker_tls_last_dtv_base <- dtv_base
+    if dtv_base != 0.uintptr():
+        trusted Unsafe.PointerCast:
+            dtv: mutable DtvEntry& = dtv_base.cast[mutable DtvEntry&]
+            num_dtvs: usize = dtv[1usize].counter
+            if module_index + 1u64 < (num_dtvs.u64() + 2u64):
+                block: uintptr = dtv[(module_index + 1u64).usize()].pointer
+                linker_tls_last_block_pointer <- block
+                if block != 0.uintptr():
+                    result: uintptr = block + offset.uintptr()
+                    linker_tls_last_result <- result
+                    return result
+    else:
+        linker_tls_null_dtv_calls <- linker_tls_null_dtv_calls + 1u64
+    # Fallback (no installed DTV, e.g. dormant on the arm64 host): module-relative.
     module_slot: u64 = module_index - 1u64
     if module_slot >= self.modules.count.u64():
+        linker_tls_last_result <- offset.uintptr()
         return offset.uintptr()
     module: Module = self.modules[module_slot.usize()]
+    fallback_res: mutable uintptr = module.base_virtual_addr + offset.uintptr()
     if module.tls.image_virtual_addr != 0.uintptr():
-        return module.tls.image_virtual_addr + offset.uintptr()
-    return module.base_virtual_addr + offset.uintptr()
+        fallback_res <- module.tls.image_virtual_addr + offset.uintptr()
+    linker_tls_last_result <- fallback_res
+    return fallback_res
 
 def Linker_AllocateTlsForThread(self: mutable Linker&, is_primary: bool) -> uintptr:
     _ = is_primary
