@@ -54,6 +54,14 @@ def CFG_Default() -> CFG:
     return out
 
 
+# A CFG is ~1MB: inst_list (GcnInst[1024]) and blocks (Block[1024], each Block
+# embedding a full GcnInst) dominate. Building it as a stack local and returning
+# it by value overflows the (small) test stack. Use a single static scratch
+# instance and hand back a reference; CFG_Build is not re-entrant, which matches
+# its single-shot decode->CFG usage.
+global mutable g_cfg_scratch: CFG = zeroed
+
+
 def Block_Contains(block: Block&, pc: u32) -> bool:
     return pc >= block.begin and pc < block.end
 
@@ -403,9 +411,11 @@ def _cfg_prune_unreachable_blocks(cfg: mutable CFG&) -> void:
         i <- i + 1u32
 
 
-def CFG_Build(insts: GcnInst&, inst_count: u32) -> CFG:
-    cfg: mutable CFG = CFG_Default()
+def CFG_Build(insts: GcnInst&, inst_count: u32) -> mutable CFG&:
+    cfg: mutable CFG& = g_cfg_scratch.ref[mutable CFG&]
     cfg.inst_count <- inst_count
+    cfg.label_count <- 0u32
+    cfg.block_count <- 0u32
 
     copy_count: mutable u32 = inst_count
     if copy_count > CFG_MAX_INSTS:
