@@ -1,0 +1,84 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Stage 4 (thread group) tests for the pure-Elisa kernel-threads runtime.
+# Exercises kt_thread_create/join/timedjoin/detach/native, whose worker entry
+# is invoked through the typed indirect-call primitive (`entry.call_as[...]`).
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../core/libraries/kernel/threads/kt_runtime.elisa"
+
+# Worker that echoes its argument pointer straight back as the thread result.
+@callconv(c)
+def kt_test_entry_echo(arg: void&?) -> void&?:
+    return arg
+
+def kt_entry_ptr() -> void&?:
+    result: mutable void&? = null
+    trusted Unsafe.PointerCast:
+        result <- kt_test_entry_echo as void&?
+    return result
+
+def kt_addr_of_int(slot: mutable int&) -> void&?:
+    result: mutable void&? = null
+    trusted Unsafe.PointerCast:
+        result <- slot.ref[mutable void&]
+    return result
+
+@test
+def kt_thread_create_join_echoes_arg() -> void:
+    can Abort.Panic, Memory.Allocate, Thread.Spawn, Thread.Join, Memory.Release:
+        marker: mutable int = 7
+        arg: void&? = kt_addr_of_int(marker.ref[mutable int&])
+        err: mutable int = -1
+        h: mutable void&? = kt_thread_create(kt_entry_ptr(), arg, err.ref[mutable int&])
+        assert h != null
+        assert err == 0
+        ret: mutable void&? = null
+        rc: int = kt_thread_join(h, ret.ref[mutable void&?&])
+        assert rc == 0
+        assert ret == arg
+
+@test
+def kt_thread_native_nonnull_then_join() -> void:
+    can Abort.Panic, Memory.Allocate, Thread.Spawn, Thread.Join, Memory.Release:
+        err: mutable int = -1
+        h: mutable void&? = kt_thread_create(kt_entry_ptr(), null, err.ref[mutable int&])
+        assert h != null
+        native: void&? = kt_thread_native(h)
+        assert native != null
+        ret: mutable void&? = null
+        assert kt_thread_join(h, ret.ref[mutable void&?&]) == 0
+        assert ret == null
+
+@test
+def kt_thread_timedjoin_success() -> void:
+    can Abort.Panic, Memory.Allocate, Thread.Spawn, Thread.Join, Memory.Release:
+        marker: mutable int = 3
+        arg: void&? = kt_addr_of_int(marker.ref[mutable int&])
+        err: mutable int = -1
+        h: mutable void&? = kt_thread_create(kt_entry_ptr(), arg, err.ref[mutable int&])
+        assert h != null
+        ret: mutable void&? = null
+        # Far-future absolute monotonic deadline (kept under i64 ns overflow:
+        # 1e9 s * 1e9 ns/s = 1e18 < i64 max). Worker finishes long before it.
+        rc: int = kt_thread_timedjoin(h, ret.ref[mutable void&?&], 1000000000i64, 0i64)
+        assert rc == 0
+        assert ret == arg
+
+@test
+def kt_thread_detach_returns_ok() -> void:
+    can Abort.Panic, Memory.Allocate, Thread.Spawn, Thread.Join, Memory.Release:
+        err: mutable int = -1
+        h: mutable void&? = kt_thread_create(kt_entry_ptr(), null, err.ref[mutable int&])
+        assert h != null
+        assert kt_thread_detach(h) == 0
+
+@test
+def kt_thread_null_contracts() -> void:
+    can Abort.Panic:
+        ret: mutable void&? = null
+        assert kt_thread_join(null, ret.ref[mutable void&?&]) == KT_PS4_EINVAL
+        assert kt_thread_timedjoin(null, ret.ref[mutable void&?&], 0i64, 0i64) == KT_PS4_EINVAL
+        assert kt_thread_detach(null) == KT_PS4_EINVAL
+        assert kt_thread_cancel(null) == KT_PS4_EINVAL
+        assert kt_thread_native(null) == null

@@ -967,3 +967,260 @@ def kt_event_wait(handle: void&?, pattern: u64, wait_mode: u32, out_bits: mutabl
     kt_event_apply_clear(state, pattern, wait_mode)
     kt_raw_mutex_unlock(pm)
     return 0
+
+# ============================================================================
+# Thread group (Stage 4)
+# ============================================================================
+# pthread_create/join/detach are runtime-declared (reused). pthread_cancel is
+# not, so it is declared here. The thread entry is a caller-supplied raw
+# function pointer invoked through the typed indirect-call primitive
+# (`entry.call_as[func(void&?) -> void&?](arg)`), replacing the C trampoline's
+# `state->entry(state->arg)`.
+#
+# NOTE on cancellation cleanup: the C trampoline used pthread_cleanup_push/pop
+# so the finish bookkeeping (finished=1, broadcast, detached-free) also ran when
+# a thread was asynchronously cancelled mid-entry. Those are setjmp-based macros
+# that manipulate private libc state and are not expressible in portable Elisa,
+# so this port runs finish explicitly after the entry returns. Plain
+# kt_thread_join still reaps a cancelled thread correctly (pthread_join returns
+# its PTHREAD_CANCELED result). The only behavioral gap versus the C path is a
+# thread cancelled while blocked in entry: kt_thread_timedjoin then waits to its
+# deadline (finished is never set), and a detached+cancelled thread's handle is
+# not freed. Cancellation is rare in PS4 titles; faithful cleanup-on-cancel can
+# be layered later via an atomics-guarded pthread TSD destructor.
+
+@link_name(pthread_cancel)
+extern kt_pthread_cancel(thread: uintptr) -> int
+
+@fixed_layout
+struct KtThread:
+    pmutex: mutable u64[8]
+    pcond: mutable u64[6]
+    thread: mutable uintptr
+    entry: mutable void&?
+    arg: mutable void&?
+    result: mutable void&?
+    finished: mutable int
+    completed_normally: mutable int
+    joined: mutable int
+    detached: mutable int
+
+def kt_thread_from_handle(handle: void&?) -> mutable KtThread&?:
+    if handle == null:
+        return null
+    out: mutable KtThread&? = null
+    trusted Unsafe.PointerCast:
+        out <- handle.cast[mutable KtThread&?]
+    return out
+
+# Translate a host monotonic-clock absolute deadline into the realtime-clock
+# absolute deadline that pthread_cond_timedwait expects. Returns host errno
+# values (KT_ETIMEDOUT / KT_EINVAL) or 0; the caller maps to PS4 codes.
+def kt_monotonic_abs_to_realtime_deadline(tv_sec: i64, tv_nsec: i64, out: mutable KtTimespec&) -> int:
+    if tv_sec < 0i64 or tv_nsec < 0i64 or tv_nsec >= 1000000000i64:
+        return KT_EINVAL
+    mono: mutable KtTimespec = zeroed
+    real: mutable KtTimespec = zeroed
+    if kt_clock_gettime(KT_CLOCK_MONOTONIC, mono.ref[void&]) != 0:
+        return KT_EINVAL
+    if kt_clock_gettime(KT_CLOCK_REALTIME, real.ref[void&]) != 0:
+        return KT_EINVAL
+    target_ns: i64 = tv_sec * 1000000000i64 + tv_nsec
+    mono_now_ns: i64 = mono.tv_sec * 1000000000i64 + mono.tv_nsec
+    remaining_ns: i64 = target_ns - mono_now_ns
+    if remaining_ns <= 0i64:
+        return KT_ETIMEDOUT
+    real_now_ns: i64 = real.tv_sec * 1000000000i64 + real.tv_nsec
+    deadline_ns: i64 = real_now_ns + remaining_ns
+    out.tv_sec <- deadline_ns / 1000000000i64
+    out.tv_nsec <- deadline_ns % 1000000000i64
+    if out.tv_nsec < 0i64:
+        out.tv_sec <- out.tv_sec - 1i64
+        out.tv_nsec <- out.tv_nsec + 1000000000i64
+    return 0
+
+# Bookkeeping run when a worker thread finishes (normal completion). Wakes any
+# joiners and, if the thread was detached, tears the handle down.
+def kt_thread_finish(raw: void&?) -> void:
+    state_opt: mutable KtThread&? = kt_thread_from_handle(raw)
+    if state_opt == null:
+        return
+    state: mutable KtThread& = state_opt.cast[mutable KtThread&]
+    pm: void& = state.pmutex[0].ref[void&]
+    pc: void& = state.pcond[0].ref[void&]
+    kt_raw_mutex_lock(pm)
+    state.finished <- 1
+    kt_raw_cond_broadcast(pc)
+    detached: int = state.detached
+    kt_raw_mutex_unlock(pm)
+    if detached != 0:
+        kt_raw_mutex_destroy(pm)
+        kt_raw_cond_destroy(pc)
+        kt_heap_free(raw)
+
+# C-ABI worker entry handed to pthread_create. Receives the KtThread handle as
+# its argument, invokes the guest entry through the typed indirect-call
+# primitive, records the result, then runs finish bookkeeping.
+@callconv(c)
+def kt_thread_trampoline(raw: void&?) -> void&?:
+    state_opt: mutable KtThread&? = kt_thread_from_handle(raw)
+    if state_opt == null:
+        return null
+    state: mutable KtThread& = state_opt.cast[mutable KtThread&]
+    result: mutable void&? = null
+    if state.entry != null:
+        trusted Unsafe.IndirectCall:
+            result <- state.entry.call_as[func(void&?) -> void&?](state.arg)
+    state.result <- result
+    state.completed_normally <- 1
+    kt_thread_finish(raw)
+    return result
+
+# Spawn the worker via the runtime's pthread_create, passing the trampoline's
+# address as the start routine and the handle as its argument.
+def kt_pt_thread_create(state: mutable KtThread&, handle: void&?) -> int:
+    r: mutable int = 0
+    can Thread.Spawn:
+        trusted Unsafe.PointerCast:
+            entry_fn: void& = kt_thread_trampoline as void&
+            r <- pthread_create(state.thread.ref[mutable uintptr&], null, entry_fn, handle)
+    return r
+
+def kt_pt_thread_join(thread: uintptr, result: mutable void&?) -> int:
+    r: mutable int = 0
+    can Thread.Join:
+        r <- pthread_join(thread, result)
+    return r
+
+def kt_pt_thread_detach(thread: uintptr) -> int:
+    r: mutable int = 0
+    can Thread.Detach:
+        r <- pthread_detach(thread)
+    return r
+
+def kt_thread_create(entry: void&?, arg: void&?, out_error: mutable int&?) -> mutable void&?:
+    can Memory.Allocate:
+        raw: mutable void&? = kt_calloc(1usize, size_of(KtThread))
+        if raw == null:
+            if out_error != null:
+                out_error[0] <- 35
+            return null
+        state: mutable KtThread& = raw.cast[mutable KtThread&]
+        _ = kt_raw_mutex_init(state.pmutex[0].ref[void&])
+        _ = kt_raw_cond_init(state.pcond[0].ref[void&])
+        state.entry <- entry
+        state.arg <- arg
+        err: int = kt_pt_thread_create(state, raw)
+        if err != 0:
+            kt_raw_mutex_destroy(state.pmutex[0].ref[void&])
+            kt_raw_cond_destroy(state.pcond[0].ref[void&])
+            kt_heap_free(raw)
+            if out_error != null:
+                out_error[0] <- kt_thread_errno(err)
+            return null
+        if out_error != null:
+            out_error[0] <- 0
+        return raw
+
+def kt_thread_native(handle: void&?) -> mutable void&?:
+    state_opt: mutable KtThread&? = kt_thread_from_handle(handle)
+    if state_opt == null:
+        return null
+    state: mutable KtThread& = state_opt.cast[mutable KtThread&]
+    result: mutable void&? = null
+    trusted Unsafe.PointerCast:
+        result <- state.thread.cast[void&?]
+    return result
+
+def kt_thread_join(handle: void&?, retval: mutable void&?&) -> int:
+    state_opt: mutable KtThread&? = kt_thread_from_handle(handle)
+    if state_opt == null:
+        return KT_PS4_EINVAL
+    state: mutable KtThread& = state_opt.cast[mutable KtThread&]
+    pm: void& = state.pmutex[0].ref[void&]
+    pc: void& = state.pcond[0].ref[void&]
+    kt_raw_mutex_lock(pm)
+    if state.detached != 0 or state.joined != 0:
+        kt_raw_mutex_unlock(pm)
+        return KT_PS4_EINVAL
+    state.joined <- 1
+    kt_raw_mutex_unlock(pm)
+    result: mutable void&? = null
+    err: int = kt_pt_thread_join(state.thread, result.ref[mutable void&?])
+    if err != 0:
+        return kt_thread_errno(err)
+    retval[0] <- result
+    kt_raw_mutex_destroy(pm)
+    kt_raw_cond_destroy(pc)
+    kt_heap_free(handle)
+    return 0
+
+def kt_thread_timedjoin(handle: void&?, retval: mutable void&?&, tv_sec: i64, tv_nsec: i64) -> int:
+    state_opt: mutable KtThread&? = kt_thread_from_handle(handle)
+    if state_opt == null or tv_sec < 0i64 or tv_nsec < 0i64 or tv_nsec >= 1000000000i64:
+        return KT_PS4_EINVAL
+    state: mutable KtThread& = state_opt.cast[mutable KtThread&]
+    pm: void& = state.pmutex[0].ref[void&]
+    pc: void& = state.pcond[0].ref[void&]
+    kt_raw_mutex_lock(pm)
+    if state.detached != 0 or state.joined != 0:
+        kt_raw_mutex_unlock(pm)
+        return KT_PS4_EINVAL
+    kt_raw_mutex_unlock(pm)
+    deadline: mutable KtTimespec = zeroed
+    derr: int = kt_monotonic_abs_to_realtime_deadline(tv_sec, tv_nsec, deadline.ref[mutable KtTimespec&])
+    if derr == KT_ETIMEDOUT:
+        return KT_PS4_ETIMEDOUT
+    if derr != 0:
+        return kt_thread_errno(derr)
+    ts: void& = deadline.ref[void&]
+    kt_raw_mutex_lock(pm)
+    while state.finished == 0:
+        werr: int = kt_raw_cond_timedwait(pc, pm, ts)
+        if werr == KT_ETIMEDOUT:
+            kt_raw_mutex_unlock(pm)
+            return KT_PS4_ETIMEDOUT
+        if werr != 0:
+            kt_raw_mutex_unlock(pm)
+            return kt_thread_errno(werr)
+    state.joined <- 1
+    kt_raw_mutex_unlock(pm)
+    result: mutable void&? = null
+    err: int = kt_pt_thread_join(state.thread, result.ref[mutable void&?])
+    if err != 0:
+        return kt_thread_errno(err)
+    retval[0] <- result
+    kt_raw_mutex_destroy(pm)
+    kt_raw_cond_destroy(pc)
+    kt_heap_free(handle)
+    return 0
+
+def kt_thread_detach(handle: void&?) -> int:
+    state_opt: mutable KtThread&? = kt_thread_from_handle(handle)
+    if state_opt == null:
+        return KT_PS4_EINVAL
+    state: mutable KtThread& = state_opt.cast[mutable KtThread&]
+    pm: void& = state.pmutex[0].ref[void&]
+    pc: void& = state.pcond[0].ref[void&]
+    kt_raw_mutex_lock(pm)
+    if state.detached != 0 or state.joined != 0:
+        kt_raw_mutex_unlock(pm)
+        return KT_PS4_EINVAL
+    state.detached <- 1
+    finished: int = state.finished
+    kt_raw_mutex_unlock(pm)
+    err: int = kt_pt_thread_detach(state.thread)
+    if err != 0:
+        return kt_thread_errno(err)
+    if finished != 0:
+        kt_raw_mutex_destroy(pm)
+        kt_raw_cond_destroy(pc)
+        kt_heap_free(handle)
+    return 0
+
+def kt_thread_cancel(handle: void&?) -> int:
+    state_opt: mutable KtThread&? = kt_thread_from_handle(handle)
+    if state_opt == null:
+        return KT_PS4_EINVAL
+    state: mutable KtThread& = state_opt.cast[mutable KtThread&]
+    return kt_thread_errno(kt_pthread_cancel(state.thread))
