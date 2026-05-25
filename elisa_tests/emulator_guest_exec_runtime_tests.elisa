@@ -5,6 +5,13 @@ include "../common/streq.elisa"
 include "../common/types.elisa"
 include "../core/guest_exec.elisa"
 
+def guest_exec_test_posix_mutex_lock_shape(mutex: mutable void&?&?) -> int:
+    slot: mutable uintptr = 0.uintptr()
+    if mutex != null:
+        slot <- mutex.cast[void&].uintptr()
+    GuestExec_RecordRuntimeHle("libkernel", "posix_pthread_mutex_lock", slot, 0.uintptr(), 0.uintptr(), 22.uintptr())
+    return 22
+
 @test
 def emulator_guest_exec_entry_params_abi_matches_native_layout() -> void:
     can Abort.Panic:
@@ -99,6 +106,44 @@ def emulator_guest_exec_mapped_guest_calls_host_hle_probe() -> void:
             panic("expected mapped guest code to execute host HLE probe")
         if not GuestExec_UnmapRegion(mapped_entry, 4096.u64()):
             panic("expected executable HLE-call test page unmap")
+
+@test
+def emulator_guest_exec_mapped_guest_calls_posix_mutex_lock_and_returns() -> void:
+    can Abort.Panic:
+        GuestExec_ResetState()
+        if not GuestExec_IsSupported():
+            return
+        GuestExec_Enable(true)
+        lock_addr: VAddr = guest_exec_test_posix_mutex_lock_shape as uintptr
+        if lock_addr == 0.uintptr():
+            panic("expected posix pthread mutex lock address")
+        mapped_entry: VAddr = GuestExec_AllocateRegion(4096.u64(), 3.u32())
+        if mapped_entry == 0.uintptr():
+            panic("expected executable mutex-call test page allocation")
+        code: mutable u8[28] = [
+            0x48u8, 0xBFu8, 0xF4u8, 0x01u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+            0x48u8, 0xB8u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+            0xFFu8, 0xD0u8,
+            0xB8u8, 0x2Bu8, 0x00u8, 0x00u8, 0x00u8,
+            0xC3u8
+        ]
+        if not GuestExec_WriteBytes(mapped_entry, code[0].ref[void&], 28.u64()):
+            panic("expected mutex-call machine code write")
+        if not GuestExec_WriteU64(mapped_entry + 12.uintptr(), lock_addr.u64()):
+            panic("expected mutex lock address patch")
+        if not GuestExec_ProtectRegion(mapped_entry, 4096.u64(), 5.u32()):
+            panic("expected executable mutex-call page protection")
+        result: u64 = GuestExec_RunSyntheticFunction(mapped_entry, 0.u64(), 0.u64())
+        if result != 43.u64():
+            panic("expected mapped guest mutex HLE call to return to guest code")
+        if streq(GuestExec_RuntimeHleSymbol(), "posix_pthread_mutex_lock") != 1:
+            panic("expected mapped guest code to execute posix mutex lock HLE")
+        if GuestExec_RuntimeHleArg0() != 0x1F4.uintptr():
+            panic("expected runtime HLE arg0 to match CUSA mutex argument")
+        if GuestExec_RuntimeHleRet().u64() != 22.u64():
+            panic("expected low guest mutex pointer to return POSIX_EINVAL")
+        if not GuestExec_UnmapRegion(mapped_entry, 4096.u64()):
+            panic("expected executable mutex-call test page unmap")
 
 @test
 def emulator_guest_exec_mapped_fault_reports_signal_context() -> void:

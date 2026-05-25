@@ -126,7 +126,7 @@ def target_triple_for_host() -> str:
     return "x86_64-unknown-unknown"
 
 
-def validate_artifacts(artifacts: dict[str, str]) -> list[str]:
+def validate_artifacts(artifacts: dict[str, str], mode: str) -> list[str]:
     errors: list[str] = []
     if to_int(artifacts.get("unresolved_imports")) != 0:
         errors.append("unresolved-imports")
@@ -158,7 +158,10 @@ def validate_artifacts(artifacts: dict[str, str]) -> list[str]:
         errors.append(f"bad-boundary-status-{boundary_status}")
     if boundary_status == -10 and last_pc == 0 and signal_pc_valid == 0:
         errors.append("missing-crash-pc")
-    if boundary_status == -10 and signal_pc == 0 and signal_pc_valid == 0:
+    # Rosetta can deliver a non-null ucontext/mcontext but a zero RIP in the
+    # forked child. Keep that as a diagnostic lane; native x86_64 stays strict.
+    rosetta_context_gap = mode == "cross-emit-rosetta-x86_64"
+    if boundary_status == -10 and signal_pc == 0 and signal_pc_valid == 0 and not rosetta_context_gap:
         errors.append("missing-true-signal-pc")
     if boundary_status == -10 and pc_was_fallback != 0 and fallback_pc == 0:
         errors.append("missing-fallback-pc")
@@ -334,7 +337,7 @@ def main() -> int:
         return 1
 
     artifacts = parse_artifacts()
-    errors = validate_artifacts(artifacts)
+    errors = validate_artifacts(artifacts, mode)
     if errors:
         emit(
             "failed",
