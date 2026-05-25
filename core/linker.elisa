@@ -10,6 +10,14 @@ include "./guest_exec.elisa"
 include "./tls.elisa"
 
 extern getenv(name: u8&) -> u8&?
+extern pthread_self() -> void&?
+
+# shadPS4 sets tcb->tcb_thread = thread (the current Pthread object), see
+# core/libraries/kernel/threads/tcb.cpp:58. A guest that reads %fs:tcb_thread
+# and round-trips it back into our HLE pthread layer must therefore see the
+# current host thread handle, NOT the TCB self-address. Mirror that here.
+def Linker_CurrentThreadObject() -> uintptr:
+    return pthread_self().uintptr()
 
 const LINKER_NATIVE_HLE_THUNK_CAP: usize = 2048usize
 
@@ -21,6 +29,20 @@ global mutable linker_native_hle_data_relocation_count: u64 = 0
 global mutable linker_native_hle_unthunked_function_count: u64 = 0
 global mutable linker_native_hle_function_addend_count: u64 = 0
 global mutable linker_native_hle_function_max_addend: u64 = 0
+
+# Link-time tiny-pointer sweep: any pointer-bearing relocation whose final
+# written value is nonzero but lands in the unmapped low range (< 0x10000) is a
+# near-NULL bogus pointer the guest may later call/deref (the 0x1f4-class bug).
+# Flagging it here names the offending symbol/slot at link time instead of
+# leaving it to crash anonymously at runtime. TLS module-id writes (DTPMOD64,
+# value == modid) are legitimately small and are deliberately NOT swept.
+const LINKER_TINY_POINTER_THRESHOLD: u64 = 0x10000u64
+global mutable linker_tiny_pointer_slot_count: u64 = 0
+global mutable linker_tiny_pointer_first_value: u64 = 0
+global mutable linker_tiny_pointer_first_offset: u64 = 0
+global mutable linker_tiny_pointer_first_type: u32 = 0u32
+global mutable linker_tiny_pointer_first_name: static u8&? = null
+global mutable linker_tiny_pointer_first_module: static u8&? = null
 
 struct SymbolRecord:
     name: mutable static u8&
@@ -806,6 +828,38 @@ def Linker_NativeHleFunctionAddendCount() -> u64:
 def Linker_NativeHleFunctionMaxAddend() -> u64:
     return linker_native_hle_function_max_addend
 
+# Record a pointer-bearing relocation whose final written value is a near-NULL
+# bogus pointer. Call AFTER computing the value, only for pointer relocations
+# (RELATIVE / 64 / GLOB_DAT / JUMP_SLOT) -- never for DTPMOD64.
+def Linker_NoteRelocatedPointerValue(value: u64, rel_virtual_addr: u64, rel_type: u32, symbol_name: static u8&?, module_name: static u8&?) -> void:
+    if value == 0u64 or value >= LINKER_TINY_POINTER_THRESHOLD:
+        return
+    if linker_tiny_pointer_slot_count == 0u64:
+        linker_tiny_pointer_first_value <- value
+        linker_tiny_pointer_first_offset <- rel_virtual_addr
+        linker_tiny_pointer_first_type <- rel_type
+        linker_tiny_pointer_first_name <- symbol_name
+        linker_tiny_pointer_first_module <- module_name
+    linker_tiny_pointer_slot_count <- linker_tiny_pointer_slot_count + 1u64
+
+def Linker_TinyPointerSlotCount() -> u64:
+    return linker_tiny_pointer_slot_count
+
+def Linker_TinyPointerFirstValue() -> u64:
+    return linker_tiny_pointer_first_value
+
+def Linker_TinyPointerFirstOffset() -> u64:
+    return linker_tiny_pointer_first_offset
+
+def Linker_TinyPointerFirstType() -> u32:
+    return linker_tiny_pointer_first_type
+
+def Linker_TinyPointerFirstName() -> static u8&?:
+    return linker_tiny_pointer_first_name
+
+def Linker_TinyPointerFirstModule() -> static u8&?:
+    return linker_tiny_pointer_first_module
+
 def Linker_IsQualifiedImportSymbol(raw_symbol: static u8&) -> bool:
     parsed_nid: mutable static u8& = ""
     parsed_library: mutable static u8& = ""
@@ -856,7 +910,7 @@ def Linker_CreateNativeHleBoundaryThunk(target: u64) -> u64:
         cache_index <- cache_index + 1usize
     static if PLATFORM_APPLE and ARCH_X86_64:
         host_selector: u16 = TLS_CaptureHostFsSelector()
-        full: mutable u8[52] = zeroed
+        full: mutable u8[91] = zeroed
         # Capture the guest return address before touching the thunk stack.
         # At thunk entry, (%rsp) is the return PC pushed by the guest call.
         # movq (%rsp), %r11
@@ -871,43 +925,64 @@ def Linker_CreateNativeHleBoundaryThunk(target: u64) -> u64:
         full[14] <- 0x4Du8
         full[15] <- 0x89u8
         full[16] <- 0x1Au8
+        # movabs $ge_runtime_hle_guest_rsp, %r10; movq %rsp, (%r10)
+        full[17] <- 0x49u8
+        full[18] <- 0xBAu8
+        Linker_WriteU64LE(full[0].ref[mutable u8&], 19usize, ge_runtime_hle_guest_rsp.ref[void&].uintptr().u64())
+        full[27] <- 0x49u8
+        full[28] <- 0x89u8
+        full[29] <- 0x22u8
+        # movabs $ge_runtime_hle_guest_rbp, %r10; movq %rbp, (%r10)
+        full[30] <- 0x49u8
+        full[31] <- 0xBAu8
+        Linker_WriteU64LE(full[0].ref[mutable u8&], 32usize, ge_runtime_hle_guest_rbp.ref[void&].uintptr().u64())
+        full[40] <- 0x49u8
+        full[41] <- 0x89u8
+        full[42] <- 0x2Au8
+        # movabs $ge_runtime_hle_guest_rdi, %r10; movq %rdi, (%r10)
+        full[43] <- 0x49u8
+        full[44] <- 0xBAu8
+        Linker_WriteU64LE(full[0].ref[mutable u8&], 45usize, ge_runtime_hle_guest_rdi.ref[void&].uintptr().u64())
+        full[53] <- 0x49u8
+        full[54] <- 0x89u8
+        full[55] <- 0x3Au8
         # Save the live guest selector. Every guest thread has its own %fs, so
         # restoring a baked main-thread selector corrupts worker-thread TLS.
         # push %r10 also fixes the nested SysV call alignment.
-        full[17] <- 0x66u8
-        full[18] <- 0x41u8
-        full[19] <- 0x8Cu8
-        full[20] <- 0xE2u8
-        full[21] <- 0x41u8
-        full[22] <- 0x52u8
+        full[56] <- 0x66u8
+        full[57] <- 0x41u8
+        full[58] <- 0x8Cu8
+        full[59] <- 0xE2u8
+        full[60] <- 0x41u8
+        full[61] <- 0x52u8
         # movw $host_selector, %r10w; movw %r10w, %fs
-        full[23] <- 0x66u8
-        full[24] <- 0x41u8
-        full[25] <- 0xBAu8
-        Linker_WriteU16LE(full[0].ref[mutable u8&], 26usize, host_selector)
-        full[28] <- 0x66u8
-        full[29] <- 0x41u8
-        full[30] <- 0x8Eu8
-        full[31] <- 0xE2u8
+        full[62] <- 0x66u8
+        full[63] <- 0x41u8
+        full[64] <- 0xBAu8
+        Linker_WriteU16LE(full[0].ref[mutable u8&], 65usize, host_selector)
+        full[67] <- 0x66u8
+        full[68] <- 0x41u8
+        full[69] <- 0x8Eu8
+        full[70] <- 0xE2u8
         # movabs $target, %r11; call *%r11
-        full[32] <- 0x49u8
-        full[33] <- 0xBBu8
-        Linker_WriteU64LE(full[0].ref[mutable u8&], 34usize, target)
-        full[42] <- 0x41u8
-        full[43] <- 0xFFu8
-        full[44] <- 0xD3u8
+        full[71] <- 0x49u8
+        full[72] <- 0xBBu8
+        Linker_WriteU64LE(full[0].ref[mutable u8&], 73usize, target)
+        full[81] <- 0x41u8
+        full[82] <- 0xFFu8
+        full[83] <- 0xD3u8
         # pop saved selector into %r10; movw %r10w, %fs; ret
-        full[45] <- 0x41u8
-        full[46] <- 0x5Au8
-        full[47] <- 0x66u8
-        full[48] <- 0x41u8
-        full[49] <- 0x8Eu8
-        full[50] <- 0xE2u8
-        full[51] <- 0xC3u8
+        full[84] <- 0x41u8
+        full[85] <- 0x5Au8
+        full[86] <- 0x66u8
+        full[87] <- 0x41u8
+        full[88] <- 0x8Eu8
+        full[89] <- 0xE2u8
+        full[90] <- 0xC3u8
         thunk: VAddr = GuestExec_AllocateRegion(4096u64, 5u32)
         if thunk == 0.uintptr():
             return target
-        if not GuestExec_WriteBytes(thunk, full[0].ref[void&], 52u64):
+        if not GuestExec_WriteBytes(thunk, full[0].ref[void&], 91u64):
             return target
         if linker_native_hle_thunk_count < LINKER_NATIVE_HLE_THUNK_CAP:
             linker_native_hle_thunk_targets[linker_native_hle_thunk_count] <- target
@@ -958,6 +1033,7 @@ def Linker_ApplyRelocationEntry(self: mutable Linker&, module: mutable Module&, 
     memory: mutable MemoryManager& = Memory_Instance()
     if rel_type == R_X86_64_RELATIVE:
         value: u64 = module.base_virtual_addr.u64() + rel.rel_addend.u64()
+        Linker_NoteRelocatedPointerValue(value, rel_virtual_addr, rel_type, null, module.name)
         if Linker_WriteRelocationU64(module.ref[mutable Module&], memory, rel_virtual_addr, value):
             module.applied_relocation_count <- module.applied_relocation_count + 1
             return true
@@ -973,6 +1049,7 @@ def Linker_ApplyRelocationEntry(self: mutable Linker&, module: mutable Module&, 
             symbol_bind: u8 = ElfSymbol_GetBind(symbol)
             if symbol_bind == STB_LOCAL or ((symbol_bind == STB_GLOBAL or symbol_bind == STB_WEAK) and symbol.st_shndx != ELF_SHN_UNDEF and symbol.st_value != 0):
                 value: u64 = module.base_virtual_addr.u64() + symbol.st_value + addend.u64()
+                Linker_NoteRelocatedPointerValue(value, rel_virtual_addr, rel_type, Module_GetSymbolNameByIndex(module.ref[mutable Module&], symbol_index), module.name)
                 if Linker_WriteRelocationU64(module.ref[mutable Module&], memory, rel_virtual_addr, value):
                     module.applied_relocation_count <- module.applied_relocation_count + 1
                     return true
@@ -1019,6 +1096,7 @@ def Linker_ApplyRelocationEntry(self: mutable Linker&, module: mutable Module&, 
                 else:
                     linker_native_hle_data_relocation_count <- linker_native_hle_data_relocation_count + 1
             value: u64 = resolved_addr + addend.u64()
+            Linker_NoteRelocatedPointerValue(value, rel_virtual_addr, rel_type, symbol_name, module.name)
             if Linker_WriteRelocationU64(module.ref[mutable Module&], memory, rel_virtual_addr, value):
                 module.applied_relocation_count <- module.applied_relocation_count + 1
                 module.patched_import_relocation_count <- module.patched_import_relocation_count + 1
@@ -1086,6 +1164,12 @@ def Linker_RelocateAllImports(self: mutable Linker&) -> void:
     linker_native_hle_unthunked_function_count <- 0
     linker_native_hle_function_addend_count <- 0
     linker_native_hle_function_max_addend <- 0
+    linker_tiny_pointer_slot_count <- 0
+    linker_tiny_pointer_first_value <- 0
+    linker_tiny_pointer_first_offset <- 0
+    linker_tiny_pointer_first_type <- 0u32
+    linker_tiny_pointer_first_name <- null
+    linker_tiny_pointer_first_module <- null
     Linker_ResetFallbackSlots()
     Linker_ResetResolutionFingerprint()
     for i in 0..<self.modules.count:
@@ -1145,7 +1229,7 @@ def Linker_AllocateTlsForThread(self: mutable Linker&, is_primary: bool) -> uint
         if fallback.tcb_self == 0.uintptr():
             fallback.tcb_self <- fallback.ref[mutable Tcb&].cast[uintptr]
         if fallback.tcb_thread == 0.uintptr():
-            fallback.tcb_thread <- fallback.tcb_self
+            fallback.tcb_thread <- Linker_CurrentThreadObject()
         TLS_SetPrimaryTcbBase(fallback.ref[mutable Tcb&].cast[uintptr])
         return fallback.ref[mutable Tcb&].cast[uintptr]
     base: uintptr = raw.cast[uintptr]
@@ -1169,7 +1253,7 @@ def Linker_AllocateTlsForThread(self: mutable Linker&, is_primary: bool) -> uint
         dtv: mutable DtvEntry& = dtv_raw.cast[mutable DtvEntry&]
         tcb.tcb_self <- tcb_addr
         tcb.tcb_dtv <- dtv_raw.cast[uintptr]
-        tcb.tcb_thread <- tcb_addr
+        tcb.tcb_thread <- Linker_CurrentThreadObject()
         tcb.tcb_fiber <- 0.uintptr()
         dtv[0usize].counter <- self.dtv_generation_counter.usize()
         dtv[1usize].counter <- self.max_tls_index.usize()
@@ -1379,6 +1463,19 @@ def Linker_Execute(self: mutable Linker&, args: darray[static u8&]) -> s32:
     memory: mutable MemoryManager& = Memory_Instance()
     MemoryManager_SetupMemoryRegions(memory, ORBIS_KERNEL_FLEXIBLE_MEMORY_SIZE, true, true)
     _ = Linker_AllocateTlsForThread(self.ref[mutable Linker&], true)
+    if GuestExec_IsEnabled() and GuestExec_IsSupported():
+        # shadPS4 starts the game main thread through its pthread runtime, which
+        # switches to a PS4-style stack before RunMainEntry jumps into guest code.
+        # Mirror the same first-stack placement used by ThreadState::CreateStack.
+        guest_stack_guard: VAddr = 0x7EFCB0000.uintptr()
+        guest_stack_base: VAddr = guest_stack_guard + 0x4000.uintptr()
+        guest_stack_size: u64 = 0x120000u64
+        guard_out: mutable VAddr = 0.uintptr()
+        stack_out: mutable VAddr = 0.uintptr()
+        guard_status: s32 = MemoryManager_MapMemory(memory, guard_out.ref[mutable VAddr&], guest_stack_guard, 0x4000u64, MemoryProt_NoAccess, MemoryMapFlags_Fixed, VMAType_Reserved, "main-thread-guard", false, 0.uintptr(), 0x4000u64)
+        stack_status: s32 = MemoryManager_MapMemory(memory, stack_out.ref[mutable VAddr&], guest_stack_base, guest_stack_size, MemoryProt_CpuReadWrite, MemoryMapFlags_Fixed, VMAType_Stack, "main-thread-stack", false, 0.uintptr(), 0x4000u64)
+        if guard_status == 0 and stack_status == 0:
+            GuestExec_SetMainStackTop(stack_out + guest_stack_size.uintptr())
     index: mutable s32 = 0
     mod_ref: mutable Module&? = Linker_GetModule(self.ref[mutable Linker&], index)
     if mod_ref == null:

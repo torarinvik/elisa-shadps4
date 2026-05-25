@@ -399,6 +399,10 @@ def c_GuestExec_AddressNativeProt(address: uintptr) -> u32:
 def c_GuestExec_ReadNativeU64(address: uintptr) -> uintptr:
     return ge_read_native_word(address)
 
+@c_abi(c)
+def c_GuestExec_ReadContextU64(address: uintptr) -> uintptr:
+    return ge_read_context_word(address)
+
 # ============================================================
 # x86_64 signal/ucontext crash-capture foundation (Stage C+D+E, part 1).
 # Inert until the atomic swap wires it in; the signal handler and guards mirror
@@ -719,6 +723,7 @@ extern ElisaGuestExec_CurrentStackPointerAsm() -> uintptr
 extern ElisaGuestExec_EnterMainEntryAsm(params: uintptr, exit_func: uintptr) -> void
 extern ElisaGuestExec_CallMainEntryAsm(entry: uintptr, params: uintptr, exit_func: uintptr) -> void
 extern ElisaGuestExec_JumpMainEntryAsm(entry: uintptr, params: uintptr, exit_func: uintptr) -> void
+extern ElisaGuestExec_JumpMainEntryOnStackAsm(entry: uintptr, params: uintptr, exit_func: uintptr, stack_top: uintptr) -> void
 extern ElisaGuestExec_AeroLibFallbackUnknownStubAsm() -> u64
 
 global mutable ge_fork_report_addr: uintptr = 0.uintptr()
@@ -815,6 +820,8 @@ def ge_jump_main_entry(params: mutable GuestEntryParams&, exit_func: uintptr) ->
         fr.prejump_rdi <- ge_prejump_rdi
         fr.prejump_rsi <- ge_prejump_rsi
         fr.prejump_rsp <- ge_prejump_rsp
+    if guest_exec_main_stack_top != 0.uintptr():
+        ElisaGuestExec_JumpMainEntryOnStackAsm(params.entry_addr, ge_prejump_rdi, ef, guest_exec_main_stack_top)
     ElisaGuestExec_JumpMainEntryAsm(params.entry_addr, ge_prejump_rdi, ef)
 
 def ge_absorb_fork_report() -> void:
@@ -935,6 +942,17 @@ def ge_absorb_fork_report() -> void:
         ge_runtime_hle_recorder_stack_word0 <- fr.runtime_hle_recorder_stack_word0
         ge_runtime_hle_recorder_stack_word1 <- fr.runtime_hle_recorder_stack_word1
         ge_runtime_hle_guest_return_addr <- fr.runtime_hle_guest_return_addr
+        ge_runtime_hle_guest_rsp <- fr.runtime_hle_guest_rsp
+        ge_runtime_hle_guest_rbp <- fr.runtime_hle_guest_rbp
+        ge_runtime_hle_guest_rdi <- fr.runtime_hle_guest_rdi
+        ge_runtime_hle_guest_stack_word0 <- fr.runtime_hle_guest_stack_word0
+        ge_runtime_hle_guest_stack_word1 <- fr.runtime_hle_guest_stack_word1
+        ge_runtime_hle_guest_stack_word2 <- fr.runtime_hle_guest_stack_word2
+        ge_runtime_hle_guest_stack_word3 <- fr.runtime_hle_guest_stack_word3
+        ge_runtime_hle_guest_frame_word0 <- fr.runtime_hle_guest_frame_word0
+        ge_runtime_hle_guest_frame_word1 <- fr.runtime_hle_guest_frame_word1
+        ge_runtime_hle_guest_frame_word2 <- fr.runtime_hle_guest_frame_word2
+        ge_runtime_hle_guest_frame_word3 <- fr.runtime_hle_guest_frame_word3
 
 def ge_run_child_main_entry(params: mutable GuestEntryParams&) -> void:
     ge_set_native_phase(GE_PHASE_CHILD_BRANCH_ENTERED)
@@ -1081,6 +1099,17 @@ def ge_reset_crash_state() -> void:
     ge_runtime_hle_recorder_stack_word0 <- 0.uintptr()
     ge_runtime_hle_recorder_stack_word1 <- 0.uintptr()
     ge_runtime_hle_guest_return_addr <- 0.uintptr()
+    ge_runtime_hle_guest_rsp <- 0.uintptr()
+    ge_runtime_hle_guest_rbp <- 0.uintptr()
+    ge_runtime_hle_guest_rdi <- 0.uintptr()
+    ge_runtime_hle_guest_stack_word0 <- 0.uintptr()
+    ge_runtime_hle_guest_stack_word1 <- 0.uintptr()
+    ge_runtime_hle_guest_stack_word2 <- 0.uintptr()
+    ge_runtime_hle_guest_stack_word3 <- 0.uintptr()
+    ge_runtime_hle_guest_frame_word0 <- 0.uintptr()
+    ge_runtime_hle_guest_frame_word1 <- 0.uintptr()
+    ge_runtime_hle_guest_frame_word2 <- 0.uintptr()
+    ge_runtime_hle_guest_frame_word3 <- 0.uintptr()
     ge_clear_writable_page_cache()
     ge_timeout_fired <- 0
 
@@ -1968,6 +1997,17 @@ global mutable ge_runtime_hle_arg0_word0: uintptr = 0.uintptr()
 global mutable ge_runtime_hle_recorder_stack_word0: uintptr = 0.uintptr()
 global mutable ge_runtime_hle_recorder_stack_word1: uintptr = 0.uintptr()
 global mutable ge_runtime_hle_guest_return_addr: uintptr = 0.uintptr()
+global mutable ge_runtime_hle_guest_rsp: uintptr = 0.uintptr()
+global mutable ge_runtime_hle_guest_rbp: uintptr = 0.uintptr()
+global mutable ge_runtime_hle_guest_rdi: uintptr = 0.uintptr()
+global mutable ge_runtime_hle_guest_stack_word0: uintptr = 0.uintptr()
+global mutable ge_runtime_hle_guest_stack_word1: uintptr = 0.uintptr()
+global mutable ge_runtime_hle_guest_stack_word2: uintptr = 0.uintptr()
+global mutable ge_runtime_hle_guest_stack_word3: uintptr = 0.uintptr()
+global mutable ge_runtime_hle_guest_frame_word0: uintptr = 0.uintptr()
+global mutable ge_runtime_hle_guest_frame_word1: uintptr = 0.uintptr()
+global mutable ge_runtime_hle_guest_frame_word2: uintptr = 0.uintptr()
+global mutable ge_runtime_hle_guest_frame_word3: uintptr = 0.uintptr()
 global mutable ge_failed_relocation_count: u64 = 0u64
 
 @fixed_layout
@@ -2041,6 +2081,17 @@ struct ElisaGuestExecForkReport:
     runtime_hle_recorder_stack_word0: mutable uintptr
     runtime_hle_recorder_stack_word1: mutable uintptr
     runtime_hle_guest_return_addr: mutable uintptr
+    runtime_hle_guest_rsp: mutable uintptr
+    runtime_hle_guest_rbp: mutable uintptr
+    runtime_hle_guest_rdi: mutable uintptr
+    runtime_hle_guest_stack_word0: mutable uintptr
+    runtime_hle_guest_stack_word1: mutable uintptr
+    runtime_hle_guest_stack_word2: mutable uintptr
+    runtime_hle_guest_stack_word3: mutable uintptr
+    runtime_hle_guest_frame_word0: mutable uintptr
+    runtime_hle_guest_frame_word1: mutable uintptr
+    runtime_hle_guest_frame_word2: mutable uintptr
+    runtime_hle_guest_frame_word3: mutable uintptr
 
 global mutable ge_fork_report: ElisaGuestExecForkReport&? = null
 
@@ -2065,6 +2116,16 @@ def c_GuestExec_RecordRuntimeHle(module: static u8&?, symbol: static u8&?, arg0:
         ge_runtime_hle_recorder_stack_word1 <- ge_read_context_word(sp + 8.uintptr())
     fr: ElisaGuestExecForkReport&? = ge_fork_report
     if fr != null:
+        if ge_runtime_hle_guest_rsp != 0.uintptr():
+            ge_runtime_hle_guest_stack_word0 <- ge_read_context_word(ge_runtime_hle_guest_rsp)
+            ge_runtime_hle_guest_stack_word1 <- ge_read_context_word(ge_runtime_hle_guest_rsp + 8.uintptr())
+            ge_runtime_hle_guest_stack_word2 <- ge_read_context_word(ge_runtime_hle_guest_rsp + 16.uintptr())
+            ge_runtime_hle_guest_stack_word3 <- ge_read_context_word(ge_runtime_hle_guest_rsp + 24.uintptr())
+        if ge_runtime_hle_guest_rbp != 0.uintptr():
+            ge_runtime_hle_guest_frame_word0 <- ge_read_context_word(ge_runtime_hle_guest_rbp)
+            ge_runtime_hle_guest_frame_word1 <- ge_read_context_word(ge_runtime_hle_guest_rbp + 8.uintptr())
+            ge_runtime_hle_guest_frame_word2 <- ge_read_context_word(ge_runtime_hle_guest_rbp + 16.uintptr())
+            ge_runtime_hle_guest_frame_word3 <- ge_read_context_word(ge_runtime_hle_guest_rbp + 24.uintptr())
         fr.runtime_hle_module <- ge_runtime_hle_module
         fr.runtime_hle_symbol <- ge_runtime_hle_symbol
         fr.runtime_hle_arg0 <- arg0
@@ -2076,6 +2137,17 @@ def c_GuestExec_RecordRuntimeHle(module: static u8&?, symbol: static u8&?, arg0:
         fr.runtime_hle_recorder_stack_word0 <- ge_runtime_hle_recorder_stack_word0
         fr.runtime_hle_recorder_stack_word1 <- ge_runtime_hle_recorder_stack_word1
         fr.runtime_hle_guest_return_addr <- ge_runtime_hle_guest_return_addr
+        fr.runtime_hle_guest_rsp <- ge_runtime_hle_guest_rsp
+        fr.runtime_hle_guest_rbp <- ge_runtime_hle_guest_rbp
+        fr.runtime_hle_guest_rdi <- ge_runtime_hle_guest_rdi
+        fr.runtime_hle_guest_stack_word0 <- ge_runtime_hle_guest_stack_word0
+        fr.runtime_hle_guest_stack_word1 <- ge_runtime_hle_guest_stack_word1
+        fr.runtime_hle_guest_stack_word2 <- ge_runtime_hle_guest_stack_word2
+        fr.runtime_hle_guest_stack_word3 <- ge_runtime_hle_guest_stack_word3
+        fr.runtime_hle_guest_frame_word0 <- ge_runtime_hle_guest_frame_word0
+        fr.runtime_hle_guest_frame_word1 <- ge_runtime_hle_guest_frame_word1
+        fr.runtime_hle_guest_frame_word2 <- ge_runtime_hle_guest_frame_word2
+        fr.runtime_hle_guest_frame_word3 <- ge_runtime_hle_guest_frame_word3
 
 def c_GuestExec_RuntimeHleModule() -> static u8&:
     s: static u8&? = ge_runtime_hle_module
@@ -2112,6 +2184,50 @@ def c_GuestExec_RuntimeHleRecorderStackWord1() -> uintptr:
 def c_GuestExec_RuntimeHleGuestReturnAddr() -> uintptr:
     return ge_runtime_hle_guest_return_addr
 
+@c_abi(c)
+def c_GuestExec_RuntimeHleGuestRsp() -> uintptr:
+    return ge_runtime_hle_guest_rsp
+
+@c_abi(c)
+def c_GuestExec_RuntimeHleGuestRbp() -> uintptr:
+    return ge_runtime_hle_guest_rbp
+
+@c_abi(c)
+def c_GuestExec_RuntimeHleGuestRdi() -> uintptr:
+    return ge_runtime_hle_guest_rdi
+
+@c_abi(c)
+def c_GuestExec_RuntimeHleGuestStackWord0() -> uintptr:
+    return ge_runtime_hle_guest_stack_word0
+
+@c_abi(c)
+def c_GuestExec_RuntimeHleGuestStackWord1() -> uintptr:
+    return ge_runtime_hle_guest_stack_word1
+
+@c_abi(c)
+def c_GuestExec_RuntimeHleGuestStackWord2() -> uintptr:
+    return ge_runtime_hle_guest_stack_word2
+
+@c_abi(c)
+def c_GuestExec_RuntimeHleGuestStackWord3() -> uintptr:
+    return ge_runtime_hle_guest_stack_word3
+
+@c_abi(c)
+def c_GuestExec_RuntimeHleGuestFrameWord0() -> uintptr:
+    return ge_runtime_hle_guest_frame_word0
+
+@c_abi(c)
+def c_GuestExec_RuntimeHleGuestFrameWord1() -> uintptr:
+    return ge_runtime_hle_guest_frame_word1
+
+@c_abi(c)
+def c_GuestExec_RuntimeHleGuestFrameWord2() -> uintptr:
+    return ge_runtime_hle_guest_frame_word2
+
+@c_abi(c)
+def c_GuestExec_RuntimeHleGuestFrameWord3() -> uintptr:
+    return ge_runtime_hle_guest_frame_word3
+
 global mutable guest_exec_enabled: bool = false
 global mutable guest_exec_probe_mode: bool = false
 global mutable guest_exec_last_map_result: s32 = 0
@@ -2130,6 +2246,7 @@ global mutable guest_exec_last_hle_symbol: static u8&? = null
 global mutable guest_exec_first_boundary_reached: bool = false
 global mutable guest_exec_first_boundary_reason: s32 = 0
 global mutable guest_exec_execution_stage: s32 = 0
+global mutable guest_exec_main_stack_top: VAddr = 0.uintptr()
 
 const GUEST_EXEC_STAGE_NONE: s32 = 0
 const GUEST_EXEC_STAGE_LOAD: s32 = 1
@@ -2199,6 +2316,7 @@ def GuestExec_ResetState() -> void:
     guest_exec_first_boundary_reached <- false
     guest_exec_first_boundary_reason <- GUEST_EXEC_BOUNDARY_REASON_NONE
     guest_exec_execution_stage <- GUEST_EXEC_STAGE_NONE
+    guest_exec_main_stack_top <- 0.uintptr()
     c_GuestExec_ResetCrashState()
 
 def GuestExec_Enable(enabled: bool) -> void:
@@ -2206,6 +2324,9 @@ def GuestExec_Enable(enabled: bool) -> void:
 
 def GuestExec_SetProbeMode(enabled: bool) -> void:
     guest_exec_probe_mode <- enabled
+
+def GuestExec_SetMainStackTop(stack_top: VAddr) -> void:
+    guest_exec_main_stack_top <- stack_top
 
 def GuestExec_IsEnabled() -> bool:
     return guest_exec_enabled and (guest_exec_probe_mode or GuestExec_IsSupported())
@@ -2314,6 +2435,11 @@ def GuestExec_ReadNativeU64(address: VAddr) -> VAddr:
     if not GuestExec_IsEnabled() or not GuestExec_IsSupported():
         return 0.uintptr()
     return c_GuestExec_ReadNativeU64(address)
+
+def GuestExec_ReadContextU64(address: VAddr) -> VAddr:
+    if not GuestExec_IsEnabled() or not GuestExec_IsSupported():
+        return 0.uintptr()
+    return c_GuestExec_ReadContextU64(address)
 
 def GuestExec_RecordHandoff(entry_addr: VAddr, argc: int, is_main_executable: bool) -> void:
     guest_exec_last_entry_addr <- entry_addr
@@ -2759,6 +2885,39 @@ def GuestExec_RuntimeHleRecorderStackWord1() -> VAddr:
 
 def GuestExec_RuntimeHleGuestReturnAddr() -> VAddr:
     return c_GuestExec_RuntimeHleGuestReturnAddr()
+
+def GuestExec_RuntimeHleGuestRsp() -> VAddr:
+    return c_GuestExec_RuntimeHleGuestRsp()
+
+def GuestExec_RuntimeHleGuestRbp() -> VAddr:
+    return c_GuestExec_RuntimeHleGuestRbp()
+
+def GuestExec_RuntimeHleGuestRdi() -> VAddr:
+    return c_GuestExec_RuntimeHleGuestRdi()
+
+def GuestExec_RuntimeHleGuestStackWord0() -> VAddr:
+    return c_GuestExec_RuntimeHleGuestStackWord0()
+
+def GuestExec_RuntimeHleGuestStackWord1() -> VAddr:
+    return c_GuestExec_RuntimeHleGuestStackWord1()
+
+def GuestExec_RuntimeHleGuestStackWord2() -> VAddr:
+    return c_GuestExec_RuntimeHleGuestStackWord2()
+
+def GuestExec_RuntimeHleGuestStackWord3() -> VAddr:
+    return c_GuestExec_RuntimeHleGuestStackWord3()
+
+def GuestExec_RuntimeHleGuestFrameWord0() -> VAddr:
+    return c_GuestExec_RuntimeHleGuestFrameWord0()
+
+def GuestExec_RuntimeHleGuestFrameWord1() -> VAddr:
+    return c_GuestExec_RuntimeHleGuestFrameWord1()
+
+def GuestExec_RuntimeHleGuestFrameWord2() -> VAddr:
+    return c_GuestExec_RuntimeHleGuestFrameWord2()
+
+def GuestExec_RuntimeHleGuestFrameWord3() -> VAddr:
+    return c_GuestExec_RuntimeHleGuestFrameWord3()
 
 def GuestExec_LastHleModule() -> static u8&?:
     return guest_exec_last_hle_module
