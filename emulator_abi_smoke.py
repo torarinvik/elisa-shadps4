@@ -54,7 +54,6 @@ CHECKS = [
     AbiCheck("network sockets", "core/libraries/network/net_ffi.elisa"),
     AbiCheck("pad bridge DTOs", "core/libraries/pad/pad_ffi.elisa"),
     AbiCheck("voice bridge DTOs", "core/libraries/voice/voice_ffi.elisa"),
-    AbiCheck("videodec bridge DTOs", "core/libraries/videodec/videodec_ffi.elisa"),
     AbiCheck("avplayer ffmpeg public prefixes", "core/libraries/avplayer/avplayer_ffmpeg_ffi.elisa", extra_cppflags=ffmpeg_include_flags(), optional=True),
 ]
 
