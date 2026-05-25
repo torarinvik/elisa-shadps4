@@ -2,15 +2,33 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 include "../common/types.elisa"
+include "../common/arch.elisa"
 include "./module.elisa"
 include "./loader/elf.elisa"
 include "./memory.elisa"
 include "./guest_exec.elisa"
 include "./tls.elisa"
 
+extern getenv(name: u8&) -> u8&?
+
+const LINKER_NATIVE_HLE_THUNK_CAP: usize = 2048usize
+
+global mutable linker_native_hle_thunk_targets: u64[2048] = zeroed
+global mutable linker_native_hle_thunk_addrs: u64[2048] = zeroed
+global mutable linker_native_hle_thunk_count: usize = 0usize
+global mutable linker_native_hle_function_relocation_count: u64 = 0
+global mutable linker_native_hle_data_relocation_count: u64 = 0
+global mutable linker_native_hle_unthunked_function_count: u64 = 0
+global mutable linker_native_hle_function_addend_count: u64 = 0
+global mutable linker_native_hle_function_max_addend: u64 = 0
+
 struct SymbolRecord:
     name: mutable static u8&
     nid_name: mutable static u8&
+    library: mutable static u8&
+    library_version: mutable u16
+    module: mutable static u8&
+    symbol_type: mutable u8
     virtual_address: mutable u64
     callable_address: mutable u64
 
@@ -73,6 +91,15 @@ struct Linker:
     last_failed_relocation_offset: mutable u64
     last_failed_relocation_module: mutable static u8&?
     last_failed_relocation_name: mutable static u8&?
+    last_failed_relocation_stage: mutable u32
+    last_failed_relocation_kind: mutable u8
+    last_failed_relocation_value: mutable u64
+    failed_relocation_type1_count: mutable usize
+    failed_relocation_glob_dat_count: mutable usize
+    failed_relocation_jump_slot_count: mutable usize
+    failed_relocation_relative_count: mutable usize
+    failed_relocation_dtpmod64_count: mutable usize
+    failed_relocation_other_count: mutable usize
     last_started_module_index: mutable s32
     last_start_result: mutable s32
     last_entry_addr: mutable VAddr
@@ -105,6 +132,15 @@ global mutable linker_singleton: Linker = Linker(
     0u64,
     null,
     null,
+    0u32,
+    0u8,
+    0u64,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
     -1,
     0,
     0.uintptr(),
@@ -139,6 +175,15 @@ def Linker_New() -> Linker:
         0u64,
         null,
         null,
+        0u32,
+        0u8,
+        0u64,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
         -1,
         0,
         0.uintptr(),
@@ -192,13 +237,16 @@ def SymbolsResolver_AddSymbol(self: mutable SymbolsResolver&, nid: static u8&, n
     SymbolsResolver_AddBoundSymbol(self, nid, name, virtual_address, virtual_address)
 
 def SymbolsResolver_AddBoundSymbol(self: mutable SymbolsResolver&, nid: static u8&, name: static u8&, virtual_address: u64, callable_address: u64) -> void:
+    SymbolsResolver_AddBoundSymbolForLibrary(self, nid, name, "", 0u16, "", IMPORT_SYMBOL_TYPE_UNKNOWN, virtual_address, callable_address)
+
+def SymbolsResolver_AddBoundSymbolForLibrary(self: mutable SymbolsResolver&, nid: static u8&, name: static u8&, library: static u8&, library_version: u16, module: static u8&, symbol_type: u8, virtual_address: u64, callable_address: u64) -> void:
     # The HLE symbol table outlives this call, so its backing storage must be
     # allocated from the persistent metadata arena. Using a transient local
     # arena here freed the darray backing on return, leaving the resolver table
     # in use-after-free memory and making import resolution nondeterministic.
     owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
     in owner:
-        self.symbols.push(SymbolRecord(nid, name, virtual_address, callable_address))
+        self.symbols.push(SymbolRecord(nid, name, library, library_version, module, symbol_type, virtual_address, callable_address))
 
 def SymbolsResolver_Count(self: SymbolsResolver&) -> usize:
     return self.symbols.count
@@ -206,6 +254,31 @@ def SymbolsResolver_Count(self: SymbolsResolver&) -> usize:
 def SymbolsResolver_FindByNid(self: SymbolsResolver&, nid: static u8&) -> s32:
     for i in 0..<self.symbols.count:
         if streq(self.symbols[i].name, nid) == 1:
+            return i.s32()
+    return -1
+
+def SymbolsResolver_FindHleSymbol(self: SymbolsResolver&, nid: static u8&, library: static u8&, library_version: u16, module: static u8&, symbol_type: u8) -> s32:
+    for i in 0..<self.symbols.count:
+        sym: SymbolRecord = self.symbols[i]
+        if streq(sym.nid_name, nid) != 1 and not Linker_NameMatchesNid(sym.name, nid):
+            continue
+        if static_strlen(sym.library) == 0 or static_strlen(sym.module) == 0:
+            continue
+        if streq(sym.library, library) != 1:
+            continue
+        if sym.library_version != library_version:
+            continue
+        if streq(sym.module, module) != 1:
+            continue
+        if symbol_type != IMPORT_SYMBOL_TYPE_UNKNOWN and sym.symbol_type != IMPORT_SYMBOL_TYPE_UNKNOWN and sym.symbol_type != symbol_type:
+            continue
+        return i.s32()
+    return -1
+
+def SymbolsResolver_FindHleSymbolByNidOnly(self: SymbolsResolver&, nid: static u8&) -> s32:
+    for i in 0..<self.symbols.count:
+        sym: SymbolRecord = self.symbols[i]
+        if Linker_NameMatchesNid(sym.name, nid) or streq(sym.nid_name, nid) == 1:
             return i.s32()
     return -1
 
@@ -677,15 +750,189 @@ def Linker_LoadDependencyClosure(self: mutable Linker&) -> void:
     if self.modules.count != initial_count:
         self.relocated_all_imports <- false
 
+def Linker_WriteU16LE(out: mutable u8&, offset: usize, value: u16) -> void:
+    out[offset] <- (value & 0xffu16).u8()
+    out[offset + 1usize] <- ((value >> 8u16) & 0xffu16).u8()
+
+def Linker_WriteU64LE(out: mutable u8&, offset: usize, value: u64) -> void:
+    i: mutable usize = 0
+    while i < 8usize:
+        shift: u64 = (i.u64() * 8u64)
+        out[offset + i] <- ((value >> shift) & 0xffu64).u8()
+        i <- i + 1usize
+
+def Linker_UseNativeHleBoundaryThunk() -> bool:
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        return getenv("ELISA_GUEST_EXEC_NO_FORK".cast[u8&]) != null or getenv("ELISA_GUEST_EXEC_BOUNDARY_THUNK".cast[u8&]) != null
+    static else:
+        return false
+
+def Linker_NativeHleBoundaryThunkCount() -> u64:
+    return linker_native_hle_thunk_count.u64()
+
+def Linker_NativeHleBoundaryThunkEnabled() -> bool:
+    return Linker_UseNativeHleBoundaryThunk()
+
+def Linker_FindNativeHleBoundaryThunkBase(address: u64) -> u64:
+    i: mutable usize = 0usize
+    while i < linker_native_hle_thunk_count and i < LINKER_NATIVE_HLE_THUNK_CAP:
+        base: u64 = linker_native_hle_thunk_addrs[i]
+        if address >= base and address < base + 4096u64:
+            return base
+        i <- i + 1usize
+    return 0u64
+
+def Linker_FindNativeHleBoundaryThunkTarget(address: u64) -> u64:
+    i: mutable usize = 0usize
+    while i < linker_native_hle_thunk_count and i < LINKER_NATIVE_HLE_THUNK_CAP:
+        base: u64 = linker_native_hle_thunk_addrs[i]
+        if address >= base and address < base + 4096u64:
+            return linker_native_hle_thunk_targets[i]
+        i <- i + 1usize
+    return 0u64
+
+def Linker_NativeHleFunctionRelocationCount() -> u64:
+    return linker_native_hle_function_relocation_count
+
+def Linker_NativeHleDataRelocationCount() -> u64:
+    return linker_native_hle_data_relocation_count
+
+def Linker_NativeHleUnthunkedFunctionCount() -> u64:
+    return linker_native_hle_unthunked_function_count
+
+def Linker_NativeHleFunctionAddendCount() -> u64:
+    return linker_native_hle_function_addend_count
+
+def Linker_NativeHleFunctionMaxAddend() -> u64:
+    return linker_native_hle_function_max_addend
+
+def Linker_IsQualifiedImportSymbol(raw_symbol: static u8&) -> bool:
+    parsed_nid: mutable static u8& = ""
+    parsed_library: mutable static u8& = ""
+    parsed_module: mutable static u8& = ""
+    if not Module_ParseImportSymbol(raw_symbol, parsed_nid.ref[mutable static u8&], parsed_library.ref[mutable static u8&], parsed_module.ref[mutable static u8&]):
+        return false
+    return static_strlen(parsed_library) > 0 and static_strlen(parsed_module) > 0
+
+def Linker_WriteRelocationU64(module: mutable Module&, memory: mutable MemoryManager&, addr: u64, value: u64) -> bool:
+    image_ok: bool = Module_WriteImageU64(module.ref[mutable Module&], addr, value)
+    memory_ok: bool = MemoryManager_WriteU64(memory, addr.uintptr(), value)
+    return image_ok or memory_ok
+
+def Linker_RecordFailedRelocationType(self: mutable Linker&, rel_type: u32) -> void:
+    if rel_type == R_X86_64_64:
+        self.failed_relocation_type1_count <- self.failed_relocation_type1_count + 1
+    elif rel_type == R_X86_64_GLOB_DAT:
+        self.failed_relocation_glob_dat_count <- self.failed_relocation_glob_dat_count + 1
+    elif rel_type == R_X86_64_JUMP_SLOT:
+        self.failed_relocation_jump_slot_count <- self.failed_relocation_jump_slot_count + 1
+    elif rel_type == R_X86_64_RELATIVE:
+        self.failed_relocation_relative_count <- self.failed_relocation_relative_count + 1
+    elif rel_type == R_X86_64_DTPMOD64:
+        self.failed_relocation_dtpmod64_count <- self.failed_relocation_dtpmod64_count + 1
+    else:
+        self.failed_relocation_other_count <- self.failed_relocation_other_count + 1
+
+def Linker_RecordFailedRelocationDetail(self: mutable Linker&, stage: u32, kind: u8, value: u64) -> void:
+    self.last_failed_relocation_stage <- stage
+    self.last_failed_relocation_kind <- kind
+    self.last_failed_relocation_value <- value
+
+def Linker_ShouldThunkNativeHleRelocation(rel_type: u32, symbol_found: bool, symbol: elf_symbol) -> bool:
+    if not symbol_found:
+        return rel_type == R_X86_64_JUMP_SLOT
+    typ: u8 = ElfSymbol_GetType(symbol)
+    return typ == STT_FUN or (typ == STT_NOTYPE and rel_type == R_X86_64_JUMP_SLOT)
+
+def Linker_CreateNativeHleBoundaryThunk(target: u64) -> u64:
+    if target == 0u64:
+        return 0u64
+    if not Linker_UseNativeHleBoundaryThunk():
+        return target
+    cache_index: mutable usize = 0usize
+    while cache_index < linker_native_hle_thunk_count and cache_index < LINKER_NATIVE_HLE_THUNK_CAP:
+        if linker_native_hle_thunk_targets[cache_index] == target:
+            return linker_native_hle_thunk_addrs[cache_index]
+        cache_index <- cache_index + 1usize
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        host_selector: u16 = TLS_CaptureHostFsSelector()
+        full: mutable u8[52] = zeroed
+        # Capture the guest return address before touching the thunk stack.
+        # At thunk entry, (%rsp) is the return PC pushed by the guest call.
+        # movq (%rsp), %r11
+        full[0] <- 0x4Cu8
+        full[1] <- 0x8Bu8
+        full[2] <- 0x1Cu8
+        full[3] <- 0x24u8
+        # movabs $ge_runtime_hle_guest_return_addr, %r10; movq %r11, (%r10)
+        full[4] <- 0x49u8
+        full[5] <- 0xBAu8
+        Linker_WriteU64LE(full[0].ref[mutable u8&], 6usize, ge_runtime_hle_guest_return_addr.ref[void&].uintptr().u64())
+        full[14] <- 0x4Du8
+        full[15] <- 0x89u8
+        full[16] <- 0x1Au8
+        # Save the live guest selector. Every guest thread has its own %fs, so
+        # restoring a baked main-thread selector corrupts worker-thread TLS.
+        # push %r10 also fixes the nested SysV call alignment.
+        full[17] <- 0x66u8
+        full[18] <- 0x41u8
+        full[19] <- 0x8Cu8
+        full[20] <- 0xE2u8
+        full[21] <- 0x41u8
+        full[22] <- 0x52u8
+        # movw $host_selector, %r10w; movw %r10w, %fs
+        full[23] <- 0x66u8
+        full[24] <- 0x41u8
+        full[25] <- 0xBAu8
+        Linker_WriteU16LE(full[0].ref[mutable u8&], 26usize, host_selector)
+        full[28] <- 0x66u8
+        full[29] <- 0x41u8
+        full[30] <- 0x8Eu8
+        full[31] <- 0xE2u8
+        # movabs $target, %r11; call *%r11
+        full[32] <- 0x49u8
+        full[33] <- 0xBBu8
+        Linker_WriteU64LE(full[0].ref[mutable u8&], 34usize, target)
+        full[42] <- 0x41u8
+        full[43] <- 0xFFu8
+        full[44] <- 0xD3u8
+        # pop saved selector into %r10; movw %r10w, %fs; ret
+        full[45] <- 0x41u8
+        full[46] <- 0x5Au8
+        full[47] <- 0x66u8
+        full[48] <- 0x41u8
+        full[49] <- 0x8Eu8
+        full[50] <- 0xE2u8
+        full[51] <- 0xC3u8
+        thunk: VAddr = GuestExec_AllocateRegion(4096u64, 5u32)
+        if thunk == 0.uintptr():
+            return target
+        if not GuestExec_WriteBytes(thunk, full[0].ref[void&], 52u64):
+            return target
+        if linker_native_hle_thunk_count < LINKER_NATIVE_HLE_THUNK_CAP:
+            linker_native_hle_thunk_targets[linker_native_hle_thunk_count] <- target
+            linker_native_hle_thunk_addrs[linker_native_hle_thunk_count] <- thunk.u64()
+            linker_native_hle_thunk_count <- linker_native_hle_thunk_count + 1usize
+        return thunk.u64()
+    static else:
+        return target
+
 def Linker_RelocateAnyImports(self: mutable Linker&, module: mutable Module&) -> void:
     for i in 0..<module.import_symbols.count:
         self.last_total_import_count <- self.last_total_import_count + 1
         resolved_addr: mutable u64 = 0
         resolved_kind: mutable u8 = IMPORT_RESOLUTION_UNRESOLVED
         import_symbol: ImportSymbolRecord = module.import_symbols[i]
-        resolved: mutable bool = Linker_Resolve(self.ref[mutable Linker&], import_symbol.nid, module, resolved_addr.ref[mutable u64&], resolved_kind.ref[mutable u8&])
-        if not resolved:
+        qualified_raw: bool = Linker_IsQualifiedImportSymbol(import_symbol.raw_symbol)
+        resolved: mutable bool = false
+        if qualified_raw:
             resolved <- Linker_Resolve(self.ref[mutable Linker&], import_symbol.raw_symbol, module, resolved_addr.ref[mutable u64&], resolved_kind.ref[mutable u8&])
+            if not resolved:
+                resolved <- Linker_Resolve(self.ref[mutable Linker&], import_symbol.nid, module, resolved_addr.ref[mutable u64&], resolved_kind.ref[mutable u8&])
+        else:
+            resolved <- Linker_Resolve(self.ref[mutable Linker&], import_symbol.nid, module, resolved_addr.ref[mutable u64&], resolved_kind.ref[mutable u8&])
+            if not resolved:
+                resolved <- Linker_Resolve(self.ref[mutable Linker&], import_symbol.raw_symbol, module, resolved_addr.ref[mutable u64&], resolved_kind.ref[mutable u8&])
         module.import_symbols[i].resolved <- resolved
         module.import_symbols[i].resolved_virtual_addr <- resolved_addr
         module.import_symbols[i].resolution_kind <- resolved_kind
@@ -711,24 +958,26 @@ def Linker_ApplyRelocationEntry(self: mutable Linker&, module: mutable Module&, 
     memory: mutable MemoryManager& = Memory_Instance()
     if rel_type == R_X86_64_RELATIVE:
         value: u64 = module.base_virtual_addr.u64() + rel.rel_addend.u64()
-        if Module_WriteImageU64(module.ref[mutable Module&], rel_virtual_addr, value):
-            _ = MemoryManager_WriteU64(memory, rel_virtual_addr.uintptr(), value)
+        if Linker_WriteRelocationU64(module.ref[mutable Module&], memory, rel_virtual_addr, value):
             module.applied_relocation_count <- module.applied_relocation_count + 1
             return true
+        Linker_RecordFailedRelocationDetail(self.ref[mutable Linker&], 1u32, IMPORT_RESOLUTION_UNRESOLVED, value)
         return false
     if rel_type == R_X86_64_64 or rel_type == R_X86_64_GLOB_DAT or rel_type == R_X86_64_JUMP_SLOT:
         addend: mutable i64 = rel.rel_addend
         if rel_type == R_X86_64_GLOB_DAT or rel_type == R_X86_64_JUMP_SLOT:
             addend <- 0
         symbol: mutable elf_symbol = zeroed
-        if Module_GetSymbolByIndex(module, symbol_index, symbol.ref[mutable elf_symbol&]):
+        symbol_found: bool = Module_GetSymbolByIndex(module, symbol_index, symbol.ref[mutable elf_symbol&])
+        if symbol_found:
             symbol_bind: u8 = ElfSymbol_GetBind(symbol)
             if symbol_bind == STB_LOCAL or ((symbol_bind == STB_GLOBAL or symbol_bind == STB_WEAK) and symbol.st_shndx != ELF_SHN_UNDEF and symbol.st_value != 0):
                 value: u64 = module.base_virtual_addr.u64() + symbol.st_value + addend.u64()
-                if Module_WriteImageU64(module.ref[mutable Module&], rel_virtual_addr, value):
-                    _ = MemoryManager_WriteU64(memory, rel_virtual_addr.uintptr(), value)
+                if Linker_WriteRelocationU64(module.ref[mutable Module&], memory, rel_virtual_addr, value):
                     module.applied_relocation_count <- module.applied_relocation_count + 1
                     return true
+                Linker_RecordFailedRelocationDetail(self.ref[mutable Linker&], 2u32, IMPORT_RESOLUTION_PRX_EXPORT, value)
+                return false
         symbol_name: static u8& = Module_GetSymbolNameByIndex(module.ref[mutable Module&], symbol_index)
         resolved_addr: mutable u64 = 0
         rel_kind: mutable u8 = IMPORT_RESOLUTION_UNRESOLVED
@@ -737,6 +986,7 @@ def Linker_ApplyRelocationEntry(self: mutable Linker&, module: mutable Module&, 
             import_index: s32 = Module_FindImportByName(module, symbol_name)
             if import_index >= 0 and module.import_symbols[import_index.usize()].resolved:
                 resolved_addr <- module.import_symbols[import_index.usize()].resolved_virtual_addr
+                rel_kind <- module.import_symbols[import_index.usize()].resolution_kind
                 resolved <- true
         if not resolved and (rel_type == R_X86_64_JUMP_SLOT or rel_type == R_X86_64_GLOB_DAT):
             # Unresolved function-slot relocation: patch with the native fallback
@@ -747,24 +997,41 @@ def Linker_ApplyRelocationEntry(self: mutable Linker&, module: mutable Module&, 
             resolved <- true
         Linker_MixResolution(symbol_index, resolved_addr == GuestExec_AeroLibFallbackStubAddress().u64(), rel_type, symbol_name)
         if resolved:
-            value: u64 = resolved_addr + addend.u64()
             # Record every slot that ends up holding the fallback stub, no matter
             # which resolution path produced it (Linker_Resolve's built-in final
             # fallback also returns the stub address), so the runtime fallback
             # boundary can be attributed back to this relocation's symbol.
             if resolved_addr == GuestExec_AeroLibFallbackStubAddress().u64():
                 Linker_RecordFallbackSlot(rel_virtual_addr, symbol_name, symbol_index, rel_type, module.name)
-            if Module_WriteImageU64(module.ref[mutable Module&], rel_virtual_addr, value):
-                _ = MemoryManager_WriteU64(memory, rel_virtual_addr.uintptr(), value)
+            if rel_kind == IMPORT_RESOLUTION_NATIVE_HLE:
+                should_thunk_native_hle: bool = Linker_ShouldThunkNativeHleRelocation(rel_type, symbol_found, symbol)
+                if should_thunk_native_hle:
+                    linker_native_hle_function_relocation_count <- linker_native_hle_function_relocation_count + 1
+                    if addend != 0:
+                        linker_native_hle_function_addend_count <- linker_native_hle_function_addend_count + 1
+                        abs_addend: u64 = addend.u64() if addend >= 0 else (0i64 - addend).u64()
+                        if abs_addend > linker_native_hle_function_max_addend:
+                            linker_native_hle_function_max_addend <- abs_addend
+                    raw_native_hle_addr: u64 = resolved_addr
+                    resolved_addr <- Linker_CreateNativeHleBoundaryThunk(resolved_addr)
+                    if Linker_UseNativeHleBoundaryThunk() and raw_native_hle_addr != 0u64 and resolved_addr == raw_native_hle_addr:
+                        linker_native_hle_unthunked_function_count <- linker_native_hle_unthunked_function_count + 1
+                else:
+                    linker_native_hle_data_relocation_count <- linker_native_hle_data_relocation_count + 1
+            value: u64 = resolved_addr + addend.u64()
+            if Linker_WriteRelocationU64(module.ref[mutable Module&], memory, rel_virtual_addr, value):
                 module.applied_relocation_count <- module.applied_relocation_count + 1
                 module.patched_import_relocation_count <- module.patched_import_relocation_count + 1
                 return true
+            Linker_RecordFailedRelocationDetail(self.ref[mutable Linker&], 4u32, rel_kind, value)
+            return false
+        Linker_RecordFailedRelocationDetail(self.ref[mutable Linker&], 3u32, rel_kind, resolved_addr)
         return false
     if rel_type == R_X86_64_DTPMOD64:
-        if Module_WriteImageU64(module.ref[mutable Module&], rel_virtual_addr, module.tls.modid.u64()):
-            _ = MemoryManager_WriteU64(memory, rel_virtual_addr.uintptr(), module.tls.modid.u64())
+        if Linker_WriteRelocationU64(module.ref[mutable Module&], memory, rel_virtual_addr, module.tls.modid.u64()):
             module.applied_relocation_count <- module.applied_relocation_count + 1
             return true
+        Linker_RecordFailedRelocationDetail(self.ref[mutable Linker&], 5u32, IMPORT_RESOLUTION_UNRESOLVED, module.tls.modid.u64())
     return false
 
 def Linker_ApplyRelocationTable(self: mutable Linker&, module: mutable Module&, table_offset: u64, table_size: u64, entry_size: u64) -> void:
@@ -776,8 +1043,10 @@ def Linker_ApplyRelocationTable(self: mutable Linker&, module: mutable Module&, 
         if offset + size_of(elf_relocation).u64() <= module.dynamic_data.count.u64():
             rel: elf_relocation = Module_ReadRelocationAt(module, offset.usize())
             if not Linker_ApplyRelocationEntry(self.ref[mutable Linker&], module.ref[mutable Module&], rel):
+                rel_type: u32 = (rel.rel_info & 0xffffffff.u64()).u32()
                 self.last_failed_relocation_count <- self.last_failed_relocation_count + 1
-                self.last_failed_relocation_type <- (rel.rel_info & 0xffffffff.u64()).u32()
+                Linker_RecordFailedRelocationType(self.ref[mutable Linker&], rel_type)
+                self.last_failed_relocation_type <- rel_type
                 self.last_failed_relocation_symbol <- (rel.rel_info >> 32.u64()).u32()
                 self.last_failed_relocation_offset <- rel.rel_offset
                 self.last_failed_relocation_module <- module.name
@@ -802,6 +1071,21 @@ def Linker_RelocateAllImports(self: mutable Linker&) -> void:
     self.last_failed_relocation_offset <- 0u64
     self.last_failed_relocation_module <- null
     self.last_failed_relocation_name <- null
+    self.last_failed_relocation_stage <- 0u32
+    self.last_failed_relocation_kind <- IMPORT_RESOLUTION_UNRESOLVED
+    self.last_failed_relocation_value <- 0u64
+    self.failed_relocation_type1_count <- 0
+    self.failed_relocation_glob_dat_count <- 0
+    self.failed_relocation_jump_slot_count <- 0
+    self.failed_relocation_relative_count <- 0
+    self.failed_relocation_dtpmod64_count <- 0
+    self.failed_relocation_other_count <- 0
+    linker_native_hle_thunk_count <- 0usize
+    linker_native_hle_function_relocation_count <- 0
+    linker_native_hle_data_relocation_count <- 0
+    linker_native_hle_unthunked_function_count <- 0
+    linker_native_hle_function_addend_count <- 0
+    linker_native_hle_function_max_addend <- 0
     Linker_ResetFallbackSlots()
     Linker_ResetResolutionFingerprint()
     for i in 0..<self.modules.count:
@@ -851,15 +1135,60 @@ def Linker_TlsGetAddr(self: Linker&, module_index: u64, offset: u64) -> uintptr:
     return module.base_virtual_addr + offset.uintptr()
 
 def Linker_AllocateTlsForThread(self: mutable Linker&, is_primary: bool) -> uintptr:
-    _ = self
     _ = is_primary
-    InitializeTLS()
-    tcb: mutable Tcb& = GetTcbBase()
-    if tcb.tcb_self == 0.uintptr():
-        tcb.tcb_self <- tcb.ref[mutable Tcb&].cast[uintptr]
-    if tcb.tcb_thread == 0.uintptr():
-        tcb.tcb_thread <- tcb.tcb_self
-    return tcb.ref[mutable Tcb&].cast[uintptr]
+    tls_aligned_size: usize = Module_AlignUp(self.static_tls_size.u64(), 0x20u64).usize()
+    total_tls_size: usize = tls_aligned_size + 0x40usize
+    raw: mutable heap void&? = malloc(total_tls_size)
+    if raw == null:
+        InitializeTLS()
+        fallback: mutable Tcb& = GetTcbBase()
+        if fallback.tcb_self == 0.uintptr():
+            fallback.tcb_self <- fallback.ref[mutable Tcb&].cast[uintptr]
+        if fallback.tcb_thread == 0.uintptr():
+            fallback.tcb_thread <- fallback.tcb_self
+        TLS_SetPrimaryTcbBase(fallback.ref[mutable Tcb&].cast[uintptr])
+        return fallback.ref[mutable Tcb&].cast[uintptr]
+    base: uintptr = raw.cast[uintptr]
+    trusted Unsafe.PointerCast:
+        bytes: mutable u8& = raw.cast[mutable u8&]
+        i: mutable usize = 0
+        while i < total_tls_size:
+            bytes[i] <- 0u8
+            i <- i + 1
+        dtv_count: usize = self.max_tls_index.usize() + 2usize
+        dtv_raw: mutable heap void&? = malloc(dtv_count * size_of(DtvEntry))
+        if dtv_raw == null:
+            return 0.uintptr()
+        dtv_bytes: mutable u8& = dtv_raw.cast[mutable u8&]
+        d: mutable usize = 0
+        while d < dtv_count * size_of(DtvEntry):
+            dtv_bytes[d] <- 0u8
+            d <- d + 1
+        tcb_addr: uintptr = base + tls_aligned_size.uintptr()
+        tcb: mutable Tcb& = tcb_addr.cast[mutable Tcb&]
+        dtv: mutable DtvEntry& = dtv_raw.cast[mutable DtvEntry&]
+        tcb.tcb_self <- tcb_addr
+        tcb.tcb_dtv <- dtv_raw.cast[uintptr]
+        tcb.tcb_thread <- tcb_addr
+        tcb.tcb_fiber <- 0.uintptr()
+        dtv[0usize].counter <- self.dtv_generation_counter.usize()
+        dtv[1usize].counter <- self.max_tls_index.usize()
+        if self.modules.count > 0:
+            module: Module = self.modules[0]
+            if module.tls.image_size != 0 and module.tls.modid.u64() + 1u64 < dtv_count.u64():
+                dest_addr: uintptr = base + (tls_aligned_size - module.tls.offset.usize()).uintptr()
+                src_addr: uintptr = module.tls.image_virtual_addr
+                if src_addr != 0.uintptr():
+                    src: u8& = src_addr.cast[u8&]
+                    dest: mutable u8& = dest_addr.cast[mutable u8&]
+                    c: mutable usize = 0
+                    while c < module.tls.init_image_size.usize():
+                        dest[c] <- src[c]
+                        c <- c + 1
+                dtv[module.tls.modid.usize() + 1usize].pointer <- dest_addr
+        TLS_SetPrimaryTcbBase(tcb_addr)
+        TLS_RegisterPrimaryTemplate(base, total_tls_size, dtv_raw.cast[uintptr], dtv_count)
+        return tcb_addr
 
 def Linker_FreeTlsForNonPrimaryThread(self: mutable Linker&, pointer: void&?) -> void:
     _ = self
@@ -977,7 +1306,6 @@ def Linker_Relocate(self: mutable Linker&, module: mutable Module&) -> void:
     Linker_RelocateAnyImports(self.ref[mutable Linker&], module.ref[mutable Module&])
 
 def Linker_Resolve(self: mutable Linker&, name: static u8&, module: mutable Module&, out_virtual_address: mutable u64&, out_resolution_kind: mutable u8&) -> bool:
-    _ = module
     out_virtual_address <- 0
     out_resolution_kind <- IMPORT_RESOLUTION_UNRESOLVED
     GuestExec_RecordLastModuleSymbol(module.name, name)
@@ -989,15 +1317,42 @@ def Linker_Resolve(self: mutable Linker&, name: static u8&, module: mutable Modu
         out_resolution_kind <- IMPORT_RESOLUTION_NATIVE_HLE
         GuestExec_RecordLastHle(module.name, name)
         return true
-    i: mutable usize = 0
-    while i < self.hle_symbols.symbols.count:
-        sym: SymbolRecord = self.hle_symbols.symbols[i]
-        if Linker_NameMatchesNid(sym.name, name) or streq(sym.nid_name, name) == 1:
-            out_virtual_address <- sym.callable_address
-            out_resolution_kind <- IMPORT_RESOLUTION_NATIVE_HLE
-            GuestExec_RecordLastHle(module.name, sym.name)
-            return true
-        i <- i + 1
+    parsed_nid: mutable static u8& = ""
+    parsed_library_id: mutable static u8& = ""
+    parsed_module_id: mutable static u8& = ""
+    parsed: bool = Module_ParseImportSymbol(name, parsed_nid.ref[mutable static u8&], parsed_library_id.ref[mutable static u8&], parsed_module_id.ref[mutable static u8&])
+    if parsed and static_strlen(parsed_library_id) > 0 and static_strlen(parsed_module_id) > 0:
+        library_index: s32 = Module_FindImportLibraryIndex(module, parsed_library_id)
+        module_index: s32 = Module_FindImportModuleIndex(module, parsed_module_id)
+        if library_index >= 0 and module_index >= 0:
+            library_value: LibraryInfo = Module_LibraryByCombinedIndex(module, library_index)
+            module_value: ModuleInfo = Module_InfoByCombinedIndex(module, module_index)
+            symbol_type: mutable u8 = IMPORT_SYMBOL_TYPE_UNKNOWN
+            for import_index in 0..<module.import_symbols.count:
+                imp: ImportSymbolRecord = module.import_symbols[import_index]
+                if streq(imp.raw_symbol, name) == 1 or (streq(imp.nid, parsed_nid) == 1 and streq(imp.library, parsed_library_id) == 1 and streq(imp.module, parsed_module_id) == 1):
+                    symbol_type <- imp.symbol_type
+            for candidate_index in 0..<self.modules.count:
+                if Module_FindDefinedQualifiedSymbolAddress(self.modules[candidate_index].ref[Module&], parsed_nid, library_value.name, Module_DynamicLibraryVersion(library_value.value), module_value.name, symbol_type, out_virtual_address.ref[mutable u64&]):
+                    out_resolution_kind <- IMPORT_RESOLUTION_PRX_EXPORT
+                    return true
+            found_index: s32 = SymbolsResolver_FindHleSymbol(self.hle_symbols, parsed_nid, library_value.name, Module_DynamicLibraryVersion(library_value.value), module_value.name, symbol_type)
+            if found_index >= 0:
+                sym: SymbolRecord = self.hle_symbols.symbols[found_index.usize()]
+                out_virtual_address <- sym.callable_address
+                out_resolution_kind <- IMPORT_RESOLUTION_NATIVE_HLE
+                GuestExec_RecordLastHle(module.name, sym.name)
+                return true
+    lookup_nid: mutable static u8& = name
+    if parsed:
+        lookup_nid <- parsed_nid
+    fallback_index: s32 = SymbolsResolver_FindHleSymbolByNidOnly(self.hle_symbols, lookup_nid)
+    if fallback_index >= 0:
+        sym: SymbolRecord = self.hle_symbols.symbols[fallback_index.usize()]
+        out_virtual_address <- sym.callable_address
+        out_resolution_kind <- IMPORT_RESOLUTION_NATIVE_HLE
+        GuestExec_RecordLastHle(module.name, sym.name)
+        return true
     for module_index in 0..<self.modules.count:
         if Module_FindDefinedSymbolAddress(self.modules[module_index].ref[mutable Module&], name, out_virtual_address.ref[mutable u64&]):
             out_resolution_kind <- IMPORT_RESOLUTION_PRX_EXPORT
@@ -1023,6 +1378,7 @@ def Linker_Execute(self: mutable Linker&, args: darray[static u8&]) -> s32:
     GuestExec_SetFailedRelocationCount(self.last_failed_relocation_count.u64())
     memory: mutable MemoryManager& = Memory_Instance()
     MemoryManager_SetupMemoryRegions(memory, ORBIS_KERNEL_FLEXIBLE_MEMORY_SIZE, true, true)
+    _ = Linker_AllocateTlsForThread(self.ref[mutable Linker&], true)
     index: mutable s32 = 0
     mod_ref: mutable Module&? = Linker_GetModule(self.ref[mutable Linker&], index)
     if mod_ref == null:
@@ -1031,13 +1387,19 @@ def Linker_Execute(self: mutable Linker&, args: darray[static u8&]) -> s32:
         self.last_entry_addr <- 0.uintptr()
         return -1
     self.last_entry_addr <- Module_GetEntryAddress(mod_ref, 0.uintptr())
-    result: s32 = Module_Start(mod_ref, args.count.u64(), null, null)
+    mod_ref.last_start_entry_addr <- self.last_entry_addr
+    mod_ref.last_start_preinit_count <- 0
+    mod_ref.last_start_init_count <- 0
+    result: s32 = 0
     if GuestExec_IsEnabled():
         if not MemoryManager_SyncNativeBackingToGuestExec(memory):
             self.last_started_module_index <- index
             self.last_start_result <- -2
             return -2
-        GuestExec_RunMainEntry(self.last_entry_addr, args.count.int(), null)
+        argv0: mutable void&? = null
+        if args.count > 0:
+            argv0 <- args[0].cast[void&?]
+        GuestExec_RunMainEntry(self.last_entry_addr, args.count.int(), argv0)
     Linker_RelocateAllImports(self.ref[mutable Linker&])
     self.last_started_module_index <- index
     self.last_start_result <- result

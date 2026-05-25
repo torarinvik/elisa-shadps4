@@ -114,8 +114,7 @@ def c_GuestExec_AeroLibFallbackPltBytes() -> u64:
 # memcpy/memset use their canonical symbol names so compiler-generated copies
 # and zeroing share the same dynamic import instead of splitting to memcpy.N.
 # ============================================================
-@link_name(mmap)
-extern ge_mmap(addr: uintptr, length: usize, prot: int, flags: int, fd: int, offset: i64) -> uintptr
+extern mmap(addr: uintptr, length: usize, prot: int, flags: int, fd: int, offset: i64) -> uintptr
 @link_name(mprotect)
 extern ge_mprotect(addr: uintptr, length: usize, prot: int) -> int
 @link_name(munmap)
@@ -311,7 +310,7 @@ def c_GuestExec_MapRegion(address: uintptr, size: u64, prot: u32) -> s32:
         return -1
     static else:
         np: int = ge_native_prot(prot)
-        result: uintptr = ge_mmap(address, size.usize(), np, ge_mmap_fixed_flags(), -1, 0i64)
+        result: uintptr = mmap(address, size.usize(), np, ge_mmap_fixed_flags(), -1, 0i64)
         if result != ge_map_failed() and result == address:
             ge_record_native_region(address, size, prot)
             return 0
@@ -353,7 +352,13 @@ def c_GuestExec_AllocateRegion(size: u64, prot: u32) -> uintptr:
         return 0.uintptr()
     static else:
         np: int = ge_native_prot(prot)
-        result: uintptr = ge_mmap(0.uintptr(), size.usize(), np, ge_mmap_anon_flags(), -1, 0i64)
+        hint: mutable uintptr = 0.uintptr()
+        static if PLATFORM_APPLE and ARCH_X86_64:
+            # The x64 game runner shrinks __PAGEZERO and reserves low memory for
+            # LDT/TCB pages. With that layout mmap(NULL, ...) can hand out those
+            # low pages; executable HLE thunks must live in normal host space.
+            hint <- 0x600000000000.uintptr()
+        result: uintptr = mmap(hint, size.usize(), np, ge_mmap_anon_flags(), -1, 0i64)
         if result == ge_map_failed():
             return 0.uintptr()
         ge_record_native_region(result, size, prot)
@@ -714,6 +719,7 @@ extern ElisaGuestExec_CurrentStackPointerAsm() -> uintptr
 extern ElisaGuestExec_EnterMainEntryAsm(params: uintptr, exit_func: uintptr) -> void
 extern ElisaGuestExec_CallMainEntryAsm(entry: uintptr, params: uintptr, exit_func: uintptr) -> void
 extern ElisaGuestExec_JumpMainEntryAsm(entry: uintptr, params: uintptr, exit_func: uintptr) -> void
+extern ElisaGuestExec_AeroLibFallbackUnknownStubAsm() -> u64
 
 global mutable ge_fork_report_addr: uintptr = 0.uintptr()
 global mutable ge_guard_target_thread: uintptr = 0.uintptr()
@@ -765,7 +771,7 @@ def ge_ensure_fork_report() -> s32:
         if ge_fork_report != null:
             ge_reset_fork_report()
             return 0
-        mapped: uintptr = ge_mmap(0.uintptr(), 4096usize, 3, ge_map_shared_anon_flags(), -1, 0i64)
+        mapped: uintptr = mmap(0.uintptr(), 4096usize, 3, ge_map_shared_anon_flags(), -1, 0i64)
         if mapped == ge_map_failed():
             ge_fork_report <- null
             ge_fork_report_addr <- 0.uintptr()
@@ -924,6 +930,11 @@ def ge_absorb_fork_report() -> void:
         ge_runtime_hle_arg1 <- fr.runtime_hle_arg1
         ge_runtime_hle_arg2 <- fr.runtime_hle_arg2
         ge_runtime_hle_ret <- fr.runtime_hle_ret
+        ge_runtime_hle_arg0_native_prot <- fr.runtime_hle_arg0_native_prot
+        ge_runtime_hle_arg0_word0 <- fr.runtime_hle_arg0_word0
+        ge_runtime_hle_recorder_stack_word0 <- fr.runtime_hle_recorder_stack_word0
+        ge_runtime_hle_recorder_stack_word1 <- fr.runtime_hle_recorder_stack_word1
+        ge_runtime_hle_guest_return_addr <- fr.runtime_hle_guest_return_addr
 
 def ge_run_child_main_entry(params: mutable GuestEntryParams&) -> void:
     ge_set_native_phase(GE_PHASE_CHILD_BRANCH_ENTERED)
@@ -1065,6 +1076,11 @@ def ge_reset_crash_state() -> void:
     ge_runtime_hle_arg1 <- 0.uintptr()
     ge_runtime_hle_arg2 <- 0.uintptr()
     ge_runtime_hle_ret <- 0.uintptr()
+    ge_runtime_hle_arg0_native_prot <- 0xffffffffu32
+    ge_runtime_hle_arg0_word0 <- 0.uintptr()
+    ge_runtime_hle_recorder_stack_word0 <- 0.uintptr()
+    ge_runtime_hle_recorder_stack_word1 <- 0.uintptr()
+    ge_runtime_hle_guest_return_addr <- 0.uintptr()
     ge_clear_writable_page_cache()
     ge_timeout_fired <- 0
 
@@ -1138,12 +1154,13 @@ def ge_is_synthetic_main_entry(entry_addr: uintptr) -> bool:
     return entry_addr == (ge_synthetic_main_return as uintptr) or entry_addr == (ge_synthetic_main_call_boundary as uintptr)
 
 # ---- AeroLib fallback stub recorder ----
-# NOTE: the guest-reachable stub itself (which captures __builtin_return_address
-# and tail-calls this recorder) is deferred — it needs an EASM function that
-# `call`s back into Elisa, which the current EASM external-call path doesn't yet
-# emit cleanly. Until then ge_aerolib_fallback_stub_address returns 0 (real-game
-# import attribution degrades; synthetic tests don't use the stub). The recorder
-# logic below is kept for when the stub lands.
+# NOTE: the fully-attributing guest-reachable stub (which captures
+# __builtin_return_address and tail-calls this recorder) is deferred — it needs
+# an EASM function that calls back into Elisa. The plain fallback stub below
+# still must be a real nonzero callable address: shadPS4 patches unresolved
+# AeroLib imports to a concrete stub function, and R_X86_64_64 relocations may
+# carry addends. Returning 0 here leaves tiny addend-only addresses in guest
+# memory, which turns unresolved imports into bogus low pointers.
 def ge_read_byte(addr: uintptr) -> u8:
     out: mutable u8 = 0u8
     _ = ge_memcpy(out.ref[void&], ge_addr_to_ptr(addr), 1usize)
@@ -1193,8 +1210,10 @@ def ge_aerolib_fallback_record(caller_pc: uintptr) -> u64:
     return 0u64
 
 def ge_aerolib_fallback_stub_address() -> uintptr:
-    # Deferred (see note above): no guest-reachable stub yet.
-    return 0.uintptr()
+    static if ARCH_X86_64:
+        return ElisaGuestExec_AeroLibFallbackUnknownStubAsm as uintptr
+    static else:
+        return 0.uintptr()
 
 # ---- Synthetic-fixture address getters (atomic core 2b) ----
 def ge_get_synthetic_add_address() -> uintptr:
@@ -1335,6 +1354,66 @@ def ge_run_main_entry(params: mutable GuestEntryParams&, exit_func: void&?) -> v
     static else:
         _ = params
         _ = exit_func
+
+def ge_prepare_main_entry_snapshot(params: mutable GuestEntryParams&) -> void:
+    ge_expected_entry_params <- params.ref[void&].uintptr()
+    ge_expected_stack_word0 <- params.argc.u32().uintptr()
+    ge_expected_stack_word1 <- params.argv[0].uintptr()
+    ge_entry_stack_word0 <- ge_expected_stack_word0
+    ge_entry_stack_word1 <- ge_expected_stack_word1
+    ge_entry_native_word0 <- ge_read_native_word(params.entry_addr)
+    ge_entry_native_word1 <- ge_read_native_word(params.entry_addr + 8.uintptr())
+    ge_entry_native_prot <- ge_native_prot_at(params.entry_addr, 8u64)
+    fr: ElisaGuestExecForkReport&? = ge_fork_report
+    if fr != null:
+        fr.expected_entry_params <- ge_expected_entry_params
+        fr.expected_stack_word0 <- ge_expected_stack_word0
+        fr.expected_stack_word1 <- ge_expected_stack_word1
+        fr.entry_stack_word0 <- ge_entry_stack_word0
+        fr.entry_stack_word1 <- ge_entry_stack_word1
+        fr.entry_native_word0 <- ge_entry_native_word0
+        fr.entry_native_word1 <- ge_entry_native_word1
+        fr.entry_native_prot <- ge_entry_native_prot
+
+def ge_run_main_entry_guarded_in_process(params: mutable GuestEntryParams&, timeout_ms: u32) -> s32:
+    ge_set_native_phase(GE_PHASE_FUNCTION_ENTRY)
+    if params.entry_addr == 0.uintptr():
+        ge_reset_crash_state()
+        ge_set_native_phase(GE_PHASE_RETURN_BAD_PARAMS)
+        ge_last_status <- -1
+        return -1
+    static if ARCH_X86_64 and not PLATFORM_WINDOWS:
+        ge_reset_crash_state()
+        ge_set_native_phase(GE_PHASE_AFTER_RESET)
+        ge_prepare_main_entry_snapshot(params)
+        ge_install_guards()
+        ge_guard_active <- 1
+        ge_guard_target_thread <- ge_pthread_self()
+        ge_arm_timer(timeout_ms)
+        ge_set_native_phase(GE_PHASE_SYNTHETIC_BEFORE_SIGSETJMP)
+        if ge_sigsetjmp(ge_jmp_buf[0usize].ref[void&], 1) != 0:
+            ge_disarm_timer()
+            ge_guard_active <- 0
+            ge_restore_guards()
+            if ge_timeout_fired != 0:
+                ge_last_status <- -3
+            if ge_last_status == 0:
+                ge_last_status <- -11
+            return ge_last_status
+        ge_set_native_phase(GE_PHASE_CHILD_BEFORE_MAIN_ENTRY)
+        ge_jump_main_entry(params, ge_guarded_exit as uintptr)
+        ge_disarm_timer()
+        ge_guard_active <- 0
+        ge_restore_guards()
+        if ge_last_status == 0:
+            ge_last_status <- 1
+        return ge_last_status
+    static else:
+        _ = timeout_ms
+        ge_reset_crash_state()
+        ge_set_native_phase(GE_PHASE_UNSUPPORTED_RETURN)
+        ge_last_status <- -2
+        return -2
 
 def ge_run_main_entry_guarded(params: mutable GuestEntryParams&, timeout_ms: u32) -> s32:
     ge_set_native_phase(GE_PHASE_FUNCTION_ENTRY)
@@ -1479,6 +1558,9 @@ def c_GuestExec_RunMainEntry(params: mutable GuestEntryParams&, exit_func: void&
 
 def c_GuestExec_RunMainEntryGuarded(params: mutable GuestEntryParams&, timeout_ms: u32) -> s32:
     return ge_run_main_entry_guarded(params, timeout_ms)
+
+def c_GuestExec_RunMainEntryGuardedInProcess(params: mutable GuestEntryParams&, timeout_ms: u32) -> s32:
+    return ge_run_main_entry_guarded_in_process(params, timeout_ms)
 
 def c_GuestExec_RunSyntheticFunction(entry_addr: uintptr, arg0: u64, arg1: u64) -> u64:
     return ge_run_synthetic_function(entry_addr, arg0, arg1)
@@ -1881,6 +1963,11 @@ global mutable ge_runtime_hle_arg0: uintptr = 0.uintptr()
 global mutable ge_runtime_hle_arg1: uintptr = 0.uintptr()
 global mutable ge_runtime_hle_arg2: uintptr = 0.uintptr()
 global mutable ge_runtime_hle_ret: uintptr = 0.uintptr()
+global mutable ge_runtime_hle_arg0_native_prot: u32 = 0xffffffffu32
+global mutable ge_runtime_hle_arg0_word0: uintptr = 0.uintptr()
+global mutable ge_runtime_hle_recorder_stack_word0: uintptr = 0.uintptr()
+global mutable ge_runtime_hle_recorder_stack_word1: uintptr = 0.uintptr()
+global mutable ge_runtime_hle_guest_return_addr: uintptr = 0.uintptr()
 global mutable ge_failed_relocation_count: u64 = 0u64
 
 @fixed_layout
@@ -1949,6 +2036,11 @@ struct ElisaGuestExecForkReport:
     runtime_hle_arg1: mutable uintptr
     runtime_hle_arg2: mutable uintptr
     runtime_hle_ret: mutable uintptr
+    runtime_hle_arg0_native_prot: mutable u32
+    runtime_hle_arg0_word0: mutable uintptr
+    runtime_hle_recorder_stack_word0: mutable uintptr
+    runtime_hle_recorder_stack_word1: mutable uintptr
+    runtime_hle_guest_return_addr: mutable uintptr
 
 global mutable ge_fork_report: ElisaGuestExecForkReport&? = null
 
@@ -1963,6 +2055,14 @@ def c_GuestExec_RecordRuntimeHle(module: static u8&?, symbol: static u8&?, arg0:
     ge_runtime_hle_arg1 <- arg1
     ge_runtime_hle_arg2 <- arg2
     ge_runtime_hle_ret <- ret
+    ge_runtime_hle_arg0_native_prot <- ge_native_prot_at(arg0, 8u64)
+    ge_runtime_hle_arg0_word0 <- ge_read_native_word(arg0)
+    ge_runtime_hle_recorder_stack_word0 <- 0.uintptr()
+    ge_runtime_hle_recorder_stack_word1 <- 0.uintptr()
+    static if ARCH_X86_64:
+        sp: uintptr = ElisaGuestExec_CurrentStackPointerAsm()
+        ge_runtime_hle_recorder_stack_word0 <- ge_read_context_word(sp)
+        ge_runtime_hle_recorder_stack_word1 <- ge_read_context_word(sp + 8.uintptr())
     fr: ElisaGuestExecForkReport&? = ge_fork_report
     if fr != null:
         fr.runtime_hle_module <- ge_runtime_hle_module
@@ -1971,6 +2071,11 @@ def c_GuestExec_RecordRuntimeHle(module: static u8&?, symbol: static u8&?, arg0:
         fr.runtime_hle_arg1 <- arg1
         fr.runtime_hle_arg2 <- arg2
         fr.runtime_hle_ret <- ret
+        fr.runtime_hle_arg0_native_prot <- ge_runtime_hle_arg0_native_prot
+        fr.runtime_hle_arg0_word0 <- ge_runtime_hle_arg0_word0
+        fr.runtime_hle_recorder_stack_word0 <- ge_runtime_hle_recorder_stack_word0
+        fr.runtime_hle_recorder_stack_word1 <- ge_runtime_hle_recorder_stack_word1
+        fr.runtime_hle_guest_return_addr <- ge_runtime_hle_guest_return_addr
 
 def c_GuestExec_RuntimeHleModule() -> static u8&:
     s: static u8&? = ge_runtime_hle_module
@@ -1992,11 +2097,27 @@ def c_GuestExec_RuntimeHleArg2() -> uintptr:
 def c_GuestExec_RuntimeHleRet() -> uintptr:
     return ge_runtime_hle_ret
 
+def c_GuestExec_RuntimeHleArg0NativeProt() -> u32:
+    return ge_runtime_hle_arg0_native_prot
+
+def c_GuestExec_RuntimeHleArg0Word0() -> uintptr:
+    return ge_runtime_hle_arg0_word0
+
+def c_GuestExec_RuntimeHleRecorderStackWord0() -> uintptr:
+    return ge_runtime_hle_recorder_stack_word0
+
+def c_GuestExec_RuntimeHleRecorderStackWord1() -> uintptr:
+    return ge_runtime_hle_recorder_stack_word1
+
+def c_GuestExec_RuntimeHleGuestReturnAddr() -> uintptr:
+    return ge_runtime_hle_guest_return_addr
+
 global mutable guest_exec_enabled: bool = false
 global mutable guest_exec_probe_mode: bool = false
 global mutable guest_exec_last_map_result: s32 = 0
 global mutable guest_exec_last_entry_addr: VAddr = 0.uintptr()
 global mutable guest_exec_last_argc: int = 0
+global mutable guest_exec_last_argv0: static u8&? = null
 global mutable guest_exec_run_count: usize = 0
 global mutable guest_exec_failed_relocation_count: u64 = 0
 global mutable guest_exec_last_main_entry_addr: VAddr = 0.uintptr()
@@ -2066,6 +2187,7 @@ def GuestExec_ResetState() -> void:
     guest_exec_last_map_result <- 0
     guest_exec_last_entry_addr <- 0.uintptr()
     guest_exec_last_argc <- 0
+    guest_exec_last_argv0 <- null
     guest_exec_run_count <- 0
     guest_exec_last_main_entry_addr <- 0.uintptr()
     guest_exec_main_run_count <- 0
@@ -2215,6 +2337,8 @@ def GuestExec_LastSymbol() -> static u8&?:
 def GuestExec_RunModuleEntry(entry_addr: VAddr, argc: int, argv: void&?, is_main_executable: bool) -> void:
     if not GuestExec_IsEnabled() or entry_addr == 0.uintptr():
         return
+    if argv != null:
+        guest_exec_last_argv0 <- argv.cast[static u8&?]
     GuestExec_RecordHandoff(entry_addr, argc, is_main_executable)
 
 def GuestExec_RunMainEntry(entry_addr: VAddr, argc: int, argv: void&?) -> void:
@@ -2236,7 +2360,45 @@ def GuestExec_RunMainEntryGuarded(entry_addr: VAddr, argc: int, argv: void&?, ti
     params.entry_addr <- entry_addr
     if argv != null:
         params.argv[0] <- argv.cast[static u8&?]
+    elif guest_exec_last_argv0 != null:
+        params.argv[0] <- guest_exec_last_argv0
     status: s32 = c_GuestExec_RunMainEntryGuarded(params.ref[mutable GuestEntryParams&], timeout_ms)
+    guest_exec_last_game_execution_status <- status
+    GuestExec_AbsorbNativeBoundaryReport()
+    if not guest_exec_first_boundary_reached:
+        if status == -3:
+            guest_exec_first_boundary_reason <- GUEST_EXEC_BOUNDARY_REASON_TIMEOUT
+        elif status == -11 and GuestExec_LastSignal() == 0:
+            guest_exec_first_boundary_reason <- GUEST_EXEC_BOUNDARY_REASON_EXITED_BEFORE_BOUNDARY
+        elif status < 0:
+            guest_exec_first_boundary_reason <- GUEST_EXEC_BOUNDARY_REASON_HOST_CRASH
+            if GuestExec_LastSignal() != 0:
+                guest_exec_execution_stage <- GUEST_EXEC_STAGE_CRASH_CAPTURED
+        else:
+            guest_exec_first_boundary_reason <- GUEST_EXEC_BOUNDARY_REASON_EXITED_BEFORE_BOUNDARY
+    if guest_exec_first_boundary_reached:
+        guest_exec_execution_stage <- GUEST_EXEC_STAGE_FIRST_BOUNDARY
+    return status
+
+def GuestExec_RunMainEntryGuardedInProcess(entry_addr: VAddr, argc: int, argv: void&?, timeout_ms: u32) -> s32:
+    if entry_addr == 0.uintptr():
+        guest_exec_last_game_execution_status <- -1
+        return -1
+    GuestExec_RecordHandoff(entry_addr, argc, true)
+    guest_exec_execution_stage <- GUEST_EXEC_STAGE_GUARDED_ENTRY
+    if not GuestExec_IsSupported():
+        guest_exec_last_game_execution_status <- -2
+        guest_exec_first_boundary_reason <- GUEST_EXEC_BOUNDARY_REASON_UNSUPPORTED_HOST
+        return -2
+    params: mutable GuestEntryParams = zeroed
+    params.argc <- argc.s32()
+    params.padding <- 0
+    params.entry_addr <- entry_addr
+    if argv != null:
+        params.argv[0] <- argv.cast[static u8&?]
+    elif guest_exec_last_argv0 != null:
+        params.argv[0] <- guest_exec_last_argv0
+    status: s32 = c_GuestExec_RunMainEntryGuardedInProcess(params.ref[mutable GuestEntryParams&], timeout_ms)
     guest_exec_last_game_execution_status <- status
     GuestExec_AbsorbNativeBoundaryReport()
     if not guest_exec_first_boundary_reached:
@@ -2582,6 +2744,21 @@ def GuestExec_RuntimeHleArg2() -> VAddr:
 
 def GuestExec_RuntimeHleRet() -> VAddr:
     return c_GuestExec_RuntimeHleRet()
+
+def GuestExec_RuntimeHleArg0NativeProt() -> u32:
+    return c_GuestExec_RuntimeHleArg0NativeProt()
+
+def GuestExec_RuntimeHleArg0Word0() -> VAddr:
+    return c_GuestExec_RuntimeHleArg0Word0()
+
+def GuestExec_RuntimeHleRecorderStackWord0() -> VAddr:
+    return c_GuestExec_RuntimeHleRecorderStackWord0()
+
+def GuestExec_RuntimeHleRecorderStackWord1() -> VAddr:
+    return c_GuestExec_RuntimeHleRecorderStackWord1()
+
+def GuestExec_RuntimeHleGuestReturnAddr() -> VAddr:
+    return c_GuestExec_RuntimeHleGuestReturnAddr()
 
 def GuestExec_LastHleModule() -> static u8&?:
     return guest_exec_last_hle_module

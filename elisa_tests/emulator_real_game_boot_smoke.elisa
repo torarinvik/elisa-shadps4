@@ -6,11 +6,18 @@ include "../common/guest_exec_artifact_shim.elisa"
 include "../main.elisa"
 
 extern snprintf(buf: mutable u8&?, bufsize: usize, fmt: u8&, ...) -> int effects[Console.Format]
+extern getenv(name: u8&) -> u8&?
 
 const REAL_GAME_BOOT_ROOT: static u8& = "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/shadPS4/Games/CUSA07399"
 const REAL_GAME_BOOT_EBOOT: static u8& = "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/shadPS4/Games/CUSA07399/eboot.bin"
 const REAL_GAME_BOOT_ARTIFACT_PATH: static u8& = "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/elisa-shad-ps4-from-scratch/cusa07399_artifacts.txt"
 const REAL_GAME_BOOT_HANDOFF_MANIFEST_PATH: static u8& = "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/elisa-shad-ps4-from-scratch/cusa07399_handoff_manifest.txt"
+
+def RealGameBoot_UseNoForkGuestExec() -> bool:
+    value: u8&? = getenv("ELISA_GUEST_EXEC_NO_FORK".cast[u8&])
+    if value == null:
+        return false
+    return streq(value.cast[static u8&], "1") == 1
 
 global mutable dbg_reloc_boot_count: u64 = 0
 global mutable dbg_reloc_boot_fp: u64 = 0
@@ -133,12 +140,225 @@ def RealGameBoot_EmitUserServiceArtifacts(file: mutable IOFile&) -> void:
         RealGameBoot_EmitArtifactKV(file, "user_service_login_user_count", 0u64)
     _ = sceUserServiceTerminate()
 
+def RealGameBoot_EmitCrashClassificationArtifacts(file: mutable IOFile&) -> void:
+    pc: VAddr = GuestExec_LastGuestPC()
+    hle_arg0: VAddr = GuestExec_RuntimeHleArg0()
+    hle_ret: VAddr = GuestExec_RuntimeHleRet()
+    hle_reason: VAddr = GuestExec_RuntimeHleArg2()
+    arg0_prot: u32 = GuestExec_RuntimeHleArg0NativeProt()
+    crashed_low_pc: bool = pc != 0.uintptr() and pc.u64() < 4096u64
+    crashed_unmapped_pc: bool = GuestExec_LastPCNativeProt() == 0xffffffffu32
+    hle_returned_error_before_crash: bool = hle_ret != 0.uintptr() and hle_ret.u64() < 4096u64 and crashed_low_pc
+    hle_arg0_unmapped: bool = hle_arg0 != 0.uintptr() and arg0_prot == 0xffffffffu32
+    hle_arg0_small_nonzero: bool = hle_arg0 != 0.uintptr() and hle_arg0.u64() < 4096u64
+    hle_arg0_small_unmapped: bool = hle_arg0_small_nonzero and hle_arg0_unmapped
+    runtime_hle_diag: mutable u64 = 0u64
+    if hle_arg0_small_unmapped and hle_ret.u64() == 22u64:
+        runtime_hle_diag <- 1001u64
+    elif hle_arg0_unmapped and hle_ret != 0.uintptr():
+        runtime_hle_diag <- 1002u64
+    elif hle_returned_error_before_crash:
+        runtime_hle_diag <- 1003u64
+    fork_local_mutex_state_stale: mutable bool = false
+    if streq(GuestExec_RuntimeHleSymbol(), "posix_pthread_mutex_lock") == 1:
+        fork_local_mutex_state_stale <- hle_reason.u64() != threads_sync_last_mutex_reject_reason
+    RealGameBoot_EmitArtifactKV(file, "guardrail_low_pc_crash", 1u64 if crashed_low_pc else 0u64)
+    RealGameBoot_EmitArtifactKV(file, "guardrail_unmapped_pc_crash", 1u64 if crashed_unmapped_pc else 0u64)
+    RealGameBoot_EmitArtifactKV(file, "guardrail_hle_error_then_low_pc", 1u64 if hle_returned_error_before_crash else 0u64)
+    RealGameBoot_EmitArtifactKV(file, "guardrail_hle_arg0_unmapped", 1u64 if hle_arg0_unmapped else 0u64)
+    RealGameBoot_EmitArtifactKV(file, "guardrail_hle_arg0_small_nonzero", 1u64 if hle_arg0_small_nonzero else 0u64)
+    RealGameBoot_EmitArtifactKV(file, "guardrail_hle_arg0_small_unmapped", 1u64 if hle_arg0_small_unmapped else 0u64)
+    RealGameBoot_EmitArtifactKV(file, "guardrail_runtime_hle_diagnostic_code", runtime_hle_diag)
+    RealGameBoot_EmitArtifactKV(file, "guardrail_runtime_hle_reject_reason", hle_reason.u64())
+    RealGameBoot_EmitArtifactKV(file, "guardrail_fork_local_mutex_state_stale", 1u64 if fork_local_mutex_state_stale else 0u64)
+
+def RealGameBoot_RuntimeHleDiagnosticCode() -> u64:
+    pc: VAddr = GuestExec_LastGuestPC()
+    hle_arg0: VAddr = GuestExec_RuntimeHleArg0()
+    hle_ret: VAddr = GuestExec_RuntimeHleRet()
+    arg0_prot: u32 = GuestExec_RuntimeHleArg0NativeProt()
+    crashed_low_pc: bool = pc != 0.uintptr() and pc.u64() < 4096u64
+    hle_returned_error_before_crash: bool = hle_ret != 0.uintptr() and hle_ret.u64() < 4096u64 and crashed_low_pc
+    hle_arg0_unmapped: bool = hle_arg0 != 0.uintptr() and arg0_prot == 0xffffffffu32
+    hle_arg0_small_unmapped: bool = hle_arg0 != 0.uintptr() and hle_arg0.u64() < 4096u64 and hle_arg0_unmapped
+    if hle_arg0_small_unmapped and hle_ret.u64() == 22u64:
+        return 1001u64
+    if hle_arg0_unmapped and hle_ret != 0.uintptr():
+        return 1002u64
+    if hle_returned_error_before_crash:
+        return 1003u64
+    return 0u64
+
 def RealGameBoot_EmitArtifactLastHle(file: mutable IOFile&, module: static u8&?, symbol: static u8&?) -> void:
     can Memory.Allocate, Console.Format:
         line: mutable u8[256] = zeroed
         module_text: static u8& = module if module != null else ""
         symbol_text: static u8& = symbol if symbol != null else ""
         written: int = snprintf(line[0].ref[mutable u8&], 256usize, "CUSA07399_ARTIFACT last_hle_module=%s last_hle_symbol=%s", module_text, symbol_text)
+        RealGameBoot_WriteLine(file, line[0].ref[mutable u8&], written)
+
+def RealGameBoot_EmitResolvedImportDebug(file: mutable IOFile&, linker: Linker&, nid: static u8&) -> void:
+    for mi in 0..<linker.modules.count:
+        module: Module = linker.modules[mi]
+        for ii in 0..<module.import_symbols.count:
+            rec: ImportSymbolRecord = module.import_symbols[ii]
+            if streq(rec.nid, nid) == 1 or streq(rec.name, nid) == 1:
+                RealGameBoot_EmitArtifactStringKV(file, "dbg_import_module", module.file)
+                RealGameBoot_EmitArtifactStringKV(file, "dbg_import_nid", rec.nid)
+                RealGameBoot_EmitArtifactStringKV(file, "dbg_import_name", rec.name)
+                RealGameBoot_EmitArtifactKV(file, "dbg_import_resolution_kind", rec.resolution_kind.u64())
+                RealGameBoot_EmitArtifactKV(file, "dbg_import_resolved_addr", rec.resolved_virtual_addr)
+                return
+
+def RealGameBoot_EmitResolvedImportProbe(file: mutable IOFile&, linker: Linker&, label: static u8&, nid: static u8&) -> void:
+    can Memory.Allocate, Console.Format:
+        for mi in 0..<linker.modules.count:
+            module: Module = linker.modules[mi]
+            for ii in 0..<module.import_symbols.count:
+                rec: ImportSymbolRecord = module.import_symbols[ii]
+                if streq(rec.nid, nid) == 1 or streq(rec.name, nid) == 1:
+                    line: mutable u8[768] = zeroed
+                    written: int = snprintf(line[0].ref[mutable u8&], 768usize, "CUSA07399_ARTIFACT import_probe label=%s source=%s nid=%s name=%s kind=%llu resolved_addr=%llu native_prot=%llu native_word0=%llu", label, module.file, rec.nid, rec.name, rec.resolution_kind.u64(), rec.resolved_virtual_addr, GuestExec_AddressNativeProt(rec.resolved_virtual_addr.uintptr()).u64(), GuestExec_ReadNativeU64(rec.resolved_virtual_addr.uintptr()).u64())
+                    RealGameBoot_WriteLine(file, line[0].ref[mutable u8&], written)
+                    return
+        line: mutable u8[192] = zeroed
+        written: int = snprintf(line[0].ref[mutable u8&], 192usize, "CUSA07399_ARTIFACT import_probe label=%s missing_nid=%s", label, nid)
+        RealGameBoot_WriteLine(file, line[0].ref[mutable u8&], written)
+
+def RealGameBoot_EmitAddressProbe(file: mutable IOFile&, linker: Linker&, label: static u8&, addr: VAddr) -> void:
+    can Memory.Allocate, Console.Format:
+        module_name: mutable static u8& = ""
+        module_base: mutable u64 = 0u64
+        module_offset: mutable u64 = 0u64
+        module_hit: mutable u64 = 0u64
+        i: mutable usize = 0
+        while i < linker.modules.count and module_hit == 0u64:
+            mod: Module = linker.modules[i]
+            if mod.base_virtual_addr <= addr and addr < mod.base_virtual_addr + mod.aligned_base_size.uintptr():
+                module_hit <- 1u64
+                module_name <- mod.name
+                module_base <- mod.base_virtual_addr.u64()
+                module_offset <- addr.u64() - mod.base_virtual_addr.u64()
+            i <- i + 1
+        line: mutable u8[512] = zeroed
+        written: int = snprintf(line[0].ref[mutable u8&], 512usize, "CUSA07399_ARTIFACT address_probe label=%s addr=%llu native_prot=%llu native_word0=%llu guest_module_hit=%llu guest_module=%s guest_base=%llu guest_offset=%llu", label, addr.u64(), GuestExec_AddressNativeProt(addr).u64(), GuestExec_ReadNativeU64(addr).u64(), module_hit, module_name, module_base, module_offset)
+        RealGameBoot_WriteLine(file, line[0].ref[mutable u8&], written)
+
+def RealGameBoot_NativeByteAt(addr: VAddr) -> u8:
+    return (GuestExec_ReadNativeU64(addr).u64() & 0xffu64).u8()
+
+def RealGameBoot_NativeU32At(addr: VAddr) -> u32:
+    b0: u32 = RealGameBoot_NativeByteAt(addr).u32()
+    b1: u32 = RealGameBoot_NativeByteAt(addr + 1.uintptr()).u32()
+    b2: u32 = RealGameBoot_NativeByteAt(addr + 2.uintptr()).u32()
+    b3: u32 = RealGameBoot_NativeByteAt(addr + 3.uintptr()).u32()
+    return b0 | (b1 << 8u32) | (b2 << 16u32) | (b3 << 24u32)
+
+def RealGameBoot_RipRelativeSlot(next_ip: VAddr, disp: u32) -> VAddr:
+    if disp < 0x80000000u32:
+        return next_ip + disp.u64().uintptr()
+    neg: u64 = 0x100000000u64 - disp.u64()
+    if next_ip.u64() >= neg:
+        return (next_ip.u64() - neg).uintptr()
+    return 0.uintptr()
+
+def RealGameBoot_EmitCallsiteProbe(file: mutable IOFile&, label: static u8&, return_addr: VAddr) -> void:
+    can Memory.Allocate, Console.Format:
+        kind: mutable u64 = 0u64
+        start: mutable VAddr = 0.uintptr()
+        target_or_slot: mutable VAddr = 0.uintptr()
+        target_or_slot_word0: mutable VAddr = 0.uintptr()
+        target_native_prot: mutable u32 = 0xffffffffu32
+        target_word0: mutable VAddr = 0.uintptr()
+        target_entry_kind: mutable u64 = 0u64
+        target_entry_slot: mutable VAddr = 0.uintptr()
+        target_entry_slot_word0: mutable VAddr = 0.uintptr()
+        b_m8: mutable u8 = 0u8
+        b_m7: mutable u8 = 0u8
+        b_m6: mutable u8 = 0u8
+        b_m5: mutable u8 = 0u8
+        b_m4: mutable u8 = 0u8
+        b_m3: mutable u8 = 0u8
+        b_m2: mutable u8 = 0u8
+        b_m1: mutable u8 = 0u8
+        if return_addr.u64() >= 8u64:
+            b_m8 <- RealGameBoot_NativeByteAt(return_addr - 8.uintptr())
+            b_m7 <- RealGameBoot_NativeByteAt(return_addr - 7.uintptr())
+            b_m6 <- RealGameBoot_NativeByteAt(return_addr - 6.uintptr())
+            b_m5 <- RealGameBoot_NativeByteAt(return_addr - 5.uintptr())
+            b_m4 <- RealGameBoot_NativeByteAt(return_addr - 4.uintptr())
+            b_m3 <- RealGameBoot_NativeByteAt(return_addr - 3.uintptr())
+            b_m2 <- RealGameBoot_NativeByteAt(return_addr - 2.uintptr())
+            b_m1 <- RealGameBoot_NativeByteAt(return_addr - 1.uintptr())
+            if b_m5 == 0xe8.u8():
+                kind <- 1u64
+                start <- return_addr - 5.uintptr()
+                target_or_slot <- RealGameBoot_RipRelativeSlot(return_addr, RealGameBoot_NativeU32At(return_addr - 4.uintptr()))
+            elif b_m6 == 0xff.u8() and b_m5 == 0x15.u8():
+                kind <- 2u64
+                start <- return_addr - 6.uintptr()
+                target_or_slot <- RealGameBoot_RipRelativeSlot(return_addr, RealGameBoot_NativeU32At(return_addr - 4.uintptr()))
+                target_or_slot_word0 <- GuestExec_ReadNativeU64(target_or_slot)
+            elif b_m2 == 0xff.u8() and b_m1 >= 0xd0.u8() and b_m1 <= 0xd7.u8():
+                kind <- 3u64
+                start <- return_addr - 2.uintptr()
+            elif b_m1 == 0xc3.u8() or b_m1 == 0xcb.u8():
+                kind <- 4u64
+                start <- return_addr - 1.uintptr()
+            elif b_m2 == 0xc2.u8() or b_m2 == 0xca.u8():
+                kind <- 5u64
+                start <- return_addr - 2.uintptr()
+        if target_or_slot != 0.uintptr():
+            target_native_prot <- GuestExec_AddressNativeProt(target_or_slot)
+            target_word0 <- GuestExec_ReadNativeU64(target_or_slot)
+            tb0: u8 = RealGameBoot_NativeByteAt(target_or_slot)
+            tb1: u8 = RealGameBoot_NativeByteAt(target_or_slot + 1.uintptr())
+            tb4: u8 = RealGameBoot_NativeByteAt(target_or_slot + 4.uintptr())
+            if tb0 == 0xff.u8() and tb1 == 0x25.u8():
+                target_entry_kind <- 1u64
+                target_entry_slot <- RealGameBoot_RipRelativeSlot(target_or_slot + 6.uintptr(), RealGameBoot_NativeU32At(target_or_slot + 2.uintptr()))
+                target_entry_slot_word0 <- GuestExec_ReadNativeU64(target_entry_slot)
+            elif tb0 == 0xff.u8() and tb1 == 0x15.u8():
+                target_entry_kind <- 2u64
+                target_entry_slot <- RealGameBoot_RipRelativeSlot(target_or_slot + 6.uintptr(), RealGameBoot_NativeU32At(target_or_slot + 2.uintptr()))
+                target_entry_slot_word0 <- GuestExec_ReadNativeU64(target_entry_slot)
+            elif tb0 == 0xe9.u8():
+                target_entry_kind <- 3u64
+                target_entry_slot <- RealGameBoot_RipRelativeSlot(target_or_slot + 5.uintptr(), RealGameBoot_NativeU32At(target_or_slot + 1.uintptr()))
+            elif tb0 == 0xe8.u8():
+                target_entry_kind <- 4u64
+                target_entry_slot <- RealGameBoot_RipRelativeSlot(target_or_slot + 5.uintptr(), RealGameBoot_NativeU32At(target_or_slot + 1.uintptr()))
+            elif tb4 == 0xe9.u8():
+                target_entry_kind <- 5u64
+                target_entry_slot <- RealGameBoot_RipRelativeSlot(target_or_slot + 9.uintptr(), RealGameBoot_NativeU32At(target_or_slot + 5.uintptr()))
+        line: mutable u8[1024] = zeroed
+        written: int = snprintf(line[0].ref[mutable u8&], 1024usize, "CUSA07399_ARTIFACT callsite_probe label=%s return_addr=%llu kind=%llu start=%llu target_or_slot=%llu target_or_slot_word0=%llu target_native_prot=%llu target_word0=%llu target_entry_kind=%llu target_entry_slot=%llu target_entry_slot_word0=%llu native_prot=%llu bytes_m8=%llu bytes_m7=%llu bytes_m6=%llu bytes_m5=%llu bytes_m4=%llu bytes_m3=%llu bytes_m2=%llu bytes_m1=%llu", label, return_addr.u64(), kind, start.u64(), target_or_slot.u64(), target_or_slot_word0.u64(), target_native_prot.u64(), target_word0.u64(), target_entry_kind, target_entry_slot.u64(), target_entry_slot_word0.u64(), GuestExec_AddressNativeProt(return_addr).u64(), b_m8.u64(), b_m7.u64(), b_m6.u64(), b_m5.u64(), b_m4.u64(), b_m3.u64(), b_m2.u64(), b_m1.u64())
+        RealGameBoot_WriteLine(file, line[0].ref[mutable u8&], written)
+
+def RealGameBoot_EmitThunkProbe(file: mutable IOFile&, linker: Linker&, label: static u8&, addr: VAddr) -> void:
+    can Memory.Allocate, Console.Format:
+        thunk_base: u64 = Linker_FindNativeHleBoundaryThunkBase(addr.u64())
+        thunk_target: u64 = Linker_FindNativeHleBoundaryThunkTarget(addr.u64())
+        thunk_offset: mutable u64 = 0u64
+        target_name: mutable static u8& = ""
+        target_nid: mutable static u8& = ""
+        target_module: mutable static u8& = ""
+        target_library: mutable static u8& = ""
+        target_hit: mutable u64 = 0u64
+        if thunk_base != 0u64 and addr.u64() >= thunk_base:
+            thunk_offset <- addr.u64() - thunk_base
+        i: mutable usize = 0
+        while i < linker.hle_symbols.symbols.count and target_hit == 0u64:
+            sym: SymbolRecord = linker.hle_symbols.symbols[i]
+            if sym.callable_address == thunk_target:
+                target_hit <- 1u64
+                target_name <- sym.name
+                target_nid <- sym.nid_name
+                target_module <- sym.module
+                target_library <- sym.library
+            i <- i + 1
+        line: mutable u8[768] = zeroed
+        written: int = snprintf(line[0].ref[mutable u8&], 768usize, "CUSA07399_ARTIFACT thunk_probe label=%s addr=%llu thunk_base=%llu thunk_offset=%llu thunk_target=%llu target_hit=%llu target_module=%s target_library=%s target_nid=%s target_name=%s", label, addr.u64(), thunk_base, thunk_offset, thunk_target, target_hit, target_module, target_library, target_nid, target_name)
         RealGameBoot_WriteLine(file, line[0].ref[mutable u8&], written)
 
 def RealGameBoot_EmitHandoffManifest(linker: Linker&) -> void:
@@ -295,12 +515,49 @@ def RealGameBoot_EmitArtifacts(linker: Linker&, guarded_status: s32) -> void:
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "threads_sync_last_mutex_slot", threads_sync_last_mutex_slot)
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "threads_sync_last_mutex_value", threads_sync_last_mutex_value)
         RealGameBoot_EmitArtifactSignedKV(file.ref[mutable IOFile&], "threads_sync_last_mutex_ret", threads_sync_last_mutex_ret)
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "threads_sync_last_mutex_reject_reason", threads_sync_last_mutex_reject_reason)
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "kt_thread_create_count", KernelThreads_DebugThreadCreateCount())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "kt_thread_trampoline_count", KernelThreads_DebugThreadTrampolineCount())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "tls_thread_install_count", TLS_DebugThreadInstallCount())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "tls_thread_install_success_count", TLS_DebugThreadInstallSuccessCount())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "native_hle_boundary_thunk_count", Linker_NativeHleBoundaryThunkCount())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "native_hle_boundary_thunk_enabled", 1u64 if Linker_NativeHleBoundaryThunkEnabled() else 0u64)
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "native_hle_function_relocation_count", Linker_NativeHleFunctionRelocationCount())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "native_hle_data_relocation_count", Linker_NativeHleDataRelocationCount())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "native_hle_unthunked_function_count", Linker_NativeHleUnthunkedFunctionCount())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "native_hle_function_addend_count", Linker_NativeHleFunctionAddendCount())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "native_hle_function_max_addend", Linker_NativeHleFunctionMaxAddend())
         RealGameBoot_EmitArtifactStringKV(file.ref[mutable IOFile&], "guest_exec_runtime_hle_module", GuestExec_RuntimeHleModule())
         RealGameBoot_EmitArtifactStringKV(file.ref[mutable IOFile&], "guest_exec_runtime_hle_symbol", GuestExec_RuntimeHleSymbol())
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "guest_exec_runtime_hle_arg0", GuestExec_RuntimeHleArg0().u64())
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "guest_exec_runtime_hle_arg1", GuestExec_RuntimeHleArg1().u64())
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "guest_exec_runtime_hle_arg2", GuestExec_RuntimeHleArg2().u64())
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "guest_exec_runtime_hle_ret", GuestExec_RuntimeHleRet().u64())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "guest_exec_runtime_hle_arg0_native_prot", GuestExec_RuntimeHleArg0NativeProt().u64())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "guest_exec_runtime_hle_arg0_word0", GuestExec_RuntimeHleArg0Word0().u64())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "guest_exec_runtime_hle_recorder_stack_word0", GuestExec_RuntimeHleRecorderStackWord0().u64())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "guest_exec_runtime_hle_recorder_stack_word1", GuestExec_RuntimeHleRecorderStackWord1().u64())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "guest_exec_runtime_hle_guest_return_addr", GuestExec_RuntimeHleGuestReturnAddr().u64())
+        RealGameBoot_EmitAddressProbe(file.ref[mutable IOFile&], linker, "last_guest_pc", GuestExec_LastGuestPC())
+        RealGameBoot_EmitThunkProbe(file.ref[mutable IOFile&], linker, "last_guest_pc", GuestExec_LastGuestPC())
+        RealGameBoot_EmitAddressProbe(file.ref[mutable IOFile&], linker, "runtime_hle_arg0", GuestExec_RuntimeHleArg0())
+        RealGameBoot_EmitAddressProbe(file.ref[mutable IOFile&], linker, "runtime_hle_recorder_stack_word0", GuestExec_RuntimeHleRecorderStackWord0())
+        RealGameBoot_EmitAddressProbe(file.ref[mutable IOFile&], linker, "runtime_hle_recorder_stack_word1", GuestExec_RuntimeHleRecorderStackWord1())
+        RealGameBoot_EmitAddressProbe(file.ref[mutable IOFile&], linker, "runtime_hle_guest_return_addr", GuestExec_RuntimeHleGuestReturnAddr())
+        RealGameBoot_EmitCallsiteProbe(file.ref[mutable IOFile&], "runtime_hle_recorder_stack_word0", GuestExec_RuntimeHleRecorderStackWord0())
+        RealGameBoot_EmitCallsiteProbe(file.ref[mutable IOFile&], "runtime_hle_recorder_stack_word1", GuestExec_RuntimeHleRecorderStackWord1())
+        RealGameBoot_EmitCallsiteProbe(file.ref[mutable IOFile&], "runtime_hle_guest_return_addr", GuestExec_RuntimeHleGuestReturnAddr())
+        RealGameBoot_EmitAddressProbe(file.ref[mutable IOFile&], linker, "signal_stack_word0", GuestExec_SignalStackWord0())
+        RealGameBoot_EmitAddressProbe(file.ref[mutable IOFile&], linker, "signal_stack_word1", GuestExec_SignalStackWord1())
+        RealGameBoot_EmitCallsiteProbe(file.ref[mutable IOFile&], "signal_stack_word0", GuestExec_SignalStackWord0())
+        RealGameBoot_EmitCallsiteProbe(file.ref[mutable IOFile&], "signal_stack_word1", GuestExec_SignalStackWord1())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "kernel_unwind_addr", Kernel_DebugUnwindAddr())
+        RealGameBoot_EmitArtifactSignedKV(file.ref[mutable IOFile&], "kernel_unwind_flags", Kernel_DebugUnwindFlags())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "kernel_unwind_info", Kernel_DebugUnwindInfo())
+        RealGameBoot_EmitArtifactSignedKV(file.ref[mutable IOFile&], "kernel_unwind_ret", Kernel_DebugUnwindRet())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "kernel_unwind_module_base", Kernel_DebugUnwindModuleBase())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "kernel_unwind_module_size", Kernel_DebugUnwindModuleSize())
+        RealGameBoot_EmitCrashClassificationArtifacts(file.ref[mutable IOFile&])
         RealGameBoot_EmitArtifactStringKV(file.ref[mutable IOFile&], "guest_exec_last_module", GuestExec_LastModule())
         RealGameBoot_EmitArtifactStringKV(file.ref[mutable IOFile&], "guest_exec_last_symbol", GuestExec_LastSymbol())
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "malformed_imports", linker.last_malformed_import_count.u64())
@@ -310,6 +567,15 @@ def RealGameBoot_EmitArtifacts(linker: Linker&, guarded_status: s32) -> void:
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "last_failed_relocation_offset", linker.last_failed_relocation_offset)
         RealGameBoot_EmitArtifactStringKV(file.ref[mutable IOFile&], "last_failed_relocation_module", linker.last_failed_relocation_module)
         RealGameBoot_EmitArtifactStringKV(file.ref[mutable IOFile&], "last_failed_relocation_name", linker.last_failed_relocation_name)
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "last_failed_relocation_stage", linker.last_failed_relocation_stage.u64())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "last_failed_relocation_kind", linker.last_failed_relocation_kind.u64())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "last_failed_relocation_value", linker.last_failed_relocation_value)
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "failed_relocation_type1_count", linker.failed_relocation_type1_count.u64())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "failed_relocation_glob_dat_count", linker.failed_relocation_glob_dat_count.u64())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "failed_relocation_jump_slot_count", linker.failed_relocation_jump_slot_count.u64())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "failed_relocation_relative_count", linker.failed_relocation_relative_count.u64())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "failed_relocation_dtpmod64_count", linker.failed_relocation_dtpmod64_count.u64())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "failed_relocation_other_count", linker.failed_relocation_other_count.u64())
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "aerolib_fallback_stub_address", GuestExec_AeroLibFallbackStubAddress().u64())
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "aerolib_fallback_invocations", GuestExec_AeroLibFallbackInvocations())
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "aerolib_fallback_caller_pc", GuestExec_AeroLibFallbackCallerPc())
@@ -332,6 +598,18 @@ def RealGameBoot_EmitArtifacts(linker: Linker&, guarded_status: s32) -> void:
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "dbg_resolution_fp", Linker_ResolutionFingerprintValue())
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "dbg_resolution_relocs", Linker_ResolutionRelocCount())
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "dbg_hle_zero_addr_count", Linker_HleZeroAddrCount(linker))
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "dbg_tls_mmap", TLS_DebugLastMmap().u64())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "dbg_tls_ldt_addr", TLS_DebugLastLdtAddr().u64())
+        RealGameBoot_EmitArtifactSignedKV(file.ref[mutable IOFile&], "dbg_tls_ldt_ret", TLS_DebugLastLdtRet().s32())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "dbg_tls_selector", TLS_DebugLastSelector().u64())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "dbg_tls_fs0", TLS_DebugLastFs0().u64())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "dbg_sceKernelGetModuleInfoForUnwind_fn", sceKernelGetModuleInfoForUnwind.uintptr().u64())
+        RealGameBoot_EmitResolvedImportDebug(file.ref[mutable IOFile&], linker, "RpQJJVKTiFM")
+        RealGameBoot_EmitResolvedImportDebug(file.ref[mutable IOFile&], linker, "7H0iTOciTLo")
+        RealGameBoot_EmitResolvedImportDebug(file.ref[mutable IOFile&], linker, "9UK1vLZQft4")
+        RealGameBoot_EmitResolvedImportProbe(file.ref[mutable IOFile&], linker, "sceKernelGetModuleInfoForUnwind", "RpQJJVKTiFM")
+        RealGameBoot_EmitResolvedImportProbe(file.ref[mutable IOFile&], linker, "posix_pthread_mutex_lock", "7H0iTOciTLo")
+        RealGameBoot_EmitResolvedImportProbe(file.ref[mutable IOFile&], linker, "scePthreadMutexLock", "9UK1vLZQft4")
         RealGameBoot_EmitArtifactStringKV(file.ref[mutable IOFile&], "dbg_first_name", Linker_DbgFirstName())
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "dbg_first_index", Linker_DbgFirstIndex().u64())
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "dbg_name_setfp", Linker_NameSetFingerprint())
@@ -520,7 +798,12 @@ def emulator_real_game_boot_smoke_guarded_game_entry_reports_host_status() -> vo
         RealGameBoot_Check(entry == guest_exec_last_main_entry_addr, "expected guarded run to use recorded main executable entry")
         GuestExec_SetProbeMode(false)
 
-        status: s32 = GuestExec_RunMainEntryGuarded(entry, guest_exec_last_argc, null, 25.u32())
+        status: mutable s32 = 0
+        if RealGameBoot_UseNoForkGuestExec():
+            TLS_InstallPrimaryTcbBase()
+            status <- GuestExec_RunMainEntryGuardedInProcess(entry, guest_exec_last_argc, null, 25.u32())
+        else:
+            status <- GuestExec_RunMainEntryGuarded(entry, guest_exec_last_argc, null, 25.u32())
         if GuestExec_IsSupported():
             RealGameBoot_Check(status != -2, "expected supported host to attempt guarded game entry")
         else:
@@ -531,6 +814,9 @@ def emulator_real_game_boot_smoke_guarded_game_entry_reports_host_status() -> vo
         if GuestExec_IsSupported():
             RealGameBoot_Check(boundary_status == GUEST_EXEC_BOUNDARY_FIRST_HLE_IMPORT or boundary_status == GUEST_EXEC_BOUNDARY_TIMEOUT or boundary_status == GUEST_EXEC_BOUNDARY_PRE_BOUNDARY_FAULT or boundary_status == GUEST_EXEC_BOUNDARY_EXITED_BEFORE_BOUNDARY, "expected guarded execution to classify the first-boundary or pre-boundary outcome")
             RealGameBoot_Check(stage_code >= GUEST_EXEC_STAGE_GUARDED_ENTRY, "expected guarded run to advance execution stage beyond handoff")
+            if GuestExec_RuntimeHleArg0() != 0.uintptr() and GuestExec_RuntimeHleArg0().u64() < 4096u64 and GuestExec_RuntimeHleArg0NativeProt() == 0xffffffffu32 and GuestExec_RuntimeHleRet().u64() == 22u64:
+                RealGameBoot_Check(RealGameBoot_RuntimeHleDiagnosticCode() == 1001u64, "expected small-unmapped HLE pointer diagnostic")
+                RealGameBoot_Check(GuestExec_RuntimeHleArg2().u64() == 3u64, "expected fork-report HLE reject reason for small unmapped pointer")
         else:
             RealGameBoot_Check(boundary_status == GUEST_EXEC_BOUNDARY_UNSUPPORTED_HOST, "expected unsupported host boundary classification after guarded run")
             RealGameBoot_Check(streq(GuestExec_FirstBoundaryReasonName(), "unsupported-host") == 1, "expected unsupported host boundary reason name")

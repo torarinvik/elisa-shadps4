@@ -84,7 +84,24 @@ def threads_sync_orbis_from_posix(ret: int) -> int:
     return ORBIS_KERNEL_ERROR_UNKNOWN + ret
 
 def threads_sync_mutex_slot_low(mutex: mutable void&?&) -> bool:
-    return mutex.cast[void&].uintptr() < 4096.uintptr()
+    addr: VAddr = mutex.cast[void&].uintptr()
+    if addr == 0.uintptr():
+        return true
+    if MemoryManager_FindBackingIndex(Memory_Instance(), addr, 8) >= 0:
+        return false
+    return addr < 4096.uintptr()
+
+def threads_sync_mutex_slot_reject_reason(mutex: mutable void&?&?) -> u64:
+    if mutex == null:
+        return 1u64
+    addr: VAddr = mutex.cast[void&].uintptr()
+    if addr == 0.uintptr():
+        return 1u64
+    if MemoryManager_FindBackingIndex(Memory_Instance(), addr, 8) >= 0:
+        return 0u64
+    if addr < 4096.uintptr():
+        return 3u64
+    return 4u64
 
 def threads_sync_mutex_slot_addr(mutex: mutable void&?&) -> VAddr:
     return mutex.cast[void&].uintptr()
@@ -114,17 +131,20 @@ global mutable threads_sync_last_mutex_op: static u8&? = null
 global mutable threads_sync_last_mutex_slot: u64 = 0u64
 global mutable threads_sync_last_mutex_value: u64 = 0u64
 global mutable threads_sync_last_mutex_ret: int = 0
+global mutable threads_sync_last_mutex_reject_reason: u64 = 0u64
 
 def threads_sync_record_mutex(op: static u8&, mutex: mutable void&?&?, ret: int) -> int:
     threads_sync_last_mutex_op <- op
     threads_sync_last_mutex_slot <- 0u64
     threads_sync_last_mutex_value <- 0u64
+    reason: u64 = threads_sync_mutex_slot_reject_reason(mutex)
+    threads_sync_last_mutex_reject_reason <- reason
     if mutex != null:
         threads_sync_last_mutex_slot <- mutex.cast[void&].uintptr().u64()
         if not threads_sync_mutex_slot_low(mutex):
             threads_sync_last_mutex_value <- threads_sync_mutex_slot_value(mutex).u64()
     threads_sync_last_mutex_ret <- ret
-    GuestExec_RecordRuntimeHle("libkernel", op, threads_sync_last_mutex_slot.uintptr(), threads_sync_last_mutex_value.uintptr(), 0.uintptr(), ret.u64().uintptr())
+    GuestExec_RecordRuntimeHle("libkernel", op, threads_sync_last_mutex_slot.uintptr(), threads_sync_last_mutex_value.uintptr(), reason.uintptr(), ret.u64().uintptr())
     return ret
 
 def threads_sync_mutex_init_slot(mutex: mutable void&?&?, mutex_attr: PthreadMutexAttr&?) -> int:

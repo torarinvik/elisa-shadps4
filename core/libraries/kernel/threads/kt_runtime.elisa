@@ -8,11 +8,11 @@
 # exported replacement for the removed C runtime.
 
 include "../../../../common/arch.elisa"
+include "../../../tls.elisa"
 
 # --- libc / pthread externs ---------------------------------------------------
 
-@link_name(calloc)
-extern kt_calloc(count: usize, size: usize) -> mutable void&?
+extern mmap(addr: uintptr, length: usize, prot: int, flags: int, fd: int, offset: i64) -> uintptr
 # This file is intentionally self-contained for emulator builds. Do not include
 # elisacore runtime implementation fragments here: the runtime is linked as a
 # separate object, and including fragments in the emulator module duplicates
@@ -26,11 +26,22 @@ extern KtPthreadCondT
 
 extern free(ptr: heap void&) effects[Memory.Release]
 
+def kt_zalloc(size: usize) -> mutable void&?:
+    if size == 0usize:
+        return null
+    can Memory.Allocate:
+        raw_addr: uintptr = mmap(0.uintptr(), size, 3, 0x1002, -1, 0i64)
+        if raw_addr == (0usize - 1usize).uintptr():
+            return null
+        return raw_addr.cast[mutable void&?]
+
 def kt_heap_free(raw: void&?) -> void:
     if raw == null:
         return
-    can Memory.Release:
-        free(raw.cast[heap void&])
+    # kt_* handles are now backed by zero-filled mmap pages to avoid Rosetta's
+    # calloc/malloc-zone path while guest %fs switching is active. They are tiny
+    # and process-lifetime scoped for the native guest-exec bring-up tests.
+    _ = raw
 
 @link_name(clock_gettime)
 extern kt_clock_gettime(clock_id: int, ts: void&?) -> int
@@ -192,7 +203,7 @@ def kt_pt_mutex_unlock_call(state: mutable KtMutex&) -> int:
 
 def kt_mutex_create(type: int, out_error: mutable int&?) -> mutable void&?:
     can Memory.Allocate:
-        raw: mutable void&? = kt_calloc(1usize, size_of(KtMutex))
+        raw: mutable void&? = kt_zalloc(size_of(KtMutex))
         if raw == null:
             if out_error != null:
                 out_error[0] <- 35
@@ -384,7 +395,7 @@ def kt_pt_cond_broadcast_call(cond: mutable KtCond&) -> int:
 
 def kt_cond_create(out_error: mutable int&?) -> mutable void&?:
     can Memory.Allocate:
-        raw: mutable void&? = kt_calloc(1usize, size_of(KtCond))
+        raw: mutable void&? = kt_zalloc(size_of(KtCond))
         if raw == null:
             if out_error != null:
                 out_error[0] <- 35
@@ -482,7 +493,7 @@ def kt_rwlock_ptr(state: mutable KtRwlock&) -> void&?:
 
 def kt_rwlock_create(out_error: mutable int&?) -> mutable void&?:
     can Memory.Allocate:
-        raw: mutable void&? = kt_calloc(1usize, size_of(KtRwlock))
+        raw: mutable void&? = kt_zalloc(size_of(KtRwlock))
         if raw == null:
             if out_error != null:
                 out_error[0] <- 35
@@ -616,7 +627,7 @@ def kt_sem_from_handle(handle: void&?) -> mutable KtSem&?:
 
 def kt_sem_create(value: int, max_value: int, out_error: mutable int&?) -> mutable void&?:
     can Memory.Allocate:
-        raw: mutable void&? = kt_calloc(1usize, size_of(KtSem))
+        raw: mutable void&? = kt_zalloc(size_of(KtSem))
         if raw == null:
             if out_error != null:
                 out_error[0] <- 35
@@ -847,7 +858,7 @@ def kt_event_from_handle(handle: void&?) -> mutable KtEvent&?:
 
 def kt_event_create(init_pattern: u64, out_error: mutable int&?) -> mutable void&?:
     can Memory.Allocate:
-        raw: mutable void&? = kt_calloc(1usize, size_of(KtEvent))
+        raw: mutable void&? = kt_zalloc(size_of(KtEvent))
         if raw == null:
             if out_error != null:
                 out_error[0] <- 35
@@ -1046,6 +1057,8 @@ struct KtPthreadOnce:
 
 global mutable kt_tsd_once: KtPthreadOnce = KtPthreadOnce{sig: KT_PTHREAD_ONCE_SIG, opaque: 0u64}
 global mutable kt_tsd_key: u64 = 0u64
+global mutable kt_debug_thread_create_count: u64 = 0u64
+global mutable kt_debug_thread_trampoline_count: u64 = 0u64
 
 @fixed_layout
 struct KtThread:
@@ -1118,6 +1131,7 @@ def kt_thread_finish(raw: void&?) -> void:
 # key value's destructor fires during thread teardown in both cases.
 @callconv(c)
 def kt_thread_destructor(raw: void&?) -> void:
+    TLS_RestoreHostFsSelector()
     kt_thread_finish(raw)
 
 # pthread_once init routine: create the TSD key with the destructor above.
@@ -1141,16 +1155,20 @@ def kt_thread_ensure_tsd_key() -> void:
 # the entry is cancelled mid-flight.
 @callconv(c)
 def kt_thread_trampoline(raw: void&?) -> void&?:
+    kt_debug_thread_trampoline_count <- kt_debug_thread_trampoline_count + 1u64
+    _ = TLS_CaptureHostFsSelector()
     state_opt: mutable KtThread&? = kt_thread_from_handle(raw)
     if state_opt == null:
         return null
     state: mutable KtThread& = state_opt.cast[mutable KtThread&]
     trusted Unsafe.MutableGlobal:
         _ = kt_pthread_setspecific(kt_tsd_key, raw)
+    TLS_InstallThreadTcbFromPrimaryTemplate()
     result: mutable void&? = null
     if state.entry != null:
         trusted Unsafe.IndirectCall:
             result <- state.entry.call_as[func(void&?) -> void&?](state.arg)
+    TLS_RestoreHostFsSelector()
     state.result <- result
     state.completed_normally <- 1
     return result
@@ -1179,7 +1197,8 @@ def kt_pt_thread_detach(thread: uintptr) -> int:
 
 def kt_thread_create(entry: void&?, arg: void&?, out_error: mutable int&?) -> mutable void&?:
     can Memory.Allocate:
-        raw: mutable void&? = kt_calloc(1usize, size_of(KtThread))
+        kt_debug_thread_create_count <- kt_debug_thread_create_count + 1u64
+        raw: mutable void&? = kt_zalloc(size_of(KtThread))
         if raw == null:
             if out_error != null:
                 out_error[0] <- 35
@@ -1201,6 +1220,12 @@ def kt_thread_create(entry: void&?, arg: void&?, out_error: mutable int&?) -> mu
         if out_error != null:
             out_error[0] <- 0
         return raw
+
+def KernelThreads_DebugThreadCreateCount() -> u64:
+    return kt_debug_thread_create_count
+
+def KernelThreads_DebugThreadTrampolineCount() -> u64:
+    return kt_debug_thread_trampoline_count
 
 def kt_thread_native(handle: void&?) -> mutable void&?:
     state_opt: mutable KtThread&? = kt_thread_from_handle(handle)

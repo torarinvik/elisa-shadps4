@@ -2,6 +2,18 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 include "../common/types.elisa"
+include "../common/arch.elisa"
+
+extern malloc(size: usize) -> mutable heap void&?
+extern memcpy(dest: mutable void&, src: void&, n: usize) -> mutable void&
+extern mmap(addr: uintptr, length: usize, prot: int, flags: int, fd: int, offset: i64) -> uintptr
+
+@link_name(i386_set_ldt)
+extern tls_i386_set_ldt(start: int, desc: void&, num: int) -> int
+
+extern ElisaTls_LoadFsSelectorAsm(selector: u16) -> void
+extern ElisaTls_ReadFsSelectorAsm() -> u16
+extern ElisaTls_ReadFs0Asm() -> uintptr
 
 struct DtvEntry:
     counter: mutable usize
@@ -16,6 +28,49 @@ struct Tcb:
 global mutable tls_tcb_key: u32 = 1
 global mutable tls_main_tcb: Tcb = Tcb(0.uintptr(), 0.uintptr(), 0.uintptr(), 0.uintptr())
 global mutable tls_initialized: bool = false
+global mutable tls_primary_tcb_base: uintptr = 0.uintptr()
+global mutable tls_primary_template_base: uintptr = 0.uintptr()
+global mutable tls_primary_template_size: usize = 0usize
+global mutable tls_primary_dtv_base: uintptr = 0.uintptr()
+global mutable tls_primary_dtv_count: usize = 0usize
+global mutable tls_darwin_ldt_initialized: bool = false
+global mutable tls_darwin_ldt_index: u16 = 8u16
+global mutable tls_darwin_next_ldt_index: u16 = 8u16
+global mutable tls_debug_last_mmap: uintptr = 0.uintptr()
+global mutable tls_debug_last_ldt_addr: uintptr = 0.uintptr()
+global mutable tls_debug_last_ldt_ret: int = 0
+global mutable tls_debug_last_selector: u16 = 0u16
+global mutable tls_debug_last_fs0: uintptr = 0.uintptr()
+global mutable tls_host_fs_selector: u16 = 0u16
+global mutable tls_host_fs_selector_captured: bool = false
+global mutable tls_guest_fs_selector: u16 = 0u16
+global mutable tls_thread_install_count: u64 = 0u64
+global mutable tls_thread_install_success_count: u64 = 0u64
+
+@fixed_layout
+struct DarwinLdtEntry:
+    limit00: mutable u16
+    base00: mutable u16
+    base16: mutable u8
+    access: mutable u8
+    flags: mutable u8
+    base24: mutable u8
+
+@fixed_layout
+struct DarwinLdtPage:
+    tcb: mutable uintptr
+    index: mutable u16
+    padding: mutable u8[4086]
+
+const TLS_DARWIN_LDT_REGION_BASE: uintptr = 0x4000.uintptr()
+const TLS_DARWIN_LDT_REGION_SIZE: usize = 0x3FC000usize
+const TLS_DARWIN_LDT_BLOCK_SIZE: uintptr = 0x1000.uintptr()
+const TLS_DARWIN_LDT_INDEX_BASE: u16 = 8u16
+const TLS_DARWIN_LDT_ACCESS: u8 = 0xF2u8
+const TLS_DARWIN_LDT_FLAGS: u8 = 0x40u8
+
+def Tls_MapFailed() -> uintptr:
+    return (0usize - 1usize).uintptr()
 
 def GetTcbKey() -> u32:
     return tls_tcb_key
@@ -24,11 +79,51 @@ def SetTcbBase(image_address: void&?) -> void:
     base: mutable uintptr = 0.uintptr()
     if image_address != null:
         base <- image_address.cast[uintptr]
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        if not tls_darwin_ldt_initialized:
+            mapped: uintptr = mmap(TLS_DARWIN_LDT_REGION_BASE, TLS_DARWIN_LDT_REGION_SIZE, 3, 0x1012, -1, 0i64)
+            tls_debug_last_mmap <- mapped
+            if mapped == Tls_MapFailed():
+                return
+            tls_darwin_ldt_initialized <- true
+        ldt_index: u16 = tls_darwin_next_ldt_index
+        tls_darwin_next_ldt_index <- tls_darwin_next_ldt_index + 1u16
+        tls_darwin_ldt_index <- ldt_index
+        ldt_addr: uintptr = TLS_DARWIN_LDT_REGION_BASE + ((ldt_index - TLS_DARWIN_LDT_INDEX_BASE).uintptr() * TLS_DARWIN_LDT_BLOCK_SIZE)
+        tls_debug_last_ldt_addr <- ldt_addr
+        desc: mutable DarwinLdtEntry = zeroed
+        desc.limit00 <- (TLS_DARWIN_LDT_BLOCK_SIZE - 1.uintptr()).u16()
+        desc.base00 <- (ldt_addr & 0xffff.uintptr()).u16()
+        desc.base16 <- ((ldt_addr >> 16.uintptr()) & 0xff.uintptr()).u8()
+        desc.access <- TLS_DARWIN_LDT_ACCESS
+        desc.flags <- TLS_DARWIN_LDT_FLAGS
+        desc.base24 <- ((ldt_addr >> 24.uintptr()) & 0xff.uintptr()).u8()
+        ret: int = tls_i386_set_ldt(ldt_index.int(), desc.ref[void&], 1)
+        tls_debug_last_ldt_ret <- ret
+        if ret == ldt_index.int():
+            selector: u16 = ((ldt_index << 3u16) | 7u16)
+            tls_debug_last_selector <- selector
+            if not tls_host_fs_selector_captured:
+                tls_host_fs_selector <- ElisaTls_ReadFsSelectorAsm()
+                tls_host_fs_selector_captured <- true
+            tls_guest_fs_selector <- selector
+            page: mutable DarwinLdtPage&? = ldt_addr.cast[mutable DarwinLdtPage&?]
+            if page != null:
+                page.tcb <- base
+                page.index <- ldt_index
+            ElisaTls_LoadFsSelectorAsm(selector)
+            tls_debug_last_fs0 <- ElisaTls_ReadFs0Asm()
     tls_main_tcb.tcb_self <- base
     tls_main_tcb.tcb_thread <- base
     tls_initialized <- true
 
 def GetTcbBase() -> mutable Tcb&:
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        base: uintptr = ElisaTls_ReadFs0Asm()
+        if base != 0.uintptr():
+            tcb: mutable Tcb&? = base.cast[mutable Tcb&?]
+            if tcb != null:
+                return tcb
     return tls_main_tcb.ref[mutable Tcb&]
 
 def InitializeTLS() -> void:
@@ -44,3 +139,132 @@ def TLS_ResetForTests() -> void:
     tls_tcb_key <- 1
     tls_main_tcb <- Tcb(0.uintptr(), 0.uintptr(), 0.uintptr(), 0.uintptr())
     tls_initialized <- false
+    tls_primary_tcb_base <- 0.uintptr()
+    tls_primary_template_base <- 0.uintptr()
+    tls_primary_template_size <- 0usize
+    tls_primary_dtv_base <- 0.uintptr()
+    tls_primary_dtv_count <- 0usize
+    tls_darwin_next_ldt_index <- TLS_DARWIN_LDT_INDEX_BASE
+    tls_debug_last_mmap <- 0.uintptr()
+    tls_debug_last_ldt_addr <- 0.uintptr()
+    tls_debug_last_ldt_ret <- 0
+    tls_debug_last_selector <- 0u16
+    tls_debug_last_fs0 <- 0.uintptr()
+    tls_host_fs_selector <- 0u16
+    tls_host_fs_selector_captured <- false
+    tls_guest_fs_selector <- 0u16
+    tls_thread_install_count <- 0u64
+    tls_thread_install_success_count <- 0u64
+
+def TLS_DebugLastMmap() -> uintptr:
+    return tls_debug_last_mmap
+
+def TLS_DebugLastLdtAddr() -> uintptr:
+    return tls_debug_last_ldt_addr
+
+def TLS_DebugLastLdtRet() -> int:
+    return tls_debug_last_ldt_ret
+
+def TLS_DebugLastSelector() -> u16:
+    return tls_debug_last_selector
+
+def TLS_DebugLastFs0() -> uintptr:
+    return tls_debug_last_fs0
+
+def TLS_DebugThreadInstallCount() -> u64:
+    return tls_thread_install_count
+
+def TLS_DebugThreadInstallSuccessCount() -> u64:
+    return tls_thread_install_success_count
+
+def TLS_CaptureHostFsSelector() -> u16:
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        if not tls_host_fs_selector_captured:
+            tls_host_fs_selector <- ElisaTls_ReadFsSelectorAsm()
+            tls_host_fs_selector_captured <- true
+        return tls_host_fs_selector
+    static else:
+        return 0u16
+
+def TLS_HostFsSelector() -> u16:
+    return tls_host_fs_selector
+
+def TLS_RestoreHostFsSelector() -> void:
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        if tls_host_fs_selector_captured:
+            ElisaTls_LoadFsSelectorAsm(tls_host_fs_selector)
+
+def TLS_GuestFsSelector() -> u16:
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        if tls_guest_fs_selector != 0u16:
+            return tls_guest_fs_selector
+        return ((tls_darwin_ldt_index << 3u16) | 7u16)
+    static else:
+        return 0u16
+
+def TLS_SetPrimaryTcbBase(base: uintptr) -> void:
+    tls_primary_tcb_base <- base
+
+def TLS_RegisterPrimaryTemplate(base: uintptr, size: usize, dtv_base: uintptr, dtv_count: usize) -> void:
+    tls_primary_template_base <- base
+    tls_primary_template_size <- size
+    tls_primary_dtv_base <- dtv_base
+    tls_primary_dtv_count <- dtv_count
+
+def TLS_PrimaryTcbBase() -> uintptr:
+    return tls_primary_tcb_base
+
+def TLS_InstallPrimaryTcbBase() -> void:
+    if tls_primary_tcb_base != 0.uintptr():
+        SetTcbBase(tls_primary_tcb_base.cast[void&?])
+
+def TLS_InstallThreadTcbFromPrimaryTemplate() -> void:
+    tls_thread_install_count <- tls_thread_install_count + 1u64
+    if tls_primary_template_base == 0.uintptr() or tls_primary_template_size == 0usize or tls_primary_tcb_base == 0.uintptr():
+        TLS_InstallPrimaryTcbBase()
+        if TLS_DebugLastFs0() == TLS_PrimaryTcbBase():
+            tls_thread_install_success_count <- tls_thread_install_success_count + 1u64
+        return
+    can Memory.Allocate:
+        raw: mutable heap void&? = malloc(tls_primary_template_size)
+        if raw == null:
+            TLS_InstallPrimaryTcbBase()
+            return
+        new_base: uintptr = raw.cast[uintptr]
+        trusted Unsafe.PointerCast:
+            src: void& = tls_primary_template_base.cast[void&]
+            dst: mutable void& = raw.cast[mutable void&]
+            _ = memcpy(dst, src, tls_primary_template_size)
+        tcb_offset: uintptr = tls_primary_tcb_base - tls_primary_template_base
+        new_tcb_base: uintptr = new_base + tcb_offset
+        tcb: mutable Tcb& = new_tcb_base.cast[mutable Tcb&]
+        tcb.tcb_self <- new_tcb_base
+        tcb.tcb_thread <- new_tcb_base
+        if tls_primary_dtv_base != 0.uintptr() and tls_primary_dtv_count != 0usize:
+            dtv_size: usize = tls_primary_dtv_count * size_of(DtvEntry)
+            dtv_raw: mutable heap void&? = malloc(dtv_size)
+            if dtv_raw != null:
+                trusted Unsafe.PointerCast:
+                    src_dtv: void& = tls_primary_dtv_base.cast[void&]
+                    dst_dtv: mutable void& = dtv_raw.cast[mutable void&]
+                    _ = memcpy(dst_dtv, src_dtv, dtv_size)
+                    dtv: mutable DtvEntry& = dtv_raw.cast[mutable DtvEntry&]
+                    i: mutable usize = 0usize
+                    while i < tls_primary_dtv_count:
+                        ptr: uintptr = dtv[i].pointer
+                        if ptr >= tls_primary_template_base and ptr < tls_primary_template_base + tls_primary_template_size.uintptr():
+                            dtv[i].pointer <- new_base + (ptr - tls_primary_template_base)
+                        i <- i + 1usize
+                tcb.tcb_dtv <- dtv_raw.cast[uintptr]
+        SetTcbBase(new_tcb_base.cast[void&?])
+        if TLS_DebugLastFs0() == new_tcb_base:
+            tls_thread_install_success_count <- tls_thread_install_success_count + 1u64
+
+def TLS_EnterHostFromGuest() -> void:
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        TLS_RestoreHostFsSelector()
+
+def TLS_ReturnGuestFromHost() -> void:
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        if tls_guest_fs_selector != 0u16:
+            ElisaTls_LoadFsSelectorAsm(tls_guest_fs_selector)

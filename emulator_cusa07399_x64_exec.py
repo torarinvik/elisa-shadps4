@@ -17,10 +17,16 @@ HANDOFF_MANIFEST_PATH = ROOT / "cusa07399_handoff_manifest.txt"
 CUSA_PATH = ROOT.parent / "shadPS4" / "Games" / "CUSA07399"
 
 
-def run(cmd: list[str], cwd: Path = ROOT, timeout: int = 120) -> subprocess.CompletedProcess[str]:
+def run(
+    cmd: list[str],
+    cwd: Path = ROOT,
+    timeout: int = 120,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         cmd,
         cwd=cwd,
+        env=env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -329,7 +335,10 @@ def main() -> int:
         "-target-triple",
         target_triple_for_host(),
     ]
-    proc = run(cmd, cwd=COMPILER_DIR, timeout=300)
+    child_env = os.environ.copy()
+    if mode == "cross-emit-rosetta-x86_64":
+        child_env["ELISA_GUEST_EXEC_NO_FORK"] = "1"
+    proc = run(cmd, cwd=COMPILER_DIR, timeout=300, env=child_env)
     if args.verbose or proc.returncode != 0:
         print(proc.stdout, end="")
     if proc.returncode != 0:
