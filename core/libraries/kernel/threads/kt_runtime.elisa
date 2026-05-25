@@ -992,6 +992,31 @@ def kt_event_wait(handle: void&?, pattern: u64, wait_mode: u32, out_bits: mutabl
 @link_name(pthread_cancel)
 extern kt_pthread_cancel(thread: uintptr) -> int
 
+# Thread-specific-data (TSD) machinery used to run finish bookkeeping when a
+# worker thread exits by ANY means — normal return OR asynchronous cancellation.
+# A POSIX TSD destructor fires on thread teardown in both cases, which is the
+# portable replacement for the C trampoline's pthread_cleanup_push/pop. The key
+# is created exactly once via pthread_once.
+@link_name(pthread_key_create)
+extern kt_pthread_key_create(key: void&?, destructor: void&?) -> int
+@link_name(pthread_setspecific)
+extern kt_pthread_setspecific(key: u64, value: void&?) -> int
+@link_name(pthread_once)
+extern kt_pthread_once(once_control: void&?, init_routine: void&) -> int
+
+# pthread_once_t static initializer: Linux is `int 0` (a zeroed block); macOS is
+# `{ long __sig = _PTHREAD_ONCE_SIG_init; char __opaque[8] }`. A 16-byte block
+# with the platform signature word covers both (Linux only touches its low int).
+const KT_PTHREAD_ONCE_SIG: i64 = 0x30B1BCBAi64 if PLATFORM_APPLE else 0i64
+
+@fixed_layout
+struct KtPthreadOnce:
+    sig: mutable i64
+    opaque: mutable u64
+
+global mutable kt_tsd_once: KtPthreadOnce = KtPthreadOnce{sig: KT_PTHREAD_ONCE_SIG, opaque: 0u64}
+global mutable kt_tsd_key: u64 = 0u64
+
 @fixed_layout
 struct KtThread:
     pmutex: mutable u64[8]
@@ -1058,22 +1083,46 @@ def kt_thread_finish(raw: void&?) -> void:
         kt_raw_cond_destroy(pc)
         kt_heap_free(raw)
 
+# TSD destructor: runs finish bookkeeping when the worker thread exits, whether
+# by normal return or asynchronous cancellation. POSIX guarantees a non-NULL
+# key value's destructor fires during thread teardown in both cases.
+@callconv(c)
+def kt_thread_destructor(raw: void&?) -> void:
+    kt_thread_finish(raw)
+
+# pthread_once init routine: create the TSD key with the destructor above.
+@callconv(c)
+def kt_tsd_key_init_routine() -> void:
+    trusted Unsafe.MutableGlobal, Unsafe.PointerCast:
+        dtor: void&? = kt_thread_destructor as void&?
+        _ = kt_pthread_key_create(kt_tsd_key.ref[void&], dtor)
+
+# Idempotent, thread-safe key creation (pthread_once). Called on the parent
+# before spawning so the key is ready before the child sets its value.
+def kt_thread_ensure_tsd_key() -> void:
+    trusted Unsafe.MutableGlobal, Unsafe.PointerCast:
+        init_fn: void& = kt_tsd_key_init_routine as void&
+        _ = kt_pthread_once(kt_tsd_once.ref[void&], init_fn)
+
 # C-ABI worker entry handed to pthread_create. Receives the KtThread handle as
-# its argument, invokes the guest entry through the typed indirect-call
-# primitive, records the result, then runs finish bookkeeping.
+# its argument, associates it with the TSD key (so the destructor runs finish on
+# exit/cancel), then invokes the guest entry through the typed indirect-call
+# primitive. finish runs via the destructor, not inline, so it also fires when
+# the entry is cancelled mid-flight.
 @callconv(c)
 def kt_thread_trampoline(raw: void&?) -> void&?:
     state_opt: mutable KtThread&? = kt_thread_from_handle(raw)
     if state_opt == null:
         return null
     state: mutable KtThread& = state_opt.cast[mutable KtThread&]
+    trusted Unsafe.MutableGlobal:
+        _ = kt_pthread_setspecific(kt_tsd_key, raw)
     result: mutable void&? = null
     if state.entry != null:
         trusted Unsafe.IndirectCall:
             result <- state.entry.call_as[func(void&?) -> void&?](state.arg)
     state.result <- result
     state.completed_normally <- 1
-    kt_thread_finish(raw)
     return result
 
 # Spawn the worker via the runtime's pthread_create, passing the trampoline's
@@ -1106,6 +1155,7 @@ def kt_thread_create(entry: void&?, arg: void&?, out_error: mutable int&?) -> mu
                 out_error[0] <- 35
             return null
         state: mutable KtThread& = raw.cast[mutable KtThread&]
+        kt_thread_ensure_tsd_key()
         _ = kt_raw_mutex_init(state.pmutex[0].ref[void&])
         _ = kt_raw_cond_init(state.pcond[0].ref[void&])
         state.entry <- entry

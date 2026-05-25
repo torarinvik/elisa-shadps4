@@ -12,10 +12,27 @@ include "../core/libraries/kernel/threads/kt_runtime.elisa"
 def kt_test_entry_echo(arg: void&?) -> void&?:
     return arg
 
+# Worker that blocks (cancellable usleep loop) until cancelled.
+@callconv(c)
+def kt_test_entry_block(arg: void&?) -> void&?:
+    _ = arg
+    can Thread.Sleep:
+        i: mutable int = 0
+        while i < 1000000:
+            _ = usleep(5000u32)
+            i <- i + 1
+    return null
+
 def kt_entry_ptr() -> void&?:
     result: mutable void&? = null
     trusted Unsafe.PointerCast:
         result <- kt_test_entry_echo as void&?
+    return result
+
+def kt_block_entry_ptr() -> void&?:
+    result: mutable void&? = null
+    trusted Unsafe.PointerCast:
+        result <- kt_test_entry_block as void&?
     return result
 
 def kt_addr_of_int(slot: mutable int&) -> void&?:
@@ -72,6 +89,24 @@ def kt_thread_detach_returns_ok() -> void:
         h: mutable void&? = kt_thread_create(kt_entry_ptr(), null, err.ref[mutable int&])
         assert h != null
         assert kt_thread_detach(h) == 0
+
+@test
+def kt_thread_cancel_then_timedjoin_succeeds() -> void:
+    can Abort.Panic, Memory.Allocate, Thread.Spawn, Thread.Join, Memory.Release, Thread.Sleep:
+        err: mutable int = -1
+        h: mutable void&? = kt_thread_create(kt_block_entry_ptr(), null, err.ref[mutable int&])
+        assert h != null
+        # Let the worker reach its blocking usleep loop, then cancel it.
+        _ = usleep(20000u32)
+        assert kt_thread_cancel(h) == 0
+        # Near monotonic deadline (now + 3s): the TSD-destructor cancel-cleanup
+        # must set finished + broadcast so timedjoin wakes and reaps well before
+        # the deadline. A broken cleanup would time out here instead of hanging.
+        now: mutable KtTimespec = zeroed
+        _ = kt_clock_gettime(KT_CLOCK_MONOTONIC, now.ref[void&])
+        ret: mutable void&? = null
+        rc: int = kt_thread_timedjoin(h, ret.ref[mutable void&?&], now.tv_sec + 3i64, now.tv_nsec)
+        assert rc == 0
 
 @test
 def kt_thread_null_contracts() -> void:
