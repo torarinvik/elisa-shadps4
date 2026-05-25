@@ -511,3 +511,459 @@ def kt_rwlock_unlock(handle: void&?) -> int:
         return KT_PS4_EINVAL
     state: mutable KtRwlock& = state_opt.cast[mutable KtRwlock&]
     return kt_thread_errno(kt_pthread_rwlock_unlock(kt_rwlock_ptr(state)))
+
+# ============================================================================
+# Semaphore + event-flag groups (Stage 3)
+# ============================================================================
+# These embed their own mutex+cond and implement custom waiter/cancel/delete/
+# timeout logic on top of the pthread primitives wired above.
+
+const KT_PS4_EDELETED: int = 13
+const KT_PS4_ECANCELED: int = 85
+const KT_U64_MAX: u64 = 0xFFFFFFFFFFFFFFFFu64
+
+# Raw helpers operating on an embedded pthread mutex/cond by address (void&),
+# reusing the runtime's pthread_* externs and containing their effects.
+def kt_raw_mutex_init(pm: void&) -> int:
+    r: mutable int = 0
+    can Memory.Allocate:
+        r <- pthread_mutex_init(pm.cast[mutable PthreadMutexT&], null)
+    return r
+
+def kt_raw_mutex_destroy(pm: void&) -> void:
+    can Memory.Release:
+        _ = pthread_mutex_destroy(pm.cast[mutable PthreadMutexT&])
+
+def kt_raw_mutex_lock(pm: void&) -> void:
+    can Sync.Lock:
+        _ = pthread_mutex_lock(pm)
+
+def kt_raw_mutex_unlock(pm: void&) -> void:
+    can Sync.Unlock:
+        _ = pthread_mutex_unlock(pm)
+
+def kt_raw_cond_init(pc: void&) -> int:
+    r: mutable int = 0
+    can Memory.Allocate:
+        r <- pthread_cond_init(pc.cast[mutable PthreadCondT&], null)
+    return r
+
+def kt_raw_cond_destroy(pc: void&) -> void:
+    can Memory.Release:
+        _ = pthread_cond_destroy(pc.cast[mutable PthreadCondT&])
+
+def kt_raw_cond_wait(pc: void&, pm: void&) -> int:
+    r: mutable int = 0
+    can Sync.Wait:
+        r <- pthread_cond_wait(pc, pm)
+    return r
+
+def kt_raw_cond_timedwait(pc: void&, pm: void&, ts: void&) -> int:
+    return kt_pthread_cond_timedwait(pc, pm, ts)
+
+def kt_raw_cond_broadcast(pc: void&) -> void:
+    can Sync.Notify:
+        _ = pthread_cond_broadcast(pc)
+
+@fixed_layout
+struct KtSem:
+    pmutex: mutable u64[8]
+    pcond: mutable u64[6]
+    value: mutable int
+    max_value: mutable int
+    waiters: mutable int
+    canceled: mutable int
+    deleted: mutable int
+    destroy_requested: mutable int
+
+def kt_sem_from_handle(handle: void&?) -> mutable KtSem&?:
+    if handle == null:
+        return null
+    out: mutable KtSem&? = null
+    trusted Unsafe.PointerCast:
+        out <- handle.cast[mutable KtSem&?]
+    return out
+
+def kt_sem_create(value: int, max_value: int, out_error: mutable int&?) -> mutable void&?:
+    can Memory.Allocate:
+        raw: mutable void&? = kt_calloc(1usize, size_of(KtSem))
+        if raw == null:
+            if out_error != null:
+                out_error[0] <- 35
+            return null
+        state: mutable KtSem& = raw.cast[mutable KtSem&]
+        _ = kt_raw_mutex_init(state.pmutex[0].ref[void&])
+        _ = kt_raw_cond_init(state.pcond[0].ref[void&])
+        state.value <- value
+        state.max_value <- max_value
+        if out_error != null:
+            out_error[0] <- 0
+        return raw
+
+def kt_sem_destroy(handle: void&?) -> int:
+    state_opt: mutable KtSem&? = kt_sem_from_handle(handle)
+    if state_opt == null:
+        return KT_PS4_EINVAL
+    state: mutable KtSem& = state_opt.cast[mutable KtSem&]
+    if state.waiters > 0:
+        return KT_PS4_EBUSY
+    kt_raw_mutex_destroy(state.pmutex[0].ref[void&])
+    kt_raw_cond_destroy(state.pcond[0].ref[void&])
+    kt_heap_free(handle)
+    return 0
+
+def kt_sem_wait(handle: void&?, need_count: int) -> int:
+    state_opt: mutable KtSem&? = kt_sem_from_handle(handle)
+    if state_opt == null or need_count < 0:
+        return KT_PS4_EINVAL
+    state: mutable KtSem& = state_opt.cast[mutable KtSem&]
+    pm: void& = state.pmutex[0].ref[void&]
+    pc: void& = state.pcond[0].ref[void&]
+    kt_raw_mutex_lock(pm)
+    state.waiters <- state.waiters + 1
+    while state.value < need_count:
+        if state.deleted != 0:
+            state.waiters <- state.waiters - 1
+            should_finalize: bool = state.destroy_requested != 0 and state.waiters == 0
+            kt_raw_mutex_unlock(pm)
+            if should_finalize:
+                kt_raw_mutex_destroy(pm)
+                kt_raw_cond_destroy(pc)
+                kt_heap_free(handle)
+            return KT_PS4_EDELETED
+        if state.canceled != 0:
+            state.waiters <- state.waiters - 1
+            if state.waiters == 0:
+                state.canceled <- 0
+            kt_raw_mutex_unlock(pm)
+            return KT_PS4_ECANCELED
+        _ = kt_raw_cond_wait(pc, pm)
+    state.value <- state.value - need_count
+    state.waiters <- state.waiters - 1
+    kt_raw_mutex_unlock(pm)
+    return 0
+
+def kt_sem_trywait(handle: void&?, need_count: int) -> int:
+    state_opt: mutable KtSem&? = kt_sem_from_handle(handle)
+    if state_opt == null or need_count < 0:
+        return KT_PS4_EINVAL
+    state: mutable KtSem& = state_opt.cast[mutable KtSem&]
+    pm: void& = state.pmutex[0].ref[void&]
+    kt_raw_mutex_lock(pm)
+    if state.value < need_count:
+        kt_raw_mutex_unlock(pm)
+        return KT_PS4_EAGAIN
+    state.value <- state.value - need_count
+    kt_raw_mutex_unlock(pm)
+    return 0
+
+def kt_sem_timedwait(handle: void&?, need_count: int, usec: u64) -> int:
+    state_opt: mutable KtSem&? = kt_sem_from_handle(handle)
+    if state_opt == null or need_count < 0:
+        return KT_PS4_EINVAL
+    state: mutable KtSem& = state_opt.cast[mutable KtSem&]
+    deadline: mutable KtTimespec = zeroed
+    derr: int = kt_make_deadline_from_usec(usec, deadline.ref[mutable KtTimespec&])
+    if derr != 0:
+        return derr
+    pm: void& = state.pmutex[0].ref[void&]
+    pc: void& = state.pcond[0].ref[void&]
+    ts: void& = deadline.ref[void&]
+    kt_raw_mutex_lock(pm)
+    state.waiters <- state.waiters + 1
+    while state.value < need_count:
+        if state.deleted != 0:
+            state.waiters <- state.waiters - 1
+            should_finalize: bool = state.destroy_requested != 0 and state.waiters == 0
+            kt_raw_mutex_unlock(pm)
+            if should_finalize:
+                kt_raw_mutex_destroy(pm)
+                kt_raw_cond_destroy(pc)
+                kt_heap_free(handle)
+            return KT_PS4_EDELETED
+        if state.canceled != 0:
+            state.waiters <- state.waiters - 1
+            if state.waiters == 0:
+                state.canceled <- 0
+            kt_raw_mutex_unlock(pm)
+            return KT_PS4_ECANCELED
+        werr: int = kt_raw_cond_timedwait(pc, pm, ts)
+        if werr == KT_ETIMEDOUT:
+            state.waiters <- state.waiters - 1
+            kt_raw_mutex_unlock(pm)
+            return KT_PS4_ETIMEDOUT
+        if werr != 0:
+            state.waiters <- state.waiters - 1
+            kt_raw_mutex_unlock(pm)
+            return kt_thread_errno(werr)
+    state.value <- state.value - need_count
+    state.waiters <- state.waiters - 1
+    kt_raw_mutex_unlock(pm)
+    return 0
+
+def kt_sem_post(handle: void&?, signal_count: int) -> int:
+    state_opt: mutable KtSem&? = kt_sem_from_handle(handle)
+    if state_opt == null or signal_count < 0:
+        return KT_PS4_EINVAL
+    state: mutable KtSem& = state_opt.cast[mutable KtSem&]
+    pm: void& = state.pmutex[0].ref[void&]
+    kt_raw_mutex_lock(pm)
+    if signal_count > state.max_value - state.value:
+        kt_raw_mutex_unlock(pm)
+        return KT_PS4_EOVERFLOW
+    state.value <- state.value + signal_count
+    kt_raw_cond_broadcast(state.pcond[0].ref[void&])
+    kt_raw_mutex_unlock(pm)
+    return 0
+
+def kt_sem_getvalue(handle: void&?, out_value: mutable int&?) -> int:
+    state_opt: mutable KtSem&? = kt_sem_from_handle(handle)
+    if state_opt == null:
+        return KT_PS4_EINVAL
+    state: mutable KtSem& = state_opt.cast[mutable KtSem&]
+    pm: void& = state.pmutex[0].ref[void&]
+    kt_raw_mutex_lock(pm)
+    if out_value != null:
+        out_value[0] <- state.value
+    kt_raw_mutex_unlock(pm)
+    return 0
+
+def kt_sem_set(handle: void&?, value: int) -> int:
+    state_opt: mutable KtSem&? = kt_sem_from_handle(handle)
+    if state_opt == null or value < 0:
+        return KT_PS4_EINVAL
+    state: mutable KtSem& = state_opt.cast[mutable KtSem&]
+    if value > state.max_value:
+        return KT_PS4_EINVAL
+    pm: void& = state.pmutex[0].ref[void&]
+    kt_raw_mutex_lock(pm)
+    state.value <- value
+    kt_raw_cond_broadcast(state.pcond[0].ref[void&])
+    kt_raw_mutex_unlock(pm)
+    return 0
+
+def kt_sem_cancel(handle: void&?, set_value: int, out_waiters: mutable int&?) -> int:
+    state_opt: mutable KtSem&? = kt_sem_from_handle(handle)
+    if state_opt == null or set_value < 0:
+        return KT_PS4_EINVAL
+    state: mutable KtSem& = state_opt.cast[mutable KtSem&]
+    if set_value > state.max_value:
+        return KT_PS4_EINVAL
+    pm: void& = state.pmutex[0].ref[void&]
+    kt_raw_mutex_lock(pm)
+    if out_waiters != null:
+        out_waiters[0] <- state.waiters
+    state.value <- set_value
+    state.canceled <- 1
+    kt_raw_cond_broadcast(state.pcond[0].ref[void&])
+    kt_raw_mutex_unlock(pm)
+    return 0
+
+def kt_sem_delete(handle: void&?, out_waiters: mutable int&?) -> int:
+    state_opt: mutable KtSem&? = kt_sem_from_handle(handle)
+    if state_opt == null:
+        return KT_PS4_EINVAL
+    state: mutable KtSem& = state_opt.cast[mutable KtSem&]
+    pm: void& = state.pmutex[0].ref[void&]
+    pc: void& = state.pcond[0].ref[void&]
+    kt_raw_mutex_lock(pm)
+    if out_waiters != null:
+        out_waiters[0] <- state.waiters
+    state.deleted <- 1
+    state.destroy_requested <- 1
+    kt_raw_cond_broadcast(pc)
+    finalize_now: bool = state.waiters == 0
+    kt_raw_mutex_unlock(pm)
+    if finalize_now:
+        kt_raw_mutex_destroy(pm)
+        kt_raw_cond_destroy(pc)
+        kt_heap_free(handle)
+    return 0
+
+# --- event flag ---
+
+@fixed_layout
+struct KtEvent:
+    pmutex: mutable u64[8]
+    pcond: mutable u64[6]
+    bits: mutable u64
+    waiters: mutable int
+    canceled: mutable int
+    deleted: mutable int
+    destroy_requested: mutable int
+
+def kt_event_matches(bits: u64, pattern: u64, wait_mode: u32) -> bool:
+    low: u32 = wait_mode & 0x0fu32
+    if low == 0x01u32:
+        return (bits & pattern) == pattern
+    if low == 0x02u32:
+        return (bits & pattern) != 0u64
+    return false
+
+def kt_event_apply_clear(state: mutable KtEvent&, pattern: u64, wait_mode: u32) -> void:
+    clear_mode: u32 = wait_mode & 0xf0u32
+    if clear_mode == 0x10u32:
+        state.bits <- 0u64
+    elif clear_mode == 0x20u32:
+        state.bits <- state.bits & (pattern ^ KT_U64_MAX)
+
+def kt_event_from_handle(handle: void&?) -> mutable KtEvent&?:
+    if handle == null:
+        return null
+    out: mutable KtEvent&? = null
+    trusted Unsafe.PointerCast:
+        out <- handle.cast[mutable KtEvent&?]
+    return out
+
+def kt_event_create(init_pattern: u64, out_error: mutable int&?) -> mutable void&?:
+    can Memory.Allocate:
+        raw: mutable void&? = kt_calloc(1usize, size_of(KtEvent))
+        if raw == null:
+            if out_error != null:
+                out_error[0] <- 35
+            return null
+        state: mutable KtEvent& = raw.cast[mutable KtEvent&]
+        _ = kt_raw_mutex_init(state.pmutex[0].ref[void&])
+        _ = kt_raw_cond_init(state.pcond[0].ref[void&])
+        state.bits <- init_pattern
+        if out_error != null:
+            out_error[0] <- 0
+        return raw
+
+def kt_event_destroy(handle: void&?) -> int:
+    state_opt: mutable KtEvent&? = kt_event_from_handle(handle)
+    if state_opt == null:
+        return KT_PS4_EINVAL
+    state: mutable KtEvent& = state_opt.cast[mutable KtEvent&]
+    if state.waiters > 0:
+        return KT_PS4_EBUSY
+    kt_raw_mutex_destroy(state.pmutex[0].ref[void&])
+    kt_raw_cond_destroy(state.pcond[0].ref[void&])
+    kt_heap_free(handle)
+    return 0
+
+def kt_event_delete(handle: void&?, out_waiters: mutable int&?) -> int:
+    state_opt: mutable KtEvent&? = kt_event_from_handle(handle)
+    if state_opt == null:
+        return KT_PS4_EINVAL
+    state: mutable KtEvent& = state_opt.cast[mutable KtEvent&]
+    pm: void& = state.pmutex[0].ref[void&]
+    pc: void& = state.pcond[0].ref[void&]
+    kt_raw_mutex_lock(pm)
+    if out_waiters != null:
+        out_waiters[0] <- state.waiters
+    state.deleted <- 1
+    state.destroy_requested <- 1
+    kt_raw_cond_broadcast(pc)
+    finalize_now: bool = state.waiters == 0
+    kt_raw_mutex_unlock(pm)
+    if finalize_now:
+        kt_raw_mutex_destroy(pm)
+        kt_raw_cond_destroy(pc)
+        kt_heap_free(handle)
+    return 0
+
+def kt_event_clear(handle: void&?, mask: u64) -> int:
+    state_opt: mutable KtEvent&? = kt_event_from_handle(handle)
+    if state_opt == null:
+        return KT_PS4_EINVAL
+    state: mutable KtEvent& = state_opt.cast[mutable KtEvent&]
+    pm: void& = state.pmutex[0].ref[void&]
+    kt_raw_mutex_lock(pm)
+    state.bits <- state.bits & mask
+    kt_raw_mutex_unlock(pm)
+    return 0
+
+def kt_event_set(handle: void&?, pattern: u64) -> int:
+    state_opt: mutable KtEvent&? = kt_event_from_handle(handle)
+    if state_opt == null:
+        return KT_PS4_EINVAL
+    state: mutable KtEvent& = state_opt.cast[mutable KtEvent&]
+    pm: void& = state.pmutex[0].ref[void&]
+    kt_raw_mutex_lock(pm)
+    state.bits <- state.bits | pattern
+    kt_raw_cond_broadcast(state.pcond[0].ref[void&])
+    kt_raw_mutex_unlock(pm)
+    return 0
+
+def kt_event_cancel(handle: void&?, set_pattern: u64, out_waiters: mutable int&?) -> int:
+    state_opt: mutable KtEvent&? = kt_event_from_handle(handle)
+    if state_opt == null:
+        return KT_PS4_EINVAL
+    state: mutable KtEvent& = state_opt.cast[mutable KtEvent&]
+    pm: void& = state.pmutex[0].ref[void&]
+    kt_raw_mutex_lock(pm)
+    if out_waiters != null:
+        out_waiters[0] <- state.waiters
+    state.bits <- set_pattern
+    state.canceled <- 1
+    kt_raw_cond_broadcast(state.pcond[0].ref[void&])
+    kt_raw_mutex_unlock(pm)
+    return 0
+
+def kt_event_poll(handle: void&?, pattern: u64, wait_mode: u32, out_bits: mutable u64&?) -> int:
+    state_opt: mutable KtEvent&? = kt_event_from_handle(handle)
+    if state_opt == null or pattern == 0u64:
+        return KT_PS4_EINVAL
+    state: mutable KtEvent& = state_opt.cast[mutable KtEvent&]
+    pm: void& = state.pmutex[0].ref[void&]
+    kt_raw_mutex_lock(pm)
+    bits: u64 = state.bits
+    if out_bits != null:
+        out_bits[0] <- bits
+    if not kt_event_matches(bits, pattern, wait_mode):
+        kt_raw_mutex_unlock(pm)
+        return KT_PS4_EAGAIN
+    kt_event_apply_clear(state, pattern, wait_mode)
+    kt_raw_mutex_unlock(pm)
+    return 0
+
+def kt_event_wait(handle: void&?, pattern: u64, wait_mode: u32, out_bits: mutable u64&?, usec: u64) -> int:
+    state_opt: mutable KtEvent&? = kt_event_from_handle(handle)
+    if state_opt == null or pattern == 0u64:
+        return KT_PS4_EINVAL
+    state: mutable KtEvent& = state_opt.cast[mutable KtEvent&]
+    deadline: mutable KtTimespec = zeroed
+    timed: bool = usec != KT_U64_MAX
+    if timed:
+        derr: int = kt_make_deadline_from_usec(usec, deadline.ref[mutable KtTimespec&])
+        if derr != 0:
+            return derr
+    pm: void& = state.pmutex[0].ref[void&]
+    pc: void& = state.pcond[0].ref[void&]
+    ts: void& = deadline.ref[void&]
+    kt_raw_mutex_lock(pm)
+    state.waiters <- state.waiters + 1
+    while (not kt_event_matches(state.bits, pattern, wait_mode)) and state.canceled == 0 and state.deleted == 0:
+        werr: mutable int = 0
+        if timed:
+            werr <- kt_raw_cond_timedwait(pc, pm, ts)
+        else:
+            werr <- kt_raw_cond_wait(pc, pm)
+        if werr == KT_ETIMEDOUT:
+            state.waiters <- state.waiters - 1
+            kt_raw_mutex_unlock(pm)
+            return KT_PS4_ETIMEDOUT
+        if werr != 0:
+            state.waiters <- state.waiters - 1
+            kt_raw_mutex_unlock(pm)
+            return kt_thread_errno(werr)
+    state.waiters <- state.waiters - 1
+    out_bits_val: u64 = state.bits
+    if out_bits != null:
+        out_bits[0] <- out_bits_val
+    if state.canceled != 0:
+        state.canceled <- 0
+        kt_raw_mutex_unlock(pm)
+        return KT_PS4_ECANCELED
+    if state.deleted != 0:
+        should_finalize: bool = state.destroy_requested != 0 and state.waiters == 0
+        kt_raw_mutex_unlock(pm)
+        if should_finalize:
+            kt_raw_mutex_destroy(pm)
+            kt_raw_cond_destroy(pc)
+            kt_heap_free(handle)
+        return KT_PS4_EDELETED
+    kt_event_apply_clear(state, pattern, wait_mode)
+    kt_raw_mutex_unlock(pm)
+    return 0
