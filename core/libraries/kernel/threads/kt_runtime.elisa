@@ -262,3 +262,252 @@ def kt_mutex_isowned(handle: void&?) -> int:
     if state.locked != 0 and kt_pthread_equal(state.owner, kt_pthread_self()) != 0:
         return 1
     return 0
+
+# ============================================================================
+# Cond + rwlock groups (Stage 2)
+# ============================================================================
+# pthread_cond_init/destroy/wait/signal/broadcast are runtime-declared (reused).
+# pthread_cond_timedwait, pthread_rwlock_*, clock_gettime are NOT, so declared here.
+
+@link_name(pthread_cond_timedwait)
+extern kt_pthread_cond_timedwait(cond: void&?, mutex: void&?, abstime: void&?) -> int
+@link_name(pthread_rwlock_init)
+extern kt_pthread_rwlock_init(rw: void&?, attr: void&?) -> int
+@link_name(pthread_rwlock_destroy)
+extern kt_pthread_rwlock_destroy(rw: void&?) -> int
+@link_name(pthread_rwlock_rdlock)
+extern kt_pthread_rwlock_rdlock(rw: void&?) -> int
+@link_name(pthread_rwlock_tryrdlock)
+extern kt_pthread_rwlock_tryrdlock(rw: void&?) -> int
+@link_name(pthread_rwlock_wrlock)
+extern kt_pthread_rwlock_wrlock(rw: void&?) -> int
+@link_name(pthread_rwlock_trywrlock)
+extern kt_pthread_rwlock_trywrlock(rw: void&?) -> int
+@link_name(pthread_rwlock_unlock)
+extern kt_pthread_rwlock_unlock(rw: void&?) -> int
+
+@fixed_layout
+struct KtCond:
+    pcond: mutable u64[6]
+
+@fixed_layout
+struct KtRwlock:
+    prwlock: mutable u64[25]
+
+@fixed_layout
+struct KtTimespec:
+    tv_sec: mutable i64
+    tv_nsec: mutable i64
+
+def kt_make_deadline_from_usec(usec: u64, out: mutable KtTimespec&) -> int:
+    rc: int = kt_clock_gettime(KT_CLOCK_REALTIME, out.ref[void&])
+    if rc != 0:
+        return KT_PS4_EINVAL
+    out.tv_sec <- out.tv_sec + (usec / 1000000u64).i64()
+    nsec: i64 = out.tv_nsec + ((usec % 1000000u64) * 1000u64).i64()
+    if nsec >= 1000000000i64:
+        out.tv_sec <- out.tv_sec + 1i64
+        out.tv_nsec <- nsec - 1000000000i64
+    else:
+        out.tv_nsec <- nsec
+    return 0
+
+def kt_cond_from_handle(handle: void&?) -> mutable KtCond&?:
+    if handle == null:
+        return null
+    out: mutable KtCond&? = null
+    trusted Unsafe.PointerCast:
+        out <- handle.cast[mutable KtCond&?]
+    return out
+
+def kt_pt_cond_init_call(state: mutable KtCond&) -> int:
+    result: mutable int = 22
+    can Memory.Allocate:
+        c: mutable PthreadCondT& = state.pcond[0].ref[void&].cast[mutable PthreadCondT&]
+        result <- pthread_cond_init(c, null)
+    return result
+
+def kt_pt_cond_destroy_call(state: mutable KtCond&) -> int:
+    result: mutable int = 0
+    can Memory.Release:
+        c: mutable PthreadCondT& = state.pcond[0].ref[void&].cast[mutable PthreadCondT&]
+        result <- pthread_cond_destroy(c)
+    return result
+
+def kt_pt_cond_wait_call(cond: mutable KtCond&, mutex: mutable KtMutex&) -> int:
+    result: mutable int = 0
+    can Sync.Wait:
+        result <- pthread_cond_wait(cond.pcond[0].ref[void&], mutex.pmutex[0].ref[void&])
+    return result
+
+def kt_pt_cond_signal_call(cond: mutable KtCond&) -> int:
+    result: mutable int = 0
+    can Sync.Notify:
+        result <- pthread_cond_signal(cond.pcond[0].ref[void&])
+    return result
+
+def kt_pt_cond_broadcast_call(cond: mutable KtCond&) -> int:
+    result: mutable int = 0
+    can Sync.Notify:
+        result <- pthread_cond_broadcast(cond.pcond[0].ref[void&])
+    return result
+
+def kt_cond_create(out_error: mutable int&?) -> mutable void&?:
+    can Memory.Allocate:
+        raw: mutable void&? = kt_calloc(1usize, size_of(KtCond))
+        if raw == null:
+            if out_error != null:
+                out_error[0] <- 35
+            return null
+        state: mutable KtCond& = raw.cast[mutable KtCond&]
+        err: int = kt_pt_cond_init_call(state)
+        if err != 0:
+            kt_heap_free(raw)
+            if out_error != null:
+                out_error[0] <- kt_thread_errno(err)
+            return null
+        if out_error != null:
+            out_error[0] <- 0
+        return raw
+
+def kt_cond_destroy(handle: void&?) -> int:
+    state_opt: mutable KtCond&? = kt_cond_from_handle(handle)
+    if state_opt == null:
+        return KT_PS4_EINVAL
+    state: mutable KtCond& = state_opt.cast[mutable KtCond&]
+    err: int = kt_pt_cond_destroy_call(state)
+    kt_heap_free(handle)
+    return kt_thread_errno(err)
+
+def kt_cond_signal(handle: void&?) -> int:
+    state_opt: mutable KtCond&? = kt_cond_from_handle(handle)
+    if state_opt == null:
+        return KT_PS4_EINVAL
+    state: mutable KtCond& = state_opt.cast[mutable KtCond&]
+    return kt_thread_errno(kt_pt_cond_signal_call(state))
+
+def kt_cond_broadcast(handle: void&?) -> int:
+    state_opt: mutable KtCond&? = kt_cond_from_handle(handle)
+    if state_opt == null:
+        return KT_PS4_EINVAL
+    state: mutable KtCond& = state_opt.cast[mutable KtCond&]
+    return kt_thread_errno(kt_pt_cond_broadcast_call(state))
+
+def kt_cond_wait(cond_handle: void&?, mutex_handle: void&?) -> int:
+    cond_opt: mutable KtCond&? = kt_cond_from_handle(cond_handle)
+    mutex_opt: mutable KtMutex&? = kt_mutex_from_handle(mutex_handle)
+    if cond_opt == null or mutex_opt == null:
+        return KT_PS4_EINVAL
+    cond: mutable KtCond& = cond_opt.cast[mutable KtCond&]
+    mutex: mutable KtMutex& = mutex_opt.cast[mutable KtMutex&]
+    if mutex.locked == 0 or kt_pthread_equal(mutex.owner, kt_pthread_self()) == 0:
+        return KT_PS4_EPERM
+    mutex.locked <- 0
+    mutex.recursion <- 0
+    err: int = kt_pt_cond_wait_call(cond, mutex)
+    if err != 0:
+        return kt_thread_errno(err)
+    mutex.owner <- kt_pthread_self()
+    mutex.locked <- 1
+    mutex.recursion <- 1
+    return 0
+
+def kt_cond_timedwait(cond_handle: void&?, mutex_handle: void&?, tv_sec: i64, tv_nsec: i64) -> int:
+    cond_opt: mutable KtCond&? = kt_cond_from_handle(cond_handle)
+    mutex_opt: mutable KtMutex&? = kt_mutex_from_handle(mutex_handle)
+    if cond_opt == null or mutex_opt == null or tv_sec < 0i64 or tv_nsec < 0i64 or tv_nsec >= 1000000000i64:
+        return KT_PS4_EINVAL
+    cond: mutable KtCond& = cond_opt.cast[mutable KtCond&]
+    mutex: mutable KtMutex& = mutex_opt.cast[mutable KtMutex&]
+    if mutex.locked == 0 or kt_pthread_equal(mutex.owner, kt_pthread_self()) == 0:
+        return KT_PS4_EPERM
+    ts: mutable KtTimespec = zeroed
+    ts.tv_sec <- tv_sec
+    ts.tv_nsec <- tv_nsec
+    mutex.locked <- 0
+    mutex.recursion <- 0
+    err: int = kt_pthread_cond_timedwait(cond.pcond[0].ref[void&], mutex.pmutex[0].ref[void&], ts.ref[void&])
+    mutex.owner <- kt_pthread_self()
+    mutex.locked <- 1
+    mutex.recursion <- 1
+    return kt_thread_errno(err)
+
+def kt_cond_reltimedwait(cond_handle: void&?, mutex_handle: void&?, usec: u64) -> int:
+    deadline: mutable KtTimespec = zeroed
+    err: int = kt_make_deadline_from_usec(usec, deadline.ref[mutable KtTimespec&])
+    if err != 0:
+        return err
+    return kt_cond_timedwait(cond_handle, mutex_handle, deadline.tv_sec, deadline.tv_nsec)
+
+def kt_rwlock_from_handle(handle: void&?) -> mutable KtRwlock&?:
+    if handle == null:
+        return null
+    out: mutable KtRwlock&? = null
+    trusted Unsafe.PointerCast:
+        out <- handle.cast[mutable KtRwlock&?]
+    return out
+
+def kt_rwlock_ptr(state: mutable KtRwlock&) -> void&?:
+    return state.prwlock[0].ref[void&]
+
+def kt_rwlock_create(out_error: mutable int&?) -> mutable void&?:
+    can Memory.Allocate:
+        raw: mutable void&? = kt_calloc(1usize, size_of(KtRwlock))
+        if raw == null:
+            if out_error != null:
+                out_error[0] <- 35
+            return null
+        state: mutable KtRwlock& = raw.cast[mutable KtRwlock&]
+        err: int = kt_pthread_rwlock_init(state.prwlock[0].ref[void&], null)
+        if err != 0:
+            kt_heap_free(raw)
+            if out_error != null:
+                out_error[0] <- kt_thread_errno(err)
+            return null
+        if out_error != null:
+            out_error[0] <- 0
+        return raw
+
+def kt_rwlock_destroy(handle: void&?) -> int:
+    state_opt: mutable KtRwlock&? = kt_rwlock_from_handle(handle)
+    if state_opt == null:
+        return KT_PS4_EINVAL
+    state: mutable KtRwlock& = state_opt.cast[mutable KtRwlock&]
+    err: int = kt_pthread_rwlock_destroy(kt_rwlock_ptr(state))
+    kt_heap_free(handle)
+    return kt_thread_errno(err)
+
+def kt_rwlock_rdlock(handle: void&?) -> int:
+    state_opt: mutable KtRwlock&? = kt_rwlock_from_handle(handle)
+    if state_opt == null:
+        return KT_PS4_EINVAL
+    state: mutable KtRwlock& = state_opt.cast[mutable KtRwlock&]
+    return kt_thread_errno(kt_pthread_rwlock_rdlock(kt_rwlock_ptr(state)))
+
+def kt_rwlock_tryrdlock(handle: void&?) -> int:
+    state_opt: mutable KtRwlock&? = kt_rwlock_from_handle(handle)
+    if state_opt == null:
+        return KT_PS4_EINVAL
+    state: mutable KtRwlock& = state_opt.cast[mutable KtRwlock&]
+    return kt_thread_errno(kt_pthread_rwlock_tryrdlock(kt_rwlock_ptr(state)))
+
+def kt_rwlock_wrlock(handle: void&?) -> int:
+    state_opt: mutable KtRwlock&? = kt_rwlock_from_handle(handle)
+    if state_opt == null:
+        return KT_PS4_EINVAL
+    state: mutable KtRwlock& = state_opt.cast[mutable KtRwlock&]
+    return kt_thread_errno(kt_pthread_rwlock_wrlock(kt_rwlock_ptr(state)))
+
+def kt_rwlock_trywrlock(handle: void&?) -> int:
+    state_opt: mutable KtRwlock&? = kt_rwlock_from_handle(handle)
+    if state_opt == null:
+        return KT_PS4_EINVAL
+    state: mutable KtRwlock& = state_opt.cast[mutable KtRwlock&]
+    return kt_thread_errno(kt_pthread_rwlock_trywrlock(kt_rwlock_ptr(state)))
+
+def kt_rwlock_unlock(handle: void&?) -> int:
+    state_opt: mutable KtRwlock&? = kt_rwlock_from_handle(handle)
+    if state_opt == null:
+        return KT_PS4_EINVAL
+    state: mutable KtRwlock& = state_opt.cast[mutable KtRwlock&]
+    return kt_thread_errno(kt_pthread_rwlock_unlock(kt_rwlock_ptr(state)))
