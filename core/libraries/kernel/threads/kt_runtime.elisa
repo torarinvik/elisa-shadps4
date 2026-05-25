@@ -1,0 +1,264 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+# Pure-Elisa port of native/kernel_threads_runtime.c (in progress).
+#
+# Staged port: functions are named kt_* (inert) so they coexist with the C
+# runtime (still linked) without symbol conflict. Once all primitives are ported
+# and validated, the elisa_kernel_* externs are swapped to @c_abi(c) defs and the
+# C file + bridge are removed.
+#
+# Stage 1: libc/pthread externs, handle layouts, errno mapping, deadline helpers,
+# and the mutex group.
+
+include "../../../../common/arch.elisa"
+
+# --- libc / pthread externs ---------------------------------------------------
+
+@link_name(calloc)
+extern kt_calloc(count: usize, size: usize) -> mutable void&?
+# Wrapper: free a calloc'd handle through the elisacore runtime's existing
+# `free(ptr: heap void&)` extern. Re-declaring free here splits the symbol
+# (free.1 -> null -> crash), same as the pthread duplicate-symbol trap.
+def kt_heap_free(raw: void&?) -> void:
+    if raw == null:
+        return
+    can Memory.Release:
+        free(raw.cast[heap void&])
+
+@link_name(clock_gettime)
+extern kt_clock_gettime(clock_id: int, ts: void&?) -> int
+
+@link_name(pthread_self)
+extern kt_pthread_self() -> void&?
+@link_name(pthread_equal)
+extern kt_pthread_equal(t1: void&?, t2: void&?) -> int
+
+# NOTE: pthread_mutex_init/destroy/lock/unlock and pthread_cond_* are declared by
+# the elisacore runtime (elisacore_runtime_concurrency.elisa) with PthreadMutexT&/
+# void& params. Re-declaring them here with different param types makes LLVM split
+# the symbol (e.g. pthread_mutex_init.2, unbacked -> null -> jump to 0x0). So this
+# module REUSES the runtime's declarations and only declares the ones the runtime
+# does not (mutexattr_*, trylock, self/equal, clock_gettime, calloc/free, rwlock,...).
+@link_name(pthread_mutex_trylock)
+extern kt_pthread_mutex_trylock(m: void&?) -> int
+
+@link_name(pthread_mutexattr_init)
+extern kt_pthread_mutexattr_init(a: void&?) -> int
+@link_name(pthread_mutexattr_settype)
+extern kt_pthread_mutexattr_settype(a: void&?, type: int) -> int
+@link_name(pthread_mutexattr_destroy)
+extern kt_pthread_mutexattr_destroy(a: void&?) -> int
+
+# --- platform constants -------------------------------------------------------
+
+# CLOCK_REALTIME / CLOCK_MONOTONIC clock ids and pthread mutex types
+# (the monotonic clock id and the mutex-type enum values differ across platforms).
+const KT_CLOCK_REALTIME: int = 0
+const KT_CLOCK_MONOTONIC: int = 6 if PLATFORM_APPLE else 1
+const KT_PTHREAD_MUTEX_RECURSIVE: int = 2 if PLATFORM_APPLE else 1
+const KT_PTHREAD_MUTEX_ERRORCHECK: int = 1 if PLATFORM_APPLE else 2
+
+# Host errno values used by the pthread->PS4 errno mapping (a few differ).
+const KT_EPERM: int = 1
+const KT_ESRCH: int = 3
+const KT_EDEADLK: int = 11 if PLATFORM_APPLE else 35
+const KT_EBUSY: int = 16
+const KT_EINVAL: int = 22
+const KT_EAGAIN: int = 35 if PLATFORM_APPLE else 11
+const KT_ETIMEDOUT: int = 60 if PLATFORM_APPLE else 110
+const KT_EOVERFLOW: int = 84 if PLATFORM_APPLE else 75
+
+# PS4/Orbis errno codes (the values the C runtime returns to callers).
+const KT_PS4_EPERM: int = 1
+const KT_PS4_ESRCH: int = 3
+const KT_PS4_EDEADLK: int = 11
+const KT_PS4_EBUSY: int = 16
+const KT_PS4_EINVAL: int = 22
+const KT_PS4_EAGAIN: int = 35
+const KT_PS4_ETIMEDOUT: int = 60
+const KT_PS4_EOVERFLOW: int = 84
+
+# --- handle layouts -----------------------------------------------------------
+# pthread_* objects are embedded as oversized, 8-aligned byte blocks (u64 arrays)
+# placed first in each handle so calloc's 16-byte alignment satisfies them.
+# Cross-platform max sizes: mutex=64, cond=48, rwlock=200.
+
+@fixed_layout
+struct KtMutex:
+    pmutex: mutable u64[8]
+    owner: mutable void&?
+    locked: mutable i32
+    recursive: mutable i32
+    recursion: mutable i32
+
+# --- errno mapping ------------------------------------------------------------
+
+def kt_thread_errno(err: int) -> int:
+    if err == 0:
+        return 0
+    if err == KT_EPERM:
+        return KT_PS4_EPERM
+    if err == KT_ESRCH:
+        return KT_PS4_ESRCH
+    if err == KT_EDEADLK:
+        return KT_PS4_EDEADLK
+    if err == KT_EINVAL:
+        return KT_PS4_EINVAL
+    if err == KT_EBUSY:
+        return KT_PS4_EBUSY
+    if err == KT_EAGAIN:
+        return KT_PS4_EAGAIN
+    if err == KT_ETIMEDOUT:
+        return KT_PS4_ETIMEDOUT
+    if err == KT_EOVERFLOW:
+        return KT_PS4_EOVERFLOW
+    return err
+
+# --- mutex group --------------------------------------------------------------
+
+def kt_mutex_as_handle(state: mutable KtMutex&) -> mutable void&?:
+    result: mutable void&? = null
+    trusted Unsafe.PointerCast:
+        result <- state.ref[mutable void&]
+    return result
+
+def kt_mutex_from_handle(handle: void&?) -> mutable KtMutex&?:
+    if handle == null:
+        return null
+    out: mutable KtMutex&? = null
+    trusted Unsafe.PointerCast:
+        out <- handle.cast[mutable KtMutex&?]
+    return out
+
+# Effect-wrapping helpers that call the runtime's pthread mutex externs with the
+# expected param types (PthreadMutexT& / void&), keeping their Sync/Memory effects
+# contained so the kt_mutex_* API stays effect-free.
+def kt_pt_mutex_init_call(state: mutable KtMutex&, attr_ptr: void&?) -> int:
+    result: mutable int = 22
+    can Memory.Allocate:
+        m: mutable PthreadMutexT& = state.pmutex[0].ref[void&].cast[mutable PthreadMutexT&]
+        result <- pthread_mutex_init(m, attr_ptr)
+    return result
+
+def kt_pt_mutex_destroy_call(state: mutable KtMutex&) -> int:
+    result: mutable int = 0
+    can Memory.Release:
+        m: mutable PthreadMutexT& = state.pmutex[0].ref[void&].cast[mutable PthreadMutexT&]
+        result <- pthread_mutex_destroy(m)
+    return result
+
+def kt_pt_mutex_lock_call(state: mutable KtMutex&) -> int:
+    result: mutable int = 0
+    can Sync.Lock:
+        result <- pthread_mutex_lock(state.pmutex[0].ref[void&])
+    return result
+
+def kt_pt_mutex_unlock_call(state: mutable KtMutex&) -> int:
+    result: mutable int = 0
+    can Sync.Unlock:
+        result <- pthread_mutex_unlock(state.pmutex[0].ref[void&])
+    return result
+
+def kt_mutex_create(type: int, out_error: mutable int&?) -> mutable void&?:
+    can Memory.Allocate:
+        raw: mutable void&? = kt_calloc(1usize, size_of(KtMutex))
+        if raw == null:
+            if out_error != null:
+                out_error[0] <- 35
+            return null
+        state: mutable KtMutex& = raw.cast[mutable KtMutex&]
+        attr: mutable u64[2] = zeroed
+        attr_ptr: void&? = attr[0].ref[void&]
+        _ = kt_pthread_mutexattr_init(attr_ptr)
+        if type == 2 or type == 4:
+            _ = kt_pthread_mutexattr_settype(attr_ptr, KT_PTHREAD_MUTEX_RECURSIVE)
+            state.recursive <- 1
+        elif type == 3:
+            _ = kt_pthread_mutexattr_settype(attr_ptr, KT_PTHREAD_MUTEX_ERRORCHECK)
+        err: int = kt_pt_mutex_init_call(state, attr_ptr)
+        _ = kt_pthread_mutexattr_destroy(attr_ptr)
+        if err != 0:
+            kt_heap_free(raw)
+            if out_error != null:
+                out_error[0] <- kt_thread_errno(err)
+            return null
+        if out_error != null:
+            out_error[0] <- 0
+        return raw
+
+def kt_mutex_mutex_ptr(state: mutable KtMutex&) -> void&?:
+    return state.pmutex[0].ref[void&]
+
+def kt_mutex_destroy(handle: void&?) -> int:
+    state_opt: mutable KtMutex&? = kt_mutex_from_handle(handle)
+    if state_opt == null:
+        return KT_PS4_EINVAL
+    state: mutable KtMutex& = state_opt.cast[mutable KtMutex&]
+    if state.locked != 0:
+        return KT_PS4_EBUSY
+    err: int = kt_pt_mutex_destroy_call(state)
+    kt_heap_free(handle)
+    return kt_thread_errno(err)
+
+def kt_mutex_lock(handle: void&?) -> int:
+    state_opt: mutable KtMutex&? = kt_mutex_from_handle(handle)
+    if state_opt == null:
+        return KT_PS4_EINVAL
+    state: mutable KtMutex& = state_opt.cast[mutable KtMutex&]
+    self: void&? = kt_pthread_self()
+    if state.locked != 0 and kt_pthread_equal(state.owner, self) != 0:
+        if state.recursive != 0:
+            state.recursion <- state.recursion + 1
+            return 0
+        return KT_PS4_EBUSY
+    err: int = kt_pt_mutex_lock_call(state)
+    if err != 0:
+        return kt_thread_errno(err)
+    state.owner <- self
+    state.locked <- 1
+    state.recursion <- 1
+    return 0
+
+def kt_mutex_trylock(handle: void&?) -> int:
+    state_opt: mutable KtMutex&? = kt_mutex_from_handle(handle)
+    if state_opt == null:
+        return KT_PS4_EINVAL
+    state: mutable KtMutex& = state_opt.cast[mutable KtMutex&]
+    self: void&? = kt_pthread_self()
+    if state.locked != 0 and kt_pthread_equal(state.owner, self) != 0:
+        if state.recursive != 0:
+            state.recursion <- state.recursion + 1
+            return 0
+        return KT_PS4_EBUSY
+    err: int = kt_pthread_mutex_trylock(kt_mutex_mutex_ptr(state))
+    if err != 0:
+        return kt_thread_errno(err)
+    state.owner <- self
+    state.locked <- 1
+    state.recursion <- 1
+    return 0
+
+def kt_mutex_unlock(handle: void&?) -> int:
+    state_opt: mutable KtMutex&? = kt_mutex_from_handle(handle)
+    if state_opt == null:
+        return KT_PS4_EINVAL
+    state: mutable KtMutex& = state_opt.cast[mutable KtMutex&]
+    if state.locked == 0 or kt_pthread_equal(state.owner, kt_pthread_self()) == 0:
+        return KT_PS4_EPERM
+    if state.recursive != 0 and state.recursion > 1:
+        state.recursion <- state.recursion - 1
+        return 0
+    state.locked <- 0
+    state.recursion <- 0
+    err: int = kt_pt_mutex_unlock_call(state)
+    return kt_thread_errno(err)
+
+def kt_mutex_isowned(handle: void&?) -> int:
+    state_opt: mutable KtMutex&? = kt_mutex_from_handle(handle)
+    if state_opt == null:
+        return KT_PS4_EINVAL
+    state: mutable KtMutex& = state_opt.cast[mutable KtMutex&]
+    if state.locked != 0 and kt_pthread_equal(state.owner, kt_pthread_self()) != 0:
+        return 1
+    return 0
