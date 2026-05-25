@@ -250,8 +250,10 @@ def diagnose_artifacts(artifacts: dict[str, str]) -> str:
         notes.append("last-pc-not-readable")
     if boundary_status == -10 and pc_was_fallback != 0:
         notes.append("last-pc-was-fallback")
-    if boundary_status == -10 and artifact_get(artifacts, "last_hle_symbol", default="") != "":
-        notes.append("last-hle-recorded-before-crash")
+    if boundary_status == -10 and artifact_get(artifacts, "guest_exec_runtime_hle_symbol", default="") != "":
+        notes.append("runtime-hle-recorded-before-boundary")
+    elif boundary_status == -10 and artifact_get(artifacts, "last_hle_symbol", default="") != "":
+        notes.append("resolved-hle-before-crash")
     return ",".join(notes) if notes else "none"
 
 
