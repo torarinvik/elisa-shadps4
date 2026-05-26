@@ -598,19 +598,29 @@ def avplayer_auto_start_streams(handle: AvPlayerHandle) -> bool:
     # path as an explicit guest call so state/event side effects stay identical.
     return sceAvPlayerStart(handle) == ORBIS_OK
 
-def avplayer_copy_uri_name_with_length(uri_name: i8&, uri_len: u32) -> mutable heap i8&?:
+# Affine owner for the request-scoped uri-name copy. It MUST be consumed exactly
+# once by avplayer_free_uri_name_copy on every path, so a future early-return in
+# sceAvPlayerAddSourceEx that forgets the free becomes a compile error rather
+# than a silent heap leak. (Unlike the guest-%fs TLS path, avplayer runs off the
+# hot path and genuinely frees its transient allocations.)
+affine struct UriNameCopy:
+    raw: mutable heap i8&?
+
+def avplayer_copy_uri_name_with_length(uri_name: i8&, uri_len: u32) -> UriNameCopy:
     copy_len: usize = uri_len.usize()
     raw: mutable heap void&? = malloc(copy_len + 1usize)
     if raw == null:
-        return null
+        return UriNameCopy(null)
     dst: mutable heap i8& = raw.cast[mutable heap i8&]
     _ = memcpy(dst.cast[mutable void&], uri_name.cast[void&], copy_len)
     dst[copy_len] <- 0
-    return dst
+    return UriNameCopy(dst as mutable heap i8&?)
 
-def avplayer_free_uri_name_copy(uri_copy: mutable heap i8&?):
-    if uri_copy != null:
-        free(uri_copy.cast[mutable void&])
+def avplayer_free_uri_name_copy(uri_copy: UriNameCopy) -> void:
+    p: mutable heap i8&? = uri_copy.raw
+    _ = move uri_copy
+    if p != null:
+        free(p.cast[mutable void&])
 
 def sceAvPlayerAddSource(handle: AvPlayerHandle, filename: i8&?) -> i32:
     if not avplayer_valid_handle(handle) or filename == null:
@@ -637,18 +647,19 @@ def sceAvPlayerAddSourceEx(handle: AvPlayerHandle, uri_type: u32, source_details
         return ORBIS_AVPLAYER_ERROR_INVALID_PARAMS
     if source_details.uri.length == 0u32:
         return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
-    uri_name_copy: mutable heap i8&? = avplayer_copy_uri_name_with_length(source_details.uri.name.cast[i8&], source_details.uri.length)
-    if uri_name_copy == null:
+    uri_name_copy: UriNameCopy = avplayer_copy_uri_name_with_length(source_details.uri.name.cast[i8&], source_details.uri.length)
+    if uri_name_copy.raw == null:
+        avplayer_free_uri_name_copy(move uri_name_copy)
         return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
-    type_res: i32 = avimpl_validate_source_type(uri_name_copy.cast[i8&?], source_details.source_type)
+    type_res: i32 = avimpl_validate_source_type(uri_name_copy.raw.cast[i8&?], source_details.source_type)
     if type_res != ORBIS_OK:
-        avplayer_free_uri_name_copy(uri_name_copy)
+        avplayer_free_uri_name_copy(move uri_name_copy)
         return type_res
     avsrc_set_use_vdec2(handle - 1, g_handle_use_vdec2[handle - 1])
-    if not avsrc_add_source_path(handle - 1, uri_name_copy.cast[i8&?]):
-        avplayer_free_uri_name_copy(uri_name_copy)
+    if not avsrc_add_source_path(handle - 1, uri_name_copy.raw.cast[i8&?]):
+        avplayer_free_uri_name_copy(move uri_name_copy)
         return ORBIS_AVPLAYER_ERROR_OPERATION_FAILED
-    avplayer_free_uri_name_copy(uri_name_copy)
+    avplayer_free_uri_name_copy(move uri_name_copy)
     avs_on_add_source(handle - 1)
     avplayer_controller_tick(handle - 1)
     if g_handle_auto_start[handle - 1]:
