@@ -665,6 +665,18 @@ def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
     ge_fault_word1 <- ge_read_native_word(ge_last_guest_pc + 8.uintptr())
     ge_signal_stack_word0 <- ge_read_context_word(ge_last_guest_sp)
     ge_signal_stack_word1 <- ge_read_context_word(ge_last_guest_sp + 8.uintptr())
+    ge_signal_stack_word_m1 <- 0.uintptr()
+    if ge_last_guest_sp.u64() >= 8u64:
+        ge_signal_stack_word_m1 <- ge_read_context_word(ge_last_guest_sp - 8.uintptr())
+    ge_fault_transfer_class <- 0u64
+    if ge_last_guest_pc != 0.uintptr() and ge_last_guest_pc.u64() < 4096u64 and ge_pc_native_prot == 0xffffffffu32:
+        ge_fault_transfer_class <- 1u64
+        if ge_last_guest_pc == ge_signal_stack_word_m1:
+            ge_fault_transfer_class <- 2u64
+        elif ge_last_guest_pc == ge_signal_stack_word0:
+            ge_fault_transfer_class <- 3u64
+        elif ge_last_guest_pc == ge_signal_stack_word1:
+            ge_fault_transfer_class <- 4u64
     ge_resolve_pc_symbol(ge_signal_stack_word0, true)
     ge_resolve_pc_symbol(ge_last_guest_pc, false)
     fr: ElisaGuestExecForkReport&? = ge_fork_report
@@ -687,6 +699,8 @@ def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
         fr.fault_word1 <- ge_fault_word1
         fr.signal_stack_word0 <- ge_signal_stack_word0
         fr.signal_stack_word1 <- ge_signal_stack_word1
+        fr.signal_stack_word_m1 <- ge_signal_stack_word_m1
+        fr.fault_transfer_class <- ge_fault_transfer_class
         fr.signal_stack_symbol0 <- ge_signal_stack_symbol0
         fr.signal_stack_image0 <- ge_signal_stack_image0
         fr.signal_pc_symbol <- ge_signal_pc_symbol
@@ -915,9 +929,11 @@ def ge_absorb_fork_report() -> void:
         ge_last_pc_source <- fr.pc_source
     if fr.fault_word0 != 0.uintptr() or fr.fault_word1 != 0.uintptr():
         ge_fault_word0 <- fr.fault_word0
-        ge_fault_word1 <- fr.fault_word1
+    ge_fault_word1 <- fr.fault_word1
     ge_signal_stack_word0 <- fr.signal_stack_word0
     ge_signal_stack_word1 <- fr.signal_stack_word1
+    ge_signal_stack_word_m1 <- fr.signal_stack_word_m1
+    ge_fault_transfer_class <- fr.fault_transfer_class
     if fr.signal_stack_symbol0 != null:
         ge_signal_stack_symbol0 <- fr.signal_stack_symbol0
     if fr.signal_stack_image0 != null:
@@ -1078,6 +1094,8 @@ def ge_reset_crash_state() -> void:
     ge_fault_word1 <- 0.uintptr()
     ge_signal_stack_word0 <- 0.uintptr()
     ge_signal_stack_word1 <- 0.uintptr()
+    ge_signal_stack_word_m1 <- 0.uintptr()
+    ge_fault_transfer_class <- 0u64
     ge_signal_stack_symbol0 <- ""
     ge_signal_stack_image0 <- ""
     ge_signal_pc_symbol <- ""
@@ -1833,6 +1851,12 @@ def c_GuestExec_SignalStackWord0() -> uintptr:
 def c_GuestExec_SignalStackWord1() -> uintptr:
     return ge_signal_stack_word1
 
+def c_GuestExec_SignalStackWordM1() -> uintptr:
+    return ge_signal_stack_word_m1
+
+def c_GuestExec_FaultTransferClass() -> u64:
+    return ge_fault_transfer_class
+
 def c_GuestExec_SignalStackSymbol0() -> static u8&:
     s: static u8&? = ge_signal_stack_symbol0
     return s if s != null else ""
@@ -1968,6 +1992,8 @@ global mutable ge_fault_word0: uintptr = 0.uintptr()
 global mutable ge_fault_word1: uintptr = 0.uintptr()
 global mutable ge_signal_stack_word0: uintptr = 0.uintptr()
 global mutable ge_signal_stack_word1: uintptr = 0.uintptr()
+global mutable ge_signal_stack_word_m1: uintptr = 0.uintptr()
+global mutable ge_fault_transfer_class: u64 = 0u64
 global mutable ge_signal_stack_symbol0: static u8&? = null
 global mutable ge_signal_stack_image0: static u8&? = null
 global mutable ge_signal_pc_symbol: static u8&? = null
@@ -2069,6 +2095,8 @@ struct ElisaGuestExecForkReport:
     fault_word1: mutable uintptr
     signal_stack_word0: mutable uintptr
     signal_stack_word1: mutable uintptr
+    signal_stack_word_m1: mutable uintptr
+    fault_transfer_class: mutable u64
     signal_stack_symbol0: mutable static u8&?
     signal_stack_image0: mutable static u8&?
     signal_pc_symbol: mutable static u8&?
@@ -2841,6 +2869,12 @@ def GuestExec_SignalStackWord0() -> VAddr:
 
 def GuestExec_SignalStackWord1() -> VAddr:
     return c_GuestExec_SignalStackWord1()
+
+def GuestExec_SignalStackWordM1() -> VAddr:
+    return c_GuestExec_SignalStackWordM1()
+
+def GuestExec_FaultTransferClass() -> u64:
+    return c_GuestExec_FaultTransferClass()
 
 def GuestExec_SignalStackSymbol0() -> static u8&:
     return c_GuestExec_SignalStackSymbol0()
