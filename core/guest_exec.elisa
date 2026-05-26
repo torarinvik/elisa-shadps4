@@ -3,6 +3,7 @@
 
 include "../common/types.elisa"
 include "../common/arch.elisa"
+include "../../compiler/runtime/elisacore_std/debug_referee.elisai"
 
 const GUEST_EXEC_MAX_ARGS: usize = 33
 
@@ -172,6 +173,45 @@ global mutable ge_debug_trap_count: u64 = 0u64
 global mutable ge_debug_trap_reason: u64 = 0u64
 global mutable ge_debug_trap_value: uintptr = 0.uintptr()
 global mutable ge_debug_trap_sequence: u64 = 0u64
+global mutable ge_debug_trace_enabled: bool = false
+
+def ge_debug_trace_boundary(label: cstr, a: uintptr, b: uintptr, c: uintptr) -> void:
+    if not ge_debug_trace_enabled:
+        return
+    ge_debug_trace_record(DEBUG_TRACE_KIND_BOUNDARY, label, a, b, c)
+
+def ge_debug_trace_checkpoint(label: cstr) -> void:
+    if not ge_debug_trace_enabled:
+        return
+    ge_debug_trace_record(DEBUG_TRACE_KIND_CHECKPOINT, label, 0.uintptr(), 0.uintptr(), 0.uintptr())
+
+def ge_debug_trace_reset() -> void:
+    if not ge_debug_trace_enabled:
+        return
+    debug_trace_sequence <- 0u64
+    debug_trace_event_count <- 0.usize()
+    debug_trace_overflowed <- false
+    debug_trace_hash <- DEBUG_TRACE_HASH_INITIAL
+    debug_trace_last_event <- DebugTraceEvent(0u64, 0, 0.uintptr(), 0.uintptr(), 0.uintptr(), "")
+
+def ge_debug_trace_mix_word(word: uintptr) -> void:
+    debug_trace_hash <- (debug_trace_hash ^ word.u64()) * DEBUG_TRACE_HASH_PRIME
+
+def ge_debug_trace_record(kind: int, label: cstr, a: uintptr, b: uintptr, c: uintptr) -> void:
+    if not ge_debug_trace_enabled:
+        return
+    debug_trace_sequence <- debug_trace_sequence + 1u64
+    ge_debug_trace_mix_word(kind.uintptr())
+    ge_debug_trace_mix_word(a)
+    ge_debug_trace_mix_word(b)
+    ge_debug_trace_mix_word(c)
+    event: DebugTraceEvent = DebugTraceEvent(debug_trace_sequence, kind, a, b, c, label)
+    debug_trace_last_event <- event
+    if debug_trace_event_count < DEBUG_TRACE_TAPE_CAP:
+        debug_trace_events[debug_trace_event_count] <- event
+        debug_trace_event_count <- debug_trace_event_count + 1.usize()
+    else:
+        debug_trace_overflowed <- true
 
 def ge_map_failed() -> uintptr:
     return 0xFFFFFFFFFFFFFFFFu64.uintptr()
@@ -354,6 +394,7 @@ def ge_debug_guard_callable_target(target: uintptr, sequence: u64) -> bool:
     ge_debug_trap_value <- target
     ge_debug_trap_sequence <- sequence if sequence != 0u64 else ge_debug_trap_count
     ge_last_status <- GE_DEBUG_TRAP_CALLABLE_GUARD_STATUS
+    ge_debug_trace_boundary("guest-exec-callable-guard-stop", target, reason.uintptr(), ge_debug_trap_sequence.uintptr())
     return false
 
 def ge_read_native_word(address: uintptr) -> uintptr:
@@ -1633,13 +1674,17 @@ def ge_disarm_timer() -> void:
     _ = ge_setitimer(GE_ITIMER_REAL, timer_off.ref[void&], null)
 
 def ge_run_synthetic_function(entry_addr: uintptr, arg0: u64, arg1: u64) -> u64:
+    ge_debug_trace_boundary("guest-exec-synthetic-entry", entry_addr, arg0.uintptr(), arg1.uintptr())
     if entry_addr == 0.uintptr():
         ge_last_status <- -1
+        ge_debug_trace_boundary("guest-exec-synthetic-stop", entry_addr, GE_SENTINEL_MAX.uintptr(), 0.uintptr())
         return GE_SENTINEL_MAX
     static if ARCH_X86_64 and not PLATFORM_WINDOWS:
         if not ge_debug_guard_callable_target(entry_addr, 1u64):
+            ge_debug_trace_boundary("guest-exec-synthetic-stop", entry_addr, (GE_SENTINEL_MAX - 5u64).uintptr(), ge_debug_trap_reason.uintptr())
             return GE_SENTINEL_MAX - 5u64
         if not ge_check_entry_published(entry_addr):
+            ge_debug_trace_boundary("guest-exec-synthetic-stop", entry_addr, (GE_SENTINEL_MAX - 4u64).uintptr(), GE_DEBUG_TRAP_UNPUBLISHED_EXEC_STATUS.u64().uintptr())
             return GE_SENTINEL_MAX - 4u64
         ge_reset_crash_state()
         ge_install_guards()
@@ -1648,27 +1693,34 @@ def ge_run_synthetic_function(entry_addr: uintptr, arg0: u64, arg1: u64) -> u64:
         if ge_sigsetjmp(ge_jmp_buf[0usize].ref[void&], 1) != 0:
             ge_guard_active <- 0
             ge_restore_guards()
+            ge_debug_trace_boundary("guest-exec-synthetic-stop", entry_addr, (GE_SENTINEL_MAX - 2u64).uintptr(), ge_last_status.u64().uintptr())
             return GE_SENTINEL_MAX - 2u64
         fn: func(u64, u64) -> u64 = entry_addr as func(u64, u64) -> u64
         result: u64 = fn(arg0, arg1)
         ge_guard_active <- 0
         ge_restore_guards()
         ge_last_status <- 1
+        ge_debug_trace_boundary("guest-exec-synthetic-result", entry_addr, result.uintptr(), ge_last_status.u64().uintptr())
         return result
     static else:
         _ = arg0
         _ = arg1
         ge_last_status <- -2
+        ge_debug_trace_boundary("guest-exec-synthetic-stop", entry_addr, (GE_SENTINEL_MAX - 1u64).uintptr(), ge_last_status.u64().uintptr())
         return GE_SENTINEL_MAX - 1u64
 
 def ge_run_synthetic_function_with_timeout(entry_addr: uintptr, arg0: u64, arg1: u64, timeout_ms: u32) -> u64:
+    ge_debug_trace_boundary("guest-exec-synthetic-timeout-entry", entry_addr, arg0.uintptr(), arg1.uintptr())
     if entry_addr == 0.uintptr():
         ge_last_status <- -1
+        ge_debug_trace_boundary("guest-exec-synthetic-timeout-stop", entry_addr, GE_SENTINEL_MAX.uintptr(), 0.uintptr())
         return GE_SENTINEL_MAX
     static if ARCH_X86_64 and not PLATFORM_WINDOWS:
         if not ge_debug_guard_callable_target(entry_addr, 1u64):
+            ge_debug_trace_boundary("guest-exec-synthetic-timeout-stop", entry_addr, (GE_SENTINEL_MAX - 5u64).uintptr(), ge_debug_trap_reason.uintptr())
             return GE_SENTINEL_MAX - 5u64
         if not ge_check_entry_published(entry_addr):
+            ge_debug_trace_boundary("guest-exec-synthetic-timeout-stop", entry_addr, (GE_SENTINEL_MAX - 4u64).uintptr(), GE_DEBUG_TRAP_UNPUBLISHED_EXEC_STATUS.u64().uintptr())
             return GE_SENTINEL_MAX - 4u64
         ge_reset_crash_state()
         ge_install_guards()
@@ -1681,7 +1733,9 @@ def ge_run_synthetic_function_with_timeout(entry_addr: uintptr, arg0: u64, arg1:
             ge_restore_guards()
             if ge_timeout_fired != 0:
                 ge_last_status <- -3
+                ge_debug_trace_boundary("guest-exec-synthetic-timeout-stop", entry_addr, (GE_SENTINEL_MAX - 3u64).uintptr(), ge_last_status.u64().uintptr())
                 return GE_SENTINEL_MAX - 3u64
+            ge_debug_trace_boundary("guest-exec-synthetic-timeout-stop", entry_addr, (GE_SENTINEL_MAX - 2u64).uintptr(), ge_last_status.u64().uintptr())
             return GE_SENTINEL_MAX - 2u64
         fn: func(u64, u64) -> u64 = entry_addr as func(u64, u64) -> u64
         result: u64 = fn(arg0, arg1)
@@ -1689,12 +1743,14 @@ def ge_run_synthetic_function_with_timeout(entry_addr: uintptr, arg0: u64, arg1:
         ge_guard_active <- 0
         ge_restore_guards()
         ge_last_status <- 1
+        ge_debug_trace_boundary("guest-exec-synthetic-timeout-result", entry_addr, result.uintptr(), ge_last_status.u64().uintptr())
         return result
     static else:
         _ = arg0
         _ = arg1
         _ = timeout_ms
         ge_last_status <- -2
+        ge_debug_trace_boundary("guest-exec-synthetic-timeout-stop", entry_addr, (GE_SENTINEL_MAX - 1u64).uintptr(), ge_last_status.u64().uintptr())
         return GE_SENTINEL_MAX - 1u64
 
 def ge_run_main_entry(params: mutable GuestEntryParams&, exit_func: void&?) -> void:
@@ -2518,6 +2574,8 @@ def c_GuestExec_RecordRuntimeHle(module: static u8&?, symbol: static u8&?, arg0:
     ge_runtime_hle_arg1 <- arg1
     ge_runtime_hle_arg2 <- arg2
     ge_runtime_hle_ret <- ret
+    ge_debug_trace_boundary("guest-exec-hle-args", arg0, arg1, arg2)
+    ge_debug_trace_boundary("guest-exec-hle-ret", ret, ge_runtime_hle_sequence.uintptr(), ge_runtime_hle_guest_return_addr)
     ge_runtime_hle_arg0_native_prot <- ge_native_prot_at(arg0, 8u64)
     ge_runtime_hle_arg0_word0 <- ge_read_native_word(arg0)
     if ge_runtime_hle_first_bad_arg0_sequence == 0u64 and arg0 != 0.uintptr() and arg0 < 4096.uintptr() and ge_runtime_hle_arg0_native_prot == 0xffffffffu32:
@@ -2905,6 +2963,8 @@ def GuestExec_IsSupported() -> bool:
     return c_GuestExec_IsSupported() == 1
 
 def GuestExec_ResetState() -> void:
+    ge_debug_trace_reset()
+    ge_debug_trace_checkpoint("guest-exec-reset")
     guest_exec_enabled <- false
     guest_exec_probe_mode <- false
     guest_exec_last_map_result <- 0
@@ -3282,6 +3342,40 @@ def GuestExec_RunSyntheticFunctionWithTimeout(entry_addr: VAddr, arg0: u64, arg1
     if not GuestExec_IsSupported() or entry_addr == 0.uintptr():
         return 0xFFFFFFFFFFFFFFFF.u64()
     return c_GuestExec_RunSyntheticFunctionWithTimeout(entry_addr, arg0, arg1, timeout_ms)
+
+def GuestExec_SetDebugTraceEnabled(enabled: bool) -> void:
+    ge_debug_trace_enabled <- enabled
+    debug_trace_enabled <- enabled
+
+def GuestExec_DebugTraceReset() -> void:
+    enabled: bool = ge_debug_trace_enabled
+    ge_debug_trace_enabled <- true
+    ge_debug_trace_reset()
+    ge_debug_trace_enabled <- enabled
+
+def GuestExec_DebugTraceFingerprint() -> u64:
+    return debug_trace_hash
+
+def GuestExec_DebugTraceCount() -> usize:
+    return debug_trace_event_count
+
+def GuestExec_DebugTraceDidOverflow() -> bool:
+    return debug_trace_overflowed
+
+def GuestExec_DebugTraceEventAt(index: usize) -> DebugTraceEvent:
+    if index >= DEBUG_TRACE_TAPE_CAP:
+        return DebugTraceEvent(0u64, 0, 0.uintptr(), 0.uintptr(), 0.uintptr(), "")
+    return debug_trace_events[index]
+
+def GuestExec_DebugTraceEventKindAt(index: usize) -> int:
+    if index >= DEBUG_TRACE_TAPE_CAP:
+        return 0
+    return debug_trace_events[index].kind
+
+def GuestExec_DebugTraceEventAAt(index: usize) -> uintptr:
+    if index >= DEBUG_TRACE_TAPE_CAP:
+        return 0.uintptr()
+    return debug_trace_events[index].a
 
 def GuestExec_ReportedStatus() -> s32:
     return c_GuestExec_ReportedStatus()

@@ -181,6 +181,34 @@ def emulator_guest_exec_debug_callable_guard_stops_before_unmapped_entry() -> vo
         if GuestExec_DebugTrapValue() != 0x100000.uintptr():
             panic("expected callable guard unmapped target value")
 
+def guest_exec_record_trace_variant(value: VAddr) -> u64:
+    can Debug.Trace:
+        GuestExec_SetDebugTraceEnabled(true)
+        GuestExec_ResetState()
+        GuestExec_SetDebugTraceEnabled(true)
+        GuestExec_SetDebugTrapOnCallableGuard(true)
+        _ = GuestExec_DebugGuardCallableTarget(value, 44u64)
+        GuestExec_RecordRuntimeHle("libkernel", "trace_probe", value, 7.uintptr(), 9.uintptr(), 22.uintptr())
+        return GuestExec_DebugTraceFingerprint()
+
+@test
+def emulator_guest_exec_debug_trace_tape_fingerprints_boundary_events() -> void:
+    can Abort.Panic, Debug.Trace:
+        first: u64 = guest_exec_record_trace_variant(0x1F4.uintptr())
+        count: usize = GuestExec_DebugTraceCount()
+        if count < 4.usize():
+            panic("expected guest-exec trace tape to record reset/guard/HLE events")
+        if GuestExec_DebugTraceEventKindAt(0.usize()) != DEBUG_TRACE_KIND_CHECKPOINT:
+            panic("expected guest-exec trace to start with reset checkpoint")
+        if GuestExec_DebugTraceEventAAt(1.usize()) != 0x1F4.uintptr():
+            panic("expected guest-exec trace to preserve the bad callable value")
+        second: u64 = guest_exec_record_trace_variant(0x1F4.uintptr())
+        if first != second:
+            panic("expected identical guest-exec traces to have identical fingerprints")
+        third: u64 = guest_exec_record_trace_variant(0x200.uintptr())
+        if first == third:
+            panic("expected guest-exec trace fingerprint to change when boundary value changes")
+
 @test
 def emulator_guest_exec_mapped_guest_calls_host_hle_probe() -> void:
     can Abort.Panic:
