@@ -134,6 +134,11 @@ def ge_memcpy(dst: void&?, src: void&?, n: usize) -> void&?:
 
 const GE_NATIVE_REGION_CAP: u32 = 8192u32
 const GE_WRITABLE_PAGE_CAP: u64 = 65536u64
+const GE_BOUNDARY_NEAR_NULL_LIMIT: u64 = 0x10000u64
+const GE_BOUNDARY_POISON_WORD: u64 = 0xBADC0DEBADC0DEADu64
+const GE_BOUNDARY_GUARD_NONE: u64 = 0u64
+const GE_BOUNDARY_GUARD_POISON: u64 = 1u64
+const GE_BOUNDARY_GUARD_NEAR_NULL_UNMAPPED: u64 = 2u64
 
 struct GeNativeRegion:
     base: mutable uintptr
@@ -249,6 +254,13 @@ def ge_native_prot_at(address: uintptr, size: u64) -> u32:
     if index >= 0 and index.u32() < GE_NATIVE_REGION_CAP:
         return ge_native_regions[index.usize()].prot
     return 0xffffffffu32
+
+def ge_boundary_guard_reason_for_value(value: uintptr) -> u64:
+    if value.u64() == GE_BOUNDARY_POISON_WORD:
+        return GE_BOUNDARY_GUARD_POISON
+    if value != 0.uintptr() and value.u64() < GE_BOUNDARY_NEAR_NULL_LIMIT and ge_native_prot_at(value, 8u64) == 0xffffffffu32:
+        return GE_BOUNDARY_GUARD_NEAR_NULL_UNMAPPED
+    return GE_BOUNDARY_GUARD_NONE
 
 def ge_read_native_word(address: uintptr) -> uintptr:
     if address == 0.uintptr():
@@ -1010,6 +1022,13 @@ def ge_absorb_fork_report() -> void:
         ge_runtime_hle_first_tiny_unmapped_arg_symbol <- fr.runtime_hle_first_tiny_unmapped_arg_symbol
         ge_runtime_hle_first_tiny_unmapped_arg_value <- fr.runtime_hle_first_tiny_unmapped_arg_value
         ge_runtime_hle_first_tiny_unmapped_arg_return_addr <- fr.runtime_hle_first_tiny_unmapped_arg_return_addr
+        ge_runtime_hle_boundary_guard_sequence <- fr.runtime_hle_boundary_guard_sequence
+        ge_runtime_hle_boundary_guard_index <- fr.runtime_hle_boundary_guard_index
+        ge_runtime_hle_boundary_guard_reason <- fr.runtime_hle_boundary_guard_reason
+        ge_runtime_hle_boundary_guard_module <- fr.runtime_hle_boundary_guard_module
+        ge_runtime_hle_boundary_guard_symbol <- fr.runtime_hle_boundary_guard_symbol
+        ge_runtime_hle_boundary_guard_value <- fr.runtime_hle_boundary_guard_value
+        ge_runtime_hle_boundary_guard_return_addr <- fr.runtime_hle_boundary_guard_return_addr
         ge_runtime_hle_recorder_stack_word0 <- fr.runtime_hle_recorder_stack_word0
         ge_runtime_hle_recorder_stack_word1 <- fr.runtime_hle_recorder_stack_word1
         ge_runtime_hle_guest_return_addr <- fr.runtime_hle_guest_return_addr
@@ -1196,6 +1215,13 @@ def ge_reset_crash_state() -> void:
     ge_runtime_hle_first_tiny_unmapped_arg_symbol <- ""
     ge_runtime_hle_first_tiny_unmapped_arg_value <- 0.uintptr()
     ge_runtime_hle_first_tiny_unmapped_arg_return_addr <- 0.uintptr()
+    ge_runtime_hle_boundary_guard_sequence <- 0u64
+    ge_runtime_hle_boundary_guard_index <- 0u64
+    ge_runtime_hle_boundary_guard_reason <- GE_BOUNDARY_GUARD_NONE
+    ge_runtime_hle_boundary_guard_module <- ""
+    ge_runtime_hle_boundary_guard_symbol <- ""
+    ge_runtime_hle_boundary_guard_value <- 0.uintptr()
+    ge_runtime_hle_boundary_guard_return_addr <- 0.uintptr()
     ge_runtime_hle_recorder_stack_word0 <- 0.uintptr()
     ge_runtime_hle_recorder_stack_word1 <- 0.uintptr()
     ge_runtime_hle_guest_return_addr <- 0.uintptr()
@@ -2137,6 +2163,13 @@ global mutable ge_runtime_hle_first_tiny_unmapped_arg_module: static u8&? = null
 global mutable ge_runtime_hle_first_tiny_unmapped_arg_symbol: static u8&? = null
 global mutable ge_runtime_hle_first_tiny_unmapped_arg_value: uintptr = 0.uintptr()
 global mutable ge_runtime_hle_first_tiny_unmapped_arg_return_addr: uintptr = 0.uintptr()
+global mutable ge_runtime_hle_boundary_guard_sequence: u64 = 0u64
+global mutable ge_runtime_hle_boundary_guard_index: u64 = 0u64
+global mutable ge_runtime_hle_boundary_guard_reason: u64 = 0u64
+global mutable ge_runtime_hle_boundary_guard_module: static u8&? = null
+global mutable ge_runtime_hle_boundary_guard_symbol: static u8&? = null
+global mutable ge_runtime_hle_boundary_guard_value: uintptr = 0.uintptr()
+global mutable ge_runtime_hle_boundary_guard_return_addr: uintptr = 0.uintptr()
 global mutable ge_runtime_hle_recorder_stack_word0: uintptr = 0.uintptr()
 global mutable ge_runtime_hle_recorder_stack_word1: uintptr = 0.uintptr()
 global mutable ge_runtime_hle_guest_return_addr: uintptr = 0.uintptr()
@@ -2252,6 +2285,13 @@ struct ElisaGuestExecForkReport:
     runtime_hle_first_tiny_unmapped_arg_symbol: mutable static u8&?
     runtime_hle_first_tiny_unmapped_arg_value: mutable uintptr
     runtime_hle_first_tiny_unmapped_arg_return_addr: mutable uintptr
+    runtime_hle_boundary_guard_sequence: mutable u64
+    runtime_hle_boundary_guard_index: mutable u64
+    runtime_hle_boundary_guard_reason: mutable u64
+    runtime_hle_boundary_guard_module: mutable static u8&?
+    runtime_hle_boundary_guard_symbol: mutable static u8&?
+    runtime_hle_boundary_guard_value: mutable uintptr
+    runtime_hle_boundary_guard_return_addr: mutable uintptr
     runtime_hle_recorder_stack_word0: mutable uintptr
     runtime_hle_recorder_stack_word1: mutable uintptr
     runtime_hle_guest_return_addr: mutable uintptr
@@ -2319,6 +2359,31 @@ def c_GuestExec_RecordRuntimeHle(module: static u8&?, symbol: static u8&?, arg0:
             ge_runtime_hle_first_tiny_unmapped_arg_symbol <- ge_runtime_hle_symbol
             ge_runtime_hle_first_tiny_unmapped_arg_value <- tiny_arg
             ge_runtime_hle_first_tiny_unmapped_arg_return_addr <- ge_runtime_hle_guest_return_addr
+    if ge_runtime_hle_boundary_guard_sequence == 0u64:
+        guard_value: mutable uintptr = 0.uintptr()
+        guard_index: mutable u64 = 0u64
+        guard_reason: mutable u64 = ge_boundary_guard_reason_for_value(arg0)
+        if guard_reason != GE_BOUNDARY_GUARD_NONE:
+            guard_value <- arg0
+            guard_index <- 0u64
+        else:
+            guard_reason <- ge_boundary_guard_reason_for_value(arg1)
+            if guard_reason != GE_BOUNDARY_GUARD_NONE:
+                guard_value <- arg1
+                guard_index <- 1u64
+            else:
+                guard_reason <- ge_boundary_guard_reason_for_value(arg2)
+                if guard_reason != GE_BOUNDARY_GUARD_NONE:
+                    guard_value <- arg2
+                    guard_index <- 2u64
+        if guard_reason != GE_BOUNDARY_GUARD_NONE:
+            ge_runtime_hle_boundary_guard_sequence <- ge_runtime_hle_sequence
+            ge_runtime_hle_boundary_guard_index <- guard_index
+            ge_runtime_hle_boundary_guard_reason <- guard_reason
+            ge_runtime_hle_boundary_guard_module <- ge_runtime_hle_module
+            ge_runtime_hle_boundary_guard_symbol <- ge_runtime_hle_symbol
+            ge_runtime_hle_boundary_guard_value <- guard_value
+            ge_runtime_hle_boundary_guard_return_addr <- ge_runtime_hle_guest_return_addr
     ge_runtime_hle_recorder_stack_word0 <- 0.uintptr()
     ge_runtime_hle_recorder_stack_word1 <- 0.uintptr()
     static if ARCH_X86_64:
@@ -2365,6 +2430,13 @@ def c_GuestExec_RecordRuntimeHle(module: static u8&?, symbol: static u8&?, arg0:
         fr.runtime_hle_first_tiny_unmapped_arg_symbol <- ge_runtime_hle_first_tiny_unmapped_arg_symbol
         fr.runtime_hle_first_tiny_unmapped_arg_value <- ge_runtime_hle_first_tiny_unmapped_arg_value
         fr.runtime_hle_first_tiny_unmapped_arg_return_addr <- ge_runtime_hle_first_tiny_unmapped_arg_return_addr
+        fr.runtime_hle_boundary_guard_sequence <- ge_runtime_hle_boundary_guard_sequence
+        fr.runtime_hle_boundary_guard_index <- ge_runtime_hle_boundary_guard_index
+        fr.runtime_hle_boundary_guard_reason <- ge_runtime_hle_boundary_guard_reason
+        fr.runtime_hle_boundary_guard_module <- ge_runtime_hle_boundary_guard_module
+        fr.runtime_hle_boundary_guard_symbol <- ge_runtime_hle_boundary_guard_symbol
+        fr.runtime_hle_boundary_guard_value <- ge_runtime_hle_boundary_guard_value
+        fr.runtime_hle_boundary_guard_return_addr <- ge_runtime_hle_boundary_guard_return_addr
         fr.runtime_hle_recorder_stack_word0 <- ge_runtime_hle_recorder_stack_word0
         fr.runtime_hle_recorder_stack_word1 <- ge_runtime_hle_recorder_stack_word1
         fr.runtime_hle_guest_return_addr <- ge_runtime_hle_guest_return_addr
@@ -2460,6 +2532,29 @@ def c_GuestExec_RuntimeHleFirstTinyUnmappedArgValue() -> uintptr:
 
 def c_GuestExec_RuntimeHleFirstTinyUnmappedArgReturnAddr() -> uintptr:
     return ge_runtime_hle_first_tiny_unmapped_arg_return_addr
+
+def c_GuestExec_RuntimeHleBoundaryGuardSequence() -> u64:
+    return ge_runtime_hle_boundary_guard_sequence
+
+def c_GuestExec_RuntimeHleBoundaryGuardIndex() -> u64:
+    return ge_runtime_hle_boundary_guard_index
+
+def c_GuestExec_RuntimeHleBoundaryGuardReason() -> u64:
+    return ge_runtime_hle_boundary_guard_reason
+
+def c_GuestExec_RuntimeHleBoundaryGuardModule() -> static u8&:
+    s: static u8&? = ge_runtime_hle_boundary_guard_module
+    return s if s != null else ""
+
+def c_GuestExec_RuntimeHleBoundaryGuardSymbol() -> static u8&:
+    s: static u8&? = ge_runtime_hle_boundary_guard_symbol
+    return s if s != null else ""
+
+def c_GuestExec_RuntimeHleBoundaryGuardValue() -> uintptr:
+    return ge_runtime_hle_boundary_guard_value
+
+def c_GuestExec_RuntimeHleBoundaryGuardReturnAddr() -> uintptr:
+    return ge_runtime_hle_boundary_guard_return_addr
 
 def c_GuestExec_RuntimeHleRecorderStackWord0() -> uintptr:
     return ge_runtime_hle_recorder_stack_word0
@@ -3258,6 +3353,27 @@ def GuestExec_RuntimeHleFirstTinyUnmappedArgValue() -> VAddr:
 
 def GuestExec_RuntimeHleFirstTinyUnmappedArgReturnAddr() -> VAddr:
     return c_GuestExec_RuntimeHleFirstTinyUnmappedArgReturnAddr()
+
+def GuestExec_RuntimeHleBoundaryGuardSequence() -> u64:
+    return c_GuestExec_RuntimeHleBoundaryGuardSequence()
+
+def GuestExec_RuntimeHleBoundaryGuardIndex() -> u64:
+    return c_GuestExec_RuntimeHleBoundaryGuardIndex()
+
+def GuestExec_RuntimeHleBoundaryGuardReason() -> u64:
+    return c_GuestExec_RuntimeHleBoundaryGuardReason()
+
+def GuestExec_RuntimeHleBoundaryGuardModule() -> static u8&:
+    return c_GuestExec_RuntimeHleBoundaryGuardModule()
+
+def GuestExec_RuntimeHleBoundaryGuardSymbol() -> static u8&:
+    return c_GuestExec_RuntimeHleBoundaryGuardSymbol()
+
+def GuestExec_RuntimeHleBoundaryGuardValue() -> VAddr:
+    return c_GuestExec_RuntimeHleBoundaryGuardValue()
+
+def GuestExec_RuntimeHleBoundaryGuardReturnAddr() -> VAddr:
+    return c_GuestExec_RuntimeHleBoundaryGuardReturnAddr()
 
 def GuestExec_RuntimeHleRecorderStackWord0() -> VAddr:
     return c_GuestExec_RuntimeHleRecorderStackWord0()
