@@ -78,6 +78,42 @@ def emulator_guest_exec_synthetic_mapped_trampoline_executes_and_returns() -> vo
             panic("expected executable test page unmap")
 
 @test
+def emulator_guest_exec_publish_executable_code_requires_exec_mapping() -> void:
+    can Abort.Panic:
+        GuestExec_ResetState()
+        if not GuestExec_IsSupported():
+            return
+        GuestExec_Enable(true)
+        mapped_entry: VAddr = GuestExec_AllocateRegion(4096.u64(), 3.u32())
+        if mapped_entry == 0.uintptr():
+            panic("expected publish test page allocation")
+        code: mutable u8[1] = [0xC3u8]
+        if not GuestExec_WriteBytes(mapped_entry, code[0].ref[void&], 1.u64()):
+            panic("expected publish test write")
+        if GuestExec_PublishExecutableCode(mapped_entry, 1.u64()):
+            panic("expected publish to reject non-executable mapping")
+        if GuestExec_PublishExecutableRejectCount() != 1.u64():
+            panic("expected publish reject counter")
+        if GuestExec_PublishExecutableLastResult() != -2:
+            panic("expected non-executable publish reject result")
+        if not GuestExec_ProtectRegion(mapped_entry, 4096.u64(), 5.u32()):
+            panic("expected publish test executable protection")
+        if not GuestExec_PublishExecutableCode(mapped_entry, 1.u64()):
+            panic("expected executable publish to succeed")
+        if GuestExec_PublishExecutableCount() != 1.u64():
+            panic("expected publish counter")
+        if GuestExec_PublishExecutableLastAddr() != mapped_entry:
+            panic("expected publish last address")
+        if GuestExec_PublishExecutableLastSize() != 1.u64():
+            panic("expected publish last size")
+        if (GuestExec_PublishExecutableLastProt() & 4.u32()) == 0.u32():
+            panic("expected publish last prot to be executable")
+        if GuestExec_PublishExecutableLastResult() != 0:
+            panic("expected publish success result")
+        if not GuestExec_UnmapRegion(mapped_entry, 4096.u64()):
+            panic("expected publish test page unmap")
+
+@test
 def emulator_guest_exec_mapped_guest_calls_host_hle_probe() -> void:
     can Abort.Panic:
         GuestExec_ResetState()
@@ -171,6 +207,49 @@ def emulator_guest_exec_boundary_guard_records_poison_hle_arg() -> void:
             panic("expected boundary guard to identify poison arg0")
         if GuestExec_RuntimeHleBoundaryGuardValue().u64() != GE_BOUNDARY_POISON_WORD:
             panic("expected boundary guard value to match poison word")
+
+@test
+def emulator_guest_exec_debug_trap_stops_before_tiny_hle_arg_danger() -> void:
+    can Abort.Panic:
+        GuestExec_ResetState()
+        if not GuestExec_IsSupported():
+            return
+        GuestExec_Enable(true)
+        GuestExec_SetDebugTrapOnBoundaryGuard(true)
+        lock_addr: VAddr = guest_exec_test_posix_mutex_lock_shape as uintptr
+        if lock_addr == 0.uintptr():
+            panic("expected posix pthread mutex lock address")
+        mapped_entry: VAddr = GuestExec_AllocateRegion(4096.u64(), 3.u32())
+        if mapped_entry == 0.uintptr():
+            panic("expected debug trap test page allocation")
+        code: mutable u8[28] = [
+            0x48u8, 0xBFu8, 0xF4u8, 0x01u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+            0x48u8, 0xB8u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8, 0x00u8,
+            0xFFu8, 0xD0u8,
+            0xB8u8, 0x2Bu8, 0x00u8, 0x00u8, 0x00u8,
+            0xC3u8
+        ]
+        if not GuestExec_WriteBytes(mapped_entry, code[0].ref[void&], 28.u64()):
+            panic("expected debug trap machine code write")
+        if not GuestExec_WriteU64(mapped_entry + 12.uintptr(), lock_addr.u64()):
+            panic("expected debug trap target patch")
+        if not GuestExec_ProtectRegion(mapped_entry, 4096.u64(), 5.u32()):
+            panic("expected debug trap executable protection")
+        result: u64 = GuestExec_RunSyntheticFunction(mapped_entry, 0.u64(), 0.u64())
+        if result != 0xFFFFFFFFFFFFFFFD.u64():
+            panic("expected debug trap to stop guarded execution before HLE body returns")
+        if GuestExec_LastStatus() != GE_DEBUG_TRAP_BOUNDARY_GUARD_STATUS:
+            panic("expected debug trap status")
+        if GuestExec_DebugTrapCount() != 1.u64():
+            panic("expected one debug trap")
+        if GuestExec_DebugTrapReason() != GE_BOUNDARY_GUARD_NEAR_NULL_UNMAPPED:
+            panic("expected tiny unmapped debug trap reason")
+        if GuestExec_DebugTrapValue() != 0x1F4.uintptr():
+            panic("expected debug trap value")
+        if GuestExec_DebugTrapSequence() == 0.u64():
+            panic("expected debug trap sequence")
+        if not GuestExec_UnmapRegion(mapped_entry, 4096.u64()):
+            panic("expected debug trap test page unmap")
 
 @test
 def emulator_guest_exec_mapped_hle_call_preserves_sysv_callee_saved_rbx() -> void:
