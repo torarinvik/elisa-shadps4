@@ -62,6 +62,10 @@ global mutable linker_tiny_pointer_first_offset: u64 = 0
 global mutable linker_tiny_pointer_first_type: u32 = 0u32
 global mutable linker_tiny_pointer_first_name: static u8&? = null
 global mutable linker_tiny_pointer_first_module: static u8&? = null
+global mutable linker_hle_tiny_callable_count: u64 = 0
+global mutable linker_hle_tiny_callable_first_value: u64 = 0
+global mutable linker_hle_tiny_callable_first_name: static u8&? = null
+global mutable linker_hle_tiny_callable_first_nid: static u8&? = null
 
 # TLS-base provenance: record __tls_get_addr inputs and the resolved per-thread
 # DTV block, so a module_index==0 (failed DTPMOD64) or a null/garbage DTV gets
@@ -281,6 +285,10 @@ def Linker_Reset() -> void:
     GuestExec_ResetState()
     TLS_ResetForTests()
     Module_ResetMetadataArena()
+    linker_hle_tiny_callable_count <- 0
+    linker_hle_tiny_callable_first_value <- 0
+    linker_hle_tiny_callable_first_name <- null
+    linker_hle_tiny_callable_first_nid <- null
     linker_singleton <- Linker_New()
 
 def Linker_GetHLESymbols(self: mutable Linker&) -> mutable SymbolsResolver&:
@@ -293,6 +301,7 @@ def SymbolsResolver_AddBoundSymbol(self: mutable SymbolsResolver&, nid: static u
     SymbolsResolver_AddBoundSymbolForLibrary(self, nid, name, "", 0u16, "", IMPORT_SYMBOL_TYPE_UNKNOWN, virtual_address, callable_address)
 
 def SymbolsResolver_AddBoundSymbolForLibrary(self: mutable SymbolsResolver&, nid: static u8&, name: static u8&, library: static u8&, library_version: u16, module: static u8&, symbol_type: u8, virtual_address: u64, callable_address: u64) -> void:
+    Linker_NoteHleCallableRegistration(nid, name, symbol_type, callable_address)
     # The HLE symbol table outlives this call, so its backing storage must be
     # allocated from the persistent metadata arena. Using a transient local
     # arena here freed the darray backing on return, leaving the resolver table
@@ -300,6 +309,29 @@ def SymbolsResolver_AddBoundSymbolForLibrary(self: mutable SymbolsResolver&, nid
     owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
     in owner:
         self.symbols.push(SymbolRecord(nid, name, library, library_version, module, symbol_type, virtual_address, callable_address))
+
+def Linker_NoteHleCallableRegistration(nid: static u8&, name: static u8&, symbol_type: u8, callable_address: u64) -> void:
+    if symbol_type != IMPORT_SYMBOL_TYPE_FUNCTION and symbol_type != IMPORT_SYMBOL_TYPE_UNKNOWN:
+        return
+    if callable_address >= LINKER_TINY_POINTER_THRESHOLD:
+        return
+    if linker_hle_tiny_callable_count == 0u64:
+        linker_hle_tiny_callable_first_value <- callable_address
+        linker_hle_tiny_callable_first_name <- name
+        linker_hle_tiny_callable_first_nid <- nid
+    linker_hle_tiny_callable_count <- linker_hle_tiny_callable_count + 1u64
+
+def Linker_HleTinyCallableCount() -> u64:
+    return linker_hle_tiny_callable_count
+
+def Linker_HleTinyCallableFirstValue() -> u64:
+    return linker_hle_tiny_callable_first_value
+
+def Linker_HleTinyCallableFirstName() -> static u8&?:
+    return linker_hle_tiny_callable_first_name
+
+def Linker_HleTinyCallableFirstNid() -> static u8&?:
+    return linker_hle_tiny_callable_first_nid
 
 def SymbolsResolver_Count(self: SymbolsResolver&) -> usize:
     return self.symbols.count
