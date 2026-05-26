@@ -14,6 +14,7 @@ extern tls_i386_set_ldt(start: int, desc: void&, num: int) -> int
 extern ElisaTls_LoadFsSelectorAsm(selector: u16) -> void
 extern ElisaTls_ReadFsSelectorAsm() -> u16
 extern ElisaTls_ReadFs0Asm() -> uintptr
+extern ElisaTls_AtomicExchangeU32Asm(ptr: uintptr, value: u32) -> u32
 
 struct DtvEntry:
     counter: mutable usize
@@ -36,11 +37,14 @@ global mutable tls_primary_dtv_count: usize = 0usize
 global mutable tls_darwin_ldt_initialized: bool = false
 global mutable tls_darwin_ldt_index: u16 = 8u16
 global mutable tls_darwin_next_ldt_index: u16 = 8u16
+global mutable tls_darwin_ldt_lock: u32 = 0u32
 global mutable tls_debug_last_mmap: uintptr = 0.uintptr()
 global mutable tls_debug_last_ldt_addr: uintptr = 0.uintptr()
 global mutable tls_debug_last_ldt_ret: int = 0
 global mutable tls_debug_last_selector: u16 = 0u16
 global mutable tls_debug_last_fs0: uintptr = 0.uintptr()
+global mutable tls_debug_ldt_lock_spins: u64 = 0u64
+global mutable tls_debug_ldt_exhausted_count: u64 = 0u64
 global mutable tls_host_fs_selector: u16 = 0u16
 global mutable tls_host_fs_selector_captured: bool = false
 global mutable tls_guest_fs_selector: u16 = 0u16
@@ -75,18 +79,34 @@ def Tls_MapFailed() -> uintptr:
 def GetTcbKey() -> u32:
     return tls_tcb_key
 
+def TLS_LdtLock() -> void:
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        while ElisaTls_AtomicExchangeU32Asm(tls_darwin_ldt_lock.ref[mutable u32&].cast[uintptr], 1u32) != 0u32:
+            tls_debug_ldt_lock_spins <- tls_debug_ldt_lock_spins + 1u64
+
+def TLS_LdtUnlock() -> void:
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        tls_darwin_ldt_lock <- 0u32
+
 def SetTcbBase(image_address: void&?) -> void:
     base: mutable uintptr = 0.uintptr()
     if image_address != null:
         base <- image_address.cast[uintptr]
     static if PLATFORM_APPLE and ARCH_X86_64:
+        TLS_LdtLock()
         if not tls_darwin_ldt_initialized:
             mapped: uintptr = mmap(TLS_DARWIN_LDT_REGION_BASE, TLS_DARWIN_LDT_REGION_SIZE, 3, 0x1012, -1, 0i64)
             tls_debug_last_mmap <- mapped
             if mapped == Tls_MapFailed():
+                TLS_LdtUnlock()
                 return
             tls_darwin_ldt_initialized <- true
         ldt_index: u16 = tls_darwin_next_ldt_index
+        max_index: u16 = TLS_DARWIN_LDT_INDEX_BASE + (TLS_DARWIN_LDT_REGION_SIZE / TLS_DARWIN_LDT_BLOCK_SIZE.usize()).u16()
+        if ldt_index >= max_index:
+            tls_debug_ldt_exhausted_count <- tls_debug_ldt_exhausted_count + 1u64
+            TLS_LdtUnlock()
+            return
         tls_darwin_next_ldt_index <- tls_darwin_next_ldt_index + 1u16
         tls_darwin_ldt_index <- ldt_index
         ldt_addr: uintptr = TLS_DARWIN_LDT_REGION_BASE + ((ldt_index - TLS_DARWIN_LDT_INDEX_BASE).uintptr() * TLS_DARWIN_LDT_BLOCK_SIZE)
@@ -113,6 +133,7 @@ def SetTcbBase(image_address: void&?) -> void:
                 page.index <- ldt_index
             ElisaTls_LoadFsSelectorAsm(selector)
             tls_debug_last_fs0 <- ElisaTls_ReadFs0Asm()
+        TLS_LdtUnlock()
     tls_main_tcb.tcb_self <- base
     tls_main_tcb.tcb_thread <- base
     tls_initialized <- true
@@ -144,12 +165,16 @@ def TLS_ResetForTests() -> void:
     tls_primary_template_size <- 0usize
     tls_primary_dtv_base <- 0.uintptr()
     tls_primary_dtv_count <- 0usize
+    tls_darwin_ldt_initialized <- false
     tls_darwin_next_ldt_index <- TLS_DARWIN_LDT_INDEX_BASE
+    tls_darwin_ldt_lock <- 0u32
     tls_debug_last_mmap <- 0.uintptr()
     tls_debug_last_ldt_addr <- 0.uintptr()
     tls_debug_last_ldt_ret <- 0
     tls_debug_last_selector <- 0u16
     tls_debug_last_fs0 <- 0.uintptr()
+    tls_debug_ldt_lock_spins <- 0u64
+    tls_debug_ldt_exhausted_count <- 0u64
     tls_host_fs_selector <- 0u16
     tls_host_fs_selector_captured <- false
     tls_guest_fs_selector <- 0u16
@@ -176,6 +201,12 @@ def TLS_DebugThreadInstallCount() -> u64:
 
 def TLS_DebugThreadInstallSuccessCount() -> u64:
     return tls_thread_install_success_count
+
+def TLS_DebugLdtLockSpins() -> u64:
+    return tls_debug_ldt_lock_spins
+
+def TLS_DebugLdtExhaustedCount() -> u64:
+    return tls_debug_ldt_exhausted_count
 
 def TLS_CaptureHostFsSelector() -> u16:
     static if PLATFORM_APPLE and ARCH_X86_64:
