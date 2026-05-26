@@ -233,6 +233,45 @@ def emulator_guest_exec_debug_trace_diff_locates_first_divergence() -> void:
             panic("expected divergence reference value to be the original callable target")
 
 @test
+def emulator_guest_exec_debug_trace_reference_load_diff() -> void:
+    can Abort.Panic, Debug.Trace:
+        # Record a live run, then build a reference identical to it via the
+        # external-load API (this is the path a recorded shadPS4 tape uses).
+        _ = guest_exec_record_trace_variant(0x1F4.uintptr())
+        n: usize = GuestExec_DebugTraceCount()
+        if n < 4.usize():
+            panic("expected a populated live tape to build a reference from")
+        GuestExec_DebugTraceBeginReference()
+        i: mutable usize = 0usize
+        while i < n:
+            _ = GuestExec_DebugTraceLoadReferenceEvent(i, GuestExec_DebugTraceEventKindAt(i), GuestExec_DebugTraceEventAAt(i), GuestExec_DebugTraceEventBAt(i), GuestExec_DebugTraceEventCAt(i))
+            i <- i + 1usize
+        GuestExec_DebugTraceCommitReference(n)
+        # Identical reference -> no divergence against the (unchanged) live tape.
+        if GuestExec_DebugTraceFirstDivergence() != -1:
+            panic("expected a loaded reference identical to the live tape to have no divergence")
+        # Mutate reference event 1 -> divergence must localize to index 1 and
+        # surface the reference value at that point.
+        _ = GuestExec_DebugTraceLoadReferenceEvent(1.usize(), GuestExec_DebugTraceEventKindAt(1.usize()), 0xDEAD.uintptr(), GuestExec_DebugTraceEventBAt(1.usize()), GuestExec_DebugTraceEventCAt(1.usize()))
+        GuestExec_DebugTraceCommitReference(n)
+        if GuestExec_DebugTraceFirstDivergence() != 1:
+            panic("expected a mutated reference event to diverge at index 1")
+        if GuestExec_DebugTraceDivergenceSnapA() != 0xDEAD.uintptr():
+            panic("expected the reference value at the divergence to be the mutated value")
+
+@test
+def emulator_guest_exec_debug_trace_captures_barrier_trip() -> void:
+    can Abort.Panic, Debug.Trace:
+        # A barrier trip (poison callable target) must be both rejected AND
+        # recorded on the trace tape, so a differential tape diff can localize a
+        # *barrier trip*, not only a changed value.
+        _ = guest_exec_record_trace_variant(GE_BOUNDARY_POISON_WORD.uintptr())
+        if GuestExec_DebugTrapReason() != GE_BOUNDARY_GUARD_POISON:
+            panic("expected the poison callable target to trip the callable guard")
+        if GuestExec_DebugTraceEventAAt(1.usize()).u64() != GE_BOUNDARY_POISON_WORD:
+            panic("expected the trace tape to record the poison callable target value")
+
+@test
 def emulator_guest_exec_mapped_guest_calls_host_hle_probe() -> void:
     can Abort.Panic:
         GuestExec_ResetState()

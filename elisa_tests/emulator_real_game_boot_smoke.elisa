@@ -31,6 +31,32 @@ def RealGameBoot_UseUnpublishedExecDebugTrap() -> bool:
         return false
     return streq(value.cast[static u8&], "1") == 1
 
+def RealGameBoot_UseDebugTrace() -> bool:
+    value: u8&? = getenv("ELISA_GUEST_EXEC_DEBUG_TRACE".cast[u8&])
+    if value == null:
+        return false
+    return streq(value.cast[static u8&], "1") == 1
+
+# Dump the guest-exec boundary trace tape so a real (Rosetta) run produces a
+# diff-able tape: fingerprint + count + overflow, then one line per event. This
+# is what a recorded shadPS4 baseline is compared against via the snapshot/
+# DebugTraceFirstDivergence API.
+def RealGameBoot_EmitTraceTape(file: mutable IOFile&) -> void:
+    can Memory.Allocate, Console.Format:
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "trace_fingerprint", GuestExec_DebugTraceFingerprint())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "trace_event_count", GuestExec_DebugTraceCount().u64())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "trace_overflowed", 1u64 if GuestExec_DebugTraceDidOverflow() else 0u64)
+        count: usize = GuestExec_DebugTraceCount()
+        limit: mutable usize = count
+        if limit > 256usize:
+            limit <- 256usize
+        i: mutable usize = 0usize
+        while i < limit:
+            line: mutable u8[256] = zeroed
+            written: int = snprintf(line[0].ref[mutable u8&], 256usize, "CUSA07399_ARTIFACT trace_event index=%llu kind=%lld a=0x%llx b=0x%llx c=0x%llx", i.u64(), GuestExec_DebugTraceEventKindAt(i).i64(), GuestExec_DebugTraceEventAAt(i).u64(), GuestExec_DebugTraceEventBAt(i).u64(), GuestExec_DebugTraceEventCAt(i).u64())
+            RealGameBoot_WriteLine(file, line[0].ref[mutable u8&], written)
+            i <- i + 1usize
+
 global mutable dbg_reloc_boot_count: u64 = 0
 global mutable dbg_reloc_boot_fp: u64 = 0
 global mutable dbg_reloc_pass_a_count: u64 = 0
@@ -1055,6 +1081,7 @@ def RealGameBoot_EmitArtifacts(linker: Linker&, guarded_status: s32) -> void:
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "hle_tiny_callable_first_value", Linker_HleTinyCallableFirstValue())
         RealGameBoot_EmitArtifactStringKV(file.ref[mutable IOFile&], "hle_tiny_callable_first_name", Linker_HleTinyCallableFirstName())
         RealGameBoot_EmitArtifactStringKV(file.ref[mutable IOFile&], "hle_tiny_callable_first_nid", Linker_HleTinyCallableFirstNid())
+        RealGameBoot_EmitTraceTape(file.ref[mutable IOFile&])
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "tls_get_addr_calls", Linker_TlsGetAddrCalls())
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "tls_last_module_index", Linker_TlsLastModuleIndex())
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "tls_last_offset", Linker_TlsLastOffset())
@@ -1454,6 +1481,9 @@ def emulator_real_game_boot_smoke_guarded_game_entry_reports_host_status() -> vo
         GuestExec_SetProbeMode(false)
         GuestExec_SetDebugTrapOnBoundaryGuard(RealGameBoot_UseBoundaryDebugTrap())
         GuestExec_SetDebugTrapOnUnpublishedExec(RealGameBoot_UseUnpublishedExecDebugTrap())
+        if RealGameBoot_UseDebugTrace():
+            GuestExec_SetDebugTraceEnabled(true)
+            GuestExec_DebugTraceReset()
 
         status: mutable s32 = 0
         if RealGameBoot_UseNoForkGuestExec():
