@@ -332,6 +332,29 @@ def TLS_RestoreHostSegment(g: FsGuard) -> void can[Unsafe.SegmentMutation]:
     can Unsafe.SegmentMutation:
         TLS_RestoreHostFsSelector()
 
+# Guard-witnessed indirect calls into guest code. Each takes the FsGuard by
+# move and threads it back out (the call result is delivered via an out-param),
+# so the type system makes it impossible to jump to a guest entry without the
+# guest TCB installed in %fs: the only way to obtain an FsGuard is
+# TLS_Install*Segment, and move-in/move-out keeps the must-consume obligation
+# alive across the call so the caller still has to restore the host %fs.
+# (References to affine values are disallowed, so the guard is threaded by move
+# rather than borrowed.)
+def TLS_CallGuestInitEntry(guard: FsGuard, fn: void&?, args: u64, argp: void&?, param: void&?, out_result: mutable s32&) -> FsGuard:
+    trusted Unsafe.IndirectCall:
+        out_result <- fn.call_as[func(u64, void&?, void&?) -> s32](args, argp, param)
+    return move guard
+
+def TLS_CallGuestInitArrayEntry(guard: FsGuard, fn: void&?) -> FsGuard:
+    trusted Unsafe.IndirectCall:
+        fn.call_as[func() -> void]()
+    return move guard
+
+def TLS_CallGuestThreadEntry(guard: FsGuard, fn: void&?, arg: void&?, out_result: mutable void&?&) -> FsGuard:
+    trusted Unsafe.IndirectCall:
+        out_result <- fn.call_as[func(void&?) -> void&?](arg)
+    return move guard
+
 def TLS_EnterHostFromGuest() -> void can[Unsafe.SegmentMutation]:
     static if PLATFORM_APPLE and ARCH_X86_64:
         can Unsafe.SegmentMutation:
