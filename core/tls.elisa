@@ -301,6 +301,37 @@ def TLS_InstallThreadTcbFromPrimaryTemplate() -> void can[Unsafe.SegmentMutation
         if TLS_DebugLastFs0() == new_tcb_base:
             tls_thread_install_success_count <- tls_thread_install_success_count + 1u64
 
+# Affine guard for the host->guest %fs segment swap. Producing it installs the
+# guest TCB into %fs; it MUST be consumed by TLS_RestoreHostSegment, which
+# restores the host selector. Because FsGuard is affine (must-consume), the
+# compiler rejects any guest-entry path that installs the guest segment without
+# restoring the host %fs — the catastrophic "host %fs left pointing at guest
+# TCB" desync becomes un-writable.
+affine struct FsGuard:
+    active: bool
+
+# Install the primary guest TCB into %fs and hand back the guard that must be
+# restored. Use at single-threaded guest-entry boundaries (init/init-array).
+def TLS_InstallGuestSegment() -> FsGuard can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall]:
+    can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall:
+        TLS_InstallPrimaryTcbBase()
+    return FsGuard(true)
+
+# Install a per-thread TCB (cloned from the primary template) into %fs and hand
+# back the guard. Use at worker-thread guest-entry boundaries.
+def TLS_InstallThreadSegment() -> FsGuard can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall]:
+    can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall:
+        TLS_InstallThreadTcbFromPrimaryTemplate()
+    return FsGuard(true)
+
+# Consume the guard and restore the host %fs selector. Consuming the affine
+# guard is the only way to satisfy the must-consume obligation, so every
+# install is forced to pair with exactly one restore on every path.
+def TLS_RestoreHostSegment(g: FsGuard) -> void can[Unsafe.SegmentMutation]:
+    _ = move g
+    can Unsafe.SegmentMutation:
+        TLS_RestoreHostFsSelector()
+
 def TLS_EnterHostFromGuest() -> void can[Unsafe.SegmentMutation]:
     static if PLATFORM_APPLE and ARCH_X86_64:
         can Unsafe.SegmentMutation:
