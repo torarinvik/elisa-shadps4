@@ -12,12 +12,31 @@ include "./tls.elisa"
 extern getenv(name: u8&) -> u8&?
 extern pthread_self() -> void&?
 
+extern sceSysmodulePreloadModuleForLibkernel() -> int
+extern sceKernelGetDirectMemorySize() -> u64
+extern sceKernelAllocateMainDirectMemory(len: u64, alignment: u64, memoryType: int, physAddrOut: void&?) -> int
+
 # shadPS4 sets tcb->tcb_thread = thread (the current Pthread object), see
 # core/libraries/kernel/threads/tcb.cpp:58. A guest that reads %fs:tcb_thread
 # and round-trips it back into our HLE pthread layer must therefore see the
 # current host thread handle, NOT the TCB self-address. Mirror that here.
 def Linker_CurrentThreadObject() -> uintptr:
     return pthread_self().uintptr()
+
+def Linker_PrepareMainThreadBeforeEntry() -> s32:
+    # Mirror shadPS4's pre-entry game-thread setup: libkernel sysmodule preload,
+    # then a small SceGnmDriver direct-memory reservation that some titles expect
+    # to exist before their crt0 reaches user code.
+    preload: int = sceSysmodulePreloadModuleForLibkernel()
+    if preload != 0:
+        return preload.s32()
+    phys_addr: mutable i64 = 0i64
+    _ = sceKernelGetDirectMemorySize()
+    alloc: int = sceKernelAllocateMainDirectMemory(0x10000u64, 0x10000u64, 3, phys_addr.ref[mutable i64&].cast[void&?])
+    if alloc != 0:
+        return alloc.s32()
+    mapped_addr: mutable VAddr = 0.uintptr()
+    return MemoryManager_MapMemory(Memory_Instance(), mapped_addr.ref[mutable VAddr&], 0xfe0000000u64.uintptr(), 0x10000u64, 0x13u32, MemoryMapFlags_NoFlags, VMAType_Direct, "SceGnmDriver", false, phys_addr.uintptr(), 0x10000u64)
 
 const LINKER_NATIVE_HLE_THUNK_CAP: usize = 2048usize
 
@@ -946,7 +965,7 @@ def Linker_CreateNativeHleBoundaryThunk(target: u64) -> u64:
         cache_index <- cache_index + 1usize
     static if PLATFORM_APPLE and ARCH_X86_64:
         host_selector: u16 = TLS_CaptureHostFsSelector()
-        full: mutable u8[91] = zeroed
+        full: mutable u8[156] = zeroed
         # Capture the guest return address before touching the thunk stack.
         # At thunk entry, (%rsp) is the return PC pushed by the guest call.
         # movq (%rsp), %r11
@@ -982,43 +1001,76 @@ def Linker_CreateNativeHleBoundaryThunk(target: u64) -> u64:
         full[53] <- 0x49u8
         full[54] <- 0x89u8
         full[55] <- 0x3Au8
+        # Capture the rest of the SysV argument register set. This lets the
+        # artifact distinguish "real mutex call with a bad pointer" from
+        # "wrong callee / corrupted call frame" without a debugger.
+        full[56] <- 0x49u8
+        full[57] <- 0xBAu8
+        Linker_WriteU64LE(full[0].ref[mutable u8&], 58usize, ge_runtime_hle_guest_rsi.ref[void&].uintptr().u64())
+        full[66] <- 0x49u8
+        full[67] <- 0x89u8
+        full[68] <- 0x32u8
+        full[69] <- 0x49u8
+        full[70] <- 0xBAu8
+        Linker_WriteU64LE(full[0].ref[mutable u8&], 71usize, ge_runtime_hle_guest_rdx.ref[void&].uintptr().u64())
+        full[79] <- 0x49u8
+        full[80] <- 0x89u8
+        full[81] <- 0x12u8
+        full[82] <- 0x49u8
+        full[83] <- 0xBAu8
+        Linker_WriteU64LE(full[0].ref[mutable u8&], 84usize, ge_runtime_hle_guest_rcx.ref[void&].uintptr().u64())
+        full[92] <- 0x49u8
+        full[93] <- 0x89u8
+        full[94] <- 0x0Au8
+        full[95] <- 0x49u8
+        full[96] <- 0xBAu8
+        Linker_WriteU64LE(full[0].ref[mutable u8&], 97usize, ge_runtime_hle_guest_r8.ref[void&].uintptr().u64())
+        full[105] <- 0x4Du8
+        full[106] <- 0x89u8
+        full[107] <- 0x02u8
+        full[108] <- 0x49u8
+        full[109] <- 0xBAu8
+        Linker_WriteU64LE(full[0].ref[mutable u8&], 110usize, ge_runtime_hle_guest_r9.ref[void&].uintptr().u64())
+        full[118] <- 0x4Du8
+        full[119] <- 0x89u8
+        full[120] <- 0x0Au8
         # Save the live guest selector. Every guest thread has its own %fs, so
         # restoring a baked main-thread selector corrupts worker-thread TLS.
         # push %r10 also fixes the nested SysV call alignment.
-        full[56] <- 0x66u8
-        full[57] <- 0x41u8
-        full[58] <- 0x8Cu8
-        full[59] <- 0xE2u8
-        full[60] <- 0x41u8
-        full[61] <- 0x52u8
+        full[121] <- 0x66u8
+        full[122] <- 0x41u8
+        full[123] <- 0x8Cu8
+        full[124] <- 0xE2u8
+        full[125] <- 0x41u8
+        full[126] <- 0x52u8
         # movw $host_selector, %r10w; movw %r10w, %fs
-        full[62] <- 0x66u8
-        full[63] <- 0x41u8
-        full[64] <- 0xBAu8
-        Linker_WriteU16LE(full[0].ref[mutable u8&], 65usize, host_selector)
-        full[67] <- 0x66u8
-        full[68] <- 0x41u8
-        full[69] <- 0x8Eu8
-        full[70] <- 0xE2u8
+        full[127] <- 0x66u8
+        full[128] <- 0x41u8
+        full[129] <- 0xBAu8
+        Linker_WriteU16LE(full[0].ref[mutable u8&], 130usize, host_selector)
+        full[132] <- 0x66u8
+        full[133] <- 0x41u8
+        full[134] <- 0x8Eu8
+        full[135] <- 0xE2u8
         # movabs $target, %r11; call *%r11
-        full[71] <- 0x49u8
-        full[72] <- 0xBBu8
-        Linker_WriteU64LE(full[0].ref[mutable u8&], 73usize, target)
-        full[81] <- 0x41u8
-        full[82] <- 0xFFu8
-        full[83] <- 0xD3u8
+        full[136] <- 0x49u8
+        full[137] <- 0xBBu8
+        Linker_WriteU64LE(full[0].ref[mutable u8&], 138usize, target)
+        full[146] <- 0x41u8
+        full[147] <- 0xFFu8
+        full[148] <- 0xD3u8
         # pop saved selector into %r10; movw %r10w, %fs; ret
-        full[84] <- 0x41u8
-        full[85] <- 0x5Au8
-        full[86] <- 0x66u8
-        full[87] <- 0x41u8
-        full[88] <- 0x8Eu8
-        full[89] <- 0xE2u8
-        full[90] <- 0xC3u8
+        full[149] <- 0x41u8
+        full[150] <- 0x5Au8
+        full[151] <- 0x66u8
+        full[152] <- 0x41u8
+        full[153] <- 0x8Eu8
+        full[154] <- 0xE2u8
+        full[155] <- 0xC3u8
         thunk: VAddr = GuestExec_AllocateRegion(4096u64, 5u32)
         if thunk == 0.uintptr():
             return target
-        if not GuestExec_WriteBytes(thunk, full[0].ref[void&], 91u64):
+        if not GuestExec_WriteBytes(thunk, full[0].ref[void&], 156u64):
             return target
         if linker_native_hle_thunk_count < LINKER_NATIVE_HLE_THUNK_CAP:
             linker_native_hle_thunk_targets[linker_native_hle_thunk_count] <- target
@@ -1578,6 +1630,7 @@ def Linker_Execute(self: mutable Linker&, args: darray[static u8&]) -> s32:
         argv0: mutable void&? = null
         if args.count > 0:
             argv0 <- args[0].cast[void&?]
+        _ = Linker_PrepareMainThreadBeforeEntry()
         GuestExec_RunMainEntry(self.last_entry_addr, args.count.int(), argv0)
     Linker_RelocateAllImports(self.ref[mutable Linker&])
     self.last_started_module_index <- index
