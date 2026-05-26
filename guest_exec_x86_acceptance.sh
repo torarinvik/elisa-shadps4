@@ -45,6 +45,9 @@ EOF
   echo "== build compiler =="
   (cd .. && go build -o bin/elisacore ./compiler/src)
 
+  echo "== escape-hatch ratchet =="
+  tools/unsafe_ratchet.sh
+
   echo "== guest exec native tests =="
   ELISACORE_TEST_CACHE=0 ../bin/elisacore test emulator-guest-exec-runtime-tests --project .
 

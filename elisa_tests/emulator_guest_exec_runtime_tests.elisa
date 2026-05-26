@@ -272,6 +272,34 @@ def emulator_guest_exec_debug_trace_captures_barrier_trip() -> void:
             panic("expected the trace tape to record the poison callable target value")
 
 @test
+def emulator_guest_exec_thread_affinity_guard_detects_cross_thread_access() -> void:
+    can Abort.Panic:
+        GuestExec_ResetState()
+        GuestExec_DebugThreadAffinityReset()
+        GuestExec_SetDebugTrapOnThreadAffinity(true)
+        # First touch by thread 0xA111 captures ownership of slot 3.
+        if not GuestExec_DebugThreadAffinityCheck(3.usize(), 0xA111u64):
+            panic("expected first touch to capture thread affinity")
+        # Same thread may touch it again.
+        if not GuestExec_DebugThreadAffinityCheck(3.usize(), 0xA111u64):
+            panic("expected the owning thread to retain access")
+        if GuestExec_DebugThreadAffinityViolationCount() != 0u64:
+            panic("expected no violation for the owning thread")
+        # A different thread touching the same slot is a cross-thread violation.
+        if GuestExec_DebugThreadAffinityCheck(3.usize(), 0xB222u64):
+            panic("expected a different thread to be rejected by the affinity guard")
+        if GuestExec_DebugThreadAffinityViolationCount() != 1u64:
+            panic("expected one recorded cross-thread affinity violation")
+        if GuestExec_DebugThreadAffinityLastSlot() != 3.usize():
+            panic("expected the violation to record the touched slot")
+        if GuestExec_DebugThreadAffinityLastOwner() != 0xA111u64:
+            panic("expected the violation to record the original owner")
+        if GuestExec_DebugThreadAffinityLastIntruder() != 0xB222u64:
+            panic("expected the violation to record the intruding thread")
+        if GuestExec_DebugTrapReason() != GE_DEBUG_TRAP_THREAD_AFFINITY_STATUS.u64():
+            panic("expected an armed affinity guard to trip the referee")
+
+@test
 def emulator_guest_exec_mapped_guest_calls_host_hle_probe() -> void:
     can Abort.Panic:
         GuestExec_ResetState()

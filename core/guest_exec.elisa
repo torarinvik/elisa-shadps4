@@ -146,6 +146,8 @@ const GE_BOUNDARY_GUARD_UNMAPPED_EXEC: u64 = 4u64
 const GE_DEBUG_TRAP_BOUNDARY_GUARD_STATUS: s32 = -90
 const GE_DEBUG_TRAP_UNPUBLISHED_EXEC_STATUS: s32 = -91
 const GE_DEBUG_TRAP_CALLABLE_GUARD_STATUS: s32 = -92
+const GE_DEBUG_TRAP_THREAD_AFFINITY_STATUS: s32 = -93
+const GE_AFFINITY_SLOTS: usize = 16usize
 
 struct GeNativeRegion:
     base: mutable uintptr
@@ -174,6 +176,55 @@ global mutable ge_debug_trap_reason: u64 = 0u64
 global mutable ge_debug_trap_value: uintptr = 0.uintptr()
 global mutable ge_debug_trap_sequence: u64 = 0u64
 global mutable ge_debug_trace_enabled: bool = false
+
+# Thread-affinity referee: mutable state that must only be touched by one thread
+# (e.g. per-thread TLS bookkeeping, the crash-guard jmp_buf) registers a slot;
+# the first touch captures the owning thread id, and any later touch by a
+# different thread is a cross-thread violation -- recorded, traced, and (if
+# armed) trapped. Catches the racy-shared-state class (the racy LDT index, a
+# cross-thread siglongjmp) at runtime. thread_id is injectable so call sites
+# pass ge_pthread_self() while tests can simulate distinct threads.
+global mutable ge_affinity_owner: u64[16] = zeroed
+global mutable ge_affinity_set: bool[16] = zeroed
+global mutable ge_affinity_violation_count: u64 = 0u64
+global mutable ge_affinity_last_slot: usize = 0usize
+global mutable ge_affinity_last_owner: u64 = 0u64
+global mutable ge_affinity_last_intruder: u64 = 0u64
+global mutable ge_debug_trap_on_affinity: bool = false
+
+def ge_thread_affinity_reset() -> void:
+    i: mutable usize = 0usize
+    while i < GE_AFFINITY_SLOTS:
+        ge_affinity_owner[i] <- 0u64
+        ge_affinity_set[i] <- false
+        i <- i + 1usize
+    ge_affinity_violation_count <- 0u64
+    ge_affinity_last_slot <- 0usize
+    ge_affinity_last_owner <- 0u64
+    ge_affinity_last_intruder <- 0u64
+
+# Returns true if the access is permitted (first touch or same owner); false on
+# a cross-thread violation.
+def ge_thread_affinity_check(slot: usize, thread_id: u64) -> bool:
+    if slot >= GE_AFFINITY_SLOTS:
+        return false
+    if not ge_affinity_set[slot]:
+        ge_affinity_owner[slot] <- thread_id
+        ge_affinity_set[slot] <- true
+        return true
+    if ge_affinity_owner[slot] == thread_id:
+        return true
+    ge_affinity_violation_count <- ge_affinity_violation_count + 1u64
+    ge_affinity_last_slot <- slot
+    ge_affinity_last_owner <- ge_affinity_owner[slot]
+    ge_affinity_last_intruder <- thread_id
+    ge_debug_trace_boundary("guest-exec-thread-affinity-violation", slot.uintptr(), ge_affinity_owner[slot].uintptr(), thread_id.uintptr())
+    if ge_debug_trap_on_affinity:
+        ge_debug_trap_count <- ge_debug_trap_count + 1u64
+        ge_debug_trap_reason <- GE_DEBUG_TRAP_THREAD_AFFINITY_STATUS.u64()
+        ge_debug_trap_value <- thread_id.uintptr()
+        ge_last_status <- GE_DEBUG_TRAP_THREAD_AFFINITY_STATUS
+    return false
 
 def ge_debug_trace_boundary(label: cstr, a: uintptr, b: uintptr, c: uintptr) -> void:
     if not ge_debug_trace_enabled:
@@ -3168,6 +3219,27 @@ def GuestExec_SetDebugTrapOnCallableGuard(enabled: bool) -> void:
 
 def GuestExec_DebugGuardCallableTarget(target: VAddr, sequence: u64) -> bool:
     return ge_debug_guard_callable_target(target, sequence)
+
+def GuestExec_SetDebugTrapOnThreadAffinity(enabled: bool) -> void:
+    ge_debug_trap_on_affinity <- enabled
+
+def GuestExec_DebugThreadAffinityReset() -> void:
+    ge_thread_affinity_reset()
+
+def GuestExec_DebugThreadAffinityCheck(slot: usize, thread_id: u64) -> bool:
+    return ge_thread_affinity_check(slot, thread_id)
+
+def GuestExec_DebugThreadAffinityViolationCount() -> u64:
+    return ge_affinity_violation_count
+
+def GuestExec_DebugThreadAffinityLastSlot() -> usize:
+    return ge_affinity_last_slot
+
+def GuestExec_DebugThreadAffinityLastOwner() -> u64:
+    return ge_affinity_last_owner
+
+def GuestExec_DebugThreadAffinityLastIntruder() -> u64:
+    return ge_affinity_last_intruder
 
 def GuestExec_DebugTrapCount() -> u64:
     return c_GuestExec_DebugTrapCount()
