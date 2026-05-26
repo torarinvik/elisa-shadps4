@@ -140,6 +140,7 @@ const GE_BOUNDARY_GUARD_NONE: u64 = 0u64
 const GE_BOUNDARY_GUARD_POISON: u64 = 1u64
 const GE_BOUNDARY_GUARD_NEAR_NULL_UNMAPPED: u64 = 2u64
 const GE_DEBUG_TRAP_BOUNDARY_GUARD_STATUS: s32 = -90
+const GE_DEBUG_TRAP_UNPUBLISHED_EXEC_STATUS: s32 = -91
 
 struct GeNativeRegion:
     base: mutable uintptr
@@ -157,7 +158,11 @@ global mutable ge_publish_executable_last_addr: uintptr = 0.uintptr()
 global mutable ge_publish_executable_last_size: u64 = 0u64
 global mutable ge_publish_executable_last_prot: u32 = 0u32
 global mutable ge_publish_executable_last_result: s32 = 0
+global mutable ge_published_exec_bases: uintptr[2048] = zeroed
+global mutable ge_published_exec_sizes: u64[2048] = zeroed
+global mutable ge_published_exec_count: u32 = 0u32
 global mutable ge_debug_trap_on_boundary_guard: bool = false
+global mutable ge_debug_trap_on_unpublished_exec: bool = false
 global mutable ge_debug_trap_count: u64 = 0u64
 global mutable ge_debug_trap_reason: u64 = 0u64
 global mutable ge_debug_trap_value: uintptr = 0.uintptr()
@@ -273,6 +278,44 @@ def ge_boundary_guard_reason_for_value(value: uintptr) -> u64:
     if value != 0.uintptr() and value.u64() < GE_BOUNDARY_NEAR_NULL_LIMIT and ge_native_prot_at(value, 8u64) == 0xffffffffu32:
         return GE_BOUNDARY_GUARD_NEAR_NULL_UNMAPPED
     return GE_BOUNDARY_GUARD_NONE
+
+def ge_record_published_exec(address: uintptr, size: u64) -> void:
+    if address == 0.uintptr() or size == 0u64:
+        return
+    i: mutable u32 = 0u32
+    while i < ge_published_exec_count and i < 2048u32:
+        if ge_published_exec_bases[i.usize()] == address:
+            ge_published_exec_sizes[i.usize()] <- size
+            return
+        i <- i + 1u32
+    if ge_published_exec_count < 2048u32:
+        ge_published_exec_bases[ge_published_exec_count.usize()] <- address
+        ge_published_exec_sizes[ge_published_exec_count.usize()] <- size
+        ge_published_exec_count <- ge_published_exec_count + 1u32
+
+def ge_is_published_exec(address: uintptr, size: u64) -> bool:
+    if address == 0.uintptr() or size == 0u64:
+        return false
+    i: mutable u32 = 0u32
+    while i < ge_published_exec_count and i < 2048u32:
+        base: uintptr = ge_published_exec_bases[i.usize()]
+        rsize: u64 = ge_published_exec_sizes[i.usize()]
+        if ge_region_contains(base, rsize, address, size):
+            return true
+        i <- i + 1u32
+    return false
+
+def ge_check_entry_published(entry_addr: uintptr) -> bool:
+    if not ge_debug_trap_on_unpublished_exec:
+        return true
+    if ge_is_published_exec(entry_addr, 1u64):
+        return true
+    ge_debug_trap_count <- ge_debug_trap_count + 1u64
+    ge_debug_trap_reason <- GE_DEBUG_TRAP_UNPUBLISHED_EXEC_STATUS.u64()
+    ge_debug_trap_value <- entry_addr
+    ge_debug_trap_sequence <- ge_debug_trap_count
+    ge_last_status <- GE_DEBUG_TRAP_UNPUBLISHED_EXEC_STATUS
+    return false
 
 def ge_read_native_word(address: uintptr) -> uintptr:
     if address == 0.uintptr():
@@ -453,6 +496,7 @@ def c_GuestExec_PublishExecutableCode(address: uintptr, size: u64) -> s32:
         return -2
     ge_flush_instruction_cache(address, size)
     ge_publish_executable_count <- ge_publish_executable_count + 1u64
+    ge_record_published_exec(address, size)
     ge_publish_executable_last_result <- 0
     return 0
 
@@ -492,6 +536,12 @@ def c_GuestExec_PublishExecutableLastProt() -> u32:
 
 def c_GuestExec_PublishExecutableLastResult() -> s32:
     return ge_publish_executable_last_result
+
+def c_GuestExec_PublishedExecutableCount() -> u32:
+    return ge_published_exec_count
+
+def c_GuestExec_IsExecutableCodePublished(address: uintptr, size: u64) -> s32:
+    return 1 if ge_is_published_exec(address, size) else 0
 
 def c_GuestExec_DebugTrapCount() -> u64:
     return ge_debug_trap_count
@@ -1548,6 +1598,8 @@ def ge_run_synthetic_function(entry_addr: uintptr, arg0: u64, arg1: u64) -> u64:
         ge_last_status <- -1
         return GE_SENTINEL_MAX
     static if ARCH_X86_64 and not PLATFORM_WINDOWS:
+        if not ge_check_entry_published(entry_addr):
+            return GE_SENTINEL_MAX - 4u64
         ge_reset_crash_state()
         ge_install_guards()
         ge_guard_active <- 1
@@ -1573,6 +1625,8 @@ def ge_run_synthetic_function_with_timeout(entry_addr: uintptr, arg0: u64, arg1:
         ge_last_status <- -1
         return GE_SENTINEL_MAX
     static if ARCH_X86_64 and not PLATFORM_WINDOWS:
+        if not ge_check_entry_published(entry_addr):
+            return GE_SENTINEL_MAX - 4u64
         ge_reset_crash_state()
         ge_install_guards()
         ge_guard_active <- 1
@@ -2832,7 +2886,14 @@ def GuestExec_ResetState() -> void:
     ge_publish_executable_last_size <- 0u64
     ge_publish_executable_last_prot <- 0u32
     ge_publish_executable_last_result <- 0
+    ge_published_exec_count <- 0u32
+    i: mutable u32 = 0u32
+    while i < 2048u32:
+        ge_published_exec_bases[i.usize()] <- 0.uintptr()
+        ge_published_exec_sizes[i.usize()] <- 0u64
+        i <- i + 1u32
     ge_debug_trap_on_boundary_guard <- false
+    ge_debug_trap_on_unpublished_exec <- false
     ge_debug_trap_count <- 0u64
     ge_debug_trap_reason <- GE_BOUNDARY_GUARD_NONE
     ge_debug_trap_value <- 0.uintptr()
@@ -2986,8 +3047,17 @@ def GuestExec_PublishExecutableLastProt() -> u32:
 def GuestExec_PublishExecutableLastResult() -> s32:
     return c_GuestExec_PublishExecutableLastResult()
 
+def GuestExec_PublishedExecutableCount() -> u32:
+    return c_GuestExec_PublishedExecutableCount()
+
+def GuestExec_IsExecutableCodePublished(address: VAddr, size: u64) -> bool:
+    return c_GuestExec_IsExecutableCodePublished(address, size) != 0
+
 def GuestExec_SetDebugTrapOnBoundaryGuard(enabled: bool) -> void:
     ge_debug_trap_on_boundary_guard <- enabled
+
+def GuestExec_SetDebugTrapOnUnpublishedExec(enabled: bool) -> void:
+    ge_debug_trap_on_unpublished_exec <- enabled
 
 def GuestExec_DebugTrapCount() -> u64:
     return c_GuestExec_DebugTrapCount()
