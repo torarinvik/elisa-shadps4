@@ -327,6 +327,139 @@ def RealGameBoot_RipRelativeSlot(next_ip: VAddr, disp: u32) -> VAddr:
         return (next_ip.u64() - neg).uintptr()
     return 0.uintptr()
 
+def RealGameBoot_AddSigned8(base: VAddr, disp: u8) -> VAddr:
+    if disp < 128.u8():
+        return base + disp.u64().uintptr()
+    neg: u64 = 256u64 - disp.u64()
+    if base.u64() >= neg:
+        return (base.u64() - neg).uintptr()
+    return 0.uintptr()
+
+def RealGameBoot_EmitArg0ProvenanceProbe(file: mutable IOFile&, label: static u8&, return_addr: VAddr, arg0: VAddr, rbp: VAddr, rsp: VAddr) -> void:
+    if return_addr.u64() < 8u64:
+        return
+    can Memory.Allocate, Console.Format:
+        call_start: mutable VAddr = return_addr - 5.uintptr()
+        b_call: u8 = RealGameBoot_NativeByteAt(call_start)
+        if b_call != 0xe8.u8() and b_call != 0xe9.u8():
+            call_start <- return_addr
+        scan_start: mutable VAddr = 0.uintptr()
+        if call_start.u64() > 96u64:
+            scan_start <- call_start - 96.uintptr()
+        pos: mutable VAddr = scan_start
+        last_kind: mutable u64 = 0u64
+        last_pos: mutable VAddr = 0.uintptr()
+        source_addr: mutable VAddr = 0.uintptr()
+        source_word: mutable VAddr = 0.uintptr()
+        computed_value: mutable VAddr = 0.uintptr()
+        b0_seen: mutable u8 = 0u8
+        b1_seen: mutable u8 = 0u8
+        b2_seen: mutable u8 = 0u8
+        b3_seen: mutable u8 = 0u8
+        while pos < call_start:
+            b0: u8 = RealGameBoot_NativeByteAt(pos)
+            b1: u8 = RealGameBoot_NativeByteAt(pos + 1.uintptr())
+            b2: u8 = RealGameBoot_NativeByteAt(pos + 2.uintptr())
+            b3: u8 = RealGameBoot_NativeByteAt(pos + 3.uintptr())
+            if b0 == 0xc3.u8() or b0 == 0xcb.u8() or b0 == 0xc2.u8() or b0 == 0xca.u8():
+                last_kind <- 8u64 # control-flow reset: ret before this wrapper
+                last_pos <- pos
+                source_addr <- 0.uintptr()
+                source_word <- 0.uintptr()
+                computed_value <- 0.uintptr()
+                b0_seen <- b0
+                b1_seen <- b1
+                b2_seen <- b2
+                b3_seen <- b3
+            elif b0 == 0x55.u8() and b1 == 0x48.u8() and b2 == 0x89.u8() and b3 == 0xe5.u8():
+                last_kind <- 9u64 # wrapper prologue; no arg0 materialization seen yet
+                last_pos <- pos
+                source_addr <- 0.uintptr()
+                source_word <- 0.uintptr()
+                computed_value <- 0.uintptr()
+                b0_seen <- b0
+                b1_seen <- b1
+                b2_seen <- b2
+                b3_seen <- b3
+            elif b0 == 0x48.u8() and b1 == 0x8d.u8() and b2 == 0x7d.u8():
+                last_kind <- 1u64 # lea disp8(%rbp), %rdi
+                last_pos <- pos
+                source_addr <- RealGameBoot_AddSigned8(rbp, b3)
+                source_word <- GuestExec_ReadContextU64(source_addr)
+                computed_value <- source_addr
+                b0_seen <- b0
+                b1_seen <- b1
+                b2_seen <- b2
+                b3_seen <- b3
+            elif b0 == 0x48.u8() and b1 == 0x8b.u8() and b2 == 0x7d.u8():
+                last_kind <- 2u64 # mov disp8(%rbp), %rdi
+                last_pos <- pos
+                source_addr <- RealGameBoot_AddSigned8(rbp, b3)
+                source_word <- GuestExec_ReadContextU64(source_addr)
+                computed_value <- source_word
+                b0_seen <- b0
+                b1_seen <- b1
+                b2_seen <- b2
+                b3_seen <- b3
+            elif b0 == 0x48.u8() and b1 == 0x8d.u8() and b2 == 0x3d.u8():
+                disp: u32 = RealGameBoot_NativeU32At(pos + 3.uintptr())
+                last_kind <- 3u64 # lea disp32(%rip), %rdi
+                last_pos <- pos
+                source_addr <- RealGameBoot_RipRelativeSlot(pos + 7.uintptr(), disp)
+                source_word <- GuestExec_ReadNativeU64(source_addr)
+                computed_value <- source_addr
+                b0_seen <- b0
+                b1_seen <- b1
+                b2_seen <- b2
+                b3_seen <- b3
+            elif b0 == 0x48.u8() and b1 == 0x8b.u8() and b2 == 0x3d.u8():
+                disp2: u32 = RealGameBoot_NativeU32At(pos + 3.uintptr())
+                last_kind <- 4u64 # mov disp32(%rip), %rdi
+                last_pos <- pos
+                source_addr <- RealGameBoot_RipRelativeSlot(pos + 7.uintptr(), disp2)
+                source_word <- GuestExec_ReadNativeU64(source_addr)
+                computed_value <- source_word
+                b0_seen <- b0
+                b1_seen <- b1
+                b2_seen <- b2
+                b3_seen <- b3
+            elif b0 == 0xbf.u8():
+                imm: u32 = RealGameBoot_NativeU32At(pos + 1.uintptr())
+                last_kind <- 5u64 # mov imm32, %edi
+                last_pos <- pos
+                source_addr <- 0.uintptr()
+                source_word <- imm.u64().uintptr()
+                computed_value <- imm.u64().uintptr()
+                b0_seen <- b0
+                b1_seen <- b1
+                b2_seen <- b2
+                b3_seen <- b3
+            elif b0 == 0x48.u8() and b1 == 0xc7.u8() and b2 == 0xc7.u8():
+                imm2: u32 = RealGameBoot_NativeU32At(pos + 3.uintptr())
+                last_kind <- 6u64 # mov imm32, %rdi
+                last_pos <- pos
+                source_addr <- 0.uintptr()
+                source_word <- imm2.u64().uintptr()
+                computed_value <- imm2.u64().uintptr()
+                b0_seen <- b0
+                b1_seen <- b1
+                b2_seen <- b2
+                b3_seen <- b3
+            elif b0 == 0x48.u8() and b1 == 0x89.u8() and (b2 == 0xc7.u8() or b2 == 0xdf.u8() or b2 == 0xcf.u8() or b2 == 0xd7.u8() or b2 == 0xf7.u8()):
+                last_kind <- 7u64 # mov reg, %rdi
+                last_pos <- pos
+                source_addr <- 0.uintptr()
+                source_word <- 0.uintptr()
+                computed_value <- arg0
+                b0_seen <- b0
+                b1_seen <- b1
+                b2_seen <- b2
+                b3_seen <- b3
+            pos <- pos + 1.uintptr()
+        line: mutable u8[1024] = zeroed
+        written: int = snprintf(line[0].ref[mutable u8&], 1024usize, "CUSA07399_ARTIFACT arg0_provenance label=%s return_addr=%llu call_start=%llu arg0=%llu rbp=%llu rsp=%llu kind=%llu insn_addr=%llu source_addr=%llu source_word=%llu computed_value=%llu arg0_match=%llu b0=%llu b1=%llu b2=%llu b3=%llu", label, return_addr.u64(), call_start.u64(), arg0.u64(), rbp.u64(), rsp.u64(), last_kind, last_pos.u64(), source_addr.u64(), source_word.u64(), computed_value.u64(), 1u64 if computed_value == arg0 else 0u64, b0_seen.u64(), b1_seen.u64(), b2_seen.u64(), b3_seen.u64())
+        RealGameBoot_WriteLine(file, line[0].ref[mutable u8&], written)
+
 def RealGameBoot_FindHleThunkTargetName(linker: Linker&, target: u64) -> static u8&:
     i: mutable usize = 0
     while i < linker.hle_symbols.symbols.count:
@@ -1180,6 +1313,7 @@ def RealGameBoot_EmitArtifacts(linker: Linker&, guarded_status: s32) -> void:
         RealGameBoot_EmitCallsiteProbe(file.ref[mutable IOFile&], linker, "runtime_hle_recorder_stack_word0", GuestExec_RuntimeHleRecorderStackWord0())
         RealGameBoot_EmitCallsiteProbe(file.ref[mutable IOFile&], linker, "runtime_hle_recorder_stack_word1", GuestExec_RuntimeHleRecorderStackWord1())
         RealGameBoot_EmitCallsiteProbe(file.ref[mutable IOFile&], linker, "runtime_hle_guest_return_addr", GuestExec_RuntimeHleGuestReturnAddr())
+        RealGameBoot_EmitArg0ProvenanceProbe(file.ref[mutable IOFile&], "runtime_hle_guest_return_addr", GuestExec_RuntimeHleGuestReturnAddr(), GuestExec_RuntimeHleGuestRdi(), GuestExec_RuntimeHleGuestRbp(), GuestExec_RuntimeHleGuestRsp())
         RealGameBoot_EmitCallsiteProbe(file.ref[mutable IOFile&], linker, "runtime_hle_caller_return", GuestExec_RuntimeHleCallerFrameWord1())
         if GuestExec_RuntimeHleCallerFrameWord1() > 64.uintptr():
             caller_call_target: VAddr = RealGameBoot_RipRelativeSlot(GuestExec_RuntimeHleCallerFrameWord1(), RealGameBoot_NativeU32At(GuestExec_RuntimeHleCallerFrameWord1() - 4.uintptr()))

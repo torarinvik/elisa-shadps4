@@ -519,6 +519,30 @@ def ge_debug_guard_guest_pointer(target: uintptr, sequence: u64) -> bool:
     ge_abort_active_guard_for_debug_trap(GE_DEBUG_TRAP_BOUNDARY_GUARD_STATUS)
     return false
 
+def ge_debug_guard_guest_return_continuation(sequence: u64) -> bool:
+    if not ge_debug_trap_on_boundary_guard:
+        return true
+    if ge_debug_trap_sequence != 0u64:
+        return false
+    if ge_runtime_hle_guest_rbp == 0.uintptr():
+        return true
+    saved_return: uintptr = ge_read_context_word(ge_runtime_hle_guest_rbp + 8.uintptr())
+    if saved_return == 0.uintptr():
+        return true
+    reason: mutable u64 = ge_boundary_guard_reason_for_value(saved_return)
+    if reason == GE_BOUNDARY_GUARD_NONE and ge_native_prot_at(saved_return, 1u64) == 0xffffffffu32:
+        reason <- GE_BOUNDARY_GUARD_UNMAPPED_EXEC
+    if reason == GE_BOUNDARY_GUARD_NONE:
+        return true
+    ge_debug_trap_count <- ge_debug_trap_count + 1u64
+    ge_debug_trap_reason <- reason
+    ge_debug_trap_value <- saved_return
+    ge_debug_trap_sequence <- sequence if sequence != 0u64 else ge_debug_trap_count
+    ge_last_status <- GE_DEBUG_TRAP_BOUNDARY_GUARD_STATUS
+    ge_debug_trace_boundary("guest-exec-return-guard-stop", saved_return, reason.uintptr(), ge_debug_trap_sequence.uintptr())
+    ge_abort_active_guard_for_debug_trap(GE_DEBUG_TRAP_BOUNDARY_GUARD_STATUS)
+    return false
+
 def ge_read_native_word(address: uintptr) -> uintptr:
     if address == 0.uintptr():
         return 0.uintptr()
@@ -3293,6 +3317,9 @@ def GuestExec_DebugGuardCallableTarget(target: VAddr, sequence: u64) -> bool:
 
 def GuestExec_DebugGuardGuestPointer(target: GuestVAddr[void], sequence: u64) -> bool:
     return ge_debug_guard_guest_pointer(target.cast[uintptr], sequence)
+
+def GuestExec_DebugGuardGuestReturnContinuation(sequence: u64) -> bool:
+    return ge_debug_guard_guest_return_continuation(sequence)
 
 def GuestExec_SetDebugTrapOnThreadAffinity(enabled: bool) -> void:
     ge_debug_trap_on_affinity <- enabled
