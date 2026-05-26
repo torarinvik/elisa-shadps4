@@ -336,6 +336,8 @@ def main() -> int:
         target_triple_for_host(),
     ]
     child_env = os.environ.copy()
+    child_env.setdefault("ELISA_GUEST_EXEC_DEBUG_TRACE", "1")
+    child_env.setdefault("ELISA_GUEST_EXEC_DEBUG_TRAP", "1")
     if mode == "cross-emit-rosetta-x86_64":
         child_env["ELISA_GUEST_EXEC_NO_FORK"] = "1"
     proc = run(cmd, cwd=COMPILER_DIR, timeout=300, env=child_env)
@@ -420,6 +422,24 @@ def main() -> int:
             runtime_hle_arg1=artifact_get(artifacts, "guest_exec_runtime_hle_arg1", default=""),
             runtime_hle_arg2=artifact_get(artifacts, "guest_exec_runtime_hle_arg2", default=""),
             runtime_hle_ret=artifact_get(artifacts, "guest_exec_runtime_hle_ret", default=""),
+            trace_event_count=artifact_get(artifacts, "trace_event_count"),
+            guardrail_debug_trap_enabled=artifact_get(artifacts, "guardrail_debug_trap_enabled"),
+            guardrail_debug_trap_count=artifact_get(artifacts, "guardrail_debug_trap_count"),
+            guardrail_debug_trap_reason=artifact_get(artifacts, "guardrail_debug_trap_reason"),
+            guardrail_debug_trap_value=artifact_get(artifacts, "guardrail_debug_trap_value"),
+            guardrail_debug_trap_sequence=artifact_get(artifacts, "guardrail_debug_trap_sequence"),
+            guardrail_runtime_hle_boundary_sequence=artifact_get(artifacts, "guardrail_runtime_hle_boundary_sequence"),
+            guardrail_runtime_hle_boundary_index=artifact_get(artifacts, "guardrail_runtime_hle_boundary_index"),
+            guardrail_runtime_hle_boundary_reason=artifact_get(artifacts, "guardrail_runtime_hle_boundary_reason"),
+            guardrail_runtime_hle_boundary_value=artifact_get(artifacts, "guardrail_runtime_hle_boundary_value"),
+            tls_get_addr_calls=artifact_get(artifacts, "tls_get_addr_calls"),
+            tls_last_module_index=artifact_get(artifacts, "tls_last_module_index"),
+            tls_last_offset=artifact_get(artifacts, "tls_last_offset"),
+            tls_last_dtv_base=artifact_get(artifacts, "tls_last_dtv_base"),
+            tls_last_block_pointer=artifact_get(artifacts, "tls_last_block_pointer"),
+            tls_last_result=artifact_get(artifacts, "tls_last_result"),
+            tls_module0_calls=artifact_get(artifacts, "tls_module0_calls"),
+            tls_null_dtv_calls=artifact_get(artifacts, "tls_null_dtv_calls"),
             diagnostic=diagnose_artifacts(artifacts),
         )
         return 1
@@ -496,6 +516,24 @@ def main() -> int:
         runtime_hle_arg1=artifact_get(artifacts, "guest_exec_runtime_hle_arg1", default=""),
         runtime_hle_arg2=artifact_get(artifacts, "guest_exec_runtime_hle_arg2", default=""),
         runtime_hle_ret=artifact_get(artifacts, "guest_exec_runtime_hle_ret", default=""),
+        trace_event_count=artifact_get(artifacts, "trace_event_count"),
+        guardrail_debug_trap_enabled=artifact_get(artifacts, "guardrail_debug_trap_enabled"),
+        guardrail_debug_trap_count=artifact_get(artifacts, "guardrail_debug_trap_count"),
+        guardrail_debug_trap_reason=artifact_get(artifacts, "guardrail_debug_trap_reason"),
+        guardrail_debug_trap_value=artifact_get(artifacts, "guardrail_debug_trap_value"),
+        guardrail_debug_trap_sequence=artifact_get(artifacts, "guardrail_debug_trap_sequence"),
+        guardrail_runtime_hle_boundary_sequence=artifact_get(artifacts, "guardrail_runtime_hle_boundary_sequence"),
+        guardrail_runtime_hle_boundary_index=artifact_get(artifacts, "guardrail_runtime_hle_boundary_index"),
+        guardrail_runtime_hle_boundary_reason=artifact_get(artifacts, "guardrail_runtime_hle_boundary_reason"),
+        guardrail_runtime_hle_boundary_value=artifact_get(artifacts, "guardrail_runtime_hle_boundary_value"),
+        tls_get_addr_calls=artifact_get(artifacts, "tls_get_addr_calls"),
+        tls_last_module_index=artifact_get(artifacts, "tls_last_module_index"),
+        tls_last_offset=artifact_get(artifacts, "tls_last_offset"),
+        tls_last_dtv_base=artifact_get(artifacts, "tls_last_dtv_base"),
+        tls_last_block_pointer=artifact_get(artifacts, "tls_last_block_pointer"),
+        tls_last_result=artifact_get(artifacts, "tls_last_result"),
+        tls_module0_calls=artifact_get(artifacts, "tls_module0_calls"),
+        tls_null_dtv_calls=artifact_get(artifacts, "tls_null_dtv_calls"),
         diagnostic=diagnose_artifacts(artifacts),
     )
     return 0
