@@ -148,6 +148,7 @@ const GE_DEBUG_TRAP_BOUNDARY_GUARD_STATUS: s32 = -90
 const GE_DEBUG_TRAP_UNPUBLISHED_EXEC_STATUS: s32 = -91
 const GE_DEBUG_TRAP_CALLABLE_GUARD_STATUS: s32 = -92
 const GE_DEBUG_TRAP_THREAD_AFFINITY_STATUS: s32 = -93
+const GE_DEBUG_TRAP_GUEST_PTR_UNMAPPED_STATUS: s32 = -94
 const GE_AFFINITY_SLOTS: usize = 16usize
 
 struct GeNativeRegion:
@@ -180,6 +181,10 @@ global mutable ge_debug_trap_return_addr: uintptr = 0.uintptr()
 global mutable ge_debug_trap_arg0: uintptr = 0.uintptr()
 global mutable ge_debug_trap_arg1: uintptr = 0.uintptr()
 global mutable ge_debug_trap_arg2: uintptr = 0.uintptr()
+global mutable ge_debug_trap_pointer_size: u64 = 0u64
+global mutable ge_debug_trap_nearest_mapping_base: uintptr = 0.uintptr()
+global mutable ge_debug_trap_nearest_mapping_end: uintptr = 0.uintptr()
+global mutable ge_debug_trap_nearest_mapping_prot: u32 = 0u32
 global mutable ge_debug_trace_enabled: bool = false
 
 # Thread-affinity referee: mutable state that must only be touched by one thread
@@ -531,6 +536,30 @@ def ge_debug_guard_guest_pointer(target: uintptr, sequence: u64) -> bool:
     ge_abort_active_guard_for_debug_trap(GE_DEBUG_TRAP_BOUNDARY_GUARD_STATUS)
     return false
 
+def ge_debug_guard_mapped_guest_pointer(target: uintptr, size: u64, nearest_base: uintptr, nearest_end: uintptr, nearest_prot: u32, sequence: u64) -> bool:
+    if target == 0.uintptr():
+        return true
+    ge_debug_trace_boundary("guest-exec-mapped-pointer-guard-stop", target, nearest_base, nearest_end)
+    if not ge_debug_trap_on_boundary_guard:
+        return false
+    if ge_debug_trap_sequence != 0u64:
+        return false
+    ge_debug_trap_count <- ge_debug_trap_count + 1u64
+    ge_debug_trap_reason <- GE_BOUNDARY_GUARD_UNMAPPED_POINTER
+    ge_debug_trap_value <- target
+    ge_debug_trap_sequence <- sequence if sequence != 0u64 else ge_debug_trap_count
+    ge_debug_trap_return_addr <- ge_runtime_hle_guest_return_addr
+    ge_debug_trap_arg0 <- ge_runtime_hle_guest_rdi
+    ge_debug_trap_arg1 <- ge_runtime_hle_guest_rsi
+    ge_debug_trap_arg2 <- ge_runtime_hle_guest_rdx
+    ge_debug_trap_pointer_size <- size
+    ge_debug_trap_nearest_mapping_base <- nearest_base
+    ge_debug_trap_nearest_mapping_end <- nearest_end
+    ge_debug_trap_nearest_mapping_prot <- nearest_prot
+    ge_last_status <- GE_DEBUG_TRAP_GUEST_PTR_UNMAPPED_STATUS
+    ge_abort_active_guard_for_debug_trap(GE_DEBUG_TRAP_GUEST_PTR_UNMAPPED_STATUS)
+    return false
+
 def ge_debug_guard_guest_return_continuation(sequence: u64) -> bool:
     if not ge_debug_trap_on_boundary_guard:
         return true
@@ -808,6 +837,18 @@ def c_GuestExec_DebugTrapArg1() -> uintptr:
 
 def c_GuestExec_DebugTrapArg2() -> uintptr:
     return ge_debug_trap_arg2
+
+def c_GuestExec_DebugTrapPointerSize() -> u64:
+    return ge_debug_trap_pointer_size
+
+def c_GuestExec_DebugTrapNearestMappingBase() -> uintptr:
+    return ge_debug_trap_nearest_mapping_base
+
+def c_GuestExec_DebugTrapNearestMappingEnd() -> uintptr:
+    return ge_debug_trap_nearest_mapping_end
+
+def c_GuestExec_DebugTrapNearestMappingProt() -> u32:
+    return ge_debug_trap_nearest_mapping_prot
 
 # ============================================================
 # x86_64 signal/ucontext crash-capture foundation (Stage C+D+E, part 1).
@@ -3182,6 +3223,10 @@ def GuestExec_ResetState() -> void:
     ge_debug_trap_arg0 <- 0.uintptr()
     ge_debug_trap_arg1 <- 0.uintptr()
     ge_debug_trap_arg2 <- 0.uintptr()
+    ge_debug_trap_pointer_size <- 0u64
+    ge_debug_trap_nearest_mapping_base <- 0.uintptr()
+    ge_debug_trap_nearest_mapping_end <- 0.uintptr()
+    ge_debug_trap_nearest_mapping_prot <- 0u32
     c_GuestExec_ResetCrashState()
 
 def GuestExec_Enable(enabled: bool) -> void:
@@ -3352,6 +3397,9 @@ def GuestExec_DebugGuardCallableTarget(target: VAddr, sequence: u64) -> bool:
 def GuestExec_DebugGuardGuestPointer(target: GuestVAddr[void], sequence: u64) -> bool:
     return ge_debug_guard_guest_pointer(target.cast[uintptr], sequence)
 
+def GuestExec_DebugGuardMappedGuestPointer(target: GuestVAddr[void], size: u64, nearest_base: VAddr, nearest_end: VAddr, nearest_prot: u32, sequence: u64) -> bool:
+    return ge_debug_guard_mapped_guest_pointer(target.cast[uintptr], size, nearest_base, nearest_end, nearest_prot, sequence)
+
 def GuestExec_DebugGuardGuestReturnContinuation(sequence: u64) -> bool:
     return ge_debug_guard_guest_return_continuation(sequence)
 
@@ -3399,6 +3447,18 @@ def GuestExec_DebugTrapArg1() -> VAddr:
 
 def GuestExec_DebugTrapArg2() -> VAddr:
     return c_GuestExec_DebugTrapArg2()
+
+def GuestExec_DebugTrapPointerSize() -> u64:
+    return c_GuestExec_DebugTrapPointerSize()
+
+def GuestExec_DebugTrapNearestMappingBase() -> VAddr:
+    return c_GuestExec_DebugTrapNearestMappingBase()
+
+def GuestExec_DebugTrapNearestMappingEnd() -> VAddr:
+    return c_GuestExec_DebugTrapNearestMappingEnd()
+
+def GuestExec_DebugTrapNearestMappingProt() -> u32:
+    return c_GuestExec_DebugTrapNearestMappingProt()
 
 def GuestExec_RecordHandoff(entry_addr: VAddr, argc: int, is_main_executable: bool) -> void:
     guest_exec_last_entry_addr <- entry_addr
