@@ -140,8 +140,11 @@ const GE_BOUNDARY_POISON_WORD: u64 = 0xBADC0DEBADC0DEADu64
 const GE_BOUNDARY_GUARD_NONE: u64 = 0u64
 const GE_BOUNDARY_GUARD_POISON: u64 = 1u64
 const GE_BOUNDARY_GUARD_NEAR_NULL_UNMAPPED: u64 = 2u64
+const GE_BOUNDARY_GUARD_NON_CANONICAL: u64 = 3u64
+const GE_BOUNDARY_GUARD_UNMAPPED_EXEC: u64 = 4u64
 const GE_DEBUG_TRAP_BOUNDARY_GUARD_STATUS: s32 = -90
 const GE_DEBUG_TRAP_UNPUBLISHED_EXEC_STATUS: s32 = -91
+const GE_DEBUG_TRAP_CALLABLE_GUARD_STATUS: s32 = -92
 
 struct GeNativeRegion:
     base: mutable uintptr
@@ -164,6 +167,7 @@ global mutable ge_published_exec_sizes: u64[2048] = zeroed
 global mutable ge_published_exec_count: u32 = 0u32
 global mutable ge_debug_trap_on_boundary_guard: bool = false
 global mutable ge_debug_trap_on_unpublished_exec: bool = false
+global mutable ge_debug_trap_on_callable_guard: bool = false
 global mutable ge_debug_trap_count: u64 = 0u64
 global mutable ge_debug_trap_reason: u64 = 0u64
 global mutable ge_debug_trap_value: uintptr = 0.uintptr()
@@ -280,6 +284,25 @@ def ge_boundary_guard_reason_for_value(value: uintptr) -> u64:
         return GE_BOUNDARY_GUARD_NEAR_NULL_UNMAPPED
     return GE_BOUNDARY_GUARD_NONE
 
+def ge_is_noncanonical_x86_address(value: uintptr) -> bool:
+    raw: u64 = value.u64()
+    sign: u64 = (raw >> 47u64) & 1u64
+    upper: u64 = raw >> 48u64
+    if sign == 0u64:
+        return upper != 0u64
+    return upper != 0xffffu64
+
+def ge_callable_guard_reason_for_value(value: uintptr) -> u64:
+    base_reason: u64 = ge_boundary_guard_reason_for_value(value)
+    if base_reason != GE_BOUNDARY_GUARD_NONE:
+        return base_reason
+    if ge_is_noncanonical_x86_address(value):
+        return GE_BOUNDARY_GUARD_NON_CANONICAL
+    prot: u32 = ge_native_prot_at(value, 1u64)
+    if prot == 0xffffffffu32 or (prot & 4u32) == 0u32:
+        return GE_BOUNDARY_GUARD_UNMAPPED_EXEC
+    return GE_BOUNDARY_GUARD_NONE
+
 def ge_record_published_exec(address: uintptr, size: u64) -> void:
     if address == 0.uintptr() or size == 0u64:
         return
@@ -316,6 +339,21 @@ def ge_check_entry_published(entry_addr: uintptr) -> bool:
     ge_debug_trap_value <- entry_addr
     ge_debug_trap_sequence <- ge_debug_trap_count
     ge_last_status <- GE_DEBUG_TRAP_UNPUBLISHED_EXEC_STATUS
+    return false
+
+def ge_debug_guard_callable_target(target: uintptr, sequence: u64) -> bool:
+    if not ge_debug_trap_on_callable_guard:
+        return true
+    if ge_debug_trap_sequence != 0u64:
+        return false
+    reason: u64 = ge_callable_guard_reason_for_value(target)
+    if reason == GE_BOUNDARY_GUARD_NONE:
+        return true
+    ge_debug_trap_count <- ge_debug_trap_count + 1u64
+    ge_debug_trap_reason <- reason
+    ge_debug_trap_value <- target
+    ge_debug_trap_sequence <- sequence if sequence != 0u64 else ge_debug_trap_count
+    ge_last_status <- GE_DEBUG_TRAP_CALLABLE_GUARD_STATUS
     return false
 
 def ge_read_native_word(address: uintptr) -> uintptr:
@@ -1599,6 +1637,8 @@ def ge_run_synthetic_function(entry_addr: uintptr, arg0: u64, arg1: u64) -> u64:
         ge_last_status <- -1
         return GE_SENTINEL_MAX
     static if ARCH_X86_64 and not PLATFORM_WINDOWS:
+        if not ge_debug_guard_callable_target(entry_addr, 1u64):
+            return GE_SENTINEL_MAX - 5u64
         if not ge_check_entry_published(entry_addr):
             return GE_SENTINEL_MAX - 4u64
         ge_reset_crash_state()
@@ -1626,6 +1666,8 @@ def ge_run_synthetic_function_with_timeout(entry_addr: uintptr, arg0: u64, arg1:
         ge_last_status <- -1
         return GE_SENTINEL_MAX
     static if ARCH_X86_64 and not PLATFORM_WINDOWS:
+        if not ge_debug_guard_callable_target(entry_addr, 1u64):
+            return GE_SENTINEL_MAX - 5u64
         if not ge_check_entry_published(entry_addr):
             return GE_SENTINEL_MAX - 4u64
         ge_reset_crash_state()
@@ -2895,6 +2937,7 @@ def GuestExec_ResetState() -> void:
         i <- i + 1u32
     ge_debug_trap_on_boundary_guard <- false
     ge_debug_trap_on_unpublished_exec <- false
+    ge_debug_trap_on_callable_guard <- false
     ge_debug_trap_count <- 0u64
     ge_debug_trap_reason <- GE_BOUNDARY_GUARD_NONE
     ge_debug_trap_value <- 0.uintptr()
@@ -3059,6 +3102,12 @@ def GuestExec_SetDebugTrapOnBoundaryGuard(enabled: bool) -> void:
 
 def GuestExec_SetDebugTrapOnUnpublishedExec(enabled: bool) -> void:
     ge_debug_trap_on_unpublished_exec <- enabled
+
+def GuestExec_SetDebugTrapOnCallableGuard(enabled: bool) -> void:
+    ge_debug_trap_on_callable_guard <- enabled
+
+def GuestExec_DebugGuardCallableTarget(target: VAddr, sequence: u64) -> bool:
+    return ge_debug_guard_callable_target(target, sequence)
 
 def GuestExec_DebugTrapCount() -> u64:
     return c_GuestExec_DebugTrapCount()
