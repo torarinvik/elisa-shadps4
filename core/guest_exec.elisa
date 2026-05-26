@@ -441,6 +441,10 @@ global mutable ge_old_fpe: GeSigaction = zeroed
 global mutable ge_old_trap: GeSigaction = zeroed
 global mutable ge_old_alrm: GeSigaction = zeroed
 global mutable ge_jmp_buf: u8[256] = zeroed
+global mutable ge_cross_thread_signal_count: u64 = 0u64
+global mutable ge_cross_thread_signal_guard_thread: uintptr = 0.uintptr()
+global mutable ge_cross_thread_signal_fault_thread: uintptr = 0.uintptr()
+global mutable ge_cross_thread_signal_number: s32 = 0
 
 const GE_SIG_SEGV: int = 11
 const GE_SIG_ILL: int = 4
@@ -625,16 +629,31 @@ def ge_alarm_handler(sig: int) -> void:
     if fr != null:
         fr.status <- -3
         fr.signal <- GE_SIG_ALRM.s32()
+        fr.fault_thread <- ge_pthread_self()
+        fr.guard_thread <- ge_guard_target_thread
         if fr.execution_stage < 4:
             fr.execution_stage <- 4
     if ge_guard_active != 0:
-        ge_siglongjmp(ge_jmp_buf[0usize].ref[void&], 1)
+        current_thread: uintptr = ge_pthread_self()
+        if ge_guard_target_thread == 0.uintptr() or current_thread == ge_guard_target_thread:
+            ge_siglongjmp(ge_jmp_buf[0usize].ref[void&], 1)
+        ge_cross_thread_signal_count <- ge_cross_thread_signal_count + 1u64
+        ge_cross_thread_signal_guard_thread <- ge_guard_target_thread
+        ge_cross_thread_signal_fault_thread <- current_thread
+        ge_cross_thread_signal_number <- GE_SIG_ALRM.s32()
+        if fr != null:
+            fr.cross_thread_signal_count <- ge_cross_thread_signal_count
+            fr.cross_thread_signal_guard_thread <- ge_guard_target_thread
+            fr.cross_thread_signal_fault_thread <- current_thread
+            fr.cross_thread_signal_number <- GE_SIG_ALRM.s32()
+        ge_exit_now(128 + GE_SIG_ALRM)
 
 @c_abi(c)
 def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
     ge_set_native_phase(GE_PHASE_SIGNAL_HANDLER_ENTERED)
     ge_last_status <- (0 - sig).s32()
     ge_last_signal <- sig.s32()
+    fault_thread: uintptr = ge_pthread_self()
     ge_signal_uctx <- uctx.uintptr() if uctx != null else 0.uintptr()
     ge_signal_mctx <- ge_extract_mctx(uctx)
     ge_last_fault_address <- ge_siginfo_fault_addr(info)
@@ -683,6 +702,8 @@ def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
     if fr != null:
         fr.status <- ge_last_status
         fr.signal <- sig.s32()
+        fr.fault_thread <- fault_thread
+        fr.guard_thread <- ge_guard_target_thread
         fr.fault_address <- ge_last_fault_address
         fr.guest_pc <- ge_last_guest_pc
         fr.guest_sp <- ge_last_guest_sp
@@ -722,7 +743,20 @@ def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
         if fr.execution_stage < 6:
             fr.execution_stage <- 6
     if ge_guard_active != 0:
-        ge_siglongjmp(ge_jmp_buf[0usize].ref[void&], 1)
+        if ge_guard_target_thread == 0.uintptr() or fault_thread == ge_guard_target_thread:
+            ge_siglongjmp(ge_jmp_buf[0usize].ref[void&], 1)
+        ge_cross_thread_signal_count <- ge_cross_thread_signal_count + 1u64
+        ge_cross_thread_signal_guard_thread <- ge_guard_target_thread
+        ge_cross_thread_signal_fault_thread <- fault_thread
+        ge_cross_thread_signal_number <- sig.s32()
+        if fr != null:
+            fr.cross_thread_signal_count <- ge_cross_thread_signal_count
+            fr.cross_thread_signal_guard_thread <- ge_guard_target_thread
+            fr.cross_thread_signal_fault_thread <- fault_thread
+            fr.cross_thread_signal_number <- sig.s32()
+        if sig > 0 and sig < 128:
+            ge_exit_now(128 + sig)
+        ge_exit_now(1)
 
 # ---- Orchestration plumbing (atomic core, part 2a; inert until swap) ----
 @link_name(sigsetjmp)
@@ -876,6 +910,11 @@ def ge_absorb_fork_report() -> void:
         ge_last_guest_r8 <- fr.guest_r8
     if fr.guest_r9 != 0.uintptr():
         ge_last_guest_r9 <- fr.guest_r9
+    if fr.cross_thread_signal_count != 0u64:
+        ge_cross_thread_signal_count <- fr.cross_thread_signal_count
+        ge_cross_thread_signal_guard_thread <- fr.cross_thread_signal_guard_thread
+        ge_cross_thread_signal_fault_thread <- fr.cross_thread_signal_fault_thread
+        ge_cross_thread_signal_number <- fr.cross_thread_signal_number
     if fr.expected_entry_params != 0.uintptr():
         ge_expected_entry_params <- fr.expected_entry_params
     if fr.expected_stack_word0 != 0.uintptr() or fr.expected_stack_word1 != 0.uintptr():
@@ -1056,6 +1095,10 @@ def ge_reset_crash_state() -> void:
     ge_last_signal <- 0
     ge_last_errno <- 0
     ge_last_native_phase <- GE_PHASE_NONE
+    ge_cross_thread_signal_count <- 0u64
+    ge_cross_thread_signal_guard_thread <- 0.uintptr()
+    ge_cross_thread_signal_fault_thread <- 0.uintptr()
+    ge_cross_thread_signal_number <- 0
     ge_last_fault_address <- 0.uintptr()
     ge_last_guest_pc <- 0.uintptr()
     ge_last_guest_sp <- 0.uintptr()
@@ -1857,6 +1900,18 @@ def c_GuestExec_SignalStackWordM1() -> uintptr:
 def c_GuestExec_FaultTransferClass() -> u64:
     return ge_fault_transfer_class
 
+def c_GuestExec_CrossThreadSignalCount() -> u64:
+    return ge_cross_thread_signal_count
+
+def c_GuestExec_CrossThreadSignalGuardThread() -> uintptr:
+    return ge_cross_thread_signal_guard_thread
+
+def c_GuestExec_CrossThreadSignalFaultThread() -> uintptr:
+    return ge_cross_thread_signal_fault_thread
+
+def c_GuestExec_CrossThreadSignalNumber() -> s32:
+    return ge_cross_thread_signal_number
+
 def c_GuestExec_SignalStackSymbol0() -> static u8&:
     s: static u8&? = ge_signal_stack_symbol0
     return s if s != null else ""
@@ -2084,6 +2139,12 @@ struct ElisaGuestExecForkReport:
     guest_r9: mutable uintptr
     guest_rax: mutable uintptr
     guest_rbx: mutable uintptr
+    guard_thread: mutable uintptr
+    fault_thread: mutable uintptr
+    cross_thread_signal_count: mutable u64
+    cross_thread_signal_guard_thread: mutable uintptr
+    cross_thread_signal_fault_thread: mutable uintptr
+    cross_thread_signal_number: mutable s32
     expected_entry_params: mutable uintptr
     expected_stack_word0: mutable uintptr
     expected_stack_word1: mutable uintptr
@@ -2875,6 +2936,18 @@ def GuestExec_SignalStackWordM1() -> VAddr:
 
 def GuestExec_FaultTransferClass() -> u64:
     return c_GuestExec_FaultTransferClass()
+
+def GuestExec_CrossThreadSignalCount() -> u64:
+    return c_GuestExec_CrossThreadSignalCount()
+
+def GuestExec_CrossThreadSignalGuardThread() -> VAddr:
+    return c_GuestExec_CrossThreadSignalGuardThread()
+
+def GuestExec_CrossThreadSignalFaultThread() -> VAddr:
+    return c_GuestExec_CrossThreadSignalFaultThread()
+
+def GuestExec_CrossThreadSignalNumber() -> s32:
+    return c_GuestExec_CrossThreadSignalNumber()
 
 def GuestExec_SignalStackSymbol0() -> static u8&:
     return c_GuestExec_SignalStackSymbol0()
