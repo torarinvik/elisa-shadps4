@@ -11,7 +11,7 @@ extern mmap(addr: uintptr, length: usize, prot: int, flags: int, fd: int, offset
 @link_name(i386_set_ldt)
 extern tls_i386_set_ldt(start: int, desc: void&, num: int) -> int
 
-extern ElisaTls_LoadFsSelectorAsm(selector: u16) -> void
+extern ElisaTls_LoadFsSelectorAsm(selector: u16) -> void can[Unsafe.SegmentMutation]
 extern ElisaTls_ReadFsSelectorAsm() -> u16
 extern ElisaTls_ReadFs0Asm() -> uintptr
 extern ElisaTls_AtomicExchangeU32Asm(ptr: uintptr, value: u32) -> u32
@@ -92,7 +92,7 @@ def TLS_LdtUnlock() -> void:
     static if PLATFORM_APPLE and ARCH_X86_64:
         tls_darwin_ldt_lock <- 0u32
 
-def SetTcbBase(image_address: void&?) -> void:
+def SetTcbBase(image_address: void&?) -> void can[Unsafe.SegmentMutation]:
     base: mutable uintptr = 0.uintptr()
     if image_address != null:
         base <- image_address.cast[uintptr]
@@ -135,7 +135,8 @@ def SetTcbBase(image_address: void&?) -> void:
             if page != null:
                 page.tcb <- base
                 page.index <- ldt_index
-            ElisaTls_LoadFsSelectorAsm(selector)
+            can Unsafe.SegmentMutation:
+                ElisaTls_LoadFsSelectorAsm(selector)
             tls_debug_last_fs0 <- ElisaTls_ReadFs0Asm()
         TLS_LdtUnlock()
     tls_main_tcb.tcb_self <- base
@@ -224,10 +225,11 @@ def TLS_CaptureHostFsSelector() -> u16:
 def TLS_HostFsSelector() -> u16:
     return tls_host_fs_selector
 
-def TLS_RestoreHostFsSelector() -> void:
+def TLS_RestoreHostFsSelector() -> void can[Unsafe.SegmentMutation]:
     static if PLATFORM_APPLE and ARCH_X86_64:
         if tls_host_fs_selector_captured:
-            ElisaTls_LoadFsSelectorAsm(tls_host_fs_selector)
+            can Unsafe.SegmentMutation:
+                ElisaTls_LoadFsSelectorAsm(tls_host_fs_selector)
 
 def TLS_GuestFsSelector() -> u16:
     static if PLATFORM_APPLE and ARCH_X86_64:
@@ -249,21 +251,24 @@ def TLS_RegisterPrimaryTemplate(base: uintptr, size: usize, dtv_base: uintptr, d
 def TLS_PrimaryTcbBase() -> uintptr:
     return tls_primary_tcb_base
 
-def TLS_InstallPrimaryTcbBase() -> void:
+def TLS_InstallPrimaryTcbBase() -> void can[Unsafe.SegmentMutation]:
     if tls_primary_tcb_base != 0.uintptr():
-        SetTcbBase(tls_primary_tcb_base.cast[void&?])
+        can Unsafe.SegmentMutation:
+            SetTcbBase(tls_primary_tcb_base.cast[void&?])
 
-def TLS_InstallThreadTcbFromPrimaryTemplate() -> void:
+def TLS_InstallThreadTcbFromPrimaryTemplate() -> void can[Unsafe.SegmentMutation]:
     tls_thread_install_count <- tls_thread_install_count + 1u64
     if tls_primary_template_base == 0.uintptr() or tls_primary_template_size == 0usize or tls_primary_tcb_base == 0.uintptr():
-        TLS_InstallPrimaryTcbBase()
+        can Unsafe.SegmentMutation:
+            TLS_InstallPrimaryTcbBase()
         if TLS_DebugLastFs0() == TLS_PrimaryTcbBase():
             tls_thread_install_success_count <- tls_thread_install_success_count + 1u64
         return
     can Memory.Allocate:
         raw: mutable heap void&? = malloc(tls_primary_template_size)
         if raw == null:
-            TLS_InstallPrimaryTcbBase()
+            can Unsafe.SegmentMutation:
+                TLS_InstallPrimaryTcbBase()
             return
         new_base: uintptr = raw.cast[uintptr]
         trusted Unsafe.PointerCast:
@@ -291,15 +296,18 @@ def TLS_InstallThreadTcbFromPrimaryTemplate() -> void:
                             dtv[i].pointer <- new_base + (ptr - tls_primary_template_base)
                         i <- i + 1usize
                 tcb.tcb_dtv <- dtv_raw.cast[uintptr]
-        SetTcbBase(new_tcb_base.cast[void&?])
+        can Unsafe.SegmentMutation:
+            SetTcbBase(new_tcb_base.cast[void&?])
         if TLS_DebugLastFs0() == new_tcb_base:
             tls_thread_install_success_count <- tls_thread_install_success_count + 1u64
 
-def TLS_EnterHostFromGuest() -> void:
+def TLS_EnterHostFromGuest() -> void can[Unsafe.SegmentMutation]:
     static if PLATFORM_APPLE and ARCH_X86_64:
-        TLS_RestoreHostFsSelector()
+        can Unsafe.SegmentMutation:
+            TLS_RestoreHostFsSelector()
 
-def TLS_ReturnGuestFromHost() -> void:
+def TLS_ReturnGuestFromHost() -> void can[Unsafe.SegmentMutation]:
     static if PLATFORM_APPLE and ARCH_X86_64:
         if tls_guest_fs_selector != 0u16:
-            ElisaTls_LoadFsSelectorAsm(tls_guest_fs_selector)
+            can Unsafe.SegmentMutation:
+                ElisaTls_LoadFsSelectorAsm(tls_guest_fs_selector)

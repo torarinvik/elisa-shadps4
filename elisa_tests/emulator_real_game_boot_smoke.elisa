@@ -79,6 +79,13 @@ def RealGameBoot_EmitArtifactKV(file: mutable IOFile&, key: static u8&, value: u
         written: int = snprintf(line[0].ref[mutable u8&], 128usize, "CUSA07399_ARTIFACT %s=%llu", key, value)
         RealGameBoot_WriteLine(file, line[0].ref[mutable u8&], written)
 
+def RealGameBoot_EmitPhaseBreadcrumb(phase: u64) -> void:
+    can Memory.Allocate, Console.Format:
+        file: mutable IOFile = IOFile_opened(REAL_GAME_BOOT_ARTIFACT_PATH, FileAccessMode.Append, FileType.TextFile)
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "guarded_test_phase", phase)
+        _ = IOFile_Flush(file)
+        IOFile_Close(file)
+
 # Dump the complete patch-time AeroLib fallback slot table. Because import
 # resolution is currently nondeterministic (which slots fall to the fallback
 # stub varies run to run), the full table lets us cross-reference whatever slot
@@ -1375,7 +1382,8 @@ def emulator_real_game_boot_smoke_loads_cusa07399_eboot() -> void:
         result: mutable int = -1
         in arena:
             args: mutable darray[static u8&] = ["shadps4", REAL_GAME_BOOT_ROOT, "--", "-RealBootSmoke"]
-            result <- Main_Run(args)
+            can Unsafe.SegmentMutation:
+                result <- Main_Run(args)
         RealGameBoot_Check(result == 0, "expected real game Main_Run success")
 
         emu: mutable Emulator& = Emulator_GetInstance()
@@ -1431,7 +1439,8 @@ def emulator_real_game_boot_smoke_probes_native_guest_exec_handoff() -> void:
         result: mutable int = -1
         in arena:
             args: mutable darray[static u8&] = ["shadps4", "--native-guest-exec-probe", REAL_GAME_BOOT_ROOT, "--", "-RealBootSmoke"]
-            result <- Main_Run(args)
+            can Unsafe.SegmentMutation:
+                result <- Main_Run(args)
         RealGameBoot_Check(result == 0, "expected native guest exec probe launch success")
 
         emu: mutable Emulator& = Emulator_GetInstance()
@@ -1466,31 +1475,48 @@ def emulator_real_game_boot_smoke_probes_native_guest_exec_handoff() -> void:
 def emulator_real_game_boot_smoke_guarded_game_entry_reports_host_status() -> void:
     can Memory.Allocate, Abort.Panic:
         RealGameBoot_ResetRuntime()
+        RealGameBoot_EmitPhaseBreadcrumb(1u64)
 
         arena: Arena = zeroed
         result: mutable int = -1
         in arena:
             args: mutable darray[static u8&] = ["shadps4", "--native-guest-exec-probe", REAL_GAME_BOOT_ROOT, "--", "-RealBootSmoke"]
-            result <- Main_Run(args)
+            can Unsafe.SegmentMutation:
+                result <- Main_Run(args)
+        RealGameBoot_EmitPhaseBreadcrumb(2u64)
         RealGameBoot_Check(result == 0, "expected guarded guest exec launch setup success")
 
         linker: mutable Linker& = Linker_GetInstance()
         entry: VAddr = linker.last_entry_addr
+        RealGameBoot_EmitPhaseBreadcrumb(3u64)
         RealGameBoot_Check(entry > 0.uintptr(), "expected executable entry before guarded run")
+        RealGameBoot_EmitPhaseBreadcrumb(31u64)
         RealGameBoot_Check(entry == guest_exec_last_main_entry_addr, "expected guarded run to use recorded main executable entry")
+        RealGameBoot_EmitPhaseBreadcrumb(32u64)
         GuestExec_SetProbeMode(false)
+        RealGameBoot_EmitPhaseBreadcrumb(33u64)
         GuestExec_SetDebugTrapOnBoundaryGuard(RealGameBoot_UseBoundaryDebugTrap())
+        RealGameBoot_EmitPhaseBreadcrumb(34u64)
         GuestExec_SetDebugTrapOnUnpublishedExec(RealGameBoot_UseUnpublishedExecDebugTrap())
+        RealGameBoot_EmitPhaseBreadcrumb(35u64)
         if RealGameBoot_UseDebugTrace():
             GuestExec_SetDebugTraceEnabled(true)
+            RealGameBoot_EmitPhaseBreadcrumb(36u64)
             GuestExec_DebugTraceReset()
+            RealGameBoot_EmitPhaseBreadcrumb(37u64)
 
         status: mutable s32 = 0
         if RealGameBoot_UseNoForkGuestExec():
-            TLS_InstallPrimaryTcbBase()
+            RealGameBoot_EmitPhaseBreadcrumb(38u64)
+            can Unsafe.SegmentMutation:
+                TLS_InstallPrimaryTcbBase()
+            RealGameBoot_EmitPhaseBreadcrumb(39u64)
+            RealGameBoot_EmitPhaseBreadcrumb(4u64)
             status <- GuestExec_RunMainEntryGuardedInProcess(entry, guest_exec_last_argc, null, 25.u32())
         else:
+            RealGameBoot_EmitPhaseBreadcrumb(5u64)
             status <- GuestExec_RunMainEntryGuarded(entry, guest_exec_last_argc, null, 25.u32())
+        RealGameBoot_EmitPhaseBreadcrumb(6u64)
         if GuestExec_IsSupported():
             RealGameBoot_Check(status != -2, "expected supported host to attempt guarded game entry")
         else:

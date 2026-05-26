@@ -240,35 +240,39 @@ def Module_ShouldExecuteGuestStart() -> bool:
     static else:
         return false
 
-def Module_CallGuestInitEntry(entry_addr: VAddr, args: u64, argp: void&?, param: void&?) -> s32:
+def Module_CallGuestInitEntry(entry_addr: VAddr, args: u64, argp: void&?, param: void&?) -> s32 can[Unsafe.SegmentMutation]:
     if entry_addr == 0.uintptr():
         return 0
     result: mutable s32 = 0
     static if PLATFORM_APPLE and ARCH_X86_64:
-        TLS_InstallPrimaryTcbBase()
+        can Unsafe.SegmentMutation:
+            TLS_InstallPrimaryTcbBase()
         fn: mutable void&? = null
         trusted Unsafe.PointerCast:
             fn <- entry_addr.cast[void&?]
         if fn != null:
             trusted Unsafe.IndirectCall:
                 result <- fn.call_as[func(u64, void&?, void&?) -> s32](args, argp, param)
-        TLS_RestoreHostFsSelector()
+        can Unsafe.SegmentMutation:
+            TLS_RestoreHostFsSelector()
     return result
 
-def Module_CallGuestInitArrayEntry(entry_addr: VAddr) -> void:
+def Module_CallGuestInitArrayEntry(entry_addr: VAddr) -> void can[Unsafe.SegmentMutation]:
     if entry_addr == 0.uintptr() or entry_addr.u64() == 0xffffffffffffffffu64:
         return
     static if PLATFORM_APPLE and ARCH_X86_64:
-        TLS_InstallPrimaryTcbBase()
+        can Unsafe.SegmentMutation:
+            TLS_InstallPrimaryTcbBase()
         fn: mutable void&? = null
         trusted Unsafe.PointerCast:
             fn <- entry_addr.cast[void&?]
         if fn != null:
             trusted Unsafe.IndirectCall:
                 fn.call_as[func() -> void]()
-        TLS_RestoreHostFsSelector()
+        can Unsafe.SegmentMutation:
+            TLS_RestoreHostFsSelector()
 
-def Module_CallGuestInitArray(self: Module&, array_virtual_addr: u64, array_size: u64) -> void:
+def Module_CallGuestInitArray(self: Module&, array_virtual_addr: u64, array_size: u64) -> void can[Unsafe.SegmentMutation]:
     if not Module_ShouldExecuteGuestStart():
         return
     if array_virtual_addr == 0 or array_size < 8:
@@ -279,16 +283,18 @@ def Module_CallGuestInitArray(self: Module&, array_virtual_addr: u64, array_size
     i: mutable usize = 0usize
     while i < count:
         entry_addr: VAddr = MemoryManager_ReadU64(memory, base + (i.u64() * 8u64).uintptr()).uintptr()
-        Module_CallGuestInitArrayEntry(entry_addr)
+        can Unsafe.SegmentMutation:
+            Module_CallGuestInitArrayEntry(entry_addr)
         i <- i + 1usize
 
-def Module_Start(self: mutable Module&, args: u64, argp: void&?, param: void&?) -> s32:
+def Module_Start(self: mutable Module&, args: u64, argp: void&?, param: void&?) -> s32 can[Unsafe.SegmentMutation]:
     if not self.is_valid:
         return -1
     self.last_start_preinit_count <- 0
     if self.dynamic_info.preinit_array_virtual_addr != 0 and self.dynamic_info.preinit_array_size >= 8:
         self.last_start_preinit_count <- self.dynamic_info.preinit_array_size / 8
-        Module_CallGuestInitArray(self, self.dynamic_info.preinit_array_virtual_addr, self.dynamic_info.preinit_array_size)
+        can Unsafe.SegmentMutation:
+            Module_CallGuestInitArray(self, self.dynamic_info.preinit_array_virtual_addr, self.dynamic_info.preinit_array_size)
     self.last_start_entry_addr <- 0.uintptr()
     result: mutable s32 = 0
     if self.dynamic_info.init_virtual_addr != 0:
@@ -296,11 +302,13 @@ def Module_Start(self: mutable Module&, args: u64, argp: void&?, param: void&?) 
     else:
         self.last_start_entry_addr <- Module_GetEntryAddress(self, 0.uintptr())
     if Module_ShouldExecuteGuestStart() and self.dynamic_info.init_virtual_addr != 0:
-        result <- Module_CallGuestInitEntry(self.last_start_entry_addr, args, argp, param)
+        can Unsafe.SegmentMutation:
+            result <- Module_CallGuestInitEntry(self.last_start_entry_addr, args, argp, param)
     self.last_start_init_count <- 0
     if self.dynamic_info.init_array_virtual_addr != 0 and self.dynamic_info.init_array_size >= 8:
         self.last_start_init_count <- self.dynamic_info.init_array_size / 8
-        Module_CallGuestInitArray(self, self.dynamic_info.init_array_virtual_addr, self.dynamic_info.init_array_size)
+        can Unsafe.SegmentMutation:
+            Module_CallGuestInitArray(self, self.dynamic_info.init_array_virtual_addr, self.dynamic_info.init_array_size)
     if GuestExec_IsEnabled():
         GuestExec_RunModuleEntry(self.last_start_entry_addr, args.int(), argp, false)
     return result
