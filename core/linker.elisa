@@ -1367,7 +1367,7 @@ def Linker_RecountImportResolution(self: mutable Linker&) -> void:
 def Linker_AdvanceGenerationCounter(self: mutable Linker&) -> void:
     self.dtv_generation_counter <- self.dtv_generation_counter + 1
 
-def Linker_TlsGetAddr(self: Linker&, module_index: u64, offset: u64) -> uintptr:
+def Linker_TlsGetAddr(self: Linker&, module_index: u64, offset: u64) -> GuestVAddr[void]:
     GuestExec_RecordFirstBoundary(GUEST_EXEC_BOUNDARY_REASON_NATIVE_HLE)
     linker_tls_get_addr_calls <- linker_tls_get_addr_calls + 1u64
     linker_tls_last_module_index <- module_index
@@ -1383,7 +1383,7 @@ def Linker_TlsGetAddr(self: Linker&, module_index: u64, offset: u64) -> uintptr:
         # instead of letting a tiny pointer flow into a mutex/TLS slot.
         linker_tls_module0_calls <- linker_tls_module0_calls + 1u64
         linker_tls_last_result <- 0.uintptr()
-        return 0.uintptr()
+        return 0.uintptr().cast[GuestVAddr[void]]
     # Faithful path (shadPS4 Linker::TlsGetAddr): the per-thread TLS block lives
     # in the DTV, NOT in the module's shared static init image. Read
     # tcb_dtv[module_index + 1].pointer + offset.
@@ -1400,20 +1400,20 @@ def Linker_TlsGetAddr(self: Linker&, module_index: u64, offset: u64) -> uintptr:
                 if block != 0.uintptr():
                     result: uintptr = block + offset.uintptr()
                     linker_tls_last_result <- result
-                    return result
+                    return result.cast[GuestVAddr[void]]
     else:
         linker_tls_null_dtv_calls <- linker_tls_null_dtv_calls + 1u64
     # Fallback (no installed DTV, e.g. dormant on the arm64 host): module-relative.
     module_slot: u64 = module_index - 1u64
     if module_slot >= self.modules.count.u64():
         linker_tls_last_result <- offset.uintptr()
-        return offset.uintptr()
+        return offset.uintptr().cast[GuestVAddr[void]]
     module: Module = self.modules[module_slot.usize()]
     fallback_res: mutable uintptr = module.base_virtual_addr + offset.uintptr()
     if module.tls.image_virtual_addr != 0.uintptr():
         fallback_res <- module.tls.image_virtual_addr + offset.uintptr()
     linker_tls_last_result <- fallback_res
-    return fallback_res
+    return fallback_res.cast[GuestVAddr[void]]
 
 def Linker_AllocateTlsForThread(self: mutable Linker&, is_primary: bool) -> uintptr:
     # NOTE (C++ deviation, deliberate): shadPS4 maps the PRIMARY thread's TLS+TCB
