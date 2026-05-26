@@ -11,10 +11,11 @@ cd "${ROOT}"
   echo "host_machine=$(uname -m)"
 
   echo "== C ucontext offset reference =="
-  ref_c="$(mktemp /tmp/guest_exec_ucontext_ref.XXXXXX.c)"
-  ref_bin="$(mktemp /tmp/guest_exec_ucontext_ref.XXXXXX)"
+  ref_c="$(mktemp -t guest_exec_ucontext_ref).c"
+  ref_bin="$(mktemp -t guest_exec_ucontext_ref)"
   cat >"${ref_c}" <<'EOF'
 #define _GNU_SOURCE
+#define _XOPEN_SOURCE 700
 #include <stddef.h>
 #include <stdio.h>
 #include <sys/ucontext.h>
@@ -43,7 +44,8 @@ EOF
   rm -f "${ref_c}" "${ref_bin}"
 
   echo "== build compiler =="
-  (cd .. && go build -o bin/elisacore ./compiler/src)
+  mkdir -p ../bin
+  (cd ../compiler && go build -o ../bin/elisacore ./src)
 
   echo "== escape-hatch ratchet =="
   tools/unsafe_ratchet.sh
