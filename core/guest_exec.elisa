@@ -3377,6 +3377,87 @@ def GuestExec_DebugTraceEventAAt(index: usize) -> uintptr:
         return 0.uintptr()
     return debug_trace_events[index].a
 
+# Differential trace: snapshot the current tape, then after a second run locate
+# the FIRST event that diverges (kind/a/b/c). The fingerprint tells you *that*
+# two runs differ; this tells you *where* -- which is what collapses a hunt into
+# a one-line "diverges at event N: live a=X vs reference a=Y". The snapshot also
+# serves as the slot for a recorded reference tape (e.g. a shadPS4 baseline).
+global mutable debug_trace_snapshot_kind: int[DEBUG_TRACE_TAPE_CAP] = zeroed
+global mutable debug_trace_snapshot_a: uintptr[DEBUG_TRACE_TAPE_CAP] = zeroed
+global mutable debug_trace_snapshot_b: uintptr[DEBUG_TRACE_TAPE_CAP] = zeroed
+global mutable debug_trace_snapshot_c: uintptr[DEBUG_TRACE_TAPE_CAP] = zeroed
+global mutable debug_trace_snapshot_count: usize = 0usize
+global mutable debug_trace_snapshot_valid: bool = false
+global mutable debug_trace_diverge_index: int = -1
+global mutable debug_trace_diverge_live_kind: int = 0
+global mutable debug_trace_diverge_snap_kind: int = 0
+global mutable debug_trace_diverge_live_a: uintptr = 0.uintptr()
+global mutable debug_trace_diverge_snap_a: uintptr = 0.uintptr()
+
+def GuestExec_DebugTraceSnapshot() -> void:
+    n: mutable usize = debug_trace_event_count
+    if n > DEBUG_TRACE_TAPE_CAP:
+        n <- DEBUG_TRACE_TAPE_CAP
+    i: mutable usize = 0usize
+    while i < n:
+        ev: DebugTraceEvent = debug_trace_events[i]
+        debug_trace_snapshot_kind[i] <- ev.kind
+        debug_trace_snapshot_a[i] <- ev.a
+        debug_trace_snapshot_b[i] <- ev.b
+        debug_trace_snapshot_c[i] <- ev.c
+        i <- i + 1usize
+    debug_trace_snapshot_count <- n
+    debug_trace_snapshot_valid <- true
+
+def GuestExec_DebugTraceSnapshotCount() -> usize:
+    return debug_trace_snapshot_count
+
+# Returns the index of the first divergence between the live tape and the
+# snapshot, or -1 if identical. A length mismatch with an otherwise-equal prefix
+# diverges at the shorter length.
+def GuestExec_DebugTraceFirstDivergence() -> int:
+    debug_trace_diverge_index <- -1
+    debug_trace_diverge_live_kind <- 0
+    debug_trace_diverge_snap_kind <- 0
+    debug_trace_diverge_live_a <- 0.uintptr()
+    debug_trace_diverge_snap_a <- 0.uintptr()
+    if not debug_trace_snapshot_valid:
+        return -1
+    live_n: usize = debug_trace_event_count
+    snap_n: usize = debug_trace_snapshot_count
+    m: mutable usize = live_n
+    if snap_n < m:
+        m <- snap_n
+    if m > DEBUG_TRACE_TAPE_CAP:
+        m <- DEBUG_TRACE_TAPE_CAP
+    i: mutable usize = 0usize
+    while i < m:
+        ev: DebugTraceEvent = debug_trace_events[i]
+        if ev.kind != debug_trace_snapshot_kind[i] or ev.a != debug_trace_snapshot_a[i] or ev.b != debug_trace_snapshot_b[i] or ev.c != debug_trace_snapshot_c[i]:
+            debug_trace_diverge_index <- i.int()
+            debug_trace_diverge_live_kind <- ev.kind
+            debug_trace_diverge_snap_kind <- debug_trace_snapshot_kind[i]
+            debug_trace_diverge_live_a <- ev.a
+            debug_trace_diverge_snap_a <- debug_trace_snapshot_a[i]
+            return debug_trace_diverge_index
+        i <- i + 1usize
+    if live_n != snap_n:
+        debug_trace_diverge_index <- m.int()
+        return debug_trace_diverge_index
+    return -1
+
+def GuestExec_DebugTraceDivergenceLiveA() -> uintptr:
+    return debug_trace_diverge_live_a
+
+def GuestExec_DebugTraceDivergenceSnapA() -> uintptr:
+    return debug_trace_diverge_snap_a
+
+def GuestExec_DebugTraceDivergenceLiveKind() -> int:
+    return debug_trace_diverge_live_kind
+
+def GuestExec_DebugTraceDivergenceSnapKind() -> int:
+    return debug_trace_diverge_snap_kind
+
 def GuestExec_ReportedStatus() -> s32:
     return c_GuestExec_ReportedStatus()
 
