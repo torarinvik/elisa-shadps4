@@ -46,8 +46,12 @@ global mutable linker_native_hle_thunk_count: usize = 0usize
 global mutable linker_native_hle_function_relocation_count: u64 = 0
 global mutable linker_native_hle_data_relocation_count: u64 = 0
 global mutable linker_native_hle_unthunked_function_count: u64 = 0
+global mutable linker_native_hle_unthunked_function_first_target: u64 = 0
 global mutable linker_native_hle_function_addend_count: u64 = 0
 global mutable linker_native_hle_function_max_addend: u64 = 0
+global mutable linker_native_hle_data_thunk_pointer_count: u64 = 0
+global mutable linker_native_hle_data_thunk_pointer_first_value: u64 = 0
+global mutable linker_native_hle_data_thunk_pointer_first_name: static u8&? = null
 
 # Link-time tiny-pointer sweep: any pointer-bearing relocation whose final
 # written value is nonzero but lands in the unmapped low range (< 0x10000) is a
@@ -885,11 +889,33 @@ def Linker_NativeHleDataRelocationCount() -> u64:
 def Linker_NativeHleUnthunkedFunctionCount() -> u64:
     return linker_native_hle_unthunked_function_count
 
+def Linker_NativeHleUnthunkedFunctionFirstTarget() -> u64:
+    return linker_native_hle_unthunked_function_first_target
+
 def Linker_NativeHleFunctionAddendCount() -> u64:
     return linker_native_hle_function_addend_count
 
 def Linker_NativeHleFunctionMaxAddend() -> u64:
     return linker_native_hle_function_max_addend
+
+def Linker_NativeHleDataThunkPointerCount() -> u64:
+    return linker_native_hle_data_thunk_pointer_count
+
+def Linker_NativeHleDataThunkPointerFirstValue() -> u64:
+    return linker_native_hle_data_thunk_pointer_first_value
+
+def Linker_NativeHleDataThunkPointerFirstName() -> static u8&?:
+    return linker_native_hle_data_thunk_pointer_first_name
+
+def Linker_NoteNativeHleDataRelocationValue(value: u64, symbol_name: static u8&?) -> void:
+    if value == 0u64:
+        return
+    if Linker_FindNativeHleBoundaryThunkBase(value) == 0u64:
+        return
+    if linker_native_hle_data_thunk_pointer_count == 0u64:
+        linker_native_hle_data_thunk_pointer_first_value <- value
+        linker_native_hle_data_thunk_pointer_first_name <- symbol_name
+    linker_native_hle_data_thunk_pointer_count <- linker_native_hle_data_thunk_pointer_count + 1u64
 
 # Record a pointer-bearing relocation whose final written value is a near-NULL
 # bogus pointer. Call AFTER computing the value, only for pointer relocations
@@ -1216,9 +1242,12 @@ def Linker_ApplyRelocationEntry(self: mutable Linker&, module: mutable Module&, 
                     raw_native_hle_addr: u64 = resolved_addr
                     resolved_addr <- Linker_CreateNativeHleBoundaryThunk(resolved_addr)
                     if Linker_UseNativeHleBoundaryThunk() and raw_native_hle_addr != 0u64 and resolved_addr == raw_native_hle_addr:
+                        if linker_native_hle_unthunked_function_count == 0u64:
+                            linker_native_hle_unthunked_function_first_target <- raw_native_hle_addr
                         linker_native_hle_unthunked_function_count <- linker_native_hle_unthunked_function_count + 1
                 else:
                     linker_native_hle_data_relocation_count <- linker_native_hle_data_relocation_count + 1
+                    Linker_NoteNativeHleDataRelocationValue(resolved_addr, symbol_name)
             value: u64 = resolved_addr + addend.u64()
             Linker_NoteRelocatedPointerValue(value, rel_virtual_addr, rel_type, symbol_name, module.name)
             if Linker_WriteRelocationU64(module.ref[mutable Module&], memory, rel_virtual_addr, value):
@@ -1286,8 +1315,12 @@ def Linker_RelocateAllImports(self: mutable Linker&) -> void:
     linker_native_hle_function_relocation_count <- 0
     linker_native_hle_data_relocation_count <- 0
     linker_native_hle_unthunked_function_count <- 0
+    linker_native_hle_unthunked_function_first_target <- 0
     linker_native_hle_function_addend_count <- 0
     linker_native_hle_function_max_addend <- 0
+    linker_native_hle_data_thunk_pointer_count <- 0
+    linker_native_hle_data_thunk_pointer_first_value <- 0
+    linker_native_hle_data_thunk_pointer_first_name <- null
     linker_tiny_pointer_slot_count <- 0
     linker_tiny_pointer_first_value <- 0
     linker_tiny_pointer_first_offset <- 0
