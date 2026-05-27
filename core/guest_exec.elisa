@@ -221,6 +221,10 @@ global mutable ge_fs_state_last_fs0: uintptr = 0.uintptr()
 global mutable ge_fs_state_last_hle_return_addr: uintptr = 0.uintptr()
 global mutable ge_fs_state_last_hle_module: cstr = ""
 global mutable ge_fs_state_last_hle_symbol: cstr = ""
+global mutable ge_fs_state_shadow_owner: u32 = GE_FS_OWNER_HOST
+global mutable ge_fs_state_shadow_mismatch_count: u64 = 0u64
+global mutable ge_fs_state_shadow_transition_count: u64 = 0u64
+global mutable ge_fs_state_shadow_last_site: cstr = ""
 global mutable ge_hle_thunk_contract_count: u64 = 0u64
 global mutable ge_hle_thunk_contract_last_thunk: uintptr = 0.uintptr()
 global mutable ge_hle_thunk_contract_last_target: uintptr = 0.uintptr()
@@ -591,11 +595,65 @@ def ge_expected_fs_selector(expected_owner: u32, host_selector: u16, guest_selec
         return host_selector.uintptr()
     return 0.uintptr()
 
+def ge_fs_owner_is_valid(owner: u32) -> bool:
+    return owner == GE_FS_OWNER_HOST or owner == GE_FS_OWNER_GUEST or owner == GE_FS_OWNER_UNKNOWN
+
+def ge_shadow_fs_transition(site: cstr, owner: u32) -> void:
+    if not ge_fs_state_check_enabled:
+        return
+    normalized_owner: mutable u32 = owner
+    if not ge_fs_owner_is_valid(owner):
+        normalized_owner <- GE_FS_OWNER_UNKNOWN
+    ge_fs_state_shadow_owner <- normalized_owner
+    ge_fs_state_shadow_transition_count <- ge_fs_state_shadow_transition_count + 1u64
+    ge_fs_state_shadow_last_site <- site
+
+def ge_record_fs_state_mismatch(site: cstr, expected_owner: u32, actual_owner: u32, actual_selector: uintptr) -> void:
+    ge_fs_state_mismatch_count <- ge_fs_state_mismatch_count + 1u64
+    ge_debug_trap_count <- ge_debug_trap_count + 1u64
+    ge_debug_trap_reason <- expected_owner.u64()
+    ge_debug_trap_value <- actual_selector
+    ge_debug_trap_sequence <- ge_runtime_hle_sequence
+    ge_debug_trap_return_addr <- ge_runtime_hle_guest_return_addr
+    ge_debug_trap_arg0 <- ge_runtime_hle_guest_rdi
+    ge_debug_trap_arg1 <- ge_runtime_hle_guest_rsi
+    ge_debug_trap_arg2 <- ge_runtime_hle_guest_rdx
+    ge_debug_trace_boundary(site, actual_selector, expected_owner.u64().uintptr(), actual_owner.u64().uintptr())
+    if ge_fs_state_trap_on_mismatch:
+        ge_last_status <- GE_DEBUG_TRAP_FS_STATE_STATUS
+        ge_abort_active_guard_for_debug_trap(GE_DEBUG_TRAP_FS_STATE_STATUS)
+
+def ge_reconcile_shadow_fs_owner(site: cstr, expected_owner: u32) -> bool:
+    if not ge_fs_state_check_enabled:
+        return true
+    if expected_owner == GE_FS_OWNER_UNKNOWN or ge_fs_state_shadow_owner == GE_FS_OWNER_UNKNOWN:
+        return true
+    if ge_fs_state_shadow_owner == expected_owner:
+        return true
+    ge_fs_state_shadow_mismatch_count <- ge_fs_state_shadow_mismatch_count + 1u64
+    ge_fs_state_last_site <- site
+    ge_fs_state_last_expect_guest <- expected_owner == GE_FS_OWNER_GUEST
+    ge_fs_state_last_expected <- expected_owner.u64().uintptr()
+    ge_fs_state_last_actual <- ge_fs_state_shadow_owner.u64().uintptr()
+    ge_fs_state_last_expected_owner <- expected_owner
+    ge_fs_state_last_actual_owner <- ge_fs_state_shadow_owner
+    ge_fs_state_last_guest_selector <- TLS_GuestFsSelectorRaw().uintptr()
+    ge_fs_state_last_host_selector <- TLS_HostFsSelectorRaw().uintptr()
+    ge_fs_state_last_tcb_base <- TLS_PrimaryTcbBase()
+    ge_fs_state_last_fs0 <- 0.uintptr()
+    ge_fs_state_last_hle_return_addr <- ge_runtime_hle_guest_return_addr
+    ge_fs_state_last_hle_module <- ge_runtime_hle_module if ge_runtime_hle_module != null else ""
+    ge_fs_state_last_hle_symbol <- ge_runtime_hle_symbol if ge_runtime_hle_symbol != null else ""
+    ge_record_fs_state_mismatch("guest-exec-fs-shadow-mismatch", expected_owner, ge_fs_state_shadow_owner, ge_fs_state_shadow_owner.u64().uintptr())
+    return false
+
 # Observe the %fs owner at a host<->guest boundary transition. The referee only
 # reads %fs:[0] when the selector is already classified as the expected owner,
 # so a broken segment base cannot knock out the diagnostic path itself.
 def ge_observe_fs_owner_state(site: cstr, expected_owner: u32) -> void:
     if not ge_fs_state_check_enabled:
+        return
+    if not ge_reconcile_shadow_fs_owner(site, expected_owner):
         return
     static if PLATFORM_APPLE and ARCH_X86_64:
         actual_selector: u16 = ElisaTls_ReadFsSelectorAsm()
@@ -620,19 +678,7 @@ def ge_observe_fs_owner_state(site: cstr, expected_owner: u32) -> void:
         if ok and actual_owner != GE_FS_OWNER_UNKNOWN:
             ge_fs_state_last_fs0 <- ElisaTls_ReadFs0Asm()
         if not ok:
-            ge_fs_state_mismatch_count <- ge_fs_state_mismatch_count + 1u64
-            ge_debug_trap_count <- ge_debug_trap_count + 1u64
-            ge_debug_trap_reason <- expected_owner.u64()
-            ge_debug_trap_value <- actual_selector.uintptr()
-            ge_debug_trap_sequence <- ge_runtime_hle_sequence
-            ge_debug_trap_return_addr <- ge_runtime_hle_guest_return_addr
-            ge_debug_trap_arg0 <- ge_runtime_hle_guest_rdi
-            ge_debug_trap_arg1 <- ge_runtime_hle_guest_rsi
-            ge_debug_trap_arg2 <- ge_runtime_hle_guest_rdx
-            ge_debug_trace_boundary("guest-exec-fs-owner-mismatch", actual_selector.uintptr(), expected_owner.u64().uintptr(), actual_owner.u64().uintptr())
-            if ge_fs_state_trap_on_mismatch:
-                ge_last_status <- GE_DEBUG_TRAP_FS_STATE_STATUS
-                ge_abort_active_guard_for_debug_trap(GE_DEBUG_TRAP_FS_STATE_STATUS)
+            ge_record_fs_state_mismatch("guest-exec-fs-owner-mismatch", expected_owner, actual_owner, actual_selector.uintptr())
         fr: ElisaGuestExecForkReport&? = ge_fork_report
         if fr != null:
             fr.fs_state_observation_count <- ge_fs_state_observation_count
@@ -1305,6 +1351,7 @@ def ge_alarm_handler(sig: int) -> void:
     static if PLATFORM_APPLE and ARCH_X86_64:
         can Unsafe.SegmentMutation, Segment.Host:
             TLS_RestoreHostFsSelector()
+        ge_shadow_fs_transition("alarm-handler-host-fs-restored", GE_FS_OWNER_HOST)
         ge_assert_host_fs_owner("alarm-handler-after-host-fs-restore")
     _ = sig
     ge_set_native_phase(GE_PHASE_ALARM_HANDLER_ENTERED)
@@ -1341,6 +1388,7 @@ def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
     static if PLATFORM_APPLE and ARCH_X86_64:
         can Unsafe.SegmentMutation, Segment.Host:
             TLS_RestoreHostFsSelector()
+        ge_shadow_fs_transition("signal-handler-host-fs-restored", GE_FS_OWNER_HOST)
         ge_assert_host_fs_owner("signal-handler-after-host-fs-restore")
     ge_set_native_phase(GE_PHASE_SIGNAL_HANDLER_ENTERED)
     ge_last_status <- (0 - sig).s32()
@@ -1573,8 +1621,10 @@ def ge_jump_main_entry(params: mutable GuestEntryParams&, exit_func: uintptr) ->
     static if PLATFORM_APPLE and ARCH_X86_64:
         if !guest_fs_selector != 0u32:
             if guest_exec_main_stack_top != 0.uintptr():
+                ge_shadow_fs_transition("pre-main-easm-transition-to-guest", GE_FS_OWNER_GUEST)
                 can Unsafe.SegmentMutation, Segment.Guest:
                     ElisaGuestExec_JumpMainEntryOnStackWithFsAsm(params.entry_addr.cast[GuestEntryPoint], ge_prejump_rdi.cast[HostPtr[void]], ef.cast[ExitFunction], guest_exec_main_stack_top.cast[GuestStackTop], guest_fs_selector)
+            ge_shadow_fs_transition("pre-main-easm-transition-to-guest", GE_FS_OWNER_GUEST)
             can Unsafe.SegmentMutation, Segment.Guest:
                 ElisaGuestExec_JumpMainEntryWithFsAsm(params.entry_addr.cast[GuestEntryPoint], ge_prejump_rdi.cast[HostPtr[void]], ef.cast[ExitFunction], guest_fs_selector)
     if guest_exec_main_stack_top != 0.uintptr():
@@ -3099,6 +3149,7 @@ def ge_pc_source_is_fallback(source: s32) -> bool:
 
 # --- Runtime-HLE recording (ported; recorder + getters move together) ---
 def c_GuestExec_RecordRuntimeHle(module: static u8&?, symbol: static u8&?, arg0: uintptr, arg1: uintptr, arg2: uintptr, ret: uintptr) -> void:
+    ge_shadow_fs_transition("runtime-hle-thunk-transition-to-host", GE_FS_OWNER_HOST)
     ge_observe_fs_owner("runtime-hle-entry", false)
     ge_runtime_hle_sequence <- ge_runtime_hle_sequence + 1u64
     ge_runtime_hle_module <- module if module != null else ""
@@ -3563,6 +3614,10 @@ def GuestExec_ResetState() -> void:
     ge_fs_state_last_hle_return_addr <- 0.uintptr()
     ge_fs_state_last_hle_module <- ""
     ge_fs_state_last_hle_symbol <- ""
+    ge_fs_state_shadow_owner <- GE_FS_OWNER_HOST
+    ge_fs_state_shadow_mismatch_count <- 0u64
+    ge_fs_state_shadow_transition_count <- 0u64
+    ge_fs_state_shadow_last_site <- ""
     ge_hle_thunk_contract_count <- 0u64
     ge_hle_thunk_contract_last_thunk <- 0.uintptr()
     ge_hle_thunk_contract_last_target <- 0.uintptr()
@@ -3777,6 +3832,24 @@ def GuestExec_FsStateLastHleModule() -> cstr:
 
 def GuestExec_FsStateLastHleSymbol() -> cstr:
     return ge_fs_state_last_hle_symbol
+
+def GuestExec_FsStateShadowOwner() -> u32:
+    return ge_fs_state_shadow_owner
+
+def GuestExec_FsStateShadowMismatchCount() -> u64:
+    return ge_fs_state_shadow_mismatch_count
+
+def GuestExec_FsStateShadowTransitionCount() -> u64:
+    return ge_fs_state_shadow_transition_count
+
+def GuestExec_FsStateShadowLastSite() -> cstr:
+    return ge_fs_state_shadow_last_site
+
+def GuestExec_DebugSetFsShadowOwner(owner: u32) -> void:
+    ge_fs_state_shadow_owner <- owner
+
+def GuestExec_DebugObserveFsOwner(expected_owner: u32) -> void:
+    ge_observe_fs_owner_state("debug-observe-fs-owner", expected_owner)
 
 def GuestExec_HleThunkContractCount() -> u64:
     return ge_hle_thunk_contract_count
