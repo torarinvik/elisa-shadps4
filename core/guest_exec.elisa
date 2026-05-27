@@ -3,6 +3,7 @@
 
 include "../common/types.elisa"
 include "../common/arch.elisa"
+include "./tls.elisa"
 include "../../compiler/runtime/elisacore_std/debug_referee.elisai"
 
 const GUEST_EXEC_MAX_ARGS: usize = 33
@@ -149,6 +150,7 @@ const GE_DEBUG_TRAP_UNPUBLISHED_EXEC_STATUS: s32 = -91
 const GE_DEBUG_TRAP_CALLABLE_GUARD_STATUS: s32 = -92
 const GE_DEBUG_TRAP_THREAD_AFFINITY_STATUS: s32 = -93
 const GE_DEBUG_TRAP_GUEST_PTR_UNMAPPED_STATUS: s32 = -94
+const GE_DEBUG_TRAP_FS_STATE_STATUS: s32 = -95
 const GE_AFFINITY_SLOTS: usize = 16usize
 
 struct GeNativeRegion:
@@ -185,6 +187,24 @@ global mutable ge_debug_trap_pointer_size: u64 = 0u64
 global mutable ge_debug_trap_nearest_mapping_base: uintptr = 0.uintptr()
 global mutable ge_debug_trap_nearest_mapping_end: uintptr = 0.uintptr()
 global mutable ge_debug_trap_nearest_mapping_prot: u32 = 0u32
+# TLS health captured at the trap so we can tell whether a near-null guest
+# pointer (e.g. 0x1f4) came from a broken %fs/TCB self-pointer (TLS hypothesis)
+# vs a data relocation that resolved to a raw offset (relocation hypothesis).
+global mutable ge_debug_trap_tcb_base: uintptr = 0.uintptr()
+global mutable ge_debug_trap_tcb_self: uintptr = 0.uintptr()
+global mutable ge_debug_trap_install_fs0: uintptr = 0.uintptr()
+# %fs-owner invariant observer: at each host<->guest boundary transition we read
+# the %fs selector and compare it to the expected owner selector. We deliberately
+# do not read %fs:[0] here: if the selector is not installed, the observer itself
+# would fault before it could report the mismatch.
+global mutable ge_fs_state_check_enabled: bool = false
+global mutable ge_fs_state_trap_on_mismatch: bool = false
+global mutable ge_fs_state_mismatch_count: u64 = 0u64
+global mutable ge_fs_state_observation_count: u64 = 0u64
+global mutable ge_fs_state_last_site: cstr = ""
+global mutable ge_fs_state_last_expect_guest: bool = false
+global mutable ge_fs_state_last_expected: uintptr = 0.uintptr()
+global mutable ge_fs_state_last_actual: uintptr = 0.uintptr()
 global mutable ge_debug_trace_enabled: bool = false
 
 # Thread-affinity referee: mutable state that must only be touched by one thread
@@ -536,6 +556,32 @@ def ge_debug_guard_guest_pointer(target: uintptr, sequence: u64) -> bool:
     ge_abort_active_guard_for_debug_trap(GE_DEBUG_TRAP_BOUNDARY_GUARD_STATUS)
     return false
 
+# Observe the %fs owner at a host<->guest boundary transition. This deliberately
+# reads only the selector, never %fs:[0], so the referee cannot fault when the
+# segment base is missing or stale. expect_guest=true is reserved for code that
+# is already inside the final assembly handoff; Elisa host frames should use
+# expect_guest=false so stack-canary/TLS users stay on host %fs.
+def ge_observe_fs_owner(site: cstr, expect_guest: bool) -> void:
+    if not ge_fs_state_check_enabled:
+        return
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        actual_selector: u16 = ElisaTls_ReadFsSelectorAsm()
+        guest_selector: u16 = TLS_GuestFsSelector()
+        ok: bool = (guest_selector != 0u16 and actual_selector == guest_selector) if expect_guest else (actual_selector != guest_selector)
+        ge_fs_state_observation_count <- ge_fs_state_observation_count + 1u64
+        if not ok:
+            ge_fs_state_mismatch_count <- ge_fs_state_mismatch_count + 1u64
+            ge_fs_state_last_site <- site
+            ge_fs_state_last_expect_guest <- expect_guest
+            ge_fs_state_last_expected <- guest_selector.uintptr()
+            ge_fs_state_last_actual <- actual_selector.uintptr()
+            if ge_fs_state_trap_on_mismatch:
+                ge_last_status <- GE_DEBUG_TRAP_FS_STATE_STATUS
+                ge_abort_active_guard_for_debug_trap(GE_DEBUG_TRAP_FS_STATE_STATUS)
+    static else:
+        _ = site
+        _ = expect_guest
+
 def ge_debug_guard_mapped_guest_pointer(site: cstr, target: uintptr, size: u64, nearest_base: uintptr, nearest_end: uintptr, nearest_prot: u32, sequence: u64) -> bool:
     if target == 0.uintptr():
         return true
@@ -556,6 +602,10 @@ def ge_debug_guard_mapped_guest_pointer(site: cstr, target: uintptr, size: u64, 
     ge_debug_trap_nearest_mapping_base <- nearest_base
     ge_debug_trap_nearest_mapping_end <- nearest_end
     ge_debug_trap_nearest_mapping_prot <- nearest_prot
+    tcb_base: uintptr = TLS_PrimaryTcbBase()
+    ge_debug_trap_tcb_base <- tcb_base
+    ge_debug_trap_tcb_self <- ge_read_context_word(tcb_base)
+    ge_debug_trap_install_fs0 <- TLS_DebugLastFs0()
     ge_last_status <- GE_DEBUG_TRAP_GUEST_PTR_UNMAPPED_STATUS
     ge_abort_active_guard_for_debug_trap(GE_DEBUG_TRAP_GUEST_PTR_UNMAPPED_STATUS)
     return false
@@ -849,6 +899,15 @@ def c_GuestExec_DebugTrapNearestMappingEnd() -> uintptr:
 
 def c_GuestExec_DebugTrapNearestMappingProt() -> u32:
     return ge_debug_trap_nearest_mapping_prot
+
+def c_GuestExec_DebugTrapTcbBase() -> uintptr:
+    return ge_debug_trap_tcb_base
+
+def c_GuestExec_DebugTrapTcbSelf() -> uintptr:
+    return ge_debug_trap_tcb_self
+
+def c_GuestExec_DebugTrapInstallFs0() -> uintptr:
+    return ge_debug_trap_install_fs0
 
 # ============================================================
 # x86_64 signal/ucontext crash-capture foundation (Stage C+D+E, part 1).
@@ -1315,6 +1374,7 @@ def ge_jump_main_entry(params: mutable GuestEntryParams&, exit_func: uintptr) ->
         fr.prejump_rdi <- ge_prejump_rdi
         fr.prejump_rsi <- ge_prejump_rsi
         fr.prejump_rsp <- ge_prejump_rsp
+    ge_observe_fs_owner("pre-main-host-before-easm", false)
     if guest_exec_main_stack_top != 0.uintptr():
         ElisaGuestExec_JumpMainEntryOnStackAsm(params.entry_addr, ge_prejump_rdi, ef, guest_exec_main_stack_top)
     ElisaGuestExec_JumpMainEntryAsm(params.entry_addr, ge_prejump_rdi, ef)
@@ -2782,6 +2842,7 @@ def ge_pc_source_is_fallback(source: s32) -> bool:
 
 # --- Runtime-HLE recording (ported; recorder + getters move together) ---
 def c_GuestExec_RecordRuntimeHle(module: static u8&?, symbol: static u8&?, arg0: uintptr, arg1: uintptr, arg2: uintptr, ret: uintptr) -> void:
+    ge_observe_fs_owner("runtime-hle-entry", false)
     ge_runtime_hle_sequence <- ge_runtime_hle_sequence + 1u64
     ge_runtime_hle_module <- module if module != null else ""
     ge_runtime_hle_symbol <- symbol if symbol != null else ""
@@ -3227,6 +3288,17 @@ def GuestExec_ResetState() -> void:
     ge_debug_trap_nearest_mapping_base <- 0.uintptr()
     ge_debug_trap_nearest_mapping_end <- 0.uintptr()
     ge_debug_trap_nearest_mapping_prot <- 0u32
+    ge_debug_trap_tcb_base <- 0.uintptr()
+    ge_debug_trap_tcb_self <- 0.uintptr()
+    ge_debug_trap_install_fs0 <- 0.uintptr()
+    ge_fs_state_check_enabled <- false
+    ge_fs_state_trap_on_mismatch <- false
+    ge_fs_state_mismatch_count <- 0u64
+    ge_fs_state_observation_count <- 0u64
+    ge_fs_state_last_site <- ""
+    ge_fs_state_last_expect_guest <- false
+    ge_fs_state_last_expected <- 0.uintptr()
+    ge_fs_state_last_actual <- 0.uintptr()
     c_GuestExec_ResetCrashState()
 
 def GuestExec_Enable(enabled: bool) -> void:
@@ -3385,6 +3457,30 @@ def GuestExec_IsExecutableCodePublished(address: VAddr, size: u64) -> bool:
 def GuestExec_SetDebugTrapOnBoundaryGuard(enabled: bool) -> void:
     ge_debug_trap_on_boundary_guard <- enabled
 
+def GuestExec_SetFsStateCheckEnabled(enabled: bool) -> void:
+    ge_fs_state_check_enabled <- enabled
+
+def GuestExec_SetFsStateTrapOnMismatch(enabled: bool) -> void:
+    ge_fs_state_trap_on_mismatch <- enabled
+
+def GuestExec_FsStateObservationCount() -> u64:
+    return ge_fs_state_observation_count
+
+def GuestExec_FsStateMismatchCount() -> u64:
+    return ge_fs_state_mismatch_count
+
+def GuestExec_FsStateLastSite() -> cstr:
+    return ge_fs_state_last_site
+
+def GuestExec_FsStateLastExpectGuest() -> bool:
+    return ge_fs_state_last_expect_guest
+
+def GuestExec_FsStateLastExpected() -> VAddr:
+    return ge_fs_state_last_expected
+
+def GuestExec_FsStateLastActual() -> VAddr:
+    return ge_fs_state_last_actual
+
 def GuestExec_SetDebugTrapOnUnpublishedExec(enabled: bool) -> void:
     ge_debug_trap_on_unpublished_exec <- enabled
 
@@ -3459,6 +3555,15 @@ def GuestExec_DebugTrapNearestMappingEnd() -> VAddr:
 
 def GuestExec_DebugTrapNearestMappingProt() -> u32:
     return c_GuestExec_DebugTrapNearestMappingProt()
+
+def GuestExec_DebugTrapTcbBase() -> VAddr:
+    return c_GuestExec_DebugTrapTcbBase()
+
+def GuestExec_DebugTrapTcbSelf() -> VAddr:
+    return c_GuestExec_DebugTrapTcbSelf()
+
+def GuestExec_DebugTrapInstallFs0() -> VAddr:
+    return c_GuestExec_DebugTrapInstallFs0()
 
 def GuestExec_RecordHandoff(entry_addr: VAddr, argc: int, is_main_executable: bool) -> void:
     guest_exec_last_entry_addr <- entry_addr
