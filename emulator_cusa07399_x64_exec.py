@@ -5,6 +5,7 @@ import argparse
 import os
 import platform
 import re
+import signal
 import shutil
 import subprocess
 import sys
@@ -23,15 +24,25 @@ def run(
     timeout: int = 120,
     env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    proc = subprocess.Popen(
         cmd,
         cwd=cwd,
         env=env,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        timeout=timeout,
+        start_new_session=True,
     )
+    try:
+        stdout, _ = proc.communicate(timeout=timeout)
+        return subprocess.CompletedProcess(cmd, proc.returncode, stdout, None)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        stdout, _ = proc.communicate()
+        return subprocess.CompletedProcess(cmd, 124, stdout, None)
 
 
 def emit(status: str, **fields: object) -> None:

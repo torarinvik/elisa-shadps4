@@ -1038,10 +1038,6 @@ extern kt_pthread_cancel(thread: uintptr) -> int
 # A POSIX TSD destructor fires on thread teardown in both cases, which is the
 # portable replacement for the C trampoline's pthread_cleanup_push/pop. The key
 # is created exactly once via pthread_once.
-@link_name(pthread_key_create)
-extern kt_pthread_key_create(key: void&?, destructor: void&?) -> int
-@link_name(pthread_setspecific)
-extern kt_pthread_setspecific(key: u64, value: void&?) -> int
 @link_name(pthread_once)
 extern kt_pthread_once(once_control: void&?, init_routine: void&) -> int
 
@@ -1131,8 +1127,6 @@ def kt_thread_finish(raw: void&?) -> void:
 # key value's destructor fires during thread teardown in both cases.
 @callconv(c)
 def kt_thread_destructor(raw: void&?) -> void:
-    can Unsafe.SegmentMutation:
-        TLS_RestoreHostFsSelector()
     kt_thread_finish(raw)
 
 # pthread_once init routine: create the TSD key with the destructor above.
@@ -1140,7 +1134,7 @@ def kt_thread_destructor(raw: void&?) -> void:
 def kt_tsd_key_init_routine() -> void:
     trusted Unsafe.MutableGlobal, Unsafe.PointerCast:
         dtor: void&? = kt_thread_destructor as void&?
-        _ = kt_pthread_key_create(kt_tsd_key.ref[void&], dtor)
+        _ = tls_pthread_key_create(kt_tsd_key.ref[void&], dtor)
 
 # Idempotent, thread-safe key creation (pthread_once). Called on the parent
 # before spawning so the key is ready before the child sets its value.
@@ -1148,6 +1142,10 @@ def kt_thread_ensure_tsd_key() -> void:
     trusted Unsafe.MutableGlobal, Unsafe.PointerCast:
         init_fn: void& = kt_tsd_key_init_routine as void&
         _ = kt_pthread_once(kt_tsd_once.ref[void&], init_fn)
+
+def kt_thread_set_tsd(raw: void&?) -> void:
+    trusted Unsafe.MutableGlobal:
+        _ = tls_pthread_setspecific(kt_tsd_key, raw)
 
 # C-ABI worker entry handed to pthread_create. Receives the KtThread handle as
 # its argument, associates it with the TSD key (so the destructor runs finish on
@@ -1157,15 +1155,30 @@ def kt_thread_ensure_tsd_key() -> void:
 @callconv(c)
 def kt_thread_trampoline(raw: void&?) -> void&?:
     kt_debug_thread_trampoline_count <- kt_debug_thread_trampoline_count + 1u64
+    state_opt: mutable KtThread&? = kt_thread_from_handle(raw)
+    if state_opt == null:
+        return null
+    state: mutable KtThread& = state_opt.cast[mutable KtThread&]
+    kt_thread_set_tsd(raw)
+    result: mutable void&? = null
+    if state.entry != null:
+        trusted Unsafe.IndirectCall:
+            result <- state.entry.call_as[func(void&?) -> void&?](state.arg)
+    state.result <- result
+    state.completed_normally <- 1
+    return result
+
+@callconv(c)
+def kt_guest_thread_trampoline(raw: void&?) -> void&?:
+    kt_debug_thread_trampoline_count <- kt_debug_thread_trampoline_count + 1u64
     _ = TLS_CaptureHostFsSelector()
     state_opt: mutable KtThread&? = kt_thread_from_handle(raw)
     if state_opt == null:
         return null
     state: mutable KtThread& = state_opt.cast[mutable KtThread&]
-    trusted Unsafe.MutableGlobal:
-        _ = kt_pthread_setspecific(kt_tsd_key, raw)
+    kt_thread_set_tsd(raw)
     result: mutable void&? = null
-    can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall:
+    can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
         guard: FsGuard = TLS_InstallThreadSegment()
         if state.entry != null:
             result <- TLS_CallGuestThreadEntry(guard.ref[FsGuard&], state.entry, state.arg)
@@ -1176,11 +1189,13 @@ def kt_thread_trampoline(raw: void&?) -> void&?:
 
 # Spawn the worker via the runtime's pthread_create, passing the trampoline's
 # address as the start routine and the handle as its argument.
-def kt_pt_thread_create(state: mutable KtThread&, handle: void&?) -> int:
+def kt_pt_thread_create(state: mutable KtThread&, handle: void&?, guest_segment_entry: int) -> int:
     r: mutable int = 0
     can Thread.Spawn:
         trusted Unsafe.PointerCast:
-            entry_fn: void& = kt_thread_trampoline as void&
+            entry_fn: mutable void& = kt_thread_trampoline as void&
+            if guest_segment_entry != 0:
+                entry_fn <- kt_guest_thread_trampoline as void&
             r <- kt_pthread_create(state.thread.ref[mutable uintptr&], null, entry_fn, handle)
     return r
 
@@ -1196,7 +1211,7 @@ def kt_pt_thread_detach(thread: uintptr) -> int:
         r <- kt_pthread_detach(thread)
     return r
 
-def kt_thread_create(entry: void&?, arg: void&?, out_error: mutable int&?) -> mutable void&?:
+def kt_thread_create_with_segment(entry: void&?, arg: void&?, out_error: mutable int&?, guest_segment_entry: int) -> mutable void&?:
     can Memory.Allocate:
         kt_debug_thread_create_count <- kt_debug_thread_create_count + 1u64
         raw: mutable void&? = kt_zalloc(size_of(KtThread))
@@ -1210,7 +1225,7 @@ def kt_thread_create(entry: void&?, arg: void&?, out_error: mutable int&?) -> mu
         _ = kt_raw_cond_init(state.pcond[0].ref[void&])
         state.entry <- entry
         state.arg <- arg
-        err: int = kt_pt_thread_create(state, raw)
+        err: int = kt_pt_thread_create(state, raw, guest_segment_entry)
         if err != 0:
             kt_raw_mutex_destroy(state.pmutex[0].ref[void&])
             kt_raw_cond_destroy(state.pcond[0].ref[void&])
@@ -1221,6 +1236,12 @@ def kt_thread_create(entry: void&?, arg: void&?, out_error: mutable int&?) -> mu
         if out_error != null:
             out_error[0] <- 0
         return raw
+
+def kt_thread_create(entry: void&?, arg: void&?, out_error: mutable int&?) -> mutable void&?:
+    return kt_thread_create_with_segment(entry, arg, out_error, 0)
+
+def kt_guest_thread_create(entry: void&?, arg: void&?, out_error: mutable int&?) -> mutable void&?:
+    return kt_thread_create_with_segment(entry, arg, out_error, 1)
 
 def KernelThreads_DebugThreadCreateCount() -> u64:
     return kt_debug_thread_create_count
@@ -1462,6 +1483,9 @@ def elisa_kernel_event_wait(handle: void&?, pattern: u64, wait_mode: u32, out_bi
 @c_abi(c)
 def elisa_kernel_thread_create(entry: void&?, arg: void&?, out_error: mutable int&?) -> void&?:
     return kt_thread_create(entry, arg, out_error)
+@c_abi(c)
+def elisa_kernel_guest_thread_create(entry: void&?, arg: void&?, out_error: mutable int&?) -> void&?:
+    return kt_guest_thread_create(entry, arg, out_error)
 @c_abi(c)
 def elisa_kernel_thread_native(handle: void&?) -> void&?:
     return kt_thread_native(handle)

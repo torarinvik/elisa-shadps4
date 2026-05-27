@@ -145,12 +145,16 @@ const GE_BOUNDARY_GUARD_NEAR_NULL_UNMAPPED: u64 = 2u64
 const GE_BOUNDARY_GUARD_NON_CANONICAL: u64 = 3u64
 const GE_BOUNDARY_GUARD_UNMAPPED_EXEC: u64 = 4u64
 const GE_BOUNDARY_GUARD_UNMAPPED_POINTER: u64 = 5u64
+const GE_BOUNDARY_GUARD_UNPUBLISHED_EXEC: u64 = 6u64
 const GE_DEBUG_TRAP_BOUNDARY_GUARD_STATUS: s32 = -90
 const GE_DEBUG_TRAP_UNPUBLISHED_EXEC_STATUS: s32 = -91
 const GE_DEBUG_TRAP_CALLABLE_GUARD_STATUS: s32 = -92
 const GE_DEBUG_TRAP_THREAD_AFFINITY_STATUS: s32 = -93
 const GE_DEBUG_TRAP_GUEST_PTR_UNMAPPED_STATUS: s32 = -94
 const GE_DEBUG_TRAP_FS_STATE_STATUS: s32 = -95
+const GE_FS_OWNER_UNKNOWN: u32 = 0u32
+const GE_FS_OWNER_HOST: u32 = 1u32
+const GE_FS_OWNER_GUEST: u32 = 2u32
 const GE_AFFINITY_SLOTS: usize = 16usize
 const GE_HOST_FS_ENTRY_THUNK_SIZE: u64 = 22u64
 
@@ -208,6 +212,20 @@ global mutable ge_fs_state_last_site: cstr = ""
 global mutable ge_fs_state_last_expect_guest: bool = false
 global mutable ge_fs_state_last_expected: uintptr = 0.uintptr()
 global mutable ge_fs_state_last_actual: uintptr = 0.uintptr()
+global mutable ge_fs_state_last_expected_owner: u32 = GE_FS_OWNER_UNKNOWN
+global mutable ge_fs_state_last_actual_owner: u32 = GE_FS_OWNER_UNKNOWN
+global mutable ge_fs_state_last_guest_selector: uintptr = 0.uintptr()
+global mutable ge_fs_state_last_host_selector: uintptr = 0.uintptr()
+global mutable ge_fs_state_last_tcb_base: uintptr = 0.uintptr()
+global mutable ge_fs_state_last_fs0: uintptr = 0.uintptr()
+global mutable ge_fs_state_last_hle_return_addr: uintptr = 0.uintptr()
+global mutable ge_fs_state_last_hle_module: cstr = ""
+global mutable ge_fs_state_last_hle_symbol: cstr = ""
+global mutable ge_hle_thunk_contract_count: u64 = 0u64
+global mutable ge_hle_thunk_contract_last_thunk: uintptr = 0.uintptr()
+global mutable ge_hle_thunk_contract_last_target: uintptr = 0.uintptr()
+global mutable ge_hle_thunk_contract_last_size: u64 = 0u64
+global mutable ge_hle_thunk_contract_last_host_selector: uintptr = 0.uintptr()
 global mutable ge_debug_trace_enabled: bool = false
 
 # Thread-affinity referee: mutable state that must only be touched by one thread
@@ -559,31 +577,75 @@ def ge_debug_guard_guest_pointer(target: uintptr, sequence: u64) -> bool:
     ge_abort_active_guard_for_debug_trap(GE_DEBUG_TRAP_BOUNDARY_GUARD_STATUS)
     return false
 
-# Observe the %fs owner at a host<->guest boundary transition. This deliberately
-# reads only the selector, never %fs:[0], so the referee cannot fault when the
-# segment base is missing or stale. expect_guest=true is reserved for code that
-# is already inside the final assembly handoff; Elisa host frames should use
-# expect_guest=false so stack-canary/TLS users stay on host %fs.
-def ge_observe_fs_owner(site: cstr, expect_guest: bool) -> void:
+def ge_classify_fs_owner(actual_selector: u16, host_selector: u16, guest_selector: u16) -> u32:
+    if guest_selector != 0u16 and actual_selector == guest_selector:
+        return GE_FS_OWNER_GUEST
+    if host_selector != 0u16 and actual_selector == host_selector:
+        return GE_FS_OWNER_HOST
+    return GE_FS_OWNER_UNKNOWN
+
+def ge_expected_fs_selector(expected_owner: u32, host_selector: u16, guest_selector: u16) -> uintptr:
+    if expected_owner == GE_FS_OWNER_GUEST:
+        return guest_selector.uintptr()
+    if expected_owner == GE_FS_OWNER_HOST:
+        return host_selector.uintptr()
+    return 0.uintptr()
+
+# Observe the %fs owner at a host<->guest boundary transition. The referee only
+# reads %fs:[0] when the selector is already classified as the expected owner,
+# so a broken segment base cannot knock out the diagnostic path itself.
+def ge_observe_fs_owner_state(site: cstr, expected_owner: u32) -> void:
     if not ge_fs_state_check_enabled:
         return
     static if PLATFORM_APPLE and ARCH_X86_64:
         actual_selector: u16 = ElisaTls_ReadFsSelectorAsm()
-        guest_selector: u16 = TLS_GuestFsSelector()
-        ok: bool = (guest_selector != 0u16 and actual_selector == guest_selector) if expect_guest else (actual_selector != guest_selector)
+        guest_selector: u16 = TLS_GuestFsSelectorRaw()
+        host_selector: u16 = TLS_HostFsSelectorRaw()
+        actual_owner: u32 = ge_classify_fs_owner(actual_selector, host_selector, guest_selector)
+        ok: bool = expected_owner == GE_FS_OWNER_UNKNOWN or actual_owner == expected_owner
         ge_fs_state_observation_count <- ge_fs_state_observation_count + 1u64
+        ge_fs_state_last_site <- site
+        ge_fs_state_last_expect_guest <- expected_owner == GE_FS_OWNER_GUEST
+        ge_fs_state_last_expected <- ge_expected_fs_selector(expected_owner, host_selector, guest_selector)
+        ge_fs_state_last_actual <- actual_selector.uintptr()
+        ge_fs_state_last_expected_owner <- expected_owner
+        ge_fs_state_last_actual_owner <- actual_owner
+        ge_fs_state_last_guest_selector <- guest_selector.uintptr()
+        ge_fs_state_last_host_selector <- host_selector.uintptr()
+        ge_fs_state_last_tcb_base <- TLS_PrimaryTcbBase()
+        ge_fs_state_last_fs0 <- 0.uintptr()
+        ge_fs_state_last_hle_return_addr <- ge_runtime_hle_guest_return_addr
+        ge_fs_state_last_hle_module <- ge_runtime_hle_module if ge_runtime_hle_module != null else ""
+        ge_fs_state_last_hle_symbol <- ge_runtime_hle_symbol if ge_runtime_hle_symbol != null else ""
+        if ok and actual_owner != GE_FS_OWNER_UNKNOWN:
+            ge_fs_state_last_fs0 <- ElisaTls_ReadFs0Asm()
         if not ok:
             ge_fs_state_mismatch_count <- ge_fs_state_mismatch_count + 1u64
-            ge_fs_state_last_site <- site
-            ge_fs_state_last_expect_guest <- expect_guest
-            ge_fs_state_last_expected <- guest_selector.uintptr()
-            ge_fs_state_last_actual <- actual_selector.uintptr()
+            ge_debug_trap_count <- ge_debug_trap_count + 1u64
+            ge_debug_trap_reason <- expected_owner.u64()
+            ge_debug_trap_value <- actual_selector.uintptr()
+            ge_debug_trap_sequence <- ge_runtime_hle_sequence
+            ge_debug_trap_return_addr <- ge_runtime_hle_guest_return_addr
+            ge_debug_trap_arg0 <- ge_runtime_hle_guest_rdi
+            ge_debug_trap_arg1 <- ge_runtime_hle_guest_rsi
+            ge_debug_trap_arg2 <- ge_runtime_hle_guest_rdx
+            ge_debug_trace_boundary("guest-exec-fs-owner-mismatch", actual_selector.uintptr(), expected_owner.u64().uintptr(), actual_owner.u64().uintptr())
             if ge_fs_state_trap_on_mismatch:
                 ge_last_status <- GE_DEBUG_TRAP_FS_STATE_STATUS
                 ge_abort_active_guard_for_debug_trap(GE_DEBUG_TRAP_FS_STATE_STATUS)
     static else:
         _ = site
-        _ = expect_guest
+        _ = expected_owner
+
+# Compatibility wrapper for older call sites.
+def ge_observe_fs_owner(site: cstr, expect_guest: bool) -> void:
+    ge_observe_fs_owner_state(site, GE_FS_OWNER_GUEST if expect_guest else GE_FS_OWNER_HOST)
+
+def ge_assert_host_fs_owner(site: cstr) -> void:
+    ge_observe_fs_owner_state(site, GE_FS_OWNER_HOST)
+
+def ge_assert_guest_fs_owner(site: cstr) -> void:
+    ge_observe_fs_owner_state(site, GE_FS_OWNER_GUEST)
 
 def ge_debug_guard_mapped_guest_pointer(site: cstr, target: uintptr, size: u64, nearest_base: uintptr, nearest_end: uintptr, nearest_prot: u32, sequence: u64) -> bool:
     if target == 0.uintptr():
@@ -619,13 +681,37 @@ def ge_debug_guard_guest_return_continuation(sequence: u64) -> bool:
     if ge_debug_trap_sequence != 0u64:
         return false
     if ge_runtime_hle_guest_rbp == 0.uintptr():
-        return true
+        ge_debug_trap_count <- ge_debug_trap_count + 1u64
+        ge_debug_trap_reason <- GE_BOUNDARY_GUARD_UNMAPPED_POINTER
+        ge_debug_trap_value <- ge_runtime_hle_guest_rbp
+        ge_debug_trap_sequence <- sequence if sequence != 0u64 else ge_debug_trap_count
+        ge_debug_trap_return_addr <- ge_runtime_hle_guest_return_addr
+        ge_debug_trap_arg0 <- ge_runtime_hle_guest_rdi
+        ge_debug_trap_arg1 <- ge_runtime_hle_guest_rsi
+        ge_debug_trap_arg2 <- ge_runtime_hle_guest_rdx
+        ge_last_status <- GE_DEBUG_TRAP_BOUNDARY_GUARD_STATUS
+        ge_debug_trace_boundary("guest-exec-return-guard-missing-rbp", ge_runtime_hle_guest_rbp, ge_debug_trap_return_addr, sequence.uintptr())
+        ge_abort_active_guard_for_debug_trap(GE_DEBUG_TRAP_BOUNDARY_GUARD_STATUS)
+        return false
     saved_return: uintptr = ge_read_context_word(ge_runtime_hle_guest_rbp + 8.uintptr())
     if saved_return == 0.uintptr():
-        return true
+        ge_debug_trap_count <- ge_debug_trap_count + 1u64
+        ge_debug_trap_reason <- GE_BOUNDARY_GUARD_UNMAPPED_EXEC
+        ge_debug_trap_value <- saved_return
+        ge_debug_trap_sequence <- sequence if sequence != 0u64 else ge_debug_trap_count
+        ge_debug_trap_return_addr <- ge_runtime_hle_guest_return_addr
+        ge_debug_trap_arg0 <- ge_runtime_hle_guest_rdi
+        ge_debug_trap_arg1 <- ge_runtime_hle_guest_rsi
+        ge_debug_trap_arg2 <- ge_runtime_hle_guest_rdx
+        ge_last_status <- GE_DEBUG_TRAP_BOUNDARY_GUARD_STATUS
+        ge_debug_trace_boundary("guest-exec-return-guard-zero", saved_return, ge_runtime_hle_guest_rbp, ge_debug_trap_return_addr)
+        ge_abort_active_guard_for_debug_trap(GE_DEBUG_TRAP_BOUNDARY_GUARD_STATUS)
+        return false
     reason: mutable u64 = ge_boundary_guard_reason_for_value(saved_return)
     if reason == GE_BOUNDARY_GUARD_NONE and ge_native_prot_at(saved_return, 1u64) == 0xffffffffu32:
         reason <- GE_BOUNDARY_GUARD_UNMAPPED_EXEC
+    if reason == GE_BOUNDARY_GUARD_NONE and not ge_is_published_exec(saved_return, 1u64):
+        reason <- GE_BOUNDARY_GUARD_UNPUBLISHED_EXEC
     if reason == GE_BOUNDARY_GUARD_NONE:
         return true
     ge_debug_trap_count <- ge_debug_trap_count + 1u64
@@ -636,9 +722,9 @@ def ge_debug_guard_guest_return_continuation(sequence: u64) -> bool:
     ge_debug_trap_arg0 <- ge_runtime_hle_guest_rdi
     ge_debug_trap_arg1 <- ge_runtime_hle_guest_rsi
     ge_debug_trap_arg2 <- ge_runtime_hle_guest_rdx
-    ge_last_status <- GE_DEBUG_TRAP_BOUNDARY_GUARD_STATUS
+    ge_last_status <- GE_DEBUG_TRAP_UNPUBLISHED_EXEC_STATUS if reason == GE_BOUNDARY_GUARD_UNPUBLISHED_EXEC else GE_DEBUG_TRAP_BOUNDARY_GUARD_STATUS
     ge_debug_trace_boundary("guest-exec-return-guard-stop", saved_return, reason.uintptr(), ge_debug_trap_return_addr)
-    ge_abort_active_guard_for_debug_trap(GE_DEBUG_TRAP_BOUNDARY_GUARD_STATUS)
+    ge_abort_active_guard_for_debug_trap(ge_last_status)
     return false
 
 def ge_read_native_word(address: uintptr) -> uintptr:
@@ -821,7 +907,8 @@ def ge_create_host_fs_entry_thunk(target: uintptr) -> uintptr can[Unsafe.Machine
     static if PLATFORM_APPLE and ARCH_X86_64:
         if target == 0.uintptr():
             return 0.uintptr()
-        host_selector: u16 = TLS_CaptureHostFsSelector()
+        _ = TLS_CaptureHostFsSelector()
+        host_selector: u16 = TLS_HostFsSelectorRaw()
         code: mutable u8[22] = zeroed
         # movw $host_selector, %r10w; movw %r10w, %fs
         code[0] <- 0x66u8
@@ -916,6 +1003,13 @@ def c_GuestExec_PublishedExecutableCount() -> u32:
 
 def c_GuestExec_IsExecutableCodePublished(address: uintptr, size: u64) -> s32:
     return 1 if ge_is_published_exec(address, size) else 0
+
+def c_GuestExec_RecordHleBoundaryThunkContract(thunk: uintptr, target: uintptr, size: u64, host_selector: u16) -> void:
+    ge_hle_thunk_contract_count <- ge_hle_thunk_contract_count + 1u64
+    ge_hle_thunk_contract_last_thunk <- thunk
+    ge_hle_thunk_contract_last_target <- target
+    ge_hle_thunk_contract_last_size <- size
+    ge_hle_thunk_contract_last_host_selector <- host_selector.uintptr()
 
 def c_GuestExec_DebugTrapCount() -> u64:
     return ge_debug_trap_count
@@ -1190,8 +1284,9 @@ def ge_restore_guards() -> void:
 @c_abi(c)
 def ge_alarm_handler(sig: int) -> void:
     static if PLATFORM_APPLE and ARCH_X86_64:
-        can Unsafe.SegmentMutation:
+        can Unsafe.SegmentMutation, Segment.Host:
             TLS_RestoreHostFsSelector()
+        ge_assert_host_fs_owner("alarm-handler-after-host-fs-restore")
     _ = sig
     ge_set_native_phase(GE_PHASE_ALARM_HANDLER_ENTERED)
     ge_timeout_fired <- 1
@@ -1223,8 +1318,9 @@ def ge_alarm_handler(sig: int) -> void:
 @c_abi(c)
 def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
     static if PLATFORM_APPLE and ARCH_X86_64:
-        can Unsafe.SegmentMutation:
+        can Unsafe.SegmentMutation, Segment.Host:
             TLS_RestoreHostFsSelector()
+        ge_assert_host_fs_owner("signal-handler-after-host-fs-restore")
     ge_set_native_phase(GE_PHASE_SIGNAL_HANDLER_ENTERED)
     ge_last_status <- (0 - sig).s32()
     ge_last_signal <- sig.s32()
@@ -1347,8 +1443,8 @@ extern ElisaGuestExec_EnterMainEntryAsm(params: HostPtr[void], exit_func: ExitFu
 extern ElisaGuestExec_CallMainEntryAsm(entry: GuestEntryPoint, params: HostPtr[void], exit_func: ExitFunction) -> void
 extern ElisaGuestExec_JumpMainEntryAsm(entry: GuestEntryPoint, params: HostPtr[void], exit_func: ExitFunction) -> void
 extern ElisaGuestExec_JumpMainEntryOnStackAsm(entry: GuestEntryPoint, params: HostPtr[void], exit_func: ExitFunction, stack_top: GuestStackTop) -> void
-extern ElisaGuestExec_JumpMainEntryWithFsAsm(entry: GuestEntryPoint, params: HostPtr[void], exit_func: ExitFunction, guest_fs_selector: GuestFsSelector) -> void
-extern ElisaGuestExec_JumpMainEntryOnStackWithFsAsm(entry: GuestEntryPoint, params: HostPtr[void], exit_func: ExitFunction, stack_top: GuestStackTop, guest_fs_selector: GuestFsSelector) -> void
+extern ElisaGuestExec_JumpMainEntryWithFsAsm(entry: GuestEntryPoint, params: HostPtr[void], exit_func: ExitFunction, guest_fs_selector: GuestFsSelector) -> void can[Unsafe.SegmentMutation, Segment.Guest]
+extern ElisaGuestExec_JumpMainEntryOnStackWithFsAsm(entry: GuestEntryPoint, params: HostPtr[void], exit_func: ExitFunction, stack_top: GuestStackTop, guest_fs_selector: GuestFsSelector) -> void can[Unsafe.SegmentMutation, Segment.Guest]
 extern ElisaGuestExec_AeroLibFallbackUnknownStubAsm() -> u64
 
 global mutable ge_fork_report_addr: uintptr = 0.uintptr()
@@ -1433,7 +1529,7 @@ def ge_call_main_entry(params: mutable GuestEntryParams&, exit_func: uintptr) ->
         ef <- ge_default_exit as uintptr
     ElisaGuestExec_CallMainEntryAsm(params.entry_addr.cast[GuestEntryPoint], params.ref[void&].uintptr().cast[HostPtr[void]], ef.cast[ExitFunction])
 
-def ge_jump_main_entry(params: mutable GuestEntryParams&, exit_func: uintptr) -> void:
+def ge_jump_main_entry(params: mutable GuestEntryParams&, exit_func: uintptr) -> void can[Unsafe.SegmentMutation, Segment.Guest]:
     ef: mutable uintptr = exit_func
     if ef == 0.uintptr():
         ef <- ge_default_exit as uintptr
@@ -1441,7 +1537,7 @@ def ge_jump_main_entry(params: mutable GuestEntryParams&, exit_func: uintptr) ->
         guarded_exit_addr: uintptr = ge_guarded_exit as uintptr
         if ef == guarded_exit_addr:
             ef <- ge_create_host_fs_entry_thunk_trusted(ef)
-    guest_fs_selector: mutable GuestFsSelector = 0u16.cast[GuestFsSelector]
+    guest_fs_selector: mutable GuestFsSelector = 0u32.cast[GuestFsSelector]
     static if PLATFORM_APPLE and ARCH_X86_64:
         guest_fs_selector <- TLS_PrepareTcbBase(TLS_PrimaryTcbBase().cast[void&?])
     ge_prejump_rdi <- params.ref[void&].uintptr()
@@ -1454,10 +1550,12 @@ def ge_jump_main_entry(params: mutable GuestEntryParams&, exit_func: uintptr) ->
         fr.prejump_rsp <- ge_prejump_rsp
     ge_observe_fs_owner("pre-main-host-before-easm", false)
     static if PLATFORM_APPLE and ARCH_X86_64:
-        if guest_fs_selector != 0u16:
+        if !guest_fs_selector != 0u32:
             if guest_exec_main_stack_top != 0.uintptr():
-                ElisaGuestExec_JumpMainEntryOnStackWithFsAsm(params.entry_addr.cast[GuestEntryPoint], ge_prejump_rdi.cast[HostPtr[void]], ef.cast[ExitFunction], guest_exec_main_stack_top.cast[GuestStackTop], guest_fs_selector)
-            ElisaGuestExec_JumpMainEntryWithFsAsm(params.entry_addr.cast[GuestEntryPoint], ge_prejump_rdi.cast[HostPtr[void]], ef.cast[ExitFunction], guest_fs_selector)
+                can Unsafe.SegmentMutation, Segment.Guest:
+                    ElisaGuestExec_JumpMainEntryOnStackWithFsAsm(params.entry_addr.cast[GuestEntryPoint], ge_prejump_rdi.cast[HostPtr[void]], ef.cast[ExitFunction], guest_exec_main_stack_top.cast[GuestStackTop], guest_fs_selector)
+            can Unsafe.SegmentMutation, Segment.Guest:
+                ElisaGuestExec_JumpMainEntryWithFsAsm(params.entry_addr.cast[GuestEntryPoint], ge_prejump_rdi.cast[HostPtr[void]], ef.cast[ExitFunction], guest_fs_selector)
     if guest_exec_main_stack_top != 0.uintptr():
         ElisaGuestExec_JumpMainEntryOnStackAsm(params.entry_addr.cast[GuestEntryPoint], ge_prejump_rdi.cast[HostPtr[void]], ef.cast[ExitFunction], guest_exec_main_stack_top.cast[GuestStackTop])
     ElisaGuestExec_JumpMainEntryAsm(params.entry_addr.cast[GuestEntryPoint], ge_prejump_rdi.cast[HostPtr[void]], ef.cast[ExitFunction])
@@ -1662,6 +1760,7 @@ def ge_run_child_main_entry(params: mutable GuestEntryParams&) -> void:
     ge_set_native_phase(GE_PHASE_CHILD_BEFORE_SIGSETJMP)
     if ge_sigsetjmp(ge_jmp_buf[0usize].ref[void&], 1) != 0:
         ge_set_native_phase(GE_PHASE_CHILD_SIGLONGJMP)
+        ge_assert_host_fs_owner("child-after-longjmp-host-owner")
         status: mutable s32 = ge_last_status
         sig: mutable s32 = ge_last_signal
         fr2: ElisaGuestExecForkReport&? = ge_fork_report
@@ -1689,7 +1788,9 @@ def ge_run_child_main_entry(params: mutable GuestEntryParams&) -> void:
         ge_exit_now(1)
         return
     ge_set_native_phase(GE_PHASE_CHILD_BEFORE_MAIN_ENTRY)
-    ge_jump_main_entry(params, ge_guarded_exit as uintptr)
+    ge_assert_host_fs_owner("child-before-main-entry")
+    can Unsafe.SegmentMutation, Segment.Guest:
+        ge_jump_main_entry(params, ge_guarded_exit as uintptr)
 
 # ---- Crash-state reset / boundary report (atomic core, part 2b; inert) ----
 def ge_report_first_boundary(reason: s32) -> void:
@@ -2141,7 +2242,7 @@ def ge_prepare_main_entry_snapshot(params: mutable GuestEntryParams&) -> void:
         fr.entry_native_word1 <- ge_entry_native_word1
         fr.entry_native_prot <- ge_entry_native_prot
 
-def ge_run_main_entry_guarded_in_process(params: mutable GuestEntryParams&, timeout_ms: u32) -> s32 can[Unsafe.SegmentMutation]:
+def ge_run_main_entry_guarded_in_process(params: mutable GuestEntryParams&, timeout_ms: u32) -> s32 can[Unsafe.SegmentMutation, Segment.Host, Segment.Guest]:
     ge_set_native_phase(GE_PHASE_FUNCTION_ENTRY)
     if params.entry_addr == 0.uintptr():
         ge_reset_crash_state()
@@ -2151,6 +2252,7 @@ def ge_run_main_entry_guarded_in_process(params: mutable GuestEntryParams&, time
     static if ARCH_X86_64 and not PLATFORM_WINDOWS:
         ge_reset_crash_state()
         ge_set_native_phase(GE_PHASE_AFTER_RESET)
+        ge_assert_host_fs_owner("guarded-in-process-after-reset")
         ge_prepare_main_entry_snapshot(params)
         ge_install_guards()
         ge_guard_active <- 1
@@ -2159,8 +2261,9 @@ def ge_run_main_entry_guarded_in_process(params: mutable GuestEntryParams&, time
         ge_set_native_phase(GE_PHASE_SYNTHETIC_BEFORE_SIGSETJMP)
         if ge_sigsetjmp(ge_jmp_buf[0usize].ref[void&], 1) != 0:
             static if PLATFORM_APPLE and ARCH_X86_64:
-                can Unsafe.SegmentMutation:
+                can Unsafe.SegmentMutation, Segment.Host:
                     TLS_RestoreHostFsSelector()
+                ge_assert_host_fs_owner("guarded-in-process-after-longjmp-host-restore")
             ge_disarm_timer()
             ge_guard_active <- 0
             ge_restore_guards()
@@ -2170,7 +2273,9 @@ def ge_run_main_entry_guarded_in_process(params: mutable GuestEntryParams&, time
                 ge_last_status <- -11
             return ge_last_status
         ge_set_native_phase(GE_PHASE_CHILD_BEFORE_MAIN_ENTRY)
-        ge_jump_main_entry(params, ge_guarded_exit as uintptr)
+        ge_assert_host_fs_owner("guarded-in-process-before-main-entry")
+        can Unsafe.SegmentMutation, Segment.Guest:
+            ge_jump_main_entry(params, ge_guarded_exit as uintptr)
         ge_disarm_timer()
         ge_guard_active <- 0
         ge_restore_guards()
@@ -2194,6 +2299,7 @@ def ge_run_main_entry_guarded(params: mutable GuestEntryParams&, timeout_ms: u32
     static if ARCH_X86_64 and not PLATFORM_WINDOWS:
         ge_reset_crash_state()
         ge_set_native_phase(GE_PHASE_AFTER_RESET)
+        ge_assert_host_fs_owner("guarded-fork-after-reset")
         ge_last_errno <- -100
         if ge_is_synthetic_main_entry(params.entry_addr):
             ge_set_native_phase(GE_PHASE_SYNTHETIC_ENTRY)
@@ -2232,7 +2338,8 @@ def ge_run_main_entry_guarded(params: mutable GuestEntryParams&, timeout_ms: u32
             ge_last_status <- -1
             return -1
         if child == 0:
-            ge_run_child_main_entry(params)
+            can Unsafe.SegmentMutation, Segment.Guest:
+                ge_run_child_main_entry(params)
         ge_set_native_phase(GE_PHASE_PARENT_BRANCH_ENTERED)
         waited_ms: mutable u32 = 0u32
         status: mutable int = 0
@@ -2325,11 +2432,12 @@ def ge_get_last_fault_address() -> uintptr:
 def c_GuestExec_RunMainEntry(params: mutable GuestEntryParams&, exit_func: void&?) -> void:
     ge_run_main_entry(params, exit_func)
 
-def c_GuestExec_RunMainEntryGuarded(params: mutable GuestEntryParams&, timeout_ms: u32) -> s32:
-    return ge_run_main_entry_guarded(params, timeout_ms)
+def c_GuestExec_RunMainEntryGuarded(params: mutable GuestEntryParams&, timeout_ms: u32) -> s32 can[Unsafe.SegmentMutation, Segment.Guest]:
+    can Unsafe.SegmentMutation, Segment.Guest:
+        return ge_run_main_entry_guarded(params, timeout_ms)
 
-def c_GuestExec_RunMainEntryGuardedInProcess(params: mutable GuestEntryParams&, timeout_ms: u32) -> s32 can[Unsafe.SegmentMutation]:
-    can Unsafe.SegmentMutation:
+def c_GuestExec_RunMainEntryGuardedInProcess(params: mutable GuestEntryParams&, timeout_ms: u32) -> s32 can[Unsafe.SegmentMutation, Segment.Host, Segment.Guest]:
+    can Unsafe.SegmentMutation, Segment.Host, Segment.Guest:
         return ge_run_main_entry_guarded_in_process(params, timeout_ms)
 
 def c_GuestExec_RunSyntheticFunction(entry_addr: uintptr, arg0: u64, arg1: u64) -> u64:
@@ -3386,6 +3494,20 @@ def GuestExec_ResetState() -> void:
     ge_fs_state_last_expect_guest <- false
     ge_fs_state_last_expected <- 0.uintptr()
     ge_fs_state_last_actual <- 0.uintptr()
+    ge_fs_state_last_expected_owner <- GE_FS_OWNER_UNKNOWN
+    ge_fs_state_last_actual_owner <- GE_FS_OWNER_UNKNOWN
+    ge_fs_state_last_guest_selector <- 0.uintptr()
+    ge_fs_state_last_host_selector <- 0.uintptr()
+    ge_fs_state_last_tcb_base <- 0.uintptr()
+    ge_fs_state_last_fs0 <- 0.uintptr()
+    ge_fs_state_last_hle_return_addr <- 0.uintptr()
+    ge_fs_state_last_hle_module <- ""
+    ge_fs_state_last_hle_symbol <- ""
+    ge_hle_thunk_contract_count <- 0u64
+    ge_hle_thunk_contract_last_thunk <- 0.uintptr()
+    ge_hle_thunk_contract_last_target <- 0.uintptr()
+    ge_hle_thunk_contract_last_size <- 0u64
+    ge_hle_thunk_contract_last_host_selector <- 0.uintptr()
     c_GuestExec_ResetCrashState()
 
 def GuestExec_Enable(enabled: bool) -> void:
@@ -3569,6 +3691,51 @@ def GuestExec_FsStateLastExpected() -> VAddr:
 def GuestExec_FsStateLastActual() -> VAddr:
     return ge_fs_state_last_actual
 
+def GuestExec_FsStateLastExpectedOwner() -> u32:
+    return ge_fs_state_last_expected_owner
+
+def GuestExec_FsStateLastActualOwner() -> u32:
+    return ge_fs_state_last_actual_owner
+
+def GuestExec_FsStateLastGuestSelector() -> VAddr:
+    return ge_fs_state_last_guest_selector
+
+def GuestExec_FsStateLastHostSelector() -> VAddr:
+    return ge_fs_state_last_host_selector
+
+def GuestExec_FsStateLastTcbBase() -> VAddr:
+    return ge_fs_state_last_tcb_base
+
+def GuestExec_FsStateLastFs0() -> VAddr:
+    return ge_fs_state_last_fs0
+
+def GuestExec_FsStateLastHleReturnAddr() -> VAddr:
+    return ge_fs_state_last_hle_return_addr
+
+def GuestExec_FsStateLastHleModule() -> cstr:
+    return ge_fs_state_last_hle_module
+
+def GuestExec_FsStateLastHleSymbol() -> cstr:
+    return ge_fs_state_last_hle_symbol
+
+def GuestExec_HleThunkContractCount() -> u64:
+    return ge_hle_thunk_contract_count
+
+def GuestExec_HleThunkContractLastThunk() -> VAddr:
+    return ge_hle_thunk_contract_last_thunk
+
+def GuestExec_HleThunkContractLastTarget() -> VAddr:
+    return ge_hle_thunk_contract_last_target
+
+def GuestExec_HleThunkContractLastSize() -> u64:
+    return ge_hle_thunk_contract_last_size
+
+def GuestExec_HleThunkContractLastHostSelector() -> VAddr:
+    return ge_hle_thunk_contract_last_host_selector
+
+def GuestExec_RecordHleBoundaryThunkContract(thunk: VAddr, target: VAddr, size: u64, host_selector: HostFsSelector) -> void:
+    c_GuestExec_RecordHleBoundaryThunkContract(thunk, target, size, (!host_selector).u16())
+
 def GuestExec_SetDebugTrapOnUnpublishedExec(enabled: bool) -> void:
     ge_debug_trap_on_unpublished_exec <- enabled
 
@@ -3586,6 +3753,10 @@ def GuestExec_DebugGuardMappedGuestPointer(site: cstr, target: GuestVAddr[void],
 
 def GuestExec_DebugGuardGuestReturnContinuation(sequence: u64) -> bool:
     return ge_debug_guard_guest_return_continuation(sequence)
+
+def GuestExec_DebugSetRuntimeHleFrameForTests(rbp: VAddr, guest_return_addr: VAddr) -> void:
+    ge_runtime_hle_guest_rbp <- rbp
+    ge_runtime_hle_guest_return_addr <- guest_return_addr
 
 def GuestExec_SetDebugTrapOnThreadAffinity(enabled: bool) -> void:
     ge_debug_trap_on_affinity <- enabled
@@ -3682,43 +3853,7 @@ def GuestExec_RunModuleEntry(entry_addr: VAddr, argc: int, argv: void&?, is_main
 def GuestExec_RunMainEntry(entry_addr: VAddr, argc: int, argv: void&?) -> void:
     GuestExec_RunModuleEntry(entry_addr, argc, argv, true)
 
-def GuestExec_RunMainEntryGuarded(entry_addr: VAddr, argc: int, argv: void&?, timeout_ms: u32) -> s32:
-    if entry_addr == 0.uintptr():
-        guest_exec_last_game_execution_status <- -1
-        return -1
-    GuestExec_RecordHandoff(entry_addr, argc, true)
-    guest_exec_execution_stage <- GUEST_EXEC_STAGE_GUARDED_ENTRY
-    if not GuestExec_IsSupported():
-        guest_exec_last_game_execution_status <- -2
-        guest_exec_first_boundary_reason <- GUEST_EXEC_BOUNDARY_REASON_UNSUPPORTED_HOST
-        return -2
-    params: mutable GuestEntryParams = zeroed
-    params.argc <- argc.s32()
-    params.padding <- 0
-    params.entry_addr <- entry_addr
-    if argv != null:
-        params.argv[0] <- argv.cast[static u8&?]
-    elif guest_exec_last_argv0 != null:
-        params.argv[0] <- guest_exec_last_argv0
-    status: s32 = c_GuestExec_RunMainEntryGuarded(params.ref[mutable GuestEntryParams&], timeout_ms)
-    guest_exec_last_game_execution_status <- status
-    GuestExec_AbsorbNativeBoundaryReport()
-    if not guest_exec_first_boundary_reached:
-        if status == -3:
-            guest_exec_first_boundary_reason <- GUEST_EXEC_BOUNDARY_REASON_TIMEOUT
-        elif status == -11 and GuestExec_LastSignal() == 0:
-            guest_exec_first_boundary_reason <- GUEST_EXEC_BOUNDARY_REASON_EXITED_BEFORE_BOUNDARY
-        elif status < 0:
-            guest_exec_first_boundary_reason <- GUEST_EXEC_BOUNDARY_REASON_HOST_CRASH
-            if GuestExec_LastSignal() != 0:
-                guest_exec_execution_stage <- GUEST_EXEC_STAGE_CRASH_CAPTURED
-        else:
-            guest_exec_first_boundary_reason <- GUEST_EXEC_BOUNDARY_REASON_EXITED_BEFORE_BOUNDARY
-    if guest_exec_first_boundary_reached:
-        guest_exec_execution_stage <- GUEST_EXEC_STAGE_FIRST_BOUNDARY
-    return status
-
-def GuestExec_RunMainEntryGuardedInProcess(entry_addr: VAddr, argc: int, argv: void&?, timeout_ms: u32) -> s32 can[Unsafe.SegmentMutation]:
+def GuestExec_RunMainEntryGuarded(entry_addr: VAddr, argc: int, argv: void&?, timeout_ms: u32) -> s32 can[Unsafe.SegmentMutation, Segment.Guest]:
     if entry_addr == 0.uintptr():
         guest_exec_last_game_execution_status <- -1
         return -1
@@ -3737,7 +3872,45 @@ def GuestExec_RunMainEntryGuardedInProcess(entry_addr: VAddr, argc: int, argv: v
     elif guest_exec_last_argv0 != null:
         params.argv[0] <- guest_exec_last_argv0
     status: mutable s32 = 0
-    can Unsafe.SegmentMutation:
+    can Unsafe.SegmentMutation, Segment.Guest:
+        status <- c_GuestExec_RunMainEntryGuarded(params.ref[mutable GuestEntryParams&], timeout_ms)
+    guest_exec_last_game_execution_status <- status
+    GuestExec_AbsorbNativeBoundaryReport()
+    if not guest_exec_first_boundary_reached:
+        if status == -3:
+            guest_exec_first_boundary_reason <- GUEST_EXEC_BOUNDARY_REASON_TIMEOUT
+        elif status == -11 and GuestExec_LastSignal() == 0:
+            guest_exec_first_boundary_reason <- GUEST_EXEC_BOUNDARY_REASON_EXITED_BEFORE_BOUNDARY
+        elif status < 0:
+            guest_exec_first_boundary_reason <- GUEST_EXEC_BOUNDARY_REASON_HOST_CRASH
+            if GuestExec_LastSignal() != 0:
+                guest_exec_execution_stage <- GUEST_EXEC_STAGE_CRASH_CAPTURED
+        else:
+            guest_exec_first_boundary_reason <- GUEST_EXEC_BOUNDARY_REASON_EXITED_BEFORE_BOUNDARY
+    if guest_exec_first_boundary_reached:
+        guest_exec_execution_stage <- GUEST_EXEC_STAGE_FIRST_BOUNDARY
+    return status
+
+def GuestExec_RunMainEntryGuardedInProcess(entry_addr: VAddr, argc: int, argv: void&?, timeout_ms: u32) -> s32 can[Unsafe.SegmentMutation, Segment.Host, Segment.Guest]:
+    if entry_addr == 0.uintptr():
+        guest_exec_last_game_execution_status <- -1
+        return -1
+    GuestExec_RecordHandoff(entry_addr, argc, true)
+    guest_exec_execution_stage <- GUEST_EXEC_STAGE_GUARDED_ENTRY
+    if not GuestExec_IsSupported():
+        guest_exec_last_game_execution_status <- -2
+        guest_exec_first_boundary_reason <- GUEST_EXEC_BOUNDARY_REASON_UNSUPPORTED_HOST
+        return -2
+    params: mutable GuestEntryParams = zeroed
+    params.argc <- argc.s32()
+    params.padding <- 0
+    params.entry_addr <- entry_addr
+    if argv != null:
+        params.argv[0] <- argv.cast[static u8&?]
+    elif guest_exec_last_argv0 != null:
+        params.argv[0] <- guest_exec_last_argv0
+    status: mutable s32 = 0
+    can Unsafe.SegmentMutation, Segment.Host, Segment.Guest:
         status <- c_GuestExec_RunMainEntryGuardedInProcess(params.ref[mutable GuestEntryParams&], timeout_ms)
     guest_exec_last_game_execution_status <- status
     GuestExec_AbsorbNativeBoundaryReport()

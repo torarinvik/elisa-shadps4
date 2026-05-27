@@ -798,7 +798,7 @@ def Linker_DependencyGuestPath(name: static u8&) -> static u8&:
         return Linker_PathJoin("/app0/sce_module", name)
     return Linker_PathJoin("/app0/sce_module", Linker_Concat2(name, ".prx"))
 
-def Linker_LoadGuestDependency(self: mutable Linker&, dependency_name: static u8&) -> s32 can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall]:
+def Linker_LoadGuestDependency(self: mutable Linker&, dependency_name: static u8&) -> s32 can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host]:
     guest_path: static u8& = Linker_DependencyGuestPath(dependency_name)
     if static_strlen(guest_path) == 0:
         return -1
@@ -822,11 +822,11 @@ def Linker_LoadGuestDependency(self: mutable Linker&, dependency_name: static u8
     Linker_RelocateAnyImports(self.ref[mutable Linker&], mod_ref)
     if mod_ref.tls.image_size != 0:
         Linker_AdvanceGenerationCounter(self.ref[mutable Linker&])
-    can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall:
+    can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
         _ = Module_Start(mod_ref, 0, null, null)
     return idx
 
-def Linker_LoadDependencyClosure(self: mutable Linker&) -> void can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall]:
+def Linker_LoadDependencyClosure(self: mutable Linker&) -> void can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host]:
     initial_count: usize = self.modules.count
     index: mutable usize = 0
     while index < self.modules.count:
@@ -834,7 +834,7 @@ def Linker_LoadDependencyClosure(self: mutable Linker&) -> void can[Unsafe.Segme
         dep_index: mutable usize = 0
         while dep_index < dep_count:
             dep_name: static u8& = self.modules[index].dynamic_info.import_modules[dep_index].name
-            can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall:
+            can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
                 _ = Linker_LoadGuestDependency(self.ref[mutable Linker&], dep_name)
             dep_index <- dep_index + 1
         index <- index + 1
@@ -1024,7 +1024,7 @@ def Linker_CreateNativeHleBoundaryThunk(target: u64) -> u64:
             return linker_native_hle_thunk_addrs[cache_index]
         cache_index <- cache_index + 1usize
     static if PLATFORM_APPLE and ARCH_X86_64:
-        host_selector: u16 = TLS_CaptureHostFsSelector()
+        host_selector: HostFsSelector = TLS_CaptureHostFsSelector()
         full: mutable u8[156] = zeroed
         # Capture the guest return address before touching the thunk stack.
         # At thunk entry, (%rsp) is the return PC pushed by the guest call.
@@ -1107,7 +1107,7 @@ def Linker_CreateNativeHleBoundaryThunk(target: u64) -> u64:
         full[127] <- 0x66u8
         full[128] <- 0x41u8
         full[129] <- 0xBAu8
-        Linker_WriteU16LE(full[0].ref[mutable u8&], 130usize, host_selector)
+        Linker_WriteU16LE(full[0].ref[mutable u8&], 130usize, (!host_selector).u16())
         full[132] <- 0x66u8
         full[133] <- 0x41u8
         full[134] <- 0x8Eu8
@@ -1136,6 +1136,7 @@ def Linker_CreateNativeHleBoundaryThunk(target: u64) -> u64:
         trusted Unsafe.ExecutableCodePublish:
             if not GuestExec_PublishExecutableCode(thunk, 156u64):
                 return target
+        GuestExec_RecordHleBoundaryThunkContract(thunk, target.uintptr(), 156u64, host_selector)
         if linker_native_hle_thunk_count < LINKER_NATIVE_HLE_THUNK_CAP:
             linker_native_hle_thunk_targets[linker_native_hle_thunk_count] <- target
             linker_native_hle_thunk_addrs[linker_native_hle_thunk_count] <- thunk.u64()
@@ -1509,7 +1510,7 @@ def Linker_LoadModuleFromHost(self: mutable Linker&, guest_name: static u8&, hos
         self.modules.push(module)
     return (self.modules.count - 1).s32()
 
-def Linker_LoadAndStartModule(self: mutable Linker&, path: static u8&, args: u64, argp: void&?, p_res: mutable int&?) -> s32 can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall]:
+def Linker_LoadAndStartModule(self: mutable Linker&, path: static u8&, args: u64, argp: void&?, p_res: mutable int&?) -> s32 can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host]:
     existing: u32 = Linker_FindByFileOrHost(self.ref[Linker&], path)
     if existing != 0xFFFFFFFF.u32():
         self.last_started_module_index <- existing.s32()
@@ -1538,7 +1539,7 @@ def Linker_LoadAndStartModule(self: mutable Linker&, path: static u8&, args: u64
         Linker_AdvanceGenerationCounter(self.ref[mutable Linker&])
     self.last_entry_addr <- Module_GetEntryAddress(mod_ref, 0.uintptr())
     start_result: mutable s32 = 0
-    can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall:
+    can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
         start_result <- Module_Start(mod_ref, args, argp, null)
     Linker_RelocateAllImports(self.ref[mutable Linker&])
     self.last_started_module_index <- idx
@@ -1548,7 +1549,7 @@ def Linker_LoadAndStartModule(self: mutable Linker&, path: static u8&, args: u64
         p_res <- start_result
     return idx
 
-def Linker_LoadAndStartGuestModule(self: mutable Linker&, guest_path: static u8&, args: u64, argp: void&?, p_res: mutable int&?) -> s32 can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall]:
+def Linker_LoadAndStartGuestModule(self: mutable Linker&, guest_path: static u8&, args: u64, argp: void&?, p_res: mutable int&?) -> s32 can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host]:
     host_path: static u8& = Linker_ResolveGuestModulePath(self.ref[Linker&], guest_path)
     if static_strlen(host_path) == 0:
         return -1
@@ -1583,7 +1584,7 @@ def Linker_LoadAndStartGuestModule(self: mutable Linker&, guest_path: static u8&
         Linker_AdvanceGenerationCounter(self.ref[mutable Linker&])
     self.last_entry_addr <- Module_GetEntryAddress(mod_ref, 0.uintptr())
     start_result: mutable s32 = 0
-    can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall:
+    can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
         start_result <- Module_Start(mod_ref, args, argp, null)
     Linker_RelocateAllImports(self.ref[mutable Linker&])
     self.last_started_module_index <- idx
@@ -1659,14 +1660,14 @@ def Linker_Resolve(self: mutable Linker&, name: static u8&, module: mutable Modu
     out_resolution_kind <- IMPORT_RESOLUTION_AEROLIB_FALLBACK
     return true
 
-def Linker_Execute(self: mutable Linker&, args: darray[static u8&]) -> s32 can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall]:
+def Linker_Execute(self: mutable Linker&, args: darray[static u8&]) -> s32 can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host]:
     self.last_execute_argc <- args.count
     if self.modules.count == 0:
         self.last_started_module_index <- -1
         self.last_start_result <- -1
         self.last_entry_addr <- 0.uintptr()
         return -1
-    can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall:
+    can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
         Linker_LoadDependencyClosure(self.ref[mutable Linker&])
     GuestExec_RecordLoad()
     self.static_tls_size <- self.modules[0].tls.image_size.usize()
