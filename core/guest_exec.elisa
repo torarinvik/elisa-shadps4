@@ -1226,6 +1226,8 @@ def c_GuestExec_DebugTrapInstallFs0() -> uintptr:
 # ============================================================
 @link_name(sigaction)
 extern ge_sigaction(signum: int, act: void&?, oldact: void&?) -> int
+@link_name(sigaltstack)
+extern ge_sigaltstack(ss: void&?, oldss: void&?) -> int
 @link_name(siglongjmp)
 @reentrant_safe
 extern ge_siglongjmp(env: void&?, val: int) -> void
@@ -1371,6 +1373,20 @@ struct GeSigaction:
     handler: mutable void&?
     mask: mutable u32
     flags: mutable int
+
+# stack_t: { void *ss_sp; size_t ss_size; int ss_flags; }
+@fixed_layout
+struct GeStackT:
+    ss_sp: mutable void&?
+    ss_size: mutable usize
+    ss_flags: mutable int
+
+# Alternate signal stack so the fault handlers (SIGSEGV/BUS/ILL/FPE/TRAP) run on
+# a known-good stack rather than the possibly-corrupted/exhausted guest stack —
+# matching shadPS4 signals.cpp which installs its handler with SA_ONSTACK.
+const GE_SIGSTKSZ: usize = 131072usize
+global mutable ge_alt_signal_stack: u8[131072] = zeroed
+global mutable ge_alt_signal_stack_installed: s32 = 0
 
 # Dl_info: { const char* dli_fname; void* dli_fbase; const char* dli_sname; void* dli_saddr; }
 @fixed_layout
@@ -1654,6 +1670,21 @@ def ge_resolve_pc_symbol(address: uintptr, is_stack: bool) -> void:
         ge_signal_pc_image <- img
 
 def ge_install_guards() -> void:
+    # Install an alternate signal stack once, so the fault handlers run on a
+    # known-good stack even when the guest stack is corrupted or exhausted
+    # (shadPS4 installs its access-violation handler with SA_ONSTACK).
+    fault_flags: mutable int = ge_sa_siginfo()
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        if ge_alt_signal_stack_installed == 0:
+            ss: mutable GeStackT = zeroed
+            ss.ss_sp <- ge_alt_signal_stack[0usize].ref[void&]
+            ss.ss_size <- GE_SIGSTKSZ
+            ss.ss_flags <- 0
+            if ge_sigaltstack(ss.ref[void&], null) == 0:
+                ge_alt_signal_stack_installed <- 1
+        if ge_alt_signal_stack_installed != 0:
+            # SA_ONSTACK = 0x0001 on macOS.
+            fault_flags <- fault_flags | 0x1
     sa: mutable GeSigaction = zeroed
     static if PLATFORM_APPLE and ARCH_X86_64:
         if !ge_signal_handler_entry_thunk == 0.uintptr():
@@ -1662,7 +1693,7 @@ def ge_install_guards() -> void:
     static else:
         sa.handler <- ge_signal_handler as void&?
     sa.mask <- 0u32
-    sa.flags <- ge_sa_siginfo()
+    sa.flags <- fault_flags
     _ = ge_sigaction(GE_SIG_SEGV, sa.ref[void&], ge_old_segv.ref[void&])
     _ = ge_sigaction(ge_sig_bus(), sa.ref[void&], ge_old_bus.ref[void&])
     _ = ge_sigaction(GE_SIG_ILL, sa.ref[void&], ge_old_ill.ref[void&])
@@ -1677,6 +1708,9 @@ def ge_install_guards() -> void:
         alarm_sa.handler <- ge_alarm_handler as void&?
     alarm_sa.mask <- 0u32
     alarm_sa.flags <- 0
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        if ge_alt_signal_stack_installed != 0:
+            alarm_sa.flags <- alarm_sa.flags | 0x1
     _ = ge_sigaction(GE_SIG_ALRM, alarm_sa.ref[void&], ge_old_alrm.ref[void&])
 
 def ge_restore_guards() -> void:
