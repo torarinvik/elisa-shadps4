@@ -66,6 +66,8 @@ global mutable linker_tiny_pointer_first_offset: u64 = 0
 global mutable linker_tiny_pointer_first_type: u32 = 0u32
 global mutable linker_tiny_pointer_first_name: static u8&? = null
 global mutable linker_tiny_pointer_first_module: static u8&? = null
+global mutable linker_defer_native_relocation_writes: bool = false
+global mutable linker_last_relocation_retryable: bool = false
 global mutable linker_hle_tiny_callable_count: u64 = 0
 global mutable linker_hle_tiny_callable_first_value: u64 = 0
 global mutable linker_hle_tiny_callable_first_name: static u8&? = null
@@ -375,6 +377,21 @@ def Linker_GetProcParam(self: Linker&) -> VAddr:
     if self.modules.count == 0:
         return 0.uintptr()
     return self.modules[0].proc_param_virtual_addr
+
+def Linker_GetFlexibleMemorySize(self: Linker&) -> u64:
+    if self.modules.count == 0:
+        return ORBIS_KERNEL_FLEXIBLE_MEMORY_SIZE
+    module: Module = self.modules[0]
+    proc_param: VAddr = module.proc_param_virtual_addr
+    if proc_param == 0.uintptr():
+        return ORBIS_KERNEL_FLEXIBLE_MEMORY_SIZE
+    mem_param: u64 = Module_ReadImageU64(module, proc_param.u64() + 56u64)
+    if mem_param == 0u64:
+        return ORBIS_KERNEL_FLEXIBLE_MEMORY_SIZE
+    requested: u64 = Module_ReadImageU64(module, mem_param + 16u64)
+    if requested == 0u64:
+        return ORBIS_KERNEL_FLEXIBLE_MEMORY_SIZE
+    return requested
 
 def Linker_GetModule(self: mutable Linker&, index: s32) -> mutable Module&?:
     if index < 0 or index >= self.modules.count.int():
@@ -828,18 +845,25 @@ def Linker_LoadGuestDependency(self: mutable Linker&, dependency_name: static u8
 
 def Linker_LoadDependencyClosure(self: mutable Linker&) -> void can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host]:
     initial_count: usize = self.modules.count
+    ge_emergency_mark(GE_EV_DEP_CLOSURE_BEGIN, initial_count.uintptr(), self.modules.count.uintptr(), 0.uintptr(), 0.uintptr())
     index: mutable usize = 0
     while index < self.modules.count:
         dep_count: usize = self.modules[index].dynamic_info.import_modules.count
+        ge_emergency_mark(GE_EV_DEP_CLOSURE_MODULE_BEGIN, index.uintptr(), dep_count.uintptr(), self.modules.count.uintptr(), self.modules[index].base_virtual_addr)
         dep_index: mutable usize = 0
         while dep_index < dep_count:
             dep_name: static u8& = self.modules[index].dynamic_info.import_modules[dep_index].name
+            ge_emergency_mark(GE_EV_DEP_CLOSURE_DEP_BEGIN, index.uintptr(), dep_index.uintptr(), dep_count.uintptr(), self.modules.count.uintptr())
+            dep_result: mutable s32 = 0
             can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
-                _ = Linker_LoadGuestDependency(self.ref[mutable Linker&], dep_name)
+                dep_result <- Linker_LoadGuestDependency(self.ref[mutable Linker&], dep_name)
+            ge_emergency_mark(GE_EV_DEP_CLOSURE_DEP_END, index.uintptr(), dep_index.uintptr(), dep_result.u64().uintptr(), self.modules.count.uintptr())
             dep_index <- dep_index + 1
+        ge_emergency_mark(GE_EV_DEP_CLOSURE_MODULE_END, index.uintptr(), dep_count.uintptr(), self.modules.count.uintptr(), self.modules[index].base_virtual_addr)
         index <- index + 1
     if self.modules.count != initial_count:
         self.relocated_all_imports <- false
+    ge_emergency_mark(GE_EV_DEP_CLOSURE_END, initial_count.uintptr(), self.modules.count.uintptr(), 0.uintptr(), 0.uintptr())
 
 def Linker_WriteU16LE(out: mutable u8&, offset: usize, value: u16) -> void:
     out[offset] <- (value & 0xffu16).u8()
@@ -854,6 +878,8 @@ def Linker_WriteU64LE(out: mutable u8&, offset: usize, value: u64) -> void:
 
 def Linker_UseNativeHleBoundaryThunk() -> bool:
     static if PLATFORM_APPLE and ARCH_X86_64:
+        if getenv("ELISA_GUEST_EXEC_NO_HLE_BOUNDARY_THUNK".cast[u8&]) != null:
+            return false
         return getenv("ELISA_GUEST_EXEC_NO_FORK".cast[u8&]) != null or getenv("ELISA_GUEST_EXEC_BOUNDARY_THUNK".cast[u8&]) != null
     static else:
         return false
@@ -985,8 +1011,34 @@ def Linker_IsQualifiedImportSymbol(raw_symbol: static u8&) -> bool:
 
 def Linker_WriteRelocationU64(module: mutable Module&, memory: mutable MemoryManager&, addr: u64, value: u64) -> bool:
     image_ok: bool = Module_WriteImageU64(module.ref[mutable Module&], addr, value)
-    memory_ok: bool = MemoryManager_WriteU64(memory, addr.uintptr(), value)
+    memory_ok: mutable bool = false
+    if linker_defer_native_relocation_writes and GuestExec_IsEnabled() and GuestExec_IsSupported():
+        memory_ok <- MemoryManager_WriteU64BackingOnly(memory, addr.uintptr(), value)
+    else:
+        memory_ok <- MemoryManager_WriteU64(memory, addr.uintptr(), value)
     return image_ok or memory_ok
+
+def Linker_ModuleRelocationBit(module: Module&, bit_index: usize) -> bool:
+    byte_index: usize = bit_index / 8usize
+    if byte_index >= module.applied_relocation_bits.count:
+        return false
+    mask: u8 = (1u8 << (bit_index % 8usize).u8())
+    return (module.applied_relocation_bits[byte_index] & mask) != 0u8
+
+def Linker_EnsureModuleRelocationBit(module: mutable Module&, bit_index: usize) -> void:
+    byte_index: usize = bit_index / 8usize
+    can Memory.Allocate:
+        trusted Unsafe.MutableGlobal:
+            owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
+            in owner:
+                while module.applied_relocation_bits.count <= byte_index:
+                    module.applied_relocation_bits.push(0u8)
+
+def Linker_SetModuleRelocationBit(module: mutable Module&, bit_index: usize) -> void:
+    Linker_EnsureModuleRelocationBit(module.ref[mutable Module&], bit_index)
+    byte_index: usize = bit_index / 8usize
+    mask: u8 = (1u8 << (bit_index % 8usize).u8())
+    module.applied_relocation_bits[byte_index] <- module.applied_relocation_bits[byte_index] | mask
 
 def Linker_RecordFailedRelocationType(self: mutable Linker&, rel_type: u32) -> void:
     if rel_type == R_X86_64_64:
@@ -1146,11 +1198,13 @@ def Linker_CreateNativeHleBoundaryThunk(target: u64) -> u64:
         return target
 
 def Linker_RelocateAnyImports(self: mutable Linker&, module: mutable Module&) -> void:
+    ge_emergency_mark(GE_EV_RELOC_MODULE_BEGIN, module.base_virtual_addr, module.import_symbols.count.uintptr(), module.dynamic_info.rela_table_total_size.uintptr(), module.dynamic_info.jmp_relocation_total_size.uintptr())
     for i in 0..<module.import_symbols.count:
         self.last_total_import_count <- self.last_total_import_count + 1
         resolved_addr: mutable u64 = 0
         resolved_kind: mutable u8 = IMPORT_RESOLUTION_UNRESOLVED
         import_symbol: ImportSymbolRecord = module.import_symbols[i]
+        ge_emergency_mark(GE_EV_RELOC_MODULE_IMPORT_BEGIN, module.base_virtual_addr, i.uintptr(), import_symbol.nid.uintptr(), import_symbol.raw_symbol.uintptr())
         qualified_raw: bool = Linker_IsQualifiedImportSymbol(import_symbol.raw_symbol)
         resolved: mutable bool = false
         if qualified_raw:
@@ -1177,9 +1231,13 @@ def Linker_RelocateAnyImports(self: mutable Linker&, module: mutable Module&) ->
                 self.last_malformed_import_count <- self.last_malformed_import_count + 1
             else:
                 self.last_unresolved_import_count <- self.last_unresolved_import_count + 1
+        ge_emergency_mark(GE_EV_RELOC_MODULE_IMPORT_END, module.base_virtual_addr, i.uintptr(), resolved_addr.uintptr(), resolved_kind.u64().uintptr())
+    ge_emergency_mark(GE_EV_RELOC_MODULE_IMPORTS_DONE, module.base_virtual_addr, module.import_symbols.count.uintptr(), self.last_relocated_import_count.u64().uintptr(), self.last_unresolved_import_count.u64().uintptr())
     Linker_ApplyModuleRelocations(self.ref[mutable Linker&], module.ref[mutable Module&])
+    ge_emergency_mark(GE_EV_RELOC_MODULE_END, module.base_virtual_addr, module.import_symbols.count.uintptr(), module.applied_relocation_count.uintptr(), module.patched_import_relocation_count.uintptr())
 
 def Linker_ApplyRelocationEntry(self: mutable Linker&, module: mutable Module&, rel: elf_relocation) -> bool:
+    linker_last_relocation_retryable <- false
     rel_type: u32 = (rel.rel_info & 0xffffffff.u64()).u32()
     symbol_index: u32 = (rel.rel_info >> 32.u64()).u32()
     rel_virtual_addr: u64 = module.base_virtual_addr.u64() + rel.rel_offset
@@ -1229,6 +1287,7 @@ def Linker_ApplyRelocationEntry(self: mutable Linker&, module: mutable Module&, 
             # first boundary can be attributed to a specific unimplemented import.
             resolved_addr <- GuestExec_AeroLibFallbackStubAddress().u64()
             resolved <- true
+            linker_last_relocation_retryable <- true
         Linker_MixResolution(symbol_index, resolved_addr == GuestExec_AeroLibFallbackStubAddress().u64(), rel_type, symbol_name)
         if resolved:
             # Record every slot that ends up holding the fallback stub, no matter
@@ -1237,6 +1296,7 @@ def Linker_ApplyRelocationEntry(self: mutable Linker&, module: mutable Module&, 
             # boundary can be attributed back to this relocation's symbol.
             if resolved_addr == GuestExec_AeroLibFallbackStubAddress().u64():
                 Linker_RecordFallbackSlot(rel_virtual_addr, symbol_name, symbol_index, rel_type, module.name)
+                linker_last_relocation_retryable <- true
             if rel_kind == IMPORT_RESOLUTION_NATIVE_HLE:
                 should_thunk_native_hle: bool = Linker_ShouldThunkNativeHleRelocation(rel_type, symbol_found, symbol)
                 if should_thunk_native_hle:
@@ -1272,15 +1332,29 @@ def Linker_ApplyRelocationEntry(self: mutable Linker&, module: mutable Module&, 
         Linker_RecordFailedRelocationDetail(self.ref[mutable Linker&], 5u32, IMPORT_RESOLUTION_UNRESOLVED, module.tls.modid.u64())
     return false
 
-def Linker_ApplyRelocationTable(self: mutable Linker&, module: mutable Module&, table_offset: u64, table_size: u64, entry_size: u64) -> void:
+def Linker_ApplyRelocationTable(self: mutable Linker&, module: mutable Module&, table_offset: u64, table_size: u64, entry_size: u64, bit_base_index: usize) -> void:
     if table_offset == 0 or table_size == 0 or entry_size == 0:
         return
     count: usize = (table_size / entry_size).usize()
+    if count != 0usize:
+        Linker_EnsureModuleRelocationBit(module.ref[mutable Module&], bit_base_index + count - 1usize)
+    ge_emergency_mark(GE_EV_RELOC_TABLE_BEGIN, module.base_virtual_addr, table_offset.uintptr(), count.uintptr(), entry_size.uintptr())
     for i in 0..<count:
         offset: u64 = table_offset + (i.u64() * entry_size)
+        bit_index: usize = bit_base_index + i
+        if Linker_ModuleRelocationBit(module, bit_index):
+            continue
+        record_entry: bool = (i.u64() & 0xfffu64) == 0u64
+        if record_entry:
+            ge_emergency_mark(GE_EV_RELOC_TABLE_ENTRY_BEGIN, module.base_virtual_addr, i.uintptr(), offset.uintptr(), count.uintptr())
         if offset + size_of(elf_relocation).u64() <= module.dynamic_data.count.u64():
             rel: elf_relocation = Module_ReadRelocationAt(module, offset.usize())
-            if not Linker_ApplyRelocationEntry(self.ref[mutable Linker&], module.ref[mutable Module&], rel):
+            applied: bool = Linker_ApplyRelocationEntry(self.ref[mutable Linker&], module.ref[mutable Module&], rel)
+            if applied and not linker_last_relocation_retryable:
+                Linker_SetModuleRelocationBit(module.ref[mutable Module&], bit_index)
+            if record_entry or not applied:
+                ge_emergency_mark(GE_EV_RELOC_TABLE_ENTRY_END, module.base_virtual_addr, i.uintptr(), (rel.rel_info & 0xffffffff.u64()).uintptr(), rel.rel_offset.uintptr())
+            if not applied:
                 rel_type: u32 = (rel.rel_info & 0xffffffff.u64()).u32()
                 self.last_failed_relocation_count <- self.last_failed_relocation_count + 1
                 Linker_RecordFailedRelocationType(self.ref[mutable Linker&], rel_type)
@@ -1289,11 +1363,15 @@ def Linker_ApplyRelocationTable(self: mutable Linker&, module: mutable Module&, 
                 self.last_failed_relocation_offset <- rel.rel_offset
                 self.last_failed_relocation_module <- module.name
                 self.last_failed_relocation_name <- Module_GetSymbolNameByIndex(module.ref[mutable Module&], self.last_failed_relocation_symbol)
+        else:
+            ge_emergency_mark(GE_EV_RELOC_TABLE_ENTRY_END, module.base_virtual_addr, i.uintptr(), 0xffffffff.u64().uintptr(), offset.uintptr())
+    ge_emergency_mark(GE_EV_RELOC_TABLE_END, module.base_virtual_addr, table_offset.uintptr(), count.uintptr(), module.applied_relocation_count.uintptr())
 
 def Linker_ApplyModuleRelocations(self: mutable Linker&, module: mutable Module&) -> void:
     entry_size: u64 = Module_GetRelaEntrySize(module)
-    Linker_ApplyRelocationTable(self.ref[mutable Linker&], module.ref[mutable Module&], module.dynamic_info.rela_table_offset, module.dynamic_info.rela_table_total_size, entry_size)
-    Linker_ApplyRelocationTable(self.ref[mutable Linker&], module.ref[mutable Module&], module.dynamic_info.jmp_relocation_offset, module.dynamic_info.jmp_relocation_total_size, entry_size)
+    rela_count: usize = Module_GetRelaRelocationCount(module)
+    Linker_ApplyRelocationTable(self.ref[mutable Linker&], module.ref[mutable Module&], module.dynamic_info.rela_table_offset, module.dynamic_info.rela_table_total_size, entry_size, 0usize)
+    Linker_ApplyRelocationTable(self.ref[mutable Linker&], module.ref[mutable Module&], module.dynamic_info.jmp_relocation_offset, module.dynamic_info.jmp_relocation_total_size, entry_size, rela_count)
 
 def Linker_RelocateAllImports(self: mutable Linker&) -> void:
     self.last_total_import_count <- 0
@@ -1669,16 +1747,26 @@ def Linker_Execute(self: mutable Linker&, args: darray[static u8&]) -> s32 can[U
         return -1
     can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
         Linker_LoadDependencyClosure(self.ref[mutable Linker&])
+    ge_emergency_mark(GE_EV_EXEC_AFTER_DEP_CLOSURE, self.modules.count.uintptr(), (1u64 if self.relocated_all_imports else 0u64).uintptr(), 0.uintptr(), 0.uintptr())
     GuestExec_RecordLoad()
     self.static_tls_size <- self.modules[0].tls.image_size.usize()
     self.modules[0].tls.offset <- self.modules[0].tls.image_size
     if not self.relocated_all_imports:
+        ge_emergency_mark(GE_EV_EXEC_RELOC_ALL_BEGIN, self.modules.count.uintptr(), self.last_relocated_import_count.u64().uintptr(), 0.uintptr(), 0.uintptr())
+        linker_defer_native_relocation_writes <- true
         Linker_RelocateAllImports(self.ref[mutable Linker&])
+        linker_defer_native_relocation_writes <- false
+        ge_emergency_mark(GE_EV_EXEC_RELOC_ALL_END, self.modules.count.uintptr(), self.last_relocated_import_count.u64().uintptr(), 0.uintptr(), 0.uintptr())
     GuestExec_RecordLink()
     GuestExec_SetFailedRelocationCount(self.last_failed_relocation_count.u64())
     memory: mutable MemoryManager& = Memory_Instance()
-    MemoryManager_SetupMemoryRegions(memory, ORBIS_KERNEL_FLEXIBLE_MEMORY_SIZE, true, true)
-    _ = Linker_AllocateTlsForThread(self.ref[mutable Linker&], true)
+    flexible_size: u64 = Linker_GetFlexibleMemorySize(self)
+    ge_emergency_mark(GE_EV_EXEC_MEMORY_SETUP_BEGIN, self.modules.count.uintptr(), self.static_tls_size.uintptr(), flexible_size.uintptr(), 0.uintptr())
+    MemoryManager_SetupMemoryRegions(memory, flexible_size, true, true)
+    ge_emergency_mark(GE_EV_EXEC_MEMORY_SETUP_END, self.modules.count.uintptr(), self.static_tls_size.uintptr(), flexible_size.uintptr(), 0.uintptr())
+    ge_emergency_mark(GE_EV_EXEC_TLS_ALLOC_BEGIN, self.modules.count.uintptr(), self.static_tls_size.uintptr(), 0.uintptr(), 0.uintptr())
+    tls_addr: VAddr = Linker_AllocateTlsForThread(self.ref[mutable Linker&], true)
+    ge_emergency_mark(GE_EV_EXEC_TLS_ALLOC_END, tls_addr, self.modules.count.uintptr(), self.static_tls_size.uintptr(), 0.uintptr())
     if GuestExec_IsEnabled() and GuestExec_IsSupported():
         # shadPS4 starts the game main thread through its pthread runtime, which
         # switches to a PS4-style stack before RunMainEntry jumps into guest code.
@@ -1705,15 +1793,21 @@ def Linker_Execute(self: mutable Linker&, args: darray[static u8&]) -> s32 can[U
     mod_ref.last_start_init_count <- 0
     result: s32 = 0
     if GuestExec_IsEnabled():
+        ge_emergency_mark(GE_EV_MAIN_ENTRY_SYNC_BEGIN, self.last_entry_addr, args.count.uintptr(), 0.uintptr(), 0.uintptr())
         if not MemoryManager_SyncNativeBackingToGuestExec(memory):
             self.last_started_module_index <- index
             self.last_start_result <- -2
             return -2
+        ge_emergency_mark(GE_EV_MAIN_ENTRY_SYNC_END, self.last_entry_addr, args.count.uintptr(), 0.uintptr(), 0.uintptr())
         argv0: mutable void&? = null
         if args.count > 0:
             argv0 <- args[0].cast[void&?]
-        _ = Linker_PrepareMainThreadBeforeEntry()
+        ge_emergency_mark(GE_EV_MAIN_ENTRY_PREPARE_BEGIN, self.last_entry_addr, args.count.uintptr(), argv0.uintptr(), 0.uintptr())
+        prep_status: s32 = Linker_PrepareMainThreadBeforeEntry()
+        ge_emergency_mark(GE_EV_MAIN_ENTRY_PREPARE_END, self.last_entry_addr, prep_status.u64().uintptr(), argv0.uintptr(), 0.uintptr())
+        ge_emergency_mark(GE_EV_MAIN_ENTRY_JUMP_BEGIN, self.last_entry_addr, args.count.uintptr(), argv0.uintptr(), 0.uintptr())
         GuestExec_RunMainEntry(self.last_entry_addr, args.count.int(), argv0)
+        ge_emergency_mark(GE_EV_MAIN_ENTRY_JUMP_RETURNED, self.last_entry_addr, args.count.uintptr(), argv0.uintptr(), 0.uintptr())
     Linker_RelocateAllImports(self.ref[mutable Linker&])
     self.last_started_module_index <- index
     self.last_start_result <- result

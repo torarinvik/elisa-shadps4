@@ -12,7 +12,8 @@ def guest_exec_test_posix_mutex_lock_shape(mutex: mutable void&?&?) -> int:
         slot <- mutex.cast[void&].uintptr()
         if slot != 0.uintptr() and slot < 4096.uintptr():
             reason <- 3.uintptr()
-    GuestExec_RecordRuntimeHle("libkernel", "posix_pthread_mutex_lock", slot, 0.uintptr(), reason, 22.uintptr())
+    can Unsafe.SegmentMutation, Segment.Host:
+        GuestExec_RecordRuntimeHle("libkernel", "posix_pthread_mutex_lock", slot, 0.uintptr(), reason, 22.uintptr())
     return 22
 
 @test
@@ -170,8 +171,9 @@ def emulator_guest_exec_debug_guest_pointer_guard_rejects_unmapped_pointer_args(
     can Abort.Panic:
         GuestExec_ResetState()
         GuestExec_SetDebugTrapOnBoundaryGuard(true)
-        if GuestExec_DebugGuardGuestPointer(0x100000.uintptr().cast[GuestVAddr[void]], 17u64):
-            panic("expected guest pointer guard to reject unmapped pointer")
+        can Unsafe.SegmentMutation, Segment.Host:
+            if GuestExec_DebugGuardGuestPointer(0x100000.uintptr().cast[GuestVAddr[void]], 17u64):
+                panic("expected guest pointer guard to reject unmapped pointer")
         if GuestExec_LastStatus() != GE_DEBUG_TRAP_BOUNDARY_GUARD_STATUS:
             panic("expected guest pointer guard trap status")
         if GuestExec_DebugTrapReason() != GE_BOUNDARY_GUARD_UNMAPPED_POINTER:
@@ -188,8 +190,9 @@ def emulator_guest_exec_debug_guest_pointer_guard_rejects_unmapped_pointer_args(
         mapped: VAddr = GuestExec_AllocateRegion(4096.u64(), 3.u32())
         if mapped == 0.uintptr():
             panic("expected mapped pointer test page")
-        if not GuestExec_DebugGuardGuestPointer(mapped.cast[GuestVAddr[void]], 18u64):
-            panic("expected mapped guest pointer to pass")
+        can Unsafe.SegmentMutation, Segment.Host:
+            if not GuestExec_DebugGuardGuestPointer(mapped.cast[GuestVAddr[void]], 18u64):
+                panic("expected mapped guest pointer to pass")
         if GuestExec_DebugTrapCount() != 0u64:
             panic("expected no debug trap for mapped guest pointer")
         if not GuestExec_UnmapRegion(mapped, 4096.u64()):
@@ -200,8 +203,9 @@ def emulator_guest_exec_mapped_guest_pointer_guard_reports_nearest_mapping() -> 
     can Abort.Panic:
         GuestExec_ResetState()
         GuestExec_SetDebugTrapOnBoundaryGuard(true)
-        if GuestExec_DebugGuardMappedGuestPointer("unit.mapped_guest_pointer", 0x1F4.uintptr().cast[GuestVAddr[void]], 8u64, 0x80000000.uintptr(), 0x80001000.uintptr(), 3u32, 21u64):
-            panic("expected mapped guest pointer guard to reject unmapped pointer")
+        can Unsafe.SegmentMutation, Segment.Host:
+            if GuestExec_DebugGuardMappedGuestPointer("unit.mapped_guest_pointer", 0x1F4.uintptr().cast[GuestVAddr[void]], 8u64, 0x80000000.uintptr(), 0x80001000.uintptr(), 3u32, 21u64):
+                panic("expected mapped guest pointer guard to reject unmapped pointer")
         if GuestExec_LastStatus() != GE_DEBUG_TRAP_GUEST_PTR_UNMAPPED_STATUS:
             panic("expected mapped guest pointer status")
         if GuestExec_DebugTrapReason() != GE_BOUNDARY_GUARD_UNMAPPED_POINTER:
@@ -225,8 +229,9 @@ def emulator_guest_exec_return_referee_traps_zero_continuation() -> void:
         frame: mutable uintptr[2] = zeroed
         frame[1] <- 0.uintptr()
         GuestExec_DebugSetRuntimeHleFrameForTests(frame[0].ref[void&].uintptr(), 0xABCDEF.uintptr())
-        if GuestExec_DebugGuardGuestReturnContinuation(31u64):
-            panic("expected return referee to reject zero continuation")
+        can Unsafe.SegmentMutation, Segment.Host:
+            if GuestExec_DebugGuardGuestReturnContinuation(31u64):
+                panic("expected return referee to reject zero continuation")
         if GuestExec_LastStatus() != GE_DEBUG_TRAP_BOUNDARY_GUARD_STATUS:
             panic("expected zero continuation trap status")
         if GuestExec_DebugTrapReason() != GE_BOUNDARY_GUARD_UNMAPPED_EXEC:
@@ -250,17 +255,20 @@ def emulator_guest_exec_return_referee_traps_unpublished_continuation() -> void:
         if not GuestExec_ProtectRegion(mapped_entry, 4096.u64(), 5.u32()):
             panic("expected return referee executable protection")
         GuestExec_SetDebugTrapOnBoundaryGuard(true)
+        GuestExec_SetDebugTrapOnUnpublishedExec(true)
         frame: mutable uintptr[2] = zeroed
         frame[1] <- mapped_entry
         GuestExec_DebugSetRuntimeHleFrameForTests(frame[0].ref[void&].uintptr(), mapped_entry)
-        if GuestExec_DebugGuardGuestReturnContinuation(32u64):
-            panic("expected return referee to reject unpublished continuation")
+        can Unsafe.SegmentMutation, Segment.Host:
+            if GuestExec_DebugGuardGuestReturnContinuation(32u64):
+                panic("expected return referee to reject unpublished continuation")
         if GuestExec_LastStatus() != GE_DEBUG_TRAP_UNPUBLISHED_EXEC_STATUS:
             panic("expected unpublished continuation trap status")
         if GuestExec_DebugTrapReason() != GE_BOUNDARY_GUARD_UNPUBLISHED_EXEC:
             panic("expected unpublished continuation reason")
         if GuestExec_DebugTrapValue() != mapped_entry:
             panic("expected unpublished continuation value")
+        GuestExec_SetDebugTrapOnUnpublishedExec(false)
         if not GuestExec_UnmapRegion(mapped_entry, 4096.u64()):
             panic("expected return referee page unmap")
 
@@ -282,20 +290,23 @@ def emulator_guest_exec_debug_callable_guard_stops_before_unmapped_entry() -> vo
         if GuestExec_DebugTrapValue() != 0x100000.uintptr():
             panic("expected callable guard unmapped target value")
 
-def guest_exec_record_trace_variant(value: VAddr) -> u64:
+def guest_exec_record_trace_variant(value: VAddr) -> u64 can[Unsafe.SegmentMutation, Segment.Host]:
     can Debug.Trace:
         GuestExec_SetDebugTraceEnabled(true)
         GuestExec_ResetState()
         GuestExec_SetDebugTraceEnabled(true)
         GuestExec_SetDebugTrapOnCallableGuard(true)
         _ = GuestExec_DebugGuardCallableTarget(value, 44u64)
-        GuestExec_RecordRuntimeHle("libkernel", "trace_probe", value, 7.uintptr(), 9.uintptr(), 22.uintptr())
+        can Unsafe.SegmentMutation, Segment.Host:
+            GuestExec_RecordRuntimeHle("libkernel", "trace_probe", value, 7.uintptr(), 9.uintptr(), 22.uintptr())
         return GuestExec_DebugTraceFingerprint()
 
 @test
 def emulator_guest_exec_debug_trace_tape_fingerprints_boundary_events() -> void:
     can Abort.Panic, Debug.Trace:
-        first: u64 = guest_exec_record_trace_variant(0x1F4.uintptr())
+        first: mutable u64 = 0u64
+        can Unsafe.SegmentMutation, Segment.Host:
+            first <- guest_exec_record_trace_variant(0x1F4.uintptr())
         count: usize = GuestExec_DebugTraceCount()
         if count < 4.usize():
             panic("expected guest-exec trace tape to record reset/guard/HLE events")
@@ -303,10 +314,14 @@ def emulator_guest_exec_debug_trace_tape_fingerprints_boundary_events() -> void:
             panic("expected guest-exec trace to start with reset checkpoint")
         if GuestExec_DebugTraceEventAAt(1.usize()) != 0x1F4.uintptr():
             panic("expected guest-exec trace to preserve the bad callable value")
-        second: u64 = guest_exec_record_trace_variant(0x1F4.uintptr())
+        second: mutable u64 = 0u64
+        can Unsafe.SegmentMutation, Segment.Host:
+            second <- guest_exec_record_trace_variant(0x1F4.uintptr())
         if first != second:
             panic("expected identical guest-exec traces to have identical fingerprints")
-        third: u64 = guest_exec_record_trace_variant(0x200.uintptr())
+        third: mutable u64 = 0u64
+        can Unsafe.SegmentMutation, Segment.Host:
+            third <- guest_exec_record_trace_variant(0x200.uintptr())
         if first == third:
             panic("expected guest-exec trace fingerprint to change when boundary value changes")
 
@@ -314,17 +329,20 @@ def emulator_guest_exec_debug_trace_tape_fingerprints_boundary_events() -> void:
 def emulator_guest_exec_debug_trace_diff_locates_first_divergence() -> void:
     can Abort.Panic, Debug.Trace:
         # Record a reference run and snapshot it as the baseline tape.
-        _ = guest_exec_record_trace_variant(0x1F4.uintptr())
+        can Unsafe.SegmentMutation, Segment.Host:
+            _ = guest_exec_record_trace_variant(0x1F4.uintptr())
         GuestExec_DebugTraceSnapshot()
         if GuestExec_DebugTraceSnapshotCount() < 4.usize():
             panic("expected snapshot to capture the reference tape")
         # An identical re-run must NOT diverge.
-        _ = guest_exec_record_trace_variant(0x1F4.uintptr())
+        can Unsafe.SegmentMutation, Segment.Host:
+            _ = guest_exec_record_trace_variant(0x1F4.uintptr())
         if GuestExec_DebugTraceFirstDivergence() != -1:
             panic("expected identical guest-exec traces to have no divergence")
         # A run with a changed boundary value must diverge, and the locator must
         # surface both the live and reference values at the divergence point.
-        _ = guest_exec_record_trace_variant(0x200.uintptr())
+        can Unsafe.SegmentMutation, Segment.Host:
+            _ = guest_exec_record_trace_variant(0x200.uintptr())
         idx: int = GuestExec_DebugTraceFirstDivergence()
         if idx < 0:
             panic("expected guest-exec trace divergence when boundary value changes")
@@ -338,7 +356,8 @@ def emulator_guest_exec_debug_trace_reference_load_diff() -> void:
     can Abort.Panic, Debug.Trace:
         # Record a live run, then build a reference identical to it via the
         # external-load API (this is the path a recorded shadPS4 tape uses).
-        _ = guest_exec_record_trace_variant(0x1F4.uintptr())
+        can Unsafe.SegmentMutation, Segment.Host:
+            _ = guest_exec_record_trace_variant(0x1F4.uintptr())
         n: usize = GuestExec_DebugTraceCount()
         if n < 4.usize():
             panic("expected a populated live tape to build a reference from")
@@ -366,7 +385,8 @@ def emulator_guest_exec_debug_trace_captures_barrier_trip() -> void:
         # A barrier trip (poison callable target) must be both rejected AND
         # recorded on the trace tape, so a differential tape diff can localize a
         # *barrier trip*, not only a changed value.
-        _ = guest_exec_record_trace_variant(GE_BOUNDARY_POISON_WORD.uintptr())
+        can Unsafe.SegmentMutation, Segment.Host:
+            _ = guest_exec_record_trace_variant(GE_BOUNDARY_POISON_WORD.uintptr())
         if GuestExec_DebugTrapReason() != GE_BOUNDARY_GUARD_POISON:
             panic("expected the poison callable target to trip the callable guard")
         if GuestExec_DebugTraceEventAAt(1.usize()).u64() != GE_BOUNDARY_POISON_WORD:
@@ -407,7 +427,8 @@ def emulator_guest_exec_fs_shadow_referee_traps_static_machine_state_drift() -> 
         GuestExec_SetFsStateCheckEnabled(true)
         GuestExec_SetFsStateTrapOnMismatch(false)
         GuestExec_DebugSetFsShadowOwner(GE_FS_OWNER_GUEST)
-        GuestExec_DebugObserveFsOwner(GE_FS_OWNER_HOST)
+        can Unsafe.SegmentMutation, Segment.Host:
+            GuestExec_DebugObserveFsOwner(GE_FS_OWNER_HOST)
         if GuestExec_FsStateShadowMismatchCount() != 1u64:
             panic("expected the shadow fs owner mismatch to be recorded")
         if GuestExec_FsStateMismatchCount() != 1u64:
@@ -506,7 +527,8 @@ def emulator_guest_exec_mapped_guest_calls_posix_mutex_lock_and_returns() -> voi
 def emulator_guest_exec_boundary_guard_records_poison_hle_arg() -> void:
     can Abort.Panic:
         GuestExec_ResetState()
-        GuestExec_RecordRuntimeHle("libkernel", "poison_probe", GE_BOUNDARY_POISON_WORD.uintptr(), 0.uintptr(), 0.uintptr(), 0.uintptr())
+        can Unsafe.SegmentMutation, Segment.Host:
+            GuestExec_RecordRuntimeHle("libkernel", "poison_probe", GE_BOUNDARY_POISON_WORD.uintptr(), 0.uintptr(), 0.uintptr(), 0.uintptr())
         if GuestExec_RuntimeHleBoundaryGuardSequence() == 0.u64():
             panic("expected boundary guard to record poison HLE arg")
         if GuestExec_RuntimeHleBoundaryGuardReason() != GE_BOUNDARY_GUARD_POISON:
@@ -712,7 +734,7 @@ def emulator_guest_exec_synthetic_timeout_allows_fast_return() -> void:
 
 @test
 def emulator_guest_exec_guarded_main_uses_guest_trampoline_abi() -> void:
-    can Abort.Panic, Unsafe.SegmentMutation, Segment.Guest:
+    can Abort.Panic, Unsafe.SegmentMutation, Segment.Host, Segment.Guest:
         if not GuestExec_IsSupported():
             return
         GuestExec_ResetState()
@@ -747,7 +769,7 @@ def emulator_guest_exec_guarded_main_uses_guest_trampoline_abi() -> void:
 
 @test
 def emulator_guest_exec_guarded_main_can_call_host_boundary_callback() -> void:
-    can Abort.Panic, Unsafe.SegmentMutation, Segment.Guest:
+    can Abort.Panic, Unsafe.SegmentMutation, Segment.Host, Segment.Guest:
         if not GuestExec_IsSupported():
             return
         GuestExec_ResetState()
@@ -765,7 +787,7 @@ def emulator_guest_exec_guarded_main_can_call_host_boundary_callback() -> void:
 
 @test
 def emulator_guest_exec_guarded_fork_reports_first_boundary_to_parent() -> void:
-    can Abort.Panic, Unsafe.SegmentMutation, Segment.Guest:
+    can Abort.Panic, Unsafe.SegmentMutation, Segment.Host, Segment.Guest:
         if not GuestExec_IsSupported():
             return
         GuestExec_ResetState()
@@ -793,7 +815,7 @@ def emulator_guest_exec_guarded_fork_reports_first_boundary_to_parent() -> void:
 
 @test
 def emulator_guest_exec_guarded_main_reports_unsupported_on_non_x64_hosts() -> void:
-    can Abort.Panic, Unsafe.SegmentMutation, Segment.Guest:
+    can Abort.Panic, Unsafe.SegmentMutation, Segment.Host, Segment.Guest:
         GuestExec_ResetState()
         if GuestExec_IsSupported():
             return
@@ -809,7 +831,7 @@ def emulator_guest_exec_guarded_main_reports_unsupported_on_non_x64_hosts() -> v
 
 @test
 def emulator_guest_exec_guarded_main_null_entry_fails_safely() -> void:
-    can Abort.Panic, Unsafe.SegmentMutation, Segment.Guest:
+    can Abort.Panic, Unsafe.SegmentMutation, Segment.Host, Segment.Guest:
         GuestExec_ResetState()
         status: s32 = GuestExec_RunMainEntryGuarded(0.uintptr(), 0, null, 10.u32())
         if status != -1:
@@ -862,7 +884,7 @@ def emulator_guest_exec_first_boundary_classifies_real_hle_boundary() -> void:
 
 @test
 def emulator_guest_exec_pre_boundary_fault_reports_crash_captured_stage() -> void:
-    can Abort.Panic, Unsafe.SegmentMutation, Segment.Guest:
+    can Abort.Panic, Unsafe.SegmentMutation, Segment.Host, Segment.Guest:
         if not GuestExec_IsSupported():
             return
         GuestExec_ResetState()
@@ -895,7 +917,7 @@ def emulator_guest_exec_pre_boundary_fault_reports_crash_captured_stage() -> voi
 
 @test
 def emulator_guest_exec_guarded_entry_trap_reports_entry_params_context() -> void:
-    can Abort.Panic, Unsafe.SegmentMutation, Segment.Guest:
+    can Abort.Panic, Unsafe.SegmentMutation, Segment.Host, Segment.Guest:
         if not GuestExec_IsSupported():
             return
         GuestExec_ResetState()

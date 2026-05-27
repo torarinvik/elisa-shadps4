@@ -37,6 +37,12 @@ def RealGameBoot_UseDebugTrace() -> bool:
         return false
     return streq(value.cast[static u8&], "1") == 1
 
+def RealGameBoot_UseEmergencyWatchdogFailfast() -> bool:
+    value: u8&? = getenv("ELISA_GUEST_EXEC_EMERGENCY_WATCHDOG".cast[u8&])
+    if value == null:
+        return false
+    return streq(value.cast[static u8&], "1") == 1
+
 # Dump the guest-exec boundary trace tape so a real (Rosetta) run produces a
 # diff-able tape: fingerprint + count + overflow, then one line per event. This
 # is what a recorded shadPS4 baseline is compared against via the snapshot/
@@ -1644,6 +1650,11 @@ def emulator_real_game_boot_smoke_guarded_game_entry_reports_host_status() -> vo
     can Memory.Allocate, Abort.Panic:
         RealGameBoot_ResetRuntime()
         RealGameBoot_EmitPhaseBreadcrumb(1u64)
+        emergency_watchdog: bool = RealGameBoot_UseEmergencyWatchdogFailfast()
+        GuestExec_SetEmergencyWatchdogFailfast(emergency_watchdog)
+        ge_emergency_mark(GE_EV_MAIN_RUN_BEGIN, 1.uintptr(), 0.uintptr(), 0.uintptr(), 0.uintptr())
+        if emergency_watchdog:
+            GuestExec_DebugArmEmergencyTimer(120000.u32())
 
         arena: Arena = zeroed
         result: mutable int = -1
@@ -1651,6 +1662,9 @@ def emulator_real_game_boot_smoke_guarded_game_entry_reports_host_status() -> vo
             args: mutable darray[static u8&] = ["shadps4", "--native-guest-exec-probe", REAL_GAME_BOOT_ROOT, "--", "-RealBootSmoke"]
             can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
                 result <- Main_Run(args)
+        if emergency_watchdog:
+            GuestExec_DebugDisarmEmergencyTimer()
+        ge_emergency_mark(GE_EV_MAIN_RUN_END, result.u64().uintptr(), 0.uintptr(), 0.uintptr(), 0.uintptr())
         RealGameBoot_EmitPhaseBreadcrumb(2u64)
         RealGameBoot_Check(result == 0, "expected guarded guest exec launch setup success")
 
@@ -1666,6 +1680,7 @@ def emulator_real_game_boot_smoke_guarded_game_entry_reports_host_status() -> vo
         GuestExec_SetDebugTrapOnBoundaryGuard(RealGameBoot_UseBoundaryDebugTrap())
         GuestExec_SetFsStateCheckEnabled(true)
         GuestExec_SetFsStateTrapOnMismatch(RealGameBoot_UseBoundaryDebugTrap())
+        GuestExec_SetEmergencyWatchdogFailfast(emergency_watchdog)
         RealGameBoot_EmitPhaseBreadcrumb(34u64)
         GuestExec_SetDebugTrapOnUnpublishedExec(RealGameBoot_UseUnpublishedExecDebugTrap())
         RealGameBoot_EmitPhaseBreadcrumb(35u64)
@@ -1684,8 +1699,10 @@ def emulator_real_game_boot_smoke_guarded_game_entry_reports_host_status() -> vo
                 status <- GuestExec_RunMainEntryGuardedInProcess(entry, guest_exec_last_argc, null, 25.u32())
         else:
             RealGameBoot_EmitPhaseBreadcrumb(5u64)
-            can Unsafe.SegmentMutation, Segment.Guest:
+            can Unsafe.SegmentMutation, Segment.Host, Segment.Guest:
                 status <- GuestExec_RunMainEntryGuarded(entry, guest_exec_last_argc, null, 25.u32())
+        if emergency_watchdog:
+            GuestExec_DebugDisarmEmergencyTimer()
         RealGameBoot_EmitPhaseBreadcrumb(6u64)
         if GuestExec_IsSupported():
             RealGameBoot_Check(status != -2, "expected supported host to attempt guarded game entry")

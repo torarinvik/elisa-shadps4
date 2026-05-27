@@ -99,9 +99,11 @@ struct MemoryManager:
 # transient local arena (which is freed on return, leaving the guest memory map
 # and GOT in use-after-free storage and making guest execution nondeterministic).
 global mutable memory_arena: Arena = zeroed
+global mutable memory_last_backing_index: s32 = -1
 
 def Memory_ResetArena() -> void:
     memory_arena <- zeroed
+    memory_last_backing_index <- -1
 
 global mutable memory_singleton: MemoryManager = MemoryManager(
     AddressSpace_New(),
@@ -483,6 +485,7 @@ def MemoryManager_RemoveBacking(self: mutable MemoryManager&, base: VAddr, size:
     i: mutable usize = 0
     while i < self.mapped_bytes.count:
         if self.mapped_bytes[i].base == base and self.mapped_bytes[i].size == size:
+            memory_last_backing_index <- -1
             j: mutable usize = i
             while j + 1 < self.mapped_bytes.count:
                 self.mapped_bytes[j] <- self.mapped_bytes[j + 1]
@@ -492,11 +495,18 @@ def MemoryManager_RemoveBacking(self: mutable MemoryManager&, base: VAddr, size:
         i <- i + 1
 
 def MemoryManager_FindBackingIndex(self: MemoryManager&, addr: VAddr, size: u64) -> s32:
+    if memory_last_backing_index >= 0 and memory_last_backing_index.usize() < self.mapped_bytes.count:
+        cached: MappedMemoryBytes = self.mapped_bytes[memory_last_backing_index.usize()]
+        if addr >= cached.base:
+            cached_offset: u64 = (addr - cached.base).u64()
+            if cached_offset <= cached.size and size <= (cached.size - cached_offset):
+                return memory_last_backing_index
     for i in 0..<self.mapped_bytes.count:
         entry: MappedMemoryBytes = self.mapped_bytes[i]
         if addr >= entry.base:
             offset: u64 = (addr - entry.base).u64()
             if offset <= entry.size and size <= (entry.size - offset):
+                memory_last_backing_index <- i.s32()
                 return i.s32()
     return -1
 
@@ -543,6 +553,15 @@ def MemoryManager_WriteU64(self: mutable MemoryManager&, addr: VAddr, value: u64
             return false
         if not MemoryManager_RestoreNativeProtectionAfterWrite(self, addr, 8.u64()):
             return false
+    base_offset: usize = (addr - self.mapped_bytes[index.usize()].base).usize()
+    for i in 0..<8:
+        self.mapped_bytes[index.usize()].bytes[base_offset + i] <- ((value >> (i.u64() * 8)) & 0xff).u8()
+    return true
+
+def MemoryManager_WriteU64BackingOnly(self: mutable MemoryManager&, addr: VAddr, value: u64) -> bool:
+    index: s32 = MemoryManager_FindBackingIndex(self, addr, 8)
+    if index < 0:
+        return false
     base_offset: usize = (addr - self.mapped_bytes[index.usize()].base).usize()
     for i in 0..<8:
         self.mapped_bytes[index.usize()].bytes[base_offset + i] <- ((value >> (i.u64() * 8)) & 0xff).u8()

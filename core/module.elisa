@@ -145,6 +145,7 @@ struct Module:
     mapped_segment_count: mutable u32
     applied_relocation_count: mutable usize
     patched_import_relocation_count: mutable usize
+    applied_relocation_bits: mutable darray[u8]
     executable_segment_count: mutable usize
     executable_segment_permission_mismatch_count: mutable usize
     first_executable_segment_addr: mutable VAddr
@@ -183,13 +184,14 @@ def Module_New(file: static u8&, name: static u8&, base_virtual_addr: VAddr, is_
         0,
         0,
         0,
-        0,
-        0,
-        0.uintptr(),
-        0,
         0.uintptr(),
         0,
         0,
+        0,
+        zeroed,
+        0,
+        0,
+        0.uintptr(),
         0,
         0.uintptr(),
         0,
@@ -244,29 +246,37 @@ def Module_CallGuestInitEntry(entry_addr: VAddr, args: u64, argp: void&?, param:
     if entry_addr == 0.uintptr():
         return 0
     result: mutable s32 = 0
+    ge_emergency_mark(GE_EV_MODULE_INIT_ENTRY_BEGIN, entry_addr, args.uintptr(), argp.uintptr(), param.uintptr())
     static if PLATFORM_APPLE and ARCH_X86_64:
         can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
             guard: FsGuard = TLS_InstallGuestSegment()
+            ge_emergency_mark(GE_EV_MODULE_INIT_ENTRY_AFTER_INSTALL, entry_addr, args.uintptr(), argp.uintptr(), param.uintptr())
             fn: mutable void&? = null
             trusted Unsafe.PointerCast:
                 fn <- entry_addr.cast[void&?]
             if fn != null:
                 result <- TLS_CallGuestInitEntry(guard.ref[FsGuard&], fn, args, argp, param)
+            ge_emergency_mark(GE_EV_MODULE_INIT_ENTRY_AFTER_CALL, entry_addr, result.u64().uintptr(), argp.uintptr(), param.uintptr())
             TLS_RestoreHostSegment(move guard)
+            ge_emergency_mark(GE_EV_MODULE_INIT_ENTRY_AFTER_RESTORE, entry_addr, result.u64().uintptr(), argp.uintptr(), param.uintptr())
     return result
 
 def Module_CallGuestInitArrayEntry(entry_addr: VAddr) -> void can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host]:
     if entry_addr == 0.uintptr() or entry_addr.u64() == 0xffffffffffffffffu64:
         return
+    ge_emergency_mark(GE_EV_MODULE_INIT_ARRAY_BEGIN, entry_addr, 0.uintptr(), 0.uintptr(), 0.uintptr())
     static if PLATFORM_APPLE and ARCH_X86_64:
         can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
             guard: FsGuard = TLS_InstallGuestSegment()
+            ge_emergency_mark(GE_EV_MODULE_INIT_ARRAY_AFTER_INSTALL, entry_addr, 0.uintptr(), 0.uintptr(), 0.uintptr())
             fn: mutable void&? = null
             trusted Unsafe.PointerCast:
                 fn <- entry_addr.cast[void&?]
             if fn != null:
                 TLS_CallGuestInitArrayEntry(guard.ref[FsGuard&], fn)
+            ge_emergency_mark(GE_EV_MODULE_INIT_ARRAY_AFTER_CALL, entry_addr, 0.uintptr(), 0.uintptr(), 0.uintptr())
             TLS_RestoreHostSegment(move guard)
+            ge_emergency_mark(GE_EV_MODULE_INIT_ARRAY_AFTER_RESTORE, entry_addr, 0.uintptr(), 0.uintptr(), 0.uintptr())
 
 def Module_CallGuestInitArray(self: Module&, array_virtual_addr: u64, array_size: u64) -> void can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host]:
     if not Module_ShouldExecuteGuestStart():
@@ -286,6 +296,7 @@ def Module_CallGuestInitArray(self: Module&, array_virtual_addr: u64, array_size
 def Module_Start(self: mutable Module&, args: u64, argp: void&?, param: void&?) -> s32 can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host]:
     if not self.is_valid:
         return -1
+    ge_emergency_mark(GE_EV_MODULE_START_BEGIN, self.base_virtual_addr, args.uintptr(), argp.uintptr(), param.uintptr())
     self.last_start_preinit_count <- 0
     if self.dynamic_info.preinit_array_virtual_addr != 0 and self.dynamic_info.preinit_array_size >= 8:
         self.last_start_preinit_count <- self.dynamic_info.preinit_array_size / 8
@@ -307,6 +318,7 @@ def Module_Start(self: mutable Module&, args: u64, argp: void&?, param: void&?) 
             Module_CallGuestInitArray(self, self.dynamic_info.init_array_virtual_addr, self.dynamic_info.init_array_size)
     if GuestExec_IsEnabled():
         GuestExec_RunModuleEntry(self.last_start_entry_addr, args.int(), argp, false)
+    ge_emergency_mark(GE_EV_MODULE_START_END, self.last_start_entry_addr, result.u64().uintptr(), self.last_start_preinit_count.uintptr(), self.last_start_init_count.uintptr())
     return result
 
 def Module_LoadModuleToMemory(self: mutable Module&, memory: mutable MemoryManager&, max_tls_index: mutable u32&) -> void:
