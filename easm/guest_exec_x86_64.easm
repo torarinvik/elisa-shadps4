@@ -10,7 +10,7 @@ export def ElisaGuestExec_CurrentStackPointerAsm() -> uintptr abi c:
         movq %rsp, %rax
         ret
 
-export def ElisaTls_LoadFsSelectorAsm(selector: u16) -> void abi c:
+export def ElisaTls_LoadGuestFsSelectorAsm(selector: GuestFsSelector) -> void abi c:
     inputs: selector = rdi
     clobbers: memory
     stack: unchanged
@@ -18,6 +18,18 @@ export def ElisaTls_LoadFsSelectorAsm(selector: u16) -> void abi c:
     requires: x86_64.segment.fs, x86_64.segment.write, x86_64.segment.persistent
     body:
         movw %di, %fs
+        state fs: guest
+        ret
+
+export def ElisaTls_LoadHostFsSelectorAsm(selector: HostFsSelector) -> void abi c:
+    inputs: selector = rdi
+    clobbers: memory
+    stack: unchanged
+    control: returns
+    requires: x86_64.segment.fs, x86_64.segment.write, x86_64.segment.persistent
+    body:
+        movw %di, %fs
+        state fs: host
         ret
 
 export def ElisaTls_ReadFsSelectorAsm() -> u16 abi c:
@@ -52,7 +64,7 @@ export def ElisaTls_AtomicExchangeU32Asm(ptr: uintptr, value: u32) -> u32 abi c:
         xchgl %eax, (%rdi)
         ret
 
-export def ElisaGuestExec_EnterMainEntryAsm(params: uintptr, exit_func: uintptr) -> void abi c:
+export def ElisaGuestExec_EnterMainEntryAsm(params: HostPtr[void], exit_func: ExitFunction) -> void abi c:
     inputs: params = rdi, exit_func = rsi
     clobbers: rax, rsi, rdi, r9, r10, r11, rsp, cc, memory
     stack: synthetic, aligned 16, noreturn
@@ -79,7 +91,7 @@ export def ElisaGuestExec_AeroLibFallbackUnknownStubAsm() -> u64 abi c:
         xorq %rax, %rax
         ret
 
-export def ElisaGuestExec_CallMainEntryAsm(entry: uintptr, params: uintptr, exit_func: uintptr) -> void abi c:
+export def ElisaGuestExec_CallMainEntryAsm(entry: GuestEntryPoint, params: HostPtr[void], exit_func: ExitFunction) -> void abi c:
     inputs: entry = rdi, params = rsi, exit_func = rdx
     clobbers: rax, rcx, rdx, rsi, rdi, r8, r9, r10, r11, r12, rsp, cc, memory
     preserves: r12, callee_saved
@@ -103,7 +115,7 @@ export def ElisaGuestExec_CallMainEntryAsm(entry: uintptr, params: uintptr, exit
         popq %r12
         ret
 
-export def ElisaGuestExec_JumpMainEntryAsm(entry: uintptr, params: uintptr, exit_func: uintptr) -> void abi c:
+export def ElisaGuestExec_JumpMainEntryAsm(entry: GuestEntryPoint, params: HostPtr[void], exit_func: ExitFunction) -> void abi c:
     inputs: entry = rdi, params = rsi, exit_func = rdx
     clobbers: rax, rsi, rdi, r9, r10, r11, rsp, cc, memory
     stack: synthetic, aligned 16, noreturn
@@ -121,7 +133,27 @@ export def ElisaGuestExec_JumpMainEntryAsm(entry: uintptr, params: uintptr, exit
         movq %r9, %rsi
         jmp *%r11
 
-export def ElisaGuestExec_JumpMainEntryOnStackAsm(entry: uintptr, params: uintptr, exit_func: uintptr, stack_top: uintptr) -> void abi c:
+export def ElisaGuestExec_JumpMainEntryWithFsAsm(entry: GuestEntryPoint, params: HostPtr[void], exit_func: ExitFunction, guest_fs_selector: GuestFsSelector) -> void abi c:
+    inputs: entry = rdi, params = rsi, exit_func = rdx, guest_fs_selector = rcx
+    clobbers: rax, rsi, rdi, r9, r10, r11, rsp, cc, memory
+    stack: synthetic, aligned 16, noreturn
+    control: noreturn, tail_jumps
+    requires: control.indirect, x86_64.segment.fs, x86_64.segment.write, x86_64.segment.persistent
+    body:
+        movq %rdi, %r11
+        movq %rsi, %r10
+        movq %rdx, %r9
+        andq $-16, %rsp
+        subq $8, %rsp
+        pushq 8(%r10)
+        pushq 0(%r10)
+        movq %r10, %rdi
+        movq %r9, %rsi
+        movw %cx, %fs
+        state fs: guest
+        jmp *%r11
+
+export def ElisaGuestExec_JumpMainEntryOnStackAsm(entry: GuestEntryPoint, params: HostPtr[void], exit_func: ExitFunction, stack_top: GuestStackTop) -> void abi c:
     inputs: entry = rdi, params = rsi, exit_func = rdx, stack_top = rcx
     clobbers: rax, rsi, rdi, r9, r10, r11, rsp, cc, memory
     stack: switches, owns, aligned 16, noreturn
@@ -139,4 +171,26 @@ export def ElisaGuestExec_JumpMainEntryOnStackAsm(entry: uintptr, params: uintpt
         pushq 0(%r10)
         movq %r10, %rdi
         movq %r9, %rsi
+        jmp *%r11
+
+export def ElisaGuestExec_JumpMainEntryOnStackWithFsAsm(entry: GuestEntryPoint, params: HostPtr[void], exit_func: ExitFunction, stack_top: GuestStackTop, guest_fs_selector: GuestFsSelector) -> void abi c:
+    inputs: entry = rdi, params = rsi, exit_func = rdx, stack_top = rcx, guest_fs_selector = r8
+    clobbers: rax, rsi, rdi, r9, r10, r11, rsp, cc, memory
+    stack: switches, owns, aligned 16, noreturn
+    control: noreturn, tail_jumps
+    requires: control.indirect, x86_64.segment.fs, x86_64.segment.write, x86_64.segment.persistent
+    body:
+        movq %rdi, %r11
+        movq %rsi, %r10
+        movq %rdx, %r9
+        movq %rcx, %rsp
+        subq $8, %rsp
+        andq $-16, %rsp
+        subq $8, %rsp
+        pushq 8(%r10)
+        pushq 0(%r10)
+        movq %r10, %rdi
+        movq %r9, %rsi
+        movw %r8w, %fs
+        state fs: guest
         jmp *%r11

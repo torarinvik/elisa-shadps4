@@ -152,6 +152,7 @@ const GE_DEBUG_TRAP_THREAD_AFFINITY_STATUS: s32 = -93
 const GE_DEBUG_TRAP_GUEST_PTR_UNMAPPED_STATUS: s32 = -94
 const GE_DEBUG_TRAP_FS_STATE_STATUS: s32 = -95
 const GE_AFFINITY_SLOTS: usize = 16usize
+const GE_HOST_FS_ENTRY_THUNK_SIZE: u64 = 22u64
 
 struct GeNativeRegion:
     base: mutable uintptr
@@ -168,6 +169,8 @@ global mutable ge_publish_executable_reject_count: u64 = 0u64
 global mutable ge_publish_executable_last_addr: uintptr = 0.uintptr()
 global mutable ge_publish_executable_last_size: u64 = 0u64
 global mutable ge_publish_executable_last_prot: u32 = 0u32
+global mutable ge_signal_handler_entry_thunk: uintptr = 0.uintptr()
+global mutable ge_alarm_handler_entry_thunk: uintptr = 0.uintptr()
 global mutable ge_publish_executable_last_result: s32 = 0
 global mutable ge_published_exec_bases: uintptr[2048] = zeroed
 global mutable ge_published_exec_sizes: u64[2048] = zeroed
@@ -803,7 +806,57 @@ def c_GuestExec_WriteU64(address: uintptr, value: u64) -> s32:
     ge_flush_instruction_cache(address, 8u64)
     return 0
 
-def c_GuestExec_PublishExecutableCode(address: uintptr, size: u64) -> s32:
+def ge_write_u16_le(out: mutable u8&, offset: usize, value: u16) -> void:
+    out[offset] <- (value & 0xffu16).u8()
+    out[offset + 1usize] <- ((value >> 8u16) & 0xffu16).u8()
+
+def ge_write_u64_le(out: mutable u8&, offset: usize, value: u64) -> void:
+    i: mutable usize = 0usize
+    while i < 8usize:
+        shift: u64 = i.u64() * 8u64
+        out[offset + i] <- ((value >> shift) & 0xffu64).u8()
+        i <- i + 1usize
+
+def ge_create_host_fs_entry_thunk(target: uintptr) -> uintptr can[Unsafe.MachineCodeBuilder, Unsafe.ExecutableCodePublish]:
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        if target == 0.uintptr():
+            return 0.uintptr()
+        host_selector: u16 = TLS_CaptureHostFsSelector()
+        code: mutable u8[22] = zeroed
+        # movw $host_selector, %r10w; movw %r10w, %fs
+        code[0] <- 0x66u8
+        code[1] <- 0x41u8
+        code[2] <- 0xBAu8
+        ge_write_u16_le(code[0].ref[mutable u8&], 3usize, host_selector)
+        code[5] <- 0x66u8
+        code[6] <- 0x41u8
+        code[7] <- 0x8Eu8
+        code[8] <- 0xE2u8
+        # movabs $target, %r11; jmp *%r11
+        code[9] <- 0x49u8
+        code[10] <- 0xBBu8
+        ge_write_u64_le(code[0].ref[mutable u8&], 11usize, target.u64())
+        code[19] <- 0x41u8
+        code[20] <- 0xFFu8
+        code[21] <- 0xE3u8
+        thunk: uintptr = c_GuestExec_AllocateRegion(4096u64, 5u32)
+        if thunk == 0.uintptr():
+            return target
+        can Memory:
+            if c_GuestExec_WriteBytes(thunk, code[0].ref[void&], GE_HOST_FS_ENTRY_THUNK_SIZE) != 0:
+                return target
+        can Unsafe.ExecutableCodePublish:
+            if c_GuestExec_PublishExecutableCode(thunk, GE_HOST_FS_ENTRY_THUNK_SIZE) != 0:
+                return target
+        return thunk
+    static else:
+        return target
+
+def ge_create_host_fs_entry_thunk_trusted(target: uintptr) -> uintptr:
+    trusted Unsafe.MachineCodeBuilder, Unsafe.ExecutableCodePublish:
+        return ge_create_host_fs_entry_thunk(target)
+
+def c_GuestExec_PublishExecutableCode(address: uintptr, size: u64) -> s32 can[Unsafe.ExecutableCodePublish]:
     ge_publish_executable_last_addr <- address
     ge_publish_executable_last_size <- size
     ge_publish_executable_last_prot <- ge_native_prot_at(address, size)
@@ -1102,7 +1155,12 @@ def ge_resolve_pc_symbol(address: uintptr, is_stack: bool) -> void:
 
 def ge_install_guards() -> void:
     sa: mutable GeSigaction = zeroed
-    sa.handler <- ge_signal_handler as void&?
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        if ge_signal_handler_entry_thunk == 0.uintptr():
+            ge_signal_handler_entry_thunk <- ge_create_host_fs_entry_thunk_trusted((ge_signal_handler as void&?).uintptr())
+        sa.handler <- ge_addr_to_ptr(ge_signal_handler_entry_thunk)
+    static else:
+        sa.handler <- ge_signal_handler as void&?
     sa.mask <- 0u32
     sa.flags <- ge_sa_siginfo()
     _ = ge_sigaction(GE_SIG_SEGV, sa.ref[void&], ge_old_segv.ref[void&])
@@ -1111,7 +1169,12 @@ def ge_install_guards() -> void:
     _ = ge_sigaction(GE_SIG_FPE, sa.ref[void&], ge_old_fpe.ref[void&])
     _ = ge_sigaction(GE_SIG_TRAP, sa.ref[void&], ge_old_trap.ref[void&])
     alarm_sa: mutable GeSigaction = zeroed
-    alarm_sa.handler <- ge_alarm_handler as void&?
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        if ge_alarm_handler_entry_thunk == 0.uintptr():
+            ge_alarm_handler_entry_thunk <- ge_create_host_fs_entry_thunk_trusted((ge_alarm_handler as void&?).uintptr())
+        alarm_sa.handler <- ge_addr_to_ptr(ge_alarm_handler_entry_thunk)
+    static else:
+        alarm_sa.handler <- ge_alarm_handler as void&?
     alarm_sa.mask <- 0u32
     alarm_sa.flags <- 0
     _ = ge_sigaction(GE_SIG_ALRM, alarm_sa.ref[void&], ge_old_alrm.ref[void&])
@@ -1126,6 +1189,9 @@ def ge_restore_guards() -> void:
 
 @c_abi(c)
 def ge_alarm_handler(sig: int) -> void:
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        can Unsafe.SegmentMutation:
+            TLS_RestoreHostFsSelector()
     _ = sig
     ge_set_native_phase(GE_PHASE_ALARM_HANDLER_ENTERED)
     ge_timeout_fired <- 1
@@ -1156,6 +1222,9 @@ def ge_alarm_handler(sig: int) -> void:
 
 @c_abi(c)
 def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        can Unsafe.SegmentMutation:
+            TLS_RestoreHostFsSelector()
     ge_set_native_phase(GE_PHASE_SIGNAL_HANDLER_ENTERED)
     ge_last_status <- (0 - sig).s32()
     ge_last_signal <- sig.s32()
@@ -1274,10 +1343,12 @@ extern ge_exit_now(code: int) -> void
 extern ge_pause() -> int
 extern memset(dest: mutable void&, value: int, n: usize) -> mutable void&
 extern ElisaGuestExec_CurrentStackPointerAsm() -> uintptr
-extern ElisaGuestExec_EnterMainEntryAsm(params: uintptr, exit_func: uintptr) -> void
-extern ElisaGuestExec_CallMainEntryAsm(entry: uintptr, params: uintptr, exit_func: uintptr) -> void
-extern ElisaGuestExec_JumpMainEntryAsm(entry: uintptr, params: uintptr, exit_func: uintptr) -> void
-extern ElisaGuestExec_JumpMainEntryOnStackAsm(entry: uintptr, params: uintptr, exit_func: uintptr, stack_top: uintptr) -> void
+extern ElisaGuestExec_EnterMainEntryAsm(params: HostPtr[void], exit_func: ExitFunction) -> void
+extern ElisaGuestExec_CallMainEntryAsm(entry: GuestEntryPoint, params: HostPtr[void], exit_func: ExitFunction) -> void
+extern ElisaGuestExec_JumpMainEntryAsm(entry: GuestEntryPoint, params: HostPtr[void], exit_func: ExitFunction) -> void
+extern ElisaGuestExec_JumpMainEntryOnStackAsm(entry: GuestEntryPoint, params: HostPtr[void], exit_func: ExitFunction, stack_top: GuestStackTop) -> void
+extern ElisaGuestExec_JumpMainEntryWithFsAsm(entry: GuestEntryPoint, params: HostPtr[void], exit_func: ExitFunction, guest_fs_selector: GuestFsSelector) -> void
+extern ElisaGuestExec_JumpMainEntryOnStackWithFsAsm(entry: GuestEntryPoint, params: HostPtr[void], exit_func: ExitFunction, stack_top: GuestStackTop, guest_fs_selector: GuestFsSelector) -> void
 extern ElisaGuestExec_AeroLibFallbackUnknownStubAsm() -> u64
 
 global mutable ge_fork_report_addr: uintptr = 0.uintptr()
@@ -1360,12 +1431,19 @@ def ge_call_main_entry(params: mutable GuestEntryParams&, exit_func: uintptr) ->
     ef: mutable uintptr = exit_func
     if ef == 0.uintptr():
         ef <- ge_default_exit as uintptr
-    ElisaGuestExec_CallMainEntryAsm(params.entry_addr, params.ref[void&].uintptr(), ef)
+    ElisaGuestExec_CallMainEntryAsm(params.entry_addr.cast[GuestEntryPoint], params.ref[void&].uintptr().cast[HostPtr[void]], ef.cast[ExitFunction])
 
 def ge_jump_main_entry(params: mutable GuestEntryParams&, exit_func: uintptr) -> void:
     ef: mutable uintptr = exit_func
     if ef == 0.uintptr():
         ef <- ge_default_exit as uintptr
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        guarded_exit_addr: uintptr = ge_guarded_exit as uintptr
+        if ef == guarded_exit_addr:
+            ef <- ge_create_host_fs_entry_thunk_trusted(ef)
+    guest_fs_selector: mutable GuestFsSelector = 0u16.cast[GuestFsSelector]
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        guest_fs_selector <- TLS_PrepareTcbBase(TLS_PrimaryTcbBase().cast[void&?])
     ge_prejump_rdi <- params.ref[void&].uintptr()
     ge_prejump_rsi <- ef
     ge_prejump_rsp <- params.ref[void&].uintptr()
@@ -1375,9 +1453,14 @@ def ge_jump_main_entry(params: mutable GuestEntryParams&, exit_func: uintptr) ->
         fr.prejump_rsi <- ge_prejump_rsi
         fr.prejump_rsp <- ge_prejump_rsp
     ge_observe_fs_owner("pre-main-host-before-easm", false)
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        if guest_fs_selector != 0u16:
+            if guest_exec_main_stack_top != 0.uintptr():
+                ElisaGuestExec_JumpMainEntryOnStackWithFsAsm(params.entry_addr.cast[GuestEntryPoint], ge_prejump_rdi.cast[HostPtr[void]], ef.cast[ExitFunction], guest_exec_main_stack_top.cast[GuestStackTop], guest_fs_selector)
+            ElisaGuestExec_JumpMainEntryWithFsAsm(params.entry_addr.cast[GuestEntryPoint], ge_prejump_rdi.cast[HostPtr[void]], ef.cast[ExitFunction], guest_fs_selector)
     if guest_exec_main_stack_top != 0.uintptr():
-        ElisaGuestExec_JumpMainEntryOnStackAsm(params.entry_addr, ge_prejump_rdi, ef, guest_exec_main_stack_top)
-    ElisaGuestExec_JumpMainEntryAsm(params.entry_addr, ge_prejump_rdi, ef)
+        ElisaGuestExec_JumpMainEntryOnStackAsm(params.entry_addr.cast[GuestEntryPoint], ge_prejump_rdi.cast[HostPtr[void]], ef.cast[ExitFunction], guest_exec_main_stack_top.cast[GuestStackTop])
+    ElisaGuestExec_JumpMainEntryAsm(params.entry_addr.cast[GuestEntryPoint], ge_prejump_rdi.cast[HostPtr[void]], ef.cast[ExitFunction])
 
 def ge_absorb_fork_report() -> void:
     fr: ElisaGuestExecForkReport&? = ge_fork_report
@@ -2033,7 +2116,7 @@ def ge_run_main_entry(params: mutable GuestEntryParams&, exit_func: void&?) -> v
         ef: mutable uintptr = exit_func.uintptr()
         if ef == 0.uintptr():
             ef <- ge_default_exit as uintptr
-        ElisaGuestExec_EnterMainEntryAsm(params.ref[void&].uintptr(), ef)
+        ElisaGuestExec_EnterMainEntryAsm(params.ref[void&].uintptr().cast[HostPtr[void]], ef.cast[ExitFunction])
     static else:
         _ = params
         _ = exit_func
@@ -2058,7 +2141,7 @@ def ge_prepare_main_entry_snapshot(params: mutable GuestEntryParams&) -> void:
         fr.entry_native_word1 <- ge_entry_native_word1
         fr.entry_native_prot <- ge_entry_native_prot
 
-def ge_run_main_entry_guarded_in_process(params: mutable GuestEntryParams&, timeout_ms: u32) -> s32:
+def ge_run_main_entry_guarded_in_process(params: mutable GuestEntryParams&, timeout_ms: u32) -> s32 can[Unsafe.SegmentMutation]:
     ge_set_native_phase(GE_PHASE_FUNCTION_ENTRY)
     if params.entry_addr == 0.uintptr():
         ge_reset_crash_state()
@@ -2075,6 +2158,9 @@ def ge_run_main_entry_guarded_in_process(params: mutable GuestEntryParams&, time
         ge_arm_timer(timeout_ms)
         ge_set_native_phase(GE_PHASE_SYNTHETIC_BEFORE_SIGSETJMP)
         if ge_sigsetjmp(ge_jmp_buf[0usize].ref[void&], 1) != 0:
+            static if PLATFORM_APPLE and ARCH_X86_64:
+                can Unsafe.SegmentMutation:
+                    TLS_RestoreHostFsSelector()
             ge_disarm_timer()
             ge_guard_active <- 0
             ge_restore_guards()
@@ -2242,8 +2328,9 @@ def c_GuestExec_RunMainEntry(params: mutable GuestEntryParams&, exit_func: void&
 def c_GuestExec_RunMainEntryGuarded(params: mutable GuestEntryParams&, timeout_ms: u32) -> s32:
     return ge_run_main_entry_guarded(params, timeout_ms)
 
-def c_GuestExec_RunMainEntryGuardedInProcess(params: mutable GuestEntryParams&, timeout_ms: u32) -> s32:
-    return ge_run_main_entry_guarded_in_process(params, timeout_ms)
+def c_GuestExec_RunMainEntryGuardedInProcess(params: mutable GuestEntryParams&, timeout_ms: u32) -> s32 can[Unsafe.SegmentMutation]:
+    can Unsafe.SegmentMutation:
+        return ge_run_main_entry_guarded_in_process(params, timeout_ms)
 
 def c_GuestExec_RunSyntheticFunction(entry_addr: uintptr, arg0: u64, arg1: u64) -> u64:
     return ge_run_synthetic_function(entry_addr, arg0, arg1)
@@ -3403,12 +3490,13 @@ def GuestExec_WriteU64(address: VAddr, value: u64) -> bool:
         return false
     return c_GuestExec_WriteU64(address, value) == 0
 
-def GuestExec_PublishExecutableCode(address: VAddr, size: u64) -> bool:
+def GuestExec_PublishExecutableCode(address: VAddr, size: u64) -> bool can[Unsafe.ExecutableCodePublish]:
     if not GuestExec_IsEnabled():
         return false
     if not GuestExec_IsSupported():
         return false
-    return c_GuestExec_PublishExecutableCode(address, size) == 0
+    can Unsafe.ExecutableCodePublish:
+        return c_GuestExec_PublishExecutableCode(address, size) == 0
 
 def GuestExec_NativeRegionCount() -> u32:
     if not GuestExec_IsEnabled() or not GuestExec_IsSupported():
@@ -3630,7 +3718,7 @@ def GuestExec_RunMainEntryGuarded(entry_addr: VAddr, argc: int, argv: void&?, ti
         guest_exec_execution_stage <- GUEST_EXEC_STAGE_FIRST_BOUNDARY
     return status
 
-def GuestExec_RunMainEntryGuardedInProcess(entry_addr: VAddr, argc: int, argv: void&?, timeout_ms: u32) -> s32:
+def GuestExec_RunMainEntryGuardedInProcess(entry_addr: VAddr, argc: int, argv: void&?, timeout_ms: u32) -> s32 can[Unsafe.SegmentMutation]:
     if entry_addr == 0.uintptr():
         guest_exec_last_game_execution_status <- -1
         return -1
@@ -3648,7 +3736,9 @@ def GuestExec_RunMainEntryGuardedInProcess(entry_addr: VAddr, argc: int, argv: v
         params.argv[0] <- argv.cast[static u8&?]
     elif guest_exec_last_argv0 != null:
         params.argv[0] <- guest_exec_last_argv0
-    status: s32 = c_GuestExec_RunMainEntryGuardedInProcess(params.ref[mutable GuestEntryParams&], timeout_ms)
+    status: mutable s32 = 0
+    can Unsafe.SegmentMutation:
+        status <- c_GuestExec_RunMainEntryGuardedInProcess(params.ref[mutable GuestEntryParams&], timeout_ms)
     guest_exec_last_game_execution_status <- status
     GuestExec_AbsorbNativeBoundaryReport()
     if not guest_exec_first_boundary_reached:

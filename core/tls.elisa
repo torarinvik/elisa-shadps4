@@ -11,7 +11,8 @@ extern mmap(addr: uintptr, length: usize, prot: int, flags: int, fd: int, offset
 @link_name(i386_set_ldt)
 extern tls_i386_set_ldt(start: int, desc: void&, num: int) -> int
 
-extern ElisaTls_LoadFsSelectorAsm(selector: u16) -> void can[Unsafe.SegmentMutation]
+extern ElisaTls_LoadGuestFsSelectorAsm(selector: GuestFsSelector) -> void can[Unsafe.SegmentMutation]
+extern ElisaTls_LoadHostFsSelectorAsm(selector: HostFsSelector) -> void can[Unsafe.SegmentMutation]
 extern ElisaTls_ReadFsSelectorAsm() -> u16
 extern ElisaTls_ReadFs0Asm() -> uintptr
 extern ElisaTls_AtomicExchangeU32Asm(ptr: uintptr, value: u32) -> u32
@@ -92,56 +93,75 @@ def TLS_LdtUnlock() -> void:
     static if PLATFORM_APPLE and ARCH_X86_64:
         tls_darwin_ldt_lock <- 0u32
 
-def SetTcbBase(image_address: void&?) -> void can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall]:
-    base: mutable uintptr = 0.uintptr()
-    if image_address != null:
-        base <- image_address.cast[uintptr]
-    static if PLATFORM_APPLE and ARCH_X86_64:
-        TLS_LdtLock()
-        if not tls_darwin_ldt_initialized:
-            mapped: uintptr = mmap(TLS_DARWIN_LDT_REGION_BASE, TLS_DARWIN_LDT_REGION_SIZE, 3, 0x1012, -1, 0i64)
-            tls_debug_last_mmap <- mapped
-            if mapped == Tls_MapFailed():
-                TLS_LdtUnlock()
-                return
-            tls_darwin_ldt_initialized <- true
-        ldt_index: u16 = tls_darwin_next_ldt_index
-        max_index: u16 = TLS_DARWIN_LDT_INDEX_BASE + (TLS_DARWIN_LDT_REGION_SIZE / TLS_DARWIN_LDT_BLOCK_SIZE.usize()).u16()
-        if ldt_index >= max_index:
-            tls_debug_ldt_exhausted_count <- tls_debug_ldt_exhausted_count + 1u64
-            TLS_LdtUnlock()
-            return
-        tls_darwin_next_ldt_index <- tls_darwin_next_ldt_index + 1u16
-        tls_darwin_ldt_index <- ldt_index
-        ldt_addr: uintptr = TLS_DARWIN_LDT_REGION_BASE + ((ldt_index - TLS_DARWIN_LDT_INDEX_BASE).uintptr() * TLS_DARWIN_LDT_BLOCK_SIZE)
-        tls_debug_last_ldt_addr <- ldt_addr
-        desc: mutable DarwinLdtEntry = zeroed
-        desc.limit00 <- (TLS_DARWIN_LDT_BLOCK_SIZE - 1.uintptr()).u16()
-        desc.base00 <- (ldt_addr & 0xffff.uintptr()).u16()
-        desc.base16 <- ((ldt_addr >> 16.uintptr()) & 0xff.uintptr()).u8()
-        desc.access <- TLS_DARWIN_LDT_ACCESS
-        desc.flags <- TLS_DARWIN_LDT_FLAGS
-        desc.base24 <- ((ldt_addr >> 24.uintptr()) & 0xff.uintptr()).u8()
-        ret: int = tls_i386_set_ldt(ldt_index.int(), desc.ref[void&], 1)
-        tls_debug_last_ldt_ret <- ret
-        if ret == ldt_index.int():
-            selector: u16 = ((ldt_index << 3u16) | 7u16)
-            tls_debug_last_selector <- selector
-            if not tls_host_fs_selector_captured:
-                tls_host_fs_selector <- ElisaTls_ReadFsSelectorAsm()
-                tls_host_fs_selector_captured <- true
-            tls_guest_fs_selector <- selector
-            page: mutable DarwinLdtPage&? = ldt_addr.cast[mutable DarwinLdtPage&?]
-            if page != null:
-                page.tcb <- base
-                page.index <- ldt_index
-            can Unsafe.SegmentMutation:
-                ElisaTls_LoadFsSelectorAsm(selector)
-            tls_debug_last_fs0 <- ElisaTls_ReadFs0Asm()
-        TLS_LdtUnlock()
+def TLS_RecordPreparedTcbBase(base: uintptr) -> void:
     tls_main_tcb.tcb_self <- base
     tls_main_tcb.tcb_thread <- base
     tls_initialized <- true
+
+def TLS_PrepareTcbBase(image_address: void&?) -> GuestFsSelector:
+    base: mutable uintptr = 0.uintptr()
+    if image_address != null:
+        base <- image_address.cast[uintptr]
+    result: mutable GuestFsSelector = 0u16.cast[GuestFsSelector]
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        TLS_LdtLock()
+        if tls_guest_fs_selector != 0u16:
+            result <- tls_guest_fs_selector.cast[GuestFsSelector]
+            ldt_addr_existing: uintptr = TLS_DARWIN_LDT_REGION_BASE + ((tls_darwin_ldt_index - TLS_DARWIN_LDT_INDEX_BASE).uintptr() * TLS_DARWIN_LDT_BLOCK_SIZE)
+            tls_debug_last_ldt_addr <- ldt_addr_existing
+            page_existing: mutable DarwinLdtPage&? = ldt_addr_existing.cast[mutable DarwinLdtPage&?]
+            if page_existing != null:
+                page_existing.tcb <- base
+                page_existing.index <- tls_darwin_ldt_index
+        else:
+            if not tls_darwin_ldt_initialized:
+                mapped: uintptr = mmap(TLS_DARWIN_LDT_REGION_BASE, TLS_DARWIN_LDT_REGION_SIZE, 3, 0x1012, -1, 0i64)
+                tls_debug_last_mmap <- mapped
+                if mapped != Tls_MapFailed():
+                    tls_darwin_ldt_initialized <- true
+            if tls_darwin_ldt_initialized:
+                ldt_index: u16 = tls_darwin_next_ldt_index
+                max_index: u16 = TLS_DARWIN_LDT_INDEX_BASE + (TLS_DARWIN_LDT_REGION_SIZE / TLS_DARWIN_LDT_BLOCK_SIZE.usize()).u16()
+                if ldt_index >= max_index:
+                    tls_debug_ldt_exhausted_count <- tls_debug_ldt_exhausted_count + 1u64
+                else:
+                    tls_darwin_next_ldt_index <- tls_darwin_next_ldt_index + 1u16
+                    tls_darwin_ldt_index <- ldt_index
+                    ldt_addr: uintptr = TLS_DARWIN_LDT_REGION_BASE + ((ldt_index - TLS_DARWIN_LDT_INDEX_BASE).uintptr() * TLS_DARWIN_LDT_BLOCK_SIZE)
+                    tls_debug_last_ldt_addr <- ldt_addr
+                    desc: mutable DarwinLdtEntry = zeroed
+                    desc.limit00 <- (TLS_DARWIN_LDT_BLOCK_SIZE - 1.uintptr()).u16()
+                    desc.base00 <- (ldt_addr & 0xffff.uintptr()).u16()
+                    desc.base16 <- ((ldt_addr >> 16.uintptr()) & 0xff.uintptr()).u8()
+                    desc.access <- TLS_DARWIN_LDT_ACCESS
+                    desc.flags <- TLS_DARWIN_LDT_FLAGS
+                    desc.base24 <- ((ldt_addr >> 24.uintptr()) & 0xff.uintptr()).u8()
+                    ret: int = tls_i386_set_ldt(ldt_index.int(), desc.ref[void&], 1)
+                    tls_debug_last_ldt_ret <- ret
+                    if ret == ldt_index.int():
+                        selector: u16 = ((ldt_index << 3u16) | 7u16)
+                        tls_debug_last_selector <- selector
+                        tls_guest_fs_selector <- selector
+                        result <- selector.cast[GuestFsSelector]
+                        page: mutable DarwinLdtPage&? = ldt_addr.cast[mutable DarwinLdtPage&?]
+                        if page != null:
+                            page.tcb <- base
+                            page.index <- ldt_index
+            if not tls_host_fs_selector_captured:
+                tls_host_fs_selector <- ElisaTls_ReadFsSelectorAsm()
+                tls_host_fs_selector_captured <- true
+        TLS_LdtUnlock()
+    TLS_RecordPreparedTcbBase(base)
+    return result
+
+def SetTcbBase(image_address: void&?) -> void can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall]:
+    selector: mutable GuestFsSelector = 0u16.cast[GuestFsSelector]
+    selector <- TLS_PrepareTcbBase(image_address)
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        if selector != 0u16:
+            can Unsafe.SegmentMutation:
+                ElisaTls_LoadGuestFsSelectorAsm(selector)
+            tls_debug_last_fs0 <- ElisaTls_ReadFs0Asm()
 
 def GetTcbBase() -> mutable Tcb&:
     static if PLATFORM_APPLE and ARCH_X86_64:
@@ -213,31 +233,31 @@ def TLS_DebugLdtLockSpins() -> u64:
 def TLS_DebugLdtExhaustedCount() -> u64:
     return tls_debug_ldt_exhausted_count
 
-def TLS_CaptureHostFsSelector() -> u16:
+def TLS_CaptureHostFsSelector() -> HostFsSelector:
     static if PLATFORM_APPLE and ARCH_X86_64:
         if not tls_host_fs_selector_captured:
             tls_host_fs_selector <- ElisaTls_ReadFsSelectorAsm()
             tls_host_fs_selector_captured <- true
-        return tls_host_fs_selector
+        return tls_host_fs_selector.cast[HostFsSelector]
     static else:
-        return 0u16
+        return 0u16.cast[HostFsSelector]
 
-def TLS_HostFsSelector() -> u16:
-    return tls_host_fs_selector
+def TLS_HostFsSelector() -> HostFsSelector:
+    return tls_host_fs_selector.cast[HostFsSelector]
 
 def TLS_RestoreHostFsSelector() -> void can[Unsafe.SegmentMutation]:
     static if PLATFORM_APPLE and ARCH_X86_64:
         if tls_host_fs_selector_captured:
             can Unsafe.SegmentMutation:
-                ElisaTls_LoadFsSelectorAsm(tls_host_fs_selector)
+                ElisaTls_LoadHostFsSelectorAsm(tls_host_fs_selector.cast[HostFsSelector])
 
-def TLS_GuestFsSelector() -> u16:
+def TLS_GuestFsSelector() -> GuestFsSelector:
     static if PLATFORM_APPLE and ARCH_X86_64:
         if tls_guest_fs_selector != 0u16:
-            return tls_guest_fs_selector
-        return ((tls_darwin_ldt_index << 3u16) | 7u16)
+            return tls_guest_fs_selector.cast[GuestFsSelector]
+        return ((tls_darwin_ldt_index << 3u16) | 7u16).cast[GuestFsSelector]
     static else:
-        return 0u16
+        return 0u16.cast[GuestFsSelector]
 
 def TLS_SetPrimaryTcbBase(base: uintptr) -> void:
     tls_primary_tcb_base <- base
@@ -361,4 +381,4 @@ def TLS_ReturnGuestFromHost() -> void can[Unsafe.SegmentMutation]:
     static if PLATFORM_APPLE and ARCH_X86_64:
         if tls_guest_fs_selector != 0u16:
             can Unsafe.SegmentMutation:
-                ElisaTls_LoadFsSelectorAsm(tls_guest_fs_selector)
+                ElisaTls_LoadGuestFsSelectorAsm(tls_guest_fs_selector.cast[GuestFsSelector])
