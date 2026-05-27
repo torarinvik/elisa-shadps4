@@ -175,8 +175,8 @@ global mutable ge_publish_executable_reject_count: u64 = 0u64
 global mutable ge_publish_executable_last_addr: PublishedExecutableAddr = 0.uintptr().cast[PublishedExecutableAddr]
 global mutable ge_publish_executable_last_size: u64 = 0u64
 global mutable ge_publish_executable_last_prot: u32 = 0u32
-global mutable ge_signal_handler_entry_thunk: uintptr = 0.uintptr()
-global mutable ge_alarm_handler_entry_thunk: uintptr = 0.uintptr()
+global mutable ge_signal_handler_entry_thunk: HostSegmentAgnosticEntry = 0.uintptr().cast[HostSegmentAgnosticEntry]
+global mutable ge_alarm_handler_entry_thunk: HostSegmentAgnosticEntry = 0.uintptr().cast[HostSegmentAgnosticEntry]
 global mutable ge_publish_executable_last_result: s32 = 0
 global mutable ge_published_exec_bases: PublishedExecutableAddr[2048] = zeroed
 global mutable ge_published_exec_sizes: u64[2048] = zeroed
@@ -985,10 +985,10 @@ def ge_write_u64_le(out: mutable u8&, offset: usize, value: u64) -> void:
         out[offset + i] <- ((value >> shift) & 0xffu64).u8()
         i <- i + 1usize
 
-def ge_create_host_fs_entry_thunk(target: uintptr) -> uintptr can[Unsafe.MachineCodeBuilder, Unsafe.ExecutableCodePublish]:
+def ge_create_host_fs_entry_thunk(target: uintptr) -> HostSegmentAgnosticEntry can[Unsafe.MachineCodeBuilder, Unsafe.ExecutableCodePublish]:
     static if PLATFORM_APPLE and ARCH_X86_64:
         if target == 0.uintptr():
-            return 0.uintptr()
+            return 0.uintptr().cast[HostSegmentAgnosticEntry]
         _ = TLS_CaptureHostFsSelector()
         host_selector: u16 = TLS_HostFsSelectorRaw()
         code: mutable u8[22] = zeroed
@@ -1010,18 +1010,18 @@ def ge_create_host_fs_entry_thunk(target: uintptr) -> uintptr can[Unsafe.Machine
         code[21] <- 0xE3u8
         thunk: uintptr = c_GuestExec_AllocateRegion(4096u64, 5u32)
         if thunk == 0.uintptr():
-            return target
+            return target.cast[HostSegmentAgnosticEntry]
         can Memory:
             if c_GuestExec_WriteBytes(thunk, code[0].ref[void&], GE_HOST_FS_ENTRY_THUNK_SIZE) != 0:
-                return target
+                return target.cast[HostSegmentAgnosticEntry]
         can Unsafe.ExecutableCodePublish:
             if c_GuestExec_PublishExecutableCode(thunk, GE_HOST_FS_ENTRY_THUNK_SIZE) != 0:
-                return target
-        return thunk
+                return target.cast[HostSegmentAgnosticEntry]
+        return thunk.cast[HostSegmentAgnosticEntry]
     static else:
-        return target
+        return target.cast[HostSegmentAgnosticEntry]
 
-def ge_create_host_fs_entry_thunk_trusted(target: uintptr) -> uintptr:
+def ge_create_host_fs_entry_thunk_trusted(target: uintptr) -> HostSegmentAgnosticEntry:
     trusted Unsafe.MachineCodeBuilder, Unsafe.ExecutableCodePublish:
         return ge_create_host_fs_entry_thunk(target)
 
@@ -1342,9 +1342,9 @@ def ge_resolve_pc_symbol(address: uintptr, is_stack: bool) -> void:
 def ge_install_guards() -> void:
     sa: mutable GeSigaction = zeroed
     static if PLATFORM_APPLE and ARCH_X86_64:
-        if ge_signal_handler_entry_thunk == 0.uintptr():
+        if !ge_signal_handler_entry_thunk == 0.uintptr():
             ge_signal_handler_entry_thunk <- ge_create_host_fs_entry_thunk_trusted((ge_signal_handler as void&?).uintptr())
-        sa.handler <- ge_addr_to_ptr(ge_signal_handler_entry_thunk)
+        sa.handler <- ge_addr_to_ptr(!ge_signal_handler_entry_thunk)
     static else:
         sa.handler <- ge_signal_handler as void&?
     sa.mask <- 0u32
@@ -1356,9 +1356,9 @@ def ge_install_guards() -> void:
     _ = ge_sigaction(GE_SIG_TRAP, sa.ref[void&], ge_old_trap.ref[void&])
     alarm_sa: mutable GeSigaction = zeroed
     static if PLATFORM_APPLE and ARCH_X86_64:
-        if ge_alarm_handler_entry_thunk == 0.uintptr():
+        if !ge_alarm_handler_entry_thunk == 0.uintptr():
             ge_alarm_handler_entry_thunk <- ge_create_host_fs_entry_thunk_trusted((ge_alarm_handler as void&?).uintptr())
-        alarm_sa.handler <- ge_addr_to_ptr(ge_alarm_handler_entry_thunk)
+        alarm_sa.handler <- ge_addr_to_ptr(!ge_alarm_handler_entry_thunk)
     static else:
         alarm_sa.handler <- ge_alarm_handler as void&?
     alarm_sa.mask <- 0u32
@@ -1645,7 +1645,7 @@ def ge_jump_main_entry(params: mutable GuestEntryParams&, exit_func: uintptr) ->
     static if PLATFORM_APPLE and ARCH_X86_64:
         guarded_exit_addr: uintptr = ge_guarded_exit as uintptr
         if ef == guarded_exit_addr:
-            ef <- ge_create_host_fs_entry_thunk_trusted(ef)
+            ef <- !ge_create_host_fs_entry_thunk_trusted(ef)
     guest_fs_selector: mutable GuestFsSelector = 0u32.cast[GuestFsSelector]
     static if PLATFORM_APPLE and ARCH_X86_64:
         guest_fs_selector <- TLS_PrepareTcbBase((!TLS_PrimaryTcbBase()).cast[void&?])
