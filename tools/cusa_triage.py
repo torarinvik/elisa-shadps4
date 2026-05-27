@@ -183,6 +183,15 @@ def main() -> int:
     )
     if runtime_symbol:
         print(f"first_hle={runtime_module}:{runtime_symbol} return=0x{runtime_ret:x}")
+    tls_base = fact_int(facts, "tls_primary_base")
+    tls_size = fact_int(facts, "tls_primary_size")
+    if tls_base and tls_size:
+        print(
+            f"tls_primary=0x{tls_base:x}..0x{tls_base + tls_size:x} "
+            f"arg0_in_tls={fact_int(facts, 'runtime_hle_arg0_in_tls_primary')} "
+            f"trap_in_tls={fact_int(facts, 'debug_trap_value_in_tls_primary')} "
+            f"boundary_in_tls={fact_int(facts, 'boundary_value_in_tls_primary')}"
+        )
     if sample_count:
         print(f"pc_samples={sample_count} last_pc=0x{sample_last_pc:x}")
     if test_after:
@@ -214,6 +223,9 @@ def main() -> int:
         reason_text = BOUNDARY_GUARD_REASONS.get(oracle_meta.a, str(oracle_meta.a)) if oracle_meta else "unknown"
         print("Return-continuation guard stopped the run before a guest crash.")
         print(f"Next fix: explain why the first HLE continuation is {reason_text}.")
+        if fact_int(facts, "runtime_hle_arg0_in_tls_primary") or fact_int(facts, "first_bad_arg0_in_tls_primary") or fact_int(facts, "debug_trap_value_in_tls_primary"):
+            print("TLS provenance lit up: an HLE/debug pointer falls inside the host-allocated primary TLS block.")
+            print("Next fix: allocate/register primary TLS through guest-exec memory, matching shadPS4.")
         if oracle_cont:
             if oracle_cont.b == 0xFFFFFFFF:
                 print("The continuation is not in native executable mappings; compare callsite/PLT/GOT against shadPS4.")

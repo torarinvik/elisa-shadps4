@@ -84,6 +84,11 @@ global mutable linker_tls_last_block_pointer: uintptr = 0.uintptr()
 global mutable linker_tls_last_result: uintptr = 0.uintptr()
 global mutable linker_tls_module0_calls: u64 = 0
 global mutable linker_tls_null_dtv_calls: u64 = 0
+global mutable linker_tls_primary_base: uintptr = 0.uintptr()
+global mutable linker_tls_primary_size: u64 = 0
+global mutable linker_tls_primary_tcb: uintptr = 0.uintptr()
+global mutable linker_tls_primary_dtv_base: uintptr = 0.uintptr()
+global mutable linker_tls_primary_dtv_size: u64 = 0
 
 struct SymbolRecord:
     name: mutable static u8&
@@ -1006,6 +1011,21 @@ def Linker_TlsModule0Calls() -> u64:
 def Linker_TlsNullDtvCalls() -> u64:
     return linker_tls_null_dtv_calls
 
+def Linker_TlsPrimaryBase() -> u64:
+    return linker_tls_primary_base.u64()
+
+def Linker_TlsPrimarySize() -> u64:
+    return linker_tls_primary_size
+
+def Linker_TlsPrimaryTcb() -> u64:
+    return linker_tls_primary_tcb.u64()
+
+def Linker_TlsPrimaryDtvBase() -> u64:
+    return linker_tls_primary_dtv_base.u64()
+
+def Linker_TlsPrimaryDtvSize() -> u64:
+    return linker_tls_primary_dtv_size
+
 def Linker_IsQualifiedImportSymbol(raw_symbol: static u8&) -> bool:
     parsed_nid: mutable static u8& = ""
     parsed_library: mutable static u8& = ""
@@ -1523,6 +1543,12 @@ def Linker_AllocateTlsForThread(self: mutable Linker&, is_primary: bool) -> uint
     if raw == null:
         InitializeTLS()
         fallback: mutable Tcb& = GetTcbBase()
+        fallback_addr: uintptr = fallback.ref[mutable Tcb&].cast[uintptr]
+        linker_tls_primary_base <- fallback_addr
+        linker_tls_primary_size <- 0x40u64
+        linker_tls_primary_tcb <- fallback_addr
+        linker_tls_primary_dtv_base <- 0.uintptr()
+        linker_tls_primary_dtv_size <- 0u64
         if !fallback.tcb_self == 0.uintptr():
             fallback.tcb_self <- fallback.ref[mutable Tcb&].cast[uintptr].cast[SegmentSelfPointer]
         if !fallback.tcb_thread == 0.uintptr():
@@ -1540,12 +1566,17 @@ def Linker_AllocateTlsForThread(self: mutable Linker&, is_primary: bool) -> uint
         dtv_raw: mutable heap void&? = malloc(dtv_count * size_of(DtvEntry))
         if dtv_raw == null:
             return 0.uintptr()
+        linker_tls_primary_base <- base
+        linker_tls_primary_size <- total_tls_size.u64()
+        linker_tls_primary_dtv_base <- dtv_raw.cast[uintptr]
+        linker_tls_primary_dtv_size <- (dtv_count * size_of(DtvEntry)).u64()
         dtv_bytes: mutable u8& = dtv_raw.cast[mutable u8&]
         d: mutable usize = 0
         while d < dtv_count * size_of(DtvEntry):
             dtv_bytes[d] <- 0u8
             d <- d + 1
         tcb_addr: uintptr = base + tls_aligned_size.uintptr()
+        linker_tls_primary_tcb <- tcb_addr
         tcb: mutable Tcb& = tcb_addr.cast[mutable Tcb&]
         dtv: mutable DtvEntry& = dtv_raw.cast[mutable DtvEntry&]
         tcb.tcb_self <- tcb_addr.cast[SegmentSelfPointer]
