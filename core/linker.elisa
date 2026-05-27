@@ -1393,14 +1393,14 @@ def Linker_TlsGetAddr(self: Linker&, module_index: u64, offset: u64) -> GuestVAd
     # in the DTV, NOT in the module's shared static init image. Read
     # tcb_dtv[module_index + 1].pointer + offset.
     tcb: mutable Tcb& = GetTcbBase()
-    dtv_base: uintptr = tcb.tcb_dtv
+    dtv_base: uintptr = !tcb.tcb_dtv
     linker_tls_last_dtv_base <- dtv_base
     if dtv_base != 0.uintptr():
         trusted Unsafe.PointerCast:
             dtv: mutable DtvEntry& = dtv_base.cast[mutable DtvEntry&]
             num_dtvs: usize = dtv[1usize].counter
             if module_index + 1u64 < (num_dtvs.u64() + 2u64):
-                block: uintptr = dtv[(module_index + 1u64).usize()].pointer
+                block: uintptr = !dtv[(module_index + 1u64).usize()].pointer
                 linker_tls_last_block_pointer <- block
                 if block != 0.uintptr():
                     result: uintptr = block + offset.uintptr()
@@ -1437,11 +1437,11 @@ def Linker_AllocateTlsForThread(self: mutable Linker&, is_primary: bool) -> uint
     if raw == null:
         InitializeTLS()
         fallback: mutable Tcb& = GetTcbBase()
-        if fallback.tcb_self == 0.uintptr():
-            fallback.tcb_self <- fallback.ref[mutable Tcb&].cast[uintptr]
-        if fallback.tcb_thread == 0.uintptr():
-            fallback.tcb_thread <- Linker_CurrentThreadObject()
-        TLS_SetPrimaryTcbBase(fallback.ref[mutable Tcb&].cast[uintptr])
+        if !fallback.tcb_self == 0.uintptr():
+            fallback.tcb_self <- fallback.ref[mutable Tcb&].cast[uintptr].cast[SegmentSelfPointer]
+        if !fallback.tcb_thread == 0.uintptr():
+            fallback.tcb_thread <- Linker_CurrentThreadObject().cast[GuestThreadObjectPointer]
+        TLS_SetPrimaryTcbBase(fallback.ref[mutable Tcb&].cast[uintptr].cast[SegmentSelfPointer])
         return fallback.ref[mutable Tcb&].cast[uintptr]
     base: uintptr = raw.cast[uintptr]
     trusted Unsafe.PointerCast:
@@ -1462,10 +1462,10 @@ def Linker_AllocateTlsForThread(self: mutable Linker&, is_primary: bool) -> uint
         tcb_addr: uintptr = base + tls_aligned_size.uintptr()
         tcb: mutable Tcb& = tcb_addr.cast[mutable Tcb&]
         dtv: mutable DtvEntry& = dtv_raw.cast[mutable DtvEntry&]
-        tcb.tcb_self <- tcb_addr
-        tcb.tcb_dtv <- dtv_raw.cast[uintptr]
-        tcb.tcb_thread <- Linker_CurrentThreadObject()
-        tcb.tcb_fiber <- 0.uintptr()
+        tcb.tcb_self <- tcb_addr.cast[SegmentSelfPointer]
+        tcb.tcb_dtv <- dtv_raw.cast[uintptr].cast[GuestDtvPointer]
+        tcb.tcb_thread <- Linker_CurrentThreadObject().cast[GuestThreadObjectPointer]
+        tcb.tcb_fiber <- 0.uintptr().cast[GuestFiberPointer]
         dtv[0usize].counter <- self.dtv_generation_counter.usize()
         dtv[1usize].counter <- self.max_tls_index.usize()
         if self.modules.count > 0:
@@ -1480,9 +1480,9 @@ def Linker_AllocateTlsForThread(self: mutable Linker&, is_primary: bool) -> uint
                     while c < module.tls.init_image_size.usize():
                         dest[c] <- src[c]
                         c <- c + 1
-                dtv[module.tls.modid.usize() + 1usize].pointer <- dest_addr
-        TLS_SetPrimaryTcbBase(tcb_addr)
-        TLS_RegisterPrimaryTemplate(base, total_tls_size, dtv_raw.cast[uintptr], dtv_count)
+                dtv[module.tls.modid.usize() + 1usize].pointer <- dest_addr.cast[GuestTlsBlockPointer]
+        TLS_SetPrimaryTcbBase(tcb_addr.cast[SegmentSelfPointer])
+        TLS_RegisterPrimaryTemplate(base.cast[GuestTlsTemplatePointer], total_tls_size, dtv_raw.cast[uintptr].cast[GuestDtvPointer], dtv_count)
         return tcb_addr
 
 def Linker_FreeTlsForNonPrimaryThread(self: mutable Linker&, pointer: void&?) -> void:
