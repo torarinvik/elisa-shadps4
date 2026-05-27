@@ -122,12 +122,14 @@ extern mmap(addr: uintptr, length: usize, prot: int, flags: int, fd: int, offset
 extern ge_mprotect(addr: uintptr, length: usize, prot: int) -> int
 @link_name(munmap)
 extern ge_munmap(addr: uintptr, length: usize) -> int
+@reentrant_safe
 extern memcpy(dest: mutable void&, src: void&, n: usize) -> mutable void&
 @link_name(sysconf)
 extern ge_sysconf(name: int) -> i64
 @link_name(sys_icache_invalidate)
 extern ge_sys_icache_invalidate(start: uintptr, len: usize) -> void
 
+@reentrant_safe
 def ge_memcpy(dst: void&?, src: void&?, n: usize) -> void&?:
     if dst == null or src == null:
         return dst
@@ -281,6 +283,7 @@ def ge_thread_affinity_check(slot: usize, thread_id: u64) -> bool:
         ge_last_status <- GE_DEBUG_TRAP_THREAD_AFFINITY_STATUS
     return false
 
+@reentrant_safe
 def ge_debug_trace_boundary(label: cstr, a: uintptr, b: uintptr, c: uintptr) -> void:
     static if DEBUG:
         if not ge_debug_trace_enabled:
@@ -310,12 +313,14 @@ def ge_debug_trace_reset() -> void:
         debug_trace_hash <- DEBUG_TRACE_HASH_INITIAL
         debug_trace_last_event <- DebugTraceEvent(0u64, 0, 0.uintptr(), 0.uintptr(), 0.uintptr(), "")
 
+@reentrant_safe
 def ge_debug_trace_mix_word(word: uintptr) -> void:
     static if DEBUG:
         debug_trace_hash <- (debug_trace_hash ^ word.u64()) * DEBUG_TRACE_HASH_PRIME
     static else:
         _ = word
 
+@reentrant_safe
 def ge_debug_trace_record(kind: int, label: cstr, a: uintptr, b: uintptr, c: uintptr) -> void:
     static if DEBUG:
         if not ge_debug_trace_enabled:
@@ -343,6 +348,7 @@ def ge_map_failed() -> uintptr:
     return 0xFFFFFFFFFFFFFFFFu64.uintptr()
 
 # Reinterpret a raw guest/host address as an opaque pointer for libc calls.
+@reentrant_safe
 def ge_addr_to_ptr(address: uintptr) -> void&?:
     p: mutable void&? = null
     trusted Unsafe.PointerCast:
@@ -390,6 +396,7 @@ def ge_flush_instruction_cache(address: uintptr, size: u64) -> void:
         _ = address
         _ = size
 
+@reentrant_safe
 def ge_region_contains(base: uintptr, rsize: u64, address: uintptr, size: u64) -> bool:
     if base == 0.uintptr() or rsize == 0u64:
         return false
@@ -398,6 +405,7 @@ def ge_region_contains(base: uintptr, rsize: u64, address: uintptr, size: u64) -
     offset: u64 = address.u64() - base.u64()
     return offset <= rsize and size <= (rsize - offset)
 
+@reentrant_safe
 def ge_find_native_region(address: uintptr, size: u64) -> s32:
     best: mutable s32 = -1
     best_size: mutable u64 = 0xFFFFFFFFFFFFFFFFu64
@@ -437,6 +445,7 @@ def ge_forget_native_region(base: uintptr, size: u64) -> void:
             return
         i <- i + 1u32
 
+@reentrant_safe
 def ge_native_prot_at(address: uintptr, size: u64) -> u32:
     index: s32 = ge_find_native_region(address, size)
     if index >= 0 and index.u32() < GE_NATIVE_REGION_CAP:
@@ -539,6 +548,7 @@ def ge_debug_guard_callable_target(target: uintptr, sequence: u64) -> bool:
     ge_debug_trace_boundary("guest-exec-callable-guard-stop", target, reason.uintptr(), ge_debug_trap_return_addr)
     return false
 
+@reentrant_safe
 def ge_abort_active_guard_for_debug_trap(status: s32) -> void:
     fr: ElisaGuestExecForkReport&? = ge_fork_report
     if fr != null:
@@ -595,9 +605,11 @@ def ge_expected_fs_selector(expected_owner: u32, host_selector: u16, guest_selec
         return host_selector.uintptr()
     return 0.uintptr()
 
+@reentrant_safe
 def ge_fs_owner_is_valid(owner: u32) -> bool:
     return owner == GE_FS_OWNER_HOST or owner == GE_FS_OWNER_GUEST or owner == GE_FS_OWNER_UNKNOWN
 
+@reentrant_safe
 def ge_shadow_fs_transition(site: cstr, owner: u32) -> void:
     if not ge_fs_state_check_enabled:
         return
@@ -608,6 +620,7 @@ def ge_shadow_fs_transition(site: cstr, owner: u32) -> void:
     ge_fs_state_shadow_transition_count <- ge_fs_state_shadow_transition_count + 1u64
     ge_fs_state_shadow_last_site <- site
 
+@reentrant_safe
 def ge_record_fs_state_mismatch(site: cstr, expected_owner: u32, actual_owner: u32, actual_selector: uintptr) -> void:
     ge_fs_state_mismatch_count <- ge_fs_state_mismatch_count + 1u64
     ge_debug_trap_count <- ge_debug_trap_count + 1u64
@@ -623,6 +636,7 @@ def ge_record_fs_state_mismatch(site: cstr, expected_owner: u32, actual_owner: u
         ge_last_status <- GE_DEBUG_TRAP_FS_STATE_STATUS
         ge_abort_active_guard_for_debug_trap(GE_DEBUG_TRAP_FS_STATE_STATUS)
 
+@reentrant_safe
 def ge_reconcile_shadow_fs_owner(site: cstr, expected_owner: u32) -> bool:
     if not ge_fs_state_check_enabled:
         return true
@@ -650,6 +664,7 @@ def ge_reconcile_shadow_fs_owner(site: cstr, expected_owner: u32) -> bool:
 # Observe the %fs owner at a host<->guest boundary transition. The referee only
 # reads %fs:[0] when the selector is already classified as the expected owner,
 # so a broken segment base cannot knock out the diagnostic path itself.
+@reentrant_safe
 def ge_observe_fs_owner_state(site: cstr, expected_owner: u32) -> void:
     if not ge_fs_state_check_enabled:
         return
@@ -704,6 +719,7 @@ def ge_observe_fs_owner_state(site: cstr, expected_owner: u32) -> void:
 def ge_observe_fs_owner(site: cstr, expect_guest: bool) -> void:
     ge_observe_fs_owner_state(site, GE_FS_OWNER_GUEST if expect_guest else GE_FS_OWNER_HOST)
 
+@reentrant_safe
 def ge_assert_host_fs_owner(site: cstr) -> void:
     ge_observe_fs_owner_state(site, GE_FS_OWNER_HOST)
 
@@ -790,6 +806,7 @@ def ge_debug_guard_guest_return_continuation(sequence: u64) -> bool:
     ge_abort_active_guard_for_debug_trap(ge_last_status)
     return false
 
+@reentrant_safe
 def ge_read_native_word(address: uintptr) -> uintptr:
     if address == 0.uintptr():
         return 0.uintptr()
@@ -1128,6 +1145,7 @@ def c_GuestExec_DebugTrapInstallFs0() -> uintptr:
 @link_name(sigaction)
 extern ge_sigaction(signum: int, act: void&?, oldact: void&?) -> int
 @link_name(siglongjmp)
+@reentrant_safe
 extern ge_siglongjmp(env: void&?, val: int) -> void
 @link_name(dladdr)
 extern ge_dladdr(addr: void&?, info: void&?) -> int
@@ -1175,6 +1193,7 @@ def ge_sig_bus() -> int:
 def ge_sa_siginfo() -> int:
     return 0x40
 
+@reentrant_safe
 def ge_set_native_phase(phase: s32) -> void:
     ge_last_native_phase <- phase
     fr: ElisaGuestExecForkReport&? = ge_fork_report
@@ -1182,6 +1201,7 @@ def ge_set_native_phase(phase: s32) -> void:
         fr.native_phase <- phase
 
 # Raw read of a uintptr at an arbitrary host address (signal/stack context).
+@reentrant_safe
 def ge_read_context_word(address: uintptr) -> uintptr:
     if address == 0.uintptr():
         return 0.uintptr()
@@ -1194,6 +1214,7 @@ def ge_uctx_word(uctx: void&?, offset: u64) -> uintptr:
         return 0.uintptr()
     return ge_read_context_word(uctx.uintptr() + offset.uintptr())
 
+@reentrant_safe
 def ge_extract_mctx(uctx: void&?) -> uintptr:
     static if ARCH_X86_64 and PLATFORM_APPLE:
         return ge_uctx_word(uctx, 48u64)
@@ -1205,6 +1226,7 @@ def ge_extract_mctx(uctx: void&?) -> uintptr:
 
 # x86_64 ucontext register extraction (raw offsets). macOS: uc_mcontext ptr at
 # uctx+48 -> mcontext64.__ss regs. Linux: inline uc_mcontext.gregs at uctx+40.
+@reentrant_safe
 def ge_extract_pc(uctx: void&?) -> uintptr:
     static if ARCH_X86_64 and PLATFORM_APPLE:
         mctx: uintptr = ge_uctx_word(uctx, 48u64)
@@ -1214,6 +1236,7 @@ def ge_extract_pc(uctx: void&?) -> uintptr:
     static else:
         return 0.uintptr()
 
+@reentrant_safe
 def ge_extract_sp(uctx: void&?) -> uintptr:
     static if ARCH_X86_64 and PLATFORM_APPLE:
         mctx: uintptr = ge_uctx_word(uctx, 48u64)
@@ -1223,6 +1246,7 @@ def ge_extract_sp(uctx: void&?) -> uintptr:
     static else:
         return 0.uintptr()
 
+@reentrant_safe
 def ge_extract_bp(uctx: void&?) -> uintptr:
     static if ARCH_X86_64 and PLATFORM_APPLE:
         mctx: uintptr = ge_uctx_word(uctx, 48u64)
@@ -1233,6 +1257,7 @@ def ge_extract_bp(uctx: void&?) -> uintptr:
         return 0.uintptr()
 
 # reg index: 0=rdi 1=rsi 2=rax 3=rbx 4=rdx 5=rcx 6=r8 7=r9
+@reentrant_safe
 def ge_extract_greg(uctx: void&?, reg: int) -> uintptr:
     static if ARCH_X86_64 and PLATFORM_APPLE:
         mctx: uintptr = ge_uctx_word(uctx, 48u64)
@@ -1281,6 +1306,7 @@ def ge_extract_greg(uctx: void&?, reg: int) -> uintptr:
         return 0.uintptr()
 
 # si_addr lives at a per-OS offset inside siginfo_t (macOS 24, Linux 16).
+@reentrant_safe
 def ge_siginfo_fault_addr(info: void&?) -> uintptr:
     if info == null:
         return 0.uintptr()
@@ -1347,6 +1373,7 @@ def ge_restore_guards() -> void:
 @c_abi(c)
 @async_entry
 @segment_establishing
+@reentrant_safe
 def ge_alarm_handler(sig: int) -> void:
     static if PLATFORM_APPLE and ARCH_X86_64:
         can Unsafe.SegmentMutation, Segment.Host:
@@ -1384,6 +1411,7 @@ def ge_alarm_handler(sig: int) -> void:
 @c_abi(c)
 @async_entry
 @segment_establishing
+@reentrant_safe
 def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
     static if PLATFORM_APPLE and ARCH_X86_64:
         can Unsafe.SegmentMutation, Segment.Host:
@@ -1436,8 +1464,12 @@ def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
             ge_fault_transfer_class <- 3u64
         elif ge_last_guest_pc == ge_signal_stack_word1:
             ge_fault_transfer_class <- 4u64
-    ge_resolve_pc_symbol(ge_signal_stack_word0, true)
-    ge_resolve_pc_symbol(ge_last_guest_pc, false)
+    # Symbolization uses dladdr and is not async-signal-safe. The handler records
+    # raw PCs/stack words only; host code can symbolize them after the jump/exit.
+    ge_signal_stack_symbol0 <- ""
+    ge_signal_stack_image0 <- ""
+    ge_signal_pc_symbol <- ""
+    ge_signal_pc_image <- ""
     fr: ElisaGuestExecForkReport&? = ge_fork_report
     if fr != null:
         fr.status <- ge_last_status
@@ -1501,8 +1533,10 @@ def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
 # ---- Orchestration plumbing (atomic core, part 2a; inert until swap) ----
 @link_name(sigsetjmp)
 extern ge_sigsetjmp(env: void&?, savemask: int) -> int
+@reentrant_safe
 extern pthread_self() -> void&?
 @link_name(_exit)
+@reentrant_safe
 extern ge_exit_now(code: int) -> void
 @link_name(pause)
 extern ge_pause() -> int
@@ -1521,6 +1555,7 @@ extern ElisaGuestExec_AeroLibFallbackUnknownStubAsm() -> u64
 global mutable ge_fork_report_addr: uintptr = 0.uintptr()
 global mutable ge_guard_target_thread: uintptr = 0.uintptr()
 
+@reentrant_safe
 def ge_pthread_self() -> uintptr:
     return pthread_self().uintptr()
 
