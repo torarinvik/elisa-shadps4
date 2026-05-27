@@ -556,7 +556,7 @@ def ge_abort_active_guard_for_debug_trap(status: s32) -> void:
         fr.signal <- 0
     if ge_guard_active == 0:
         return
-    current_thread: uintptr = ge_pthread_self()
+    current_thread: uintptr = !ge_pthread_self()
     if ge_guard_target_thread == 0.uintptr() or current_thread == ge_guard_target_thread:
         ge_siglongjmp(ge_jmp_buf[0usize].ref[void&], 1)
     ge_cross_thread_signal_count <- ge_cross_thread_signal_count + 1u64
@@ -693,7 +693,7 @@ def ge_observe_fs_owner_state(site: cstr, expected_owner: u32) -> void:
         ge_fs_state_last_hle_module <- ge_runtime_hle_module if ge_runtime_hle_module != null else ""
         ge_fs_state_last_hle_symbol <- ge_runtime_hle_symbol if ge_runtime_hle_symbol != null else ""
         if ok and actual_owner != GE_FS_OWNER_UNKNOWN:
-            ge_fs_state_last_fs0 <- ElisaTls_ReadFs0Asm()
+            ge_fs_state_last_fs0 <- !ElisaTls_ReadFs0Asm()
         if not ok:
             ge_record_fs_state_mismatch("guest-exec-fs-owner-mismatch", expected_owner, actual_owner, actual_selector.uintptr())
         fr: ElisaGuestExecForkReport&? = ge_fork_report
@@ -838,7 +838,7 @@ def ge_maybe_debug_trap_boundary_guard() -> void:
         fr.status <- GE_DEBUG_TRAP_BOUNDARY_GUARD_STATUS
         fr.signal <- 0
     if ge_guard_active != 0:
-        current_thread: uintptr = ge_pthread_self()
+        current_thread: uintptr = !ge_pthread_self()
         if ge_guard_target_thread == 0.uintptr() or current_thread == ge_guard_target_thread:
             ge_siglongjmp(ge_jmp_buf[0usize].ref[void&], 1)
         ge_cross_thread_signal_count <- ge_cross_thread_signal_count + 1u64
@@ -1392,12 +1392,12 @@ def ge_alarm_handler(sig: int) -> void:
     if fr != null:
         fr.status <- -3
         fr.signal <- GE_SIG_ALRM.s32()
-        fr.fault_thread <- ge_pthread_self()
+        fr.fault_thread <- !ge_pthread_self()
         fr.guard_thread <- ge_guard_target_thread
         if fr.execution_stage < 4:
             fr.execution_stage <- 4
     if ge_guard_active != 0:
-        current_thread: uintptr = ge_pthread_self()
+        current_thread: uintptr = !ge_pthread_self()
         if ge_guard_target_thread == 0.uintptr() or current_thread == ge_guard_target_thread:
             ge_siglongjmp(ge_jmp_buf[0usize].ref[void&], 1)
         ge_cross_thread_signal_count <- ge_cross_thread_signal_count + 1u64
@@ -1424,7 +1424,7 @@ def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
     ge_set_native_phase(GE_PHASE_SIGNAL_HANDLER_ENTERED)
     ge_last_status <- (0 - sig).s32()
     ge_last_signal <- sig.s32()
-    fault_thread: uintptr = ge_pthread_self()
+    fault_thread: uintptr = !ge_pthread_self()
     ge_signal_uctx <- uctx.uintptr() if uctx != null else 0.uintptr()
     ge_signal_mctx <- ge_extract_mctx(uctx)
     ge_last_fault_address <- ge_siginfo_fault_addr(info)
@@ -1544,7 +1544,7 @@ extern ge_exit_now(code: int) -> void
 @link_name(pause)
 extern ge_pause() -> int
 extern memset(dest: mutable void&, value: int, n: usize) -> mutable void&
-extern ElisaGuestExec_CurrentStackPointerAsm() -> uintptr
+extern ElisaGuestExec_CurrentStackPointerAsm() -> HostStackPointer
 extern ElisaGuestExec_EnterMainEntryAsm(params: HostPtr[void], exit_func: ExitFunction) -> void
 extern ElisaGuestExec_CallMainEntryAsm(entry: GuestEntryPoint, params: HostPtr[void], exit_func: ExitFunction) -> void
 extern ElisaGuestExec_JumpMainEntryAsm(entry: GuestEntryPoint, params: HostPtr[void], exit_func: ExitFunction) -> void
@@ -1559,8 +1559,8 @@ global mutable ge_fork_report_addr: uintptr = 0.uintptr()
 global mutable ge_guard_target_thread: uintptr = 0.uintptr()
 
 @reentrant_safe
-def ge_pthread_self() -> uintptr:
-    return pthread_self().uintptr()
+def ge_pthread_self() -> HostThreadId:
+    return pthread_self().uintptr().cast[HostThreadId]
 
 def ge_memset(dst: void&?, value: int, n: usize) -> void&?:
     if dst == null:
@@ -1583,11 +1583,11 @@ def ge_record_fallback_pc(pc: uintptr, source: s32) -> void:
         fr.pc_source <- source
         fr.pc_was_fallback <- 1
 
-def ge_current_stack_pointer() -> uintptr:
+def ge_current_stack_pointer() -> HostStackPointer:
     static if ARCH_X86_64 and not PLATFORM_WINDOWS:
         return ElisaGuestExec_CurrentStackPointerAsm()
     static else:
-        return 0.uintptr()
+        return 0.uintptr().cast[HostStackPointer]
 
 def ge_map_shared_anon_flags() -> int:
     static if PLATFORM_APPLE:
@@ -1863,7 +1863,7 @@ def ge_run_child_main_entry(params: mutable GuestEntryParams&) -> void:
     ge_set_native_phase(GE_PHASE_CHILD_BRANCH_ENTERED)
     ge_install_guards()
     ge_guard_active <- 1
-    ge_guard_target_thread <- ge_pthread_self()
+    ge_guard_target_thread <- !ge_pthread_self()
     ge_set_native_phase(GE_PHASE_CHILD_GUARDS_INSTALLED)
     fr: ElisaGuestExecForkReport&? = ge_fork_report
     if fr != null:
@@ -2081,7 +2081,7 @@ def ge_synthetic_spin(arg0: u64, arg1: u64) -> u64:
 
 @c_abi(c)
 def ge_synthetic_main_return(params: GuestEntryParams&?, exit_func: void&?) -> void:
-    ge_synthetic_observed_stack <- ge_current_stack_pointer()
+    ge_synthetic_observed_stack <- !ge_current_stack_pointer()
     ge_synthetic_observed_params <- params.uintptr()
     ge_synthetic_observed_exit_func <- exit_func.uintptr()
     if params != null:
@@ -2278,7 +2278,7 @@ def ge_run_synthetic_function(entry_addr: uintptr, arg0: u64, arg1: u64) -> u64:
         ge_reset_crash_state()
         ge_install_guards()
         ge_guard_active <- 1
-        ge_guard_target_thread <- ge_pthread_self()
+        ge_guard_target_thread <- !ge_pthread_self()
         if ge_sigsetjmp(ge_jmp_buf[0usize].ref[void&], 1) != 0:
             ge_guard_active <- 0
             ge_restore_guards()
@@ -2314,7 +2314,7 @@ def ge_run_synthetic_function_with_timeout(entry_addr: uintptr, arg0: u64, arg1:
         ge_reset_crash_state()
         ge_install_guards()
         ge_guard_active <- 1
-        ge_guard_target_thread <- ge_pthread_self()
+        ge_guard_target_thread <- !ge_pthread_self()
         ge_arm_timer(timeout_ms)
         if ge_sigsetjmp(ge_jmp_buf[0usize].ref[void&], 1) != 0:
             ge_disarm_timer()
@@ -2386,7 +2386,7 @@ def ge_run_main_entry_guarded_in_process(params: mutable GuestEntryParams&, time
         ge_prepare_main_entry_snapshot(params)
         ge_install_guards()
         ge_guard_active <- 1
-        ge_guard_target_thread <- ge_pthread_self()
+        ge_guard_target_thread <- !ge_pthread_self()
         ge_arm_timer(timeout_ms)
         ge_set_native_phase(GE_PHASE_SYNTHETIC_BEFORE_SIGSETJMP)
         if ge_sigsetjmp(ge_jmp_buf[0usize].ref[void&], 1) != 0:
@@ -2435,7 +2435,7 @@ def ge_run_main_entry_guarded(params: mutable GuestEntryParams&, timeout_ms: u32
             ge_set_native_phase(GE_PHASE_SYNTHETIC_ENTRY)
             ge_install_guards()
             ge_guard_active <- 1
-            ge_guard_target_thread <- ge_pthread_self()
+            ge_guard_target_thread <- !ge_pthread_self()
             ge_arm_timer(timeout_ms)
             ge_set_native_phase(GE_PHASE_SYNTHETIC_BEFORE_SIGSETJMP)
             if ge_sigsetjmp(ge_jmp_buf[0usize].ref[void&], 1) != 0:
@@ -3257,7 +3257,7 @@ def c_GuestExec_RecordRuntimeHle(module: static u8&?, symbol: static u8&?, arg0:
     ge_runtime_hle_recorder_stack_word0 <- 0.uintptr()
     ge_runtime_hle_recorder_stack_word1 <- 0.uintptr()
     static if ARCH_X86_64:
-        sp: uintptr = ElisaGuestExec_CurrentStackPointerAsm()
+        sp: uintptr = !ElisaGuestExec_CurrentStackPointerAsm()
         ge_runtime_hle_recorder_stack_word0 <- ge_read_context_word(sp)
         ge_runtime_hle_recorder_stack_word1 <- ge_read_context_word(sp + 8.uintptr())
     fr: ElisaGuestExecForkReport&? = ge_fork_report
