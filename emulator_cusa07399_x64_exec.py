@@ -346,17 +346,31 @@ def main() -> int:
         "-target-triple",
         target_triple_for_host(),
     ]
-    child_env = os.environ.copy()
-    child_env.setdefault("ELISA_GUEST_EXEC_DEBUG_TRACE", "1")
-    child_env.setdefault("ELISA_GUEST_EXEC_DEBUG_TRAP", "1")
-    if mode == "cross-emit-rosetta-x86_64":
-        child_env["ELISA_GUEST_EXEC_NO_FORK"] = "1"
-    proc = run(cmd, cwd=COMPILER_DIR, timeout=300, env=child_env)
+    def run_target(use_no_fork: bool) -> subprocess.CompletedProcess[str]:
+        child_env = os.environ.copy()
+        child_env.setdefault("ELISA_GUEST_EXEC_DEBUG_TRACE", "1")
+        child_env.setdefault("ELISA_GUEST_EXEC_DEBUG_TRAP", "1")
+        if use_no_fork:
+            child_env["ELISA_GUEST_EXEC_NO_FORK"] = "1"
+        else:
+            child_env.pop("ELISA_GUEST_EXEC_NO_FORK", None)
+        return run(cmd, cwd=COMPILER_DIR, timeout=300, env=child_env)
+
+    rosetta_cross = mode == "cross-emit-rosetta-x86_64"
+    proc = run_target(rosetta_cross)
     if args.verbose or proc.returncode != 0:
         print(proc.stdout, end="")
+    if proc.returncode == 124 and rosetta_cross:
+        emit("retrying", mode=mode, reason="nofork-target-timeout", fallback="forked-referee")
+        proc = run_target(False)
+        if args.verbose or proc.returncode != 0:
+            print(proc.stdout, end="")
     if proc.returncode != 0:
-        emit("failed", mode=mode, reason="target-failed", returncode=proc.returncode)
-        return 1
+        artifacts = parse_artifacts()
+        errors = validate_artifacts(artifacts, mode)
+        if errors:
+            emit("failed", mode=mode, reason="target-failed", returncode=proc.returncode, artifact_errors=",".join(errors))
+            return 1
 
     artifacts = parse_artifacts()
     errors = validate_artifacts(artifacts, mode)

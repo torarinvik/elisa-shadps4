@@ -633,6 +633,23 @@ def ge_observe_fs_owner_state(site: cstr, expected_owner: u32) -> void:
             if ge_fs_state_trap_on_mismatch:
                 ge_last_status <- GE_DEBUG_TRAP_FS_STATE_STATUS
                 ge_abort_active_guard_for_debug_trap(GE_DEBUG_TRAP_FS_STATE_STATUS)
+        fr: ElisaGuestExecForkReport&? = ge_fork_report
+        if fr != null:
+            fr.fs_state_observation_count <- ge_fs_state_observation_count
+            fr.fs_state_mismatch_count <- ge_fs_state_mismatch_count
+            fr.fs_state_last_site <- site
+            fr.fs_state_last_expect_guest <- 1 if expected_owner == GE_FS_OWNER_GUEST else 0
+            fr.fs_state_last_expected <- ge_fs_state_last_expected
+            fr.fs_state_last_actual <- ge_fs_state_last_actual
+            fr.fs_state_last_expected_owner <- ge_fs_state_last_expected_owner
+            fr.fs_state_last_actual_owner <- ge_fs_state_last_actual_owner
+            fr.fs_state_last_guest_selector <- ge_fs_state_last_guest_selector
+            fr.fs_state_last_host_selector <- ge_fs_state_last_host_selector
+            fr.fs_state_last_tcb_base <- ge_fs_state_last_tcb_base
+            fr.fs_state_last_fs0 <- ge_fs_state_last_fs0
+            fr.fs_state_last_hle_return_addr <- ge_fs_state_last_hle_return_addr
+            fr.fs_state_last_hle_module <- ge_fs_state_last_hle_module
+            fr.fs_state_last_hle_symbol <- ge_fs_state_last_hle_symbol
     static else:
         _ = site
         _ = expected_owner
@@ -1728,6 +1745,25 @@ def ge_absorb_fork_report() -> void:
         ge_runtime_hle_caller_frame_word1 <- fr.runtime_hle_caller_frame_word1
         ge_runtime_hle_caller_frame_word2 <- fr.runtime_hle_caller_frame_word2
         ge_runtime_hle_caller_frame_word3 <- fr.runtime_hle_caller_frame_word3
+    if fr.fs_state_observation_count != 0u64:
+        ge_fs_state_observation_count <- fr.fs_state_observation_count
+        ge_fs_state_mismatch_count <- fr.fs_state_mismatch_count
+        if fr.fs_state_last_site != null:
+            ge_fs_state_last_site <- fr.fs_state_last_site
+        ge_fs_state_last_expect_guest <- fr.fs_state_last_expect_guest != 0
+        ge_fs_state_last_expected <- fr.fs_state_last_expected
+        ge_fs_state_last_actual <- fr.fs_state_last_actual
+        ge_fs_state_last_expected_owner <- fr.fs_state_last_expected_owner
+        ge_fs_state_last_actual_owner <- fr.fs_state_last_actual_owner
+        ge_fs_state_last_guest_selector <- fr.fs_state_last_guest_selector
+        ge_fs_state_last_host_selector <- fr.fs_state_last_host_selector
+        ge_fs_state_last_tcb_base <- fr.fs_state_last_tcb_base
+        ge_fs_state_last_fs0 <- fr.fs_state_last_fs0
+        ge_fs_state_last_hle_return_addr <- fr.fs_state_last_hle_return_addr
+        if fr.fs_state_last_hle_module != null:
+            ge_fs_state_last_hle_module <- fr.fs_state_last_hle_module
+        if fr.fs_state_last_hle_symbol != null:
+            ge_fs_state_last_hle_symbol <- fr.fs_state_last_hle_symbol
 
 def ge_run_child_main_entry(params: mutable GuestEntryParams&) -> void:
     ge_set_native_phase(GE_PHASE_CHILD_BRANCH_ENTERED)
@@ -2394,8 +2430,6 @@ def ge_run_main_entry_guarded(params: mutable GuestEntryParams&, timeout_ms: u32
                 return ge_last_status
             if timeout_ms != 0u32 and waited_ms >= timeout_ms:
                 ge_set_native_phase(GE_PHASE_PARENT_TIMEOUT)
-                _ = ge_kill(child, 9)
-                _ = ge_waitpid(child, status.ref[mutable int&], 0)
                 ge_timeout_fired <- 1
                 ge_last_status <- -3
                 ge_last_signal <- GE_SIG_ALRM.s32()
@@ -2403,6 +2437,15 @@ def ge_run_main_entry_guarded(params: mutable GuestEntryParams&, timeout_ms: u32
                 if fr3 != null:
                     fr3.status <- -3
                     fr3.signal <- GE_SIG_ALRM.s32()
+                    fr3.native_phase <- GE_PHASE_PARENT_TIMEOUT
+                _ = ge_kill(child, 9)
+                reap_wait_ms: mutable u32 = 0u32
+                while reap_wait_ms < 250u32:
+                    reap_result: int = ge_waitpid(child, status.ref[mutable int&], GE_WNOHANG)
+                    if reap_result == child or reap_result < 0:
+                        break
+                    _ = ge_usleep(1000u32)
+                    reap_wait_ms <- reap_wait_ms + 1u32
                 ge_absorb_fork_report()
                 return -3
             _ = ge_usleep(1000u32)
@@ -3029,6 +3072,21 @@ struct ElisaGuestExecForkReport:
     runtime_hle_caller_frame_word1: mutable uintptr
     runtime_hle_caller_frame_word2: mutable uintptr
     runtime_hle_caller_frame_word3: mutable uintptr
+    fs_state_observation_count: mutable u64
+    fs_state_mismatch_count: mutable u64
+    fs_state_last_site: mutable static u8&?
+    fs_state_last_expect_guest: mutable s32
+    fs_state_last_expected: mutable uintptr
+    fs_state_last_actual: mutable uintptr
+    fs_state_last_expected_owner: mutable u32
+    fs_state_last_actual_owner: mutable u32
+    fs_state_last_guest_selector: mutable uintptr
+    fs_state_last_host_selector: mutable uintptr
+    fs_state_last_tcb_base: mutable uintptr
+    fs_state_last_fs0: mutable uintptr
+    fs_state_last_hle_return_addr: mutable uintptr
+    fs_state_last_hle_module: mutable static u8&?
+    fs_state_last_hle_symbol: mutable static u8&?
 
 global mutable ge_fork_report: ElisaGuestExecForkReport&? = null
 
@@ -3486,8 +3544,6 @@ def GuestExec_ResetState() -> void:
     ge_debug_trap_tcb_base <- 0.uintptr()
     ge_debug_trap_tcb_self <- 0.uintptr()
     ge_debug_trap_install_fs0 <- 0.uintptr()
-    ge_fs_state_check_enabled <- false
-    ge_fs_state_trap_on_mismatch <- false
     ge_fs_state_mismatch_count <- 0u64
     ge_fs_state_observation_count <- 0u64
     ge_fs_state_last_site <- ""

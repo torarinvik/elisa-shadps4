@@ -22,6 +22,7 @@ extern ElisaTls_LoadHostFsSelectorAsm(selector: HostFsSelector) -> void can[Unsa
 extern ElisaTls_ReadFsSelectorAsm() -> u16
 extern ElisaTls_ReadFs0Asm() -> uintptr
 extern ElisaTls_AtomicExchangeU32Asm(ptr: uintptr, value: u32) -> u32
+extern ElisaTls_CallGuestThreadEntryWithFsAsm(entry: GuestThreadEntry, arg: GuestThreadArg, guest_fs_selector: GuestFsSelector, host_fs_selector: HostFsSelector) -> GuestThreadResult can[Unsafe.SegmentMutation, Segment.Host, Segment.Guest]
 
 @fixed_layout
 @abi_layout(size, 16, align, 8, field, counter, 0, field, pointer, 8)
@@ -357,19 +358,24 @@ def TLS_InstallPrimaryTcbBase() -> void can[Unsafe.SegmentMutation, Unsafe.Guest
             SetTcbBase(tls_primary_tcb_base.cast[void&?])
 
 def TLS_InstallThreadTcbFromPrimaryTemplate() -> void can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest]:
+    selector: GuestFsSelector = TLS_PrepareThreadTcbFromPrimaryTemplate()
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        if !selector != 0u32:
+            can Unsafe.SegmentMutation, Segment.Guest:
+                ElisaTls_LoadGuestFsSelectorAsm(selector)
+            tls_debug_last_fs0 <- ElisaTls_ReadFs0Asm()
+
+def TLS_PrepareThreadTcbFromPrimaryTemplate() -> GuestFsSelector:
     tls_thread_install_count <- tls_thread_install_count + 1u64
     if tls_primary_template_base == 0.uintptr() or tls_primary_template_size == 0usize or tls_primary_tcb_base == 0.uintptr():
-        can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest:
-            TLS_InstallPrimaryTcbBase()
-        if TLS_DebugLastFs0() == TLS_PrimaryTcbBase():
+        selector: GuestFsSelector = TLS_PrepareTcbBase(tls_primary_tcb_base.cast[void&?])
+        if !selector != 0u32:
             tls_thread_install_success_count <- tls_thread_install_success_count + 1u64
-        return
+        return selector
     can Memory.Allocate:
         raw: mutable heap void&? = malloc(tls_primary_template_size)
         if raw == null:
-            can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest:
-                TLS_InstallPrimaryTcbBase()
-            return
+            return TLS_PrepareTcbBase(tls_primary_tcb_base.cast[void&?])
         new_base: uintptr = raw.cast[uintptr]
         trusted Unsafe.PointerCast:
             src: void& = tls_primary_template_base.cast[void&]
@@ -396,10 +402,11 @@ def TLS_InstallThreadTcbFromPrimaryTemplate() -> void can[Unsafe.SegmentMutation
                             dtv[i].pointer <- new_base + (ptr - tls_primary_template_base)
                         i <- i + 1usize
                 tcb.tcb_dtv <- dtv_raw.cast[uintptr]
-        can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest:
-            SetTcbBase(new_tcb_base.cast[void&?])
-        if TLS_DebugLastFs0() == new_tcb_base:
+        selector2: GuestFsSelector = TLS_PrepareTcbBase(new_tcb_base.cast[void&?])
+        if !selector2 != 0u32:
             tls_thread_install_success_count <- tls_thread_install_success_count + 1u64
+        return selector2
+    return 0u32.cast[GuestFsSelector]
 
 # Linear guard for the host->guest %fs segment swap. Producing it installs the
 # guest TCB into %fs; it MUST be consumed by TLS_RestoreHostSegment, which
@@ -451,6 +458,21 @@ def TLS_CallGuestThreadEntry(guard: FsGuard&, fn: void&?, arg: void&?) -> void&?
     _ = guard.active
     trusted Unsafe.IndirectCall:
         return fn.call_as[func(void&?) -> void&?](arg)
+
+def TLS_CallGuestThreadEntryWithPreparedSegment(fn: void&?, arg: void&?, guest_selector: GuestFsSelector, host_selector: HostFsSelector) -> void&? can[Unsafe.SegmentMutation, Segment.Host, Segment.Guest]:
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        if fn == null or !guest_selector == 0u32:
+            return null
+        result: mutable GuestThreadResult = 0.uintptr().cast[GuestThreadResult]
+        can Unsafe.SegmentMutation, Segment.Host, Segment.Guest:
+            result <- ElisaTls_CallGuestThreadEntryWithFsAsm(fn.uintptr().cast[GuestThreadEntry], arg.uintptr().cast[GuestThreadArg], guest_selector, host_selector)
+        return result.cast[void&?]
+    static else:
+        _ = fn
+        _ = arg
+        _ = guest_selector
+        _ = host_selector
+        return null
 
 def TLS_EnterHostFromGuest() -> void can[Unsafe.SegmentMutation, Segment.Host]:
     static if PLATFORM_APPLE and ARCH_X86_64:

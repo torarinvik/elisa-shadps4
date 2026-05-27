@@ -1178,11 +1178,17 @@ def kt_guest_thread_trampoline(raw: void&?) -> void&?:
     state: mutable KtThread& = state_opt.cast[mutable KtThread&]
     kt_thread_set_tsd(raw)
     result: mutable void&? = null
-    can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
-        guard: FsGuard = TLS_InstallThreadSegment()
-        if state.entry != null:
-            result <- TLS_CallGuestThreadEntry(guard.ref[FsGuard&], state.entry, state.arg)
-        TLS_RestoreHostSegment(move guard)
+    if state.entry != null:
+        static if PLATFORM_APPLE and ARCH_X86_64:
+            can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
+                guest_selector: GuestFsSelector = TLS_PrepareThreadTcbFromPrimaryTemplate()
+                host_selector: HostFsSelector = TLS_CaptureHostFsSelector()
+                result <- TLS_CallGuestThreadEntryWithPreparedSegment(state.entry, state.arg, guest_selector, host_selector)
+        static else:
+            can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
+                guard: FsGuard = TLS_InstallThreadSegment()
+                result <- TLS_CallGuestThreadEntry(guard.ref[FsGuard&], state.entry, state.arg)
+                TLS_RestoreHostSegment(move guard)
     state.result <- result
     state.completed_normally <- 1
     return result
