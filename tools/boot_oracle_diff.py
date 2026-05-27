@@ -22,6 +22,34 @@ def parse_kv(payload: str) -> dict[str, str]:
     return {key: value for key, value in TOKEN_RE.findall(payload)}
 
 
+def normalize_fields(kind: str, fields: dict[str, str]) -> dict[str, str]:
+    normalized = dict(fields)
+    if kind == "module":
+        if "name" not in normalized and "module" in normalized:
+            normalized["name"] = normalized["module"]
+        if "module" not in normalized and "name" in normalized:
+            normalized["module"] = normalized["name"]
+    elif kind == "entry":
+        if "addr" not in normalized and "entry" in normalized:
+            normalized["addr"] = normalized["entry"]
+        if "entry" not in normalized and "addr" in normalized:
+            normalized["entry"] = normalized["addr"]
+    elif kind == "resolve":
+        if "symbol" not in normalized and "name" in normalized:
+            normalized["symbol"] = normalized["name"]
+        if "name" not in normalized and "symbol" in normalized:
+            normalized["name"] = normalized["symbol"]
+        if "resolved" not in normalized and "resolved_addr" in normalized:
+            normalized["resolved"] = normalized["resolved_addr"]
+        if "resolved_addr" not in normalized and "resolved" in normalized:
+            normalized["resolved_addr"] = normalized["resolved"]
+        if "kind" not in normalized and "resolution" in normalized:
+            normalized["kind"] = normalized["resolution"]
+        if "resolution" not in normalized and "kind" in normalized:
+            normalized["resolution"] = normalized["kind"]
+    return normalized
+
+
 def parse_boot_oracle(path: Path) -> list[Record]:
     records: list[Record] = []
     if not path.exists():
@@ -37,7 +65,7 @@ def parse_boot_oracle(path: Path) -> list[Record]:
         if len(parts) < 2:
             continue
         kind = parts[1]
-        fields = parse_kv(parts[2] if len(parts) > 2 else "")
+        fields = normalize_fields(kind, parse_kv(parts[2] if len(parts) > 2 else ""))
         key = oracle_key(kind, fields, len(records))
         records.append(Record(kind, key, fields, line))
     return records
@@ -56,21 +84,23 @@ def parse_elisa_artifacts(path: Path) -> list[Record]:
         fields = parse_kv(payload)
         facts.update(fields)
         if "module" in fields and "host" in fields and "imports" in fields:
+            fields = normalize_fields("module", fields)
             key = f"module:{fields.get('index', len(records))}"
             records.append(Record("module", key, fields, line))
-        elif payload.startswith("resolve "):
-            key = f"resolve:{fields.get('nid', len(records))}"
+        elif payload.startswith("resolve ") or payload.startswith("fallback_import") or payload.startswith("import_probe "):
+            fields = normalize_fields("resolve", fields)
+            key = resolve_key(fields, len(records))
             records.append(Record("resolve", key, fields, line))
         elif payload.startswith("trace_event "):
             key = f"trace:{fields.get('index', len(records))}"
             records.append(Record("trace", key, fields, line))
 
     if "entry" in facts or "main_entry" in facts:
-        entry_fields = {
+        entry_fields = normalize_fields("entry", {
             "entry": facts.get("entry", "0"),
             "main_entry": facts.get("main_entry", "0"),
             "entry_native_prot": facts.get("guest_exec_main_entry_native_prot", ""),
-        }
+        })
         records.append(Record("entry", "entry", entry_fields, "CUSA07399_ARTIFACT synthesized entry"))
 
     hle_module = facts.get("guest_exec_runtime_hle_module") or facts.get("last_hle_module")
@@ -99,10 +129,17 @@ def oracle_key(kind: str, fields: dict[str, str], index: int) -> str:
     if kind == "hle":
         return f"hle:{fields.get('seq', index)}"
     if kind == "resolve":
-        return f"resolve:{fields.get('nid', index)}"
+        return resolve_key(fields, index)
     if kind == "trace":
         return f"trace:{fields.get('index', index)}"
     return f"{kind}:{fields.get('seq') or fields.get('index') or index}"
+
+
+def resolve_key(fields: dict[str, str], index: int) -> str:
+    nid = fields.get("nid")
+    if nid:
+        return f"resolve:{nid}"
+    return f"resolve:{fields.get('index', index)}"
 
 
 def canonical_int(text: str) -> int | None:

@@ -9,6 +9,7 @@ Each line is intentionally plain text:
 ```text
 BOOT_ORACLE module index=0 module=eboot.bin base=0x800000000 size=0x2e04000
 BOOT_ORACLE entry entry=0x800002030 argc=1
+BOOT_ORACLE resolve module=libkernel library=libkernel nid=<nid> symbol=posix_pthread_mutex_init resolved=1 kind=native_hle
 BOOT_ORACLE hle seq=1 module=libkernel symbol=posix_pthread_mutex_init nid=<nid> return=0x8008c3311 rdi=0x... rsi=0x... rdx=0x...
 ```
 
@@ -16,9 +17,10 @@ Keep values numeric where possible. Use hex for guest addresses. Lines may carry
 logger prefix (`[time] <Info> Core_Linker: BOOT_ORACLE ...`); the diff tool finds the
 `BOOT_ORACLE` token anywhere in the line, so grepping shadPS4's log file works directly.
 
-Field names must match the Elisa side: `module`/`index`/`base`/`size` for module records,
-`entry` for entry records, and `seq`/`module`/`symbol`/`return`/`rdi`/`rsi`/`rdx` for hle
-records. Records are keyed by `index` (module), the literal `entry`, and `seq` (hle).
+Field names should stay close to the Elisa side, but the diff tool normalizes the common
+aliases (`name`/`module`, `addr`/`entry`, `symbol`/`name`, `resolved`/`resolved_addr`,
+`kind`/`resolution`). Records are keyed by `index` (module), the literal `entry`, bare NID
+(resolve), and `seq` (hle).
 
 ## shadPS4 Insertion Points
 
@@ -42,9 +44,11 @@ Likewise, raw *resolved addresses* are not cross-comparable: shadPS4 resolves HL
 **host** C++ addresses while the Elisa port resolves to **guest** thunk VAs. Only structural
 facts (resolved-or-not, symbol type) would diff meaningfully there.
 
-The implemented slice (module layout + entry) is cross-comparable because both sides use the
-same ELF and `ModuleLoadBase`, so base/size/entry must match bit-for-bit. That alone catches
-the module-layout bug class (the fixed 32 MiB stride vs. real eboot size).
+The implemented slice (module layout + entry + import-resolution structure) is
+cross-comparable because both sides use the same ELF and `ModuleLoadBase`, so
+base/size/entry and resolved-or-not facts must match. That catches module-layout bugs (the
+fixed 32 MiB stride vs. real eboot size) and import classification bugs before runtime HLE
+trampolines exist.
 
 ## Diff
 
