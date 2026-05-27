@@ -33,6 +33,7 @@ EVENT_NAMES = {
     21: "MAIN_RUN_END",
     22: "TEST_AFTER_GUARD",
     23: "PC_SAMPLE",
+    24: "GUARD_LONGJMP",
     110: "SSE4A_SIGILL_ENTER",
     111: "SSE4A_EXTRQ_HANDLED",
     112: "SSE4A_INSERTQ_HANDLED",
@@ -51,6 +52,14 @@ BOUNDARY_GUARD_REASONS = {
     4: "unmapped-exec",
     5: "unmapped-pointer",
     6: "unpublished-exec",
+}
+
+LONGJMP_SOURCES = {
+    1: "debug-trap-abort",
+    2: "boundary-guard",
+    3: "alarm",
+    4: "pc-sampler",
+    5: "signal",
 }
 
 
@@ -168,6 +177,7 @@ def main() -> int:
     oracle_stack = latest(events, 121)
     oracle_meta = latest(events, 122)
     signal_event = latest(events, 11) or latest(events, 13)
+    longjmp_event = latest(events, 24)
     sample_events = [event for event in events if event.kind == 23]
     hle_return = latest(events, 8) or latest(events, 9)
     if sample_events and sample_count == 0:
@@ -198,6 +208,13 @@ def main() -> int:
         print(
             "test_after_guard="
             f"status={signed64(test_after.a)} signal={test_after.b} fs_owner={test_after.c} last_status={signed64(test_after.d)}"
+        )
+    if longjmp_event:
+        source = LONGJMP_SOURCES.get(longjmp_event.b, str(longjmp_event.b))
+        print(
+            "guard_longjmp="
+            f"status={signed64(longjmp_event.a)} source={source} "
+            f"value=0x{longjmp_event.c:x} previous_last_status={signed64(longjmp_event.d)}"
         )
     if oracle_cont:
         reason = oracle_meta.a if oracle_meta else 0

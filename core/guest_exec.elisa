@@ -577,6 +577,7 @@ def ge_abort_active_guard_for_debug_trap(status: s32) -> void can[Unsafe.Segment
         ge_establish_host_fs_for_abort("debug-trap-abort-host-fs-restored")
     current_thread: uintptr = !ge_pthread_self()
     if ge_guard_target_thread == 0.uintptr() or current_thread == ge_guard_target_thread:
+        ge_mark_guard_longjmp(status, GE_LONGJMP_SOURCE_DEBUG_TRAP_ABORT, ge_debug_trap_value)
         ge_siglongjmp(ge_jmp_buf[0usize].ref[void&], 1)
     ge_cross_thread_signal_count <- ge_cross_thread_signal_count + 1u64
     ge_cross_thread_signal_guard_thread <- ge_guard_target_thread
@@ -931,6 +932,7 @@ def ge_maybe_debug_trap_boundary_guard() -> void:
     if ge_guard_active != 0:
         current_thread: uintptr = !ge_pthread_self()
         if ge_guard_target_thread == 0.uintptr() or current_thread == ge_guard_target_thread:
+            ge_mark_guard_longjmp(GE_DEBUG_TRAP_BOUNDARY_GUARD_STATUS, GE_LONGJMP_SOURCE_BOUNDARY_GUARD, ge_runtime_hle_boundary_guard_value)
             ge_siglongjmp(ge_jmp_buf[0usize].ref[void&], 1)
         ge_cross_thread_signal_count <- ge_cross_thread_signal_count + 1u64
         ge_cross_thread_signal_guard_thread <- ge_guard_target_thread
@@ -1291,6 +1293,7 @@ const GE_EV_MAIN_RUN_BEGIN: u32 = 20u32
 const GE_EV_MAIN_RUN_END: u32 = 21u32
 const GE_EV_TEST_AFTER_GUARD: u32 = 22u32
 const GE_EV_PC_SAMPLE: u32 = 23u32
+const GE_EV_GUARD_LONGJMP: u32 = 24u32
 const GE_EV_MODULE_START_BEGIN: u32 = 30u32
 const GE_EV_MODULE_START_END: u32 = 31u32
 const GE_EV_MODULE_INIT_ENTRY_BEGIN: u32 = 32u32
@@ -1342,6 +1345,12 @@ const GE_EV_ORACLE_BOUNDARY_STACK: u32 = 121u32
 const GE_EV_ORACLE_BOUNDARY_META: u32 = 122u32
 const GE_EV_MUTEX_INIT: u32 = 1001u32
 
+const GE_LONGJMP_SOURCE_DEBUG_TRAP_ABORT: u32 = 1u32
+const GE_LONGJMP_SOURCE_BOUNDARY_GUARD: u32 = 2u32
+const GE_LONGJMP_SOURCE_ALARM: u32 = 3u32
+const GE_LONGJMP_SOURCE_PC_SAMPLER: u32 = 4u32
+const GE_LONGJMP_SOURCE_SIGNAL: u32 = 5u32
+
 @fixed_layout
 struct GeEmergencyEvent:
     seq: mutable u64
@@ -1374,6 +1383,10 @@ def ge_emergency_mark(kind: u32, a: uintptr, b: uintptr, c: uintptr, d: uintptr)
     ge_emergency_events[i].b <- b
     ge_emergency_events[i].c <- c
     ge_emergency_events[i].d <- d
+
+@reentrant_safe
+def ge_mark_guard_longjmp(status: s32, source: u32, value: uintptr) -> void:
+    ge_emergency_mark(GE_EV_GUARD_LONGJMP, status.u64().uintptr(), source.u64().uintptr(), value, ge_last_status.u64().uintptr())
 
 @reentrant_safe
 def ge_emergency_dump_raw() -> void:
@@ -1784,6 +1797,7 @@ def ge_alarm_handler(sig: int) -> void:
         current_thread: uintptr = !ge_pthread_self()
         if ge_guard_target_thread == 0.uintptr() or current_thread == ge_guard_target_thread:
             ge_raw_breadcrumb("GE:ALRM_LONGJMP\n", 16usize)
+            ge_mark_guard_longjmp(-3, GE_LONGJMP_SOURCE_ALARM, ge_current_return_pc)
             ge_siglongjmp(ge_jmp_buf[0usize].ref[void&], 1)
         ge_cross_thread_signal_count <- ge_cross_thread_signal_count + 1u64
         ge_cross_thread_signal_guard_thread <- ge_guard_target_thread
@@ -1826,6 +1840,7 @@ def ge_pc_sampler_alarm_handler(sig: int, info: void&?, uctx: void&?) -> void:
         ge_timeout_fired <- 1
         ge_last_status <- -3
         ge_last_signal <- GE_SIG_ALRM.s32()
+        ge_mark_guard_longjmp(-3, GE_LONGJMP_SOURCE_PC_SAMPLER, !pc)
         ge_siglongjmp(ge_jmp_buf[0usize].ref[void&], 1)
 
 @c_abi(c)
@@ -1960,6 +1975,7 @@ def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
     ge_emergency_mark(GE_EV_SIGNAL_CALL_TARGET, return_direct_target, ge_read_native_word(return_direct_target), ge_read_native_word(return_direct_target + 8.uintptr()), ge_native_prot_at(return_direct_target, 8u64).u64().uintptr())
     if ge_guard_active != 0:
         if ge_guard_target_thread == 0.uintptr() or fault_thread == ge_guard_target_thread:
+            ge_mark_guard_longjmp(ge_last_status, GE_LONGJMP_SOURCE_SIGNAL, !ge_last_guest_pc)
             ge_siglongjmp(ge_jmp_buf[0usize].ref[void&], 1)
         ge_cross_thread_signal_count <- ge_cross_thread_signal_count + 1u64
         ge_cross_thread_signal_guard_thread <- ge_guard_target_thread
