@@ -1494,12 +1494,23 @@ def ge_extract_mctx(uctx: void&?) -> MachineContextPtr:
         return 0.uintptr().cast[MachineContextPtr]
 
 # x86_64 ucontext register extraction (raw offsets). macOS: uc_mcontext ptr at
-# uctx+48 -> mcontext64.__ss regs. Linux: inline uc_mcontext.gregs at uctx+40.
+# uctx+48 -> mcontext64.{__es, __ss, __fs}; thread registers begin after the
+# 16-byte exception state, so __ss.__rip is mctx+16+128. Linux: inline
+# uc_mcontext.gregs at uctx+40.
+const GE_DARWIN_MCONTEXT64_SS_OFFSET: uintptr = 16.uintptr()
+
+@reentrant_safe
+def ge_darwin_mcontext64_ss(uctx: void&?) -> uintptr:
+    mctx: uintptr = ge_uctx_word(uctx, 48u64)
+    if mctx == 0.uintptr():
+        return 0.uintptr()
+    return mctx + GE_DARWIN_MCONTEXT64_SS_OFFSET
+
 @reentrant_safe
 def ge_extract_pc(uctx: void&?) -> GuestPC:
     static if ARCH_X86_64 and PLATFORM_APPLE:
-        mctx: uintptr = ge_uctx_word(uctx, 48u64)
-        return ge_read_context_word(mctx + 128.uintptr()).cast[GuestPC]
+        ss: uintptr = ge_darwin_mcontext64_ss(uctx)
+        return ge_read_context_word(ss + 128.uintptr()).cast[GuestPC]
     static elif ARCH_X86_64 and PLATFORM_LINUX:
         return ge_uctx_word(uctx, 40u64 + 16u64 * 8u64).cast[GuestPC]
     static else:
@@ -1508,8 +1519,8 @@ def ge_extract_pc(uctx: void&?) -> GuestPC:
 @reentrant_safe
 def ge_extract_sp(uctx: void&?) -> GuestStackPointer:
     static if ARCH_X86_64 and PLATFORM_APPLE:
-        mctx: uintptr = ge_uctx_word(uctx, 48u64)
-        return ge_read_context_word(mctx + 56.uintptr()).cast[GuestStackPointer]
+        ss: uintptr = ge_darwin_mcontext64_ss(uctx)
+        return ge_read_context_word(ss + 56.uintptr()).cast[GuestStackPointer]
     static elif ARCH_X86_64 and PLATFORM_LINUX:
         return ge_uctx_word(uctx, 40u64 + 15u64 * 8u64).cast[GuestStackPointer]
     static else:
@@ -1518,8 +1529,8 @@ def ge_extract_sp(uctx: void&?) -> GuestStackPointer:
 @reentrant_safe
 def ge_extract_bp(uctx: void&?) -> GuestFramePointer:
     static if ARCH_X86_64 and PLATFORM_APPLE:
-        mctx: uintptr = ge_uctx_word(uctx, 48u64)
-        return ge_read_context_word(mctx + 48.uintptr()).cast[GuestFramePointer]
+        ss: uintptr = ge_darwin_mcontext64_ss(uctx)
+        return ge_read_context_word(ss + 48.uintptr()).cast[GuestFramePointer]
     static elif ARCH_X86_64 and PLATFORM_LINUX:
         return ge_uctx_word(uctx, 40u64 + 10u64 * 8u64).cast[GuestFramePointer]
     static else:
@@ -1529,7 +1540,7 @@ def ge_extract_bp(uctx: void&?) -> GuestFramePointer:
 @reentrant_safe
 def ge_extract_greg(uctx: void&?, reg: int) -> uintptr:
     static if ARCH_X86_64 and PLATFORM_APPLE:
-        mctx: uintptr = ge_uctx_word(uctx, 48u64)
+        ss: uintptr = ge_darwin_mcontext64_ss(uctx)
         off: mutable u64 = 0u64
         if reg == 0:
             off <- 32u64
@@ -1549,7 +1560,7 @@ def ge_extract_greg(uctx: void&?, reg: int) -> uintptr:
             off <- 72u64
         else:
             return 0.uintptr()
-        return ge_read_context_word(mctx + off.uintptr())
+        return ge_read_context_word(ss + off.uintptr())
     static elif ARCH_X86_64 and PLATFORM_LINUX:
         gi: mutable u64 = 0u64
         if reg == 0:
