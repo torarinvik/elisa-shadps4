@@ -43,6 +43,12 @@ def RealGameBoot_UseEmergencyWatchdogFailfast() -> bool:
         return false
     return streq(value.cast[static u8&], "1") == 1
 
+def RealGameBoot_UsePCSampler() -> bool:
+    value: u8&? = getenv("ELISA_GUEST_EXEC_PC_SAMPLER".cast[u8&])
+    if value == null:
+        return false
+    return streq(value.cast[static u8&], "1") == 1
+
 # Dump the guest-exec boundary trace tape so a real (Rosetta) run produces a
 # diff-able tape: fingerprint + count + overflow, then one line per event. This
 # is what a recorded shadPS4 baseline is compared against via the snapshot/
@@ -1167,6 +1173,21 @@ def RealGameBoot_EmitArtifacts(linker: Linker&, guarded_status: s32) -> void:
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "guest_exec_last_r9", GuestExec_LastGuestR9().u64())
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "guest_exec_last_rax", GuestExec_LastGuestRAX().u64())
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "guest_exec_last_rbx", GuestExec_LastGuestRBX().u64())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "guest_exec_pc_sample_count", GuestExec_PCSamplerCount().u64())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "guest_exec_pc_sample_last_pc", GuestExec_PCSamplerLastPC().u64())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "guest_exec_pc_sample_last_sp", GuestExec_PCSamplerLastSP().u64())
+        sample_i: mutable u32 = 0u32
+        sample_limit: mutable u32 = GuestExec_PCSamplerCount()
+        if sample_limit > 8u32:
+            sample_limit <- 8u32
+        while sample_i < sample_limit:
+            sample_key: mutable u8[64] = zeroed
+            sample_sp_key: mutable u8[64] = zeroed
+            _ = snprintf(sample_key[0].ref[mutable u8&], 64usize, "guest_exec_pc_sample_%u", sample_i)
+            _ = snprintf(sample_sp_key[0].ref[mutable u8&], 64usize, "guest_exec_pc_sample_sp_%u", sample_i)
+            RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], sample_key[0].ref[static u8&], GuestExec_PCSamplerSamplePC(sample_i).u64())
+            RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], sample_sp_key[0].ref[static u8&], GuestExec_PCSamplerSampleSP(sample_i).u64())
+            sample_i <- sample_i + 1u32
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "guest_exec_expected_entry_params", GuestExec_ExpectedEntryParams().u64())
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "guest_exec_expected_stack_word0", GuestExec_ExpectedStackWord0().u64())
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "guest_exec_expected_stack_word1", GuestExec_ExpectedStackWord1().u64())
@@ -1681,6 +1702,7 @@ def emulator_real_game_boot_smoke_guarded_game_entry_reports_host_status() -> vo
         GuestExec_SetFsStateCheckEnabled(true)
         GuestExec_SetFsStateTrapOnMismatch(RealGameBoot_UseBoundaryDebugTrap())
         GuestExec_SetEmergencyWatchdogFailfast(emergency_watchdog)
+        GuestExec_SetPCSampler(RealGameBoot_UsePCSampler(), 5u32)
         RealGameBoot_EmitPhaseBreadcrumb(34u64)
         GuestExec_SetDebugTrapOnUnpublishedExec(RealGameBoot_UseUnpublishedExecDebugTrap())
         RealGameBoot_EmitPhaseBreadcrumb(35u64)

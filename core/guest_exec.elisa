@@ -177,6 +177,7 @@ global mutable ge_publish_executable_last_size: u64 = 0u64
 global mutable ge_publish_executable_last_prot: u32 = 0u32
 global mutable ge_signal_handler_entry_thunk: HostSegmentAgnosticEntry = 0.uintptr().cast[HostSegmentAgnosticEntry]
 global mutable ge_alarm_handler_entry_thunk: HostSegmentAgnosticEntry = 0.uintptr().cast[HostSegmentAgnosticEntry]
+global mutable ge_pc_sampler_handler_entry_thunk: HostSegmentAgnosticEntry = 0.uintptr().cast[HostSegmentAgnosticEntry]
 global mutable ge_publish_executable_last_result: s32 = 0
 global mutable ge_published_exec_bases: PublishedExecutableAddr[2048] = zeroed
 global mutable ge_published_exec_sizes: u64[2048] = zeroed
@@ -1297,6 +1298,7 @@ const GE_EV_SIGNAL_CALL_TARGET: u32 = 19u32
 const GE_EV_MAIN_RUN_BEGIN: u32 = 20u32
 const GE_EV_MAIN_RUN_END: u32 = 21u32
 const GE_EV_TEST_AFTER_GUARD: u32 = 22u32
+const GE_EV_PC_SAMPLE: u32 = 23u32
 const GE_EV_MODULE_START_BEGIN: u32 = 30u32
 const GE_EV_MODULE_START_END: u32 = 31u32
 const GE_EV_MODULE_INIT_ENTRY_BEGIN: u32 = 32u32
@@ -1726,13 +1728,20 @@ def ge_install_guards() -> void:
     _ = ge_sigaction(GE_SIG_TRAP, sa.ref[void&], ge_old_trap.ref[void&])
     alarm_sa: mutable GeSigaction = zeroed
     static if PLATFORM_APPLE and ARCH_X86_64:
-        if !ge_alarm_handler_entry_thunk == 0.uintptr():
-            ge_alarm_handler_entry_thunk <- ge_create_host_fs_entry_thunk_trusted((ge_alarm_handler as void&?).uintptr())
-        alarm_sa.handler <- ge_addr_to_ptr(!ge_alarm_handler_entry_thunk)
+        if ge_pc_sampler_enabled:
+            if !ge_pc_sampler_handler_entry_thunk == 0.uintptr():
+                ge_pc_sampler_handler_entry_thunk <- ge_create_host_fs_entry_thunk_trusted((ge_pc_sampler_alarm_handler as void&?).uintptr())
+            alarm_sa.handler <- ge_addr_to_ptr(!ge_pc_sampler_handler_entry_thunk)
+        else:
+            if !ge_alarm_handler_entry_thunk == 0.uintptr():
+                ge_alarm_handler_entry_thunk <- ge_create_host_fs_entry_thunk_trusted((ge_alarm_handler as void&?).uintptr())
+            alarm_sa.handler <- ge_addr_to_ptr(!ge_alarm_handler_entry_thunk)
     static else:
-        alarm_sa.handler <- ge_alarm_handler as void&?
+        alarm_sa.handler <- (ge_pc_sampler_alarm_handler as void&?) if ge_pc_sampler_enabled else (ge_alarm_handler as void&?)
     alarm_sa.mask <- 0u32
     alarm_sa.flags <- 0
+    if ge_pc_sampler_enabled:
+        alarm_sa.flags <- alarm_sa.flags | ge_sa_siginfo()
     static if PLATFORM_APPLE and ARCH_X86_64:
         if ge_alt_signal_stack_installed != 0:
             alarm_sa.flags <- alarm_sa.flags | 0x1
@@ -1794,6 +1803,38 @@ def ge_alarm_handler(sig: int) -> void:
             fr.cross_thread_signal_fault_thread <- current_thread
             fr.cross_thread_signal_number <- GE_SIG_ALRM.s32()
         ge_exit_now(128 + GE_SIG_ALRM)
+
+@c_abi(c)
+@async_entry
+@segment_establishing
+@reentrant_safe
+def ge_pc_sampler_alarm_handler(sig: int, info: void&?, uctx: void&?) -> void:
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        can Unsafe.SegmentMutation, Segment.Host:
+            TLS_RestoreHostFsSelector()
+        ge_shadow_fs_transition("pc-sampler-alarm-host-fs-restored", GE_FS_OWNER_HOST)
+    pc: GuestPC = ge_extract_pc(uctx)
+    sp: GuestStackPointer = ge_extract_sp(uctx)
+    idx: usize = (ge_pc_sampler_count.u64() & 127u64).usize()
+    ge_pc_sampler_samples[idx] <- pc
+    ge_pc_sampler_sps[idx] <- sp
+    ge_pc_sampler_last_pc <- pc
+    ge_pc_sampler_last_sp <- sp
+    ge_last_guest_pc <- pc
+    ge_last_guest_sp <- sp
+    ge_signal_guest_pc <- pc
+    ge_signal_pc_valid <- 1 if !pc != 0.uintptr() else 0
+    ge_signal_sp_valid <- 1 if !sp != 0.uintptr() else 0
+    ge_last_pc_source <- (GE_PC_SOURCE_SIGNAL_UCONTEXT if ge_signal_pc_valid != 0 else GE_PC_SOURCE_NONE)
+    ge_pc_sampler_count <- ge_pc_sampler_count + 1u32
+    ge_emergency_mark(GE_EV_PC_SAMPLE, ge_pc_sampler_count.u64().uintptr(), !pc, !sp, sig.u64().uintptr())
+    _ = info
+    if ge_pc_sampler_max_samples != 0u32 and ge_pc_sampler_count >= ge_pc_sampler_max_samples:
+        ge_set_native_phase(GE_PHASE_ALARM_HANDLER_ENTERED)
+        ge_timeout_fired <- 1
+        ge_last_status <- -3
+        ge_last_signal <- GE_SIG_ALRM.s32()
+        ge_siglongjmp(ge_jmp_buf[0usize].ref[void&], 1)
 
 @c_abi(c)
 @async_entry
@@ -2390,6 +2431,14 @@ def ge_reset_crash_state() -> void:
     ge_signal_mctx <- 0.uintptr().cast[MachineContextPtr]
     ge_signal_fault_addr_valid <- 0
     ge_signal_native_region_index <- -1
+    ge_pc_sampler_count <- 0u32
+    ge_pc_sampler_last_pc <- 0.uintptr().cast[GuestPC]
+    ge_pc_sampler_last_sp <- 0.uintptr().cast[GuestStackPointer]
+    pc_sample_i: mutable usize = 0usize
+    while pc_sample_i < GE_PC_SAMPLE_CAP:
+        ge_pc_sampler_samples[pc_sample_i] <- 0.uintptr().cast[GuestPC]
+        ge_pc_sampler_sps[pc_sample_i] <- 0.uintptr().cast[GuestStackPointer]
+        pc_sample_i <- pc_sample_i + 1usize
     ge_last_pc_source <- GE_PC_SOURCE_NONE
     ge_fault_word0 <- 0.uintptr()
     ge_fault_word1 <- 0.uintptr()
@@ -2690,6 +2739,23 @@ def ge_arm_timer(timeout_ms: u32) -> void:
         timer.value.tv_usec <- ((timeout_ms % 1000u32) * 1000u32).i32()
         _ = ge_setitimer(GE_ITIMER_REAL, timer.ref[void&], null)
 
+def ge_arm_pc_sampler_timer(timeout_ms: u32) -> void:
+    if timeout_ms != 0u32:
+        ge_raw_breadcrumb("GE:PC_SAMPLER_ARM\n", 18usize)
+        interval_ms: mutable u32 = ge_pc_sampler_interval_ms
+        if interval_ms == 0u32:
+            interval_ms <- 5u32
+        ge_pc_sampler_count <- 0u32
+        ge_pc_sampler_max_samples <- timeout_ms / interval_ms
+        if ge_pc_sampler_max_samples == 0u32:
+            ge_pc_sampler_max_samples <- 1u32
+        timer: mutable GeItimerval = zeroed
+        timer.interval.tv_sec <- (interval_ms / 1000u32).i64()
+        timer.interval.tv_usec <- ((interval_ms % 1000u32) * 1000u32).i32()
+        timer.value.tv_sec <- timer.interval.tv_sec
+        timer.value.tv_usec <- timer.interval.tv_usec
+        _ = ge_setitimer(GE_ITIMER_REAL, timer.ref[void&], null)
+
 def ge_disarm_timer() -> void:
     ge_raw_breadcrumb("GE:TIMER_DISARM\n", 16usize)
     timer_off: mutable GeItimerval = zeroed
@@ -2821,7 +2887,10 @@ def ge_run_main_entry_guarded_in_process(params: mutable GuestEntryParams&, time
         ge_install_guards()
         ge_guard_active <- 1
         ge_guard_target_thread <- !ge_pthread_self()
-        ge_arm_timer(timeout_ms)
+        if ge_pc_sampler_enabled:
+            ge_arm_pc_sampler_timer(timeout_ms)
+        else:
+            ge_arm_timer(timeout_ms)
         ge_set_native_phase(GE_PHASE_SYNTHETIC_BEFORE_SIGSETJMP)
         if ge_sigsetjmp(ge_jmp_buf[0usize].ref[void&], 1) != 0:
             ge_raw_breadcrumb("GE:GUARD_LONGJMP_ENTER\n", 23usize)
@@ -3324,6 +3393,25 @@ def c_GuestExec_FallbackGuestPC() -> uintptr:
 def c_GuestExec_SignalPCValid() -> s32:
     return ge_signal_pc_valid
 
+def c_GuestExec_PCSamplerCount() -> u32:
+    return ge_pc_sampler_count
+
+def c_GuestExec_PCSamplerLastPC() -> uintptr:
+    return !ge_pc_sampler_last_pc
+
+def c_GuestExec_PCSamplerLastSP() -> uintptr:
+    return !ge_pc_sampler_last_sp
+
+def c_GuestExec_PCSamplerSamplePC(index: u32) -> uintptr:
+    if index >= 128u32:
+        return 0.uintptr()
+    return !ge_pc_sampler_samples[index.usize()]
+
+def c_GuestExec_PCSamplerSampleSP(index: u32) -> uintptr:
+    if index >= 128u32:
+        return 0.uintptr()
+    return !ge_pc_sampler_sps[index.usize()]
+
 def c_GuestExec_SignalSPValid() -> s32:
     return ge_signal_sp_valid
 
@@ -3445,6 +3533,15 @@ global mutable ge_signal_uctx: SignalContextPtr = 0.uintptr().cast[SignalContext
 global mutable ge_signal_mctx: MachineContextPtr = 0.uintptr().cast[MachineContextPtr]
 global mutable ge_signal_fault_addr_valid: s32 = 0
 global mutable ge_signal_native_region_index: s32 = -1
+const GE_PC_SAMPLE_CAP: usize = 128usize
+global mutable ge_pc_sampler_enabled: bool = false
+global mutable ge_pc_sampler_interval_ms: u32 = 5u32
+global mutable ge_pc_sampler_max_samples: u32 = 0u32
+global mutable ge_pc_sampler_count: u32 = 0u32
+global mutable ge_pc_sampler_last_pc: GuestPC = 0.uintptr().cast[GuestPC]
+global mutable ge_pc_sampler_last_sp: GuestStackPointer = 0.uintptr().cast[GuestStackPointer]
+global mutable ge_pc_sampler_samples: GuestPC[128] = zeroed
+global mutable ge_pc_sampler_sps: GuestStackPointer[128] = zeroed
 global mutable ge_entry_native_prot: u32 = 0xffffffffu32
 global mutable ge_pc_native_prot: u32 = 0xffffffffu32
 global mutable ge_last_pc_was_fallback: s32 = 0
@@ -4329,6 +4426,11 @@ def GuestExec_SetFsStateTrapOnMismatch(enabled: bool) -> void:
 def GuestExec_SetEmergencyWatchdogFailfast(enabled: bool) -> void:
     ge_emergency_watchdog_failfast <- enabled
 
+def GuestExec_SetPCSampler(enabled: bool, interval_ms: u32) -> void:
+    ge_pc_sampler_enabled <- enabled
+    if interval_ms != 0u32:
+        ge_pc_sampler_interval_ms <- interval_ms
+
 def GuestExec_DebugArmEmergencyTimer(timeout_ms: u32) -> void:
     if ge_emergency_dump_fd >= 0:
         _ = ge_raw_close(ge_emergency_dump_fd)
@@ -4949,6 +5051,21 @@ def GuestExec_LastGuestR8() -> VAddr:
 
 def GuestExec_LastGuestR9() -> VAddr:
     return c_GuestExec_LastGuestR9()
+
+def GuestExec_PCSamplerCount() -> u32:
+    return c_GuestExec_PCSamplerCount()
+
+def GuestExec_PCSamplerLastPC() -> VAddr:
+    return c_GuestExec_PCSamplerLastPC()
+
+def GuestExec_PCSamplerLastSP() -> VAddr:
+    return c_GuestExec_PCSamplerLastSP()
+
+def GuestExec_PCSamplerSamplePC(index: u32) -> VAddr:
+    return c_GuestExec_PCSamplerSamplePC(index)
+
+def GuestExec_PCSamplerSampleSP(index: u32) -> VAddr:
+    return c_GuestExec_PCSamplerSampleSP(index)
 
 def GuestExec_ExpectedEntryParams() -> VAddr:
     return c_GuestExec_ExpectedEntryParams()

@@ -32,6 +32,7 @@ EVENT_NAMES = {
     20: "MAIN_RUN_BEGIN",
     21: "MAIN_RUN_END",
     22: "TEST_AFTER_GUARD",
+    23: "PC_SAMPLE",
     110: "SSE4A_SIGILL_ENTER",
     111: "SSE4A_EXTRQ_HANDLED",
     112: "SSE4A_INSERTQ_HANDLED",
@@ -159,12 +160,19 @@ def main() -> int:
     native_prot = fact_int(facts, "guest_exec_main_entry_native_prot", 0xFFFFFFFF)
     entry = fact_int(facts, "main_entry_addr", fact_int(facts, "main_entry"))
     boundary_reason_name = facts.get("guest_exec_boundary_reason_name", "")
+    sample_count = fact_int(facts, "guest_exec_pc_sample_count")
+    sample_last_pc = fact_int(facts, "guest_exec_pc_sample_last_pc")
 
     test_after = latest(events, 22)
     oracle_cont = latest(events, 120)
     oracle_stack = latest(events, 121)
     oracle_meta = latest(events, 122)
     signal_event = latest(events, 11) or latest(events, 13)
+    sample_events = [event for event in events if event.kind == 23]
+    hle_return = latest(events, 8) or latest(events, 9)
+    if sample_events and sample_count == 0:
+        sample_count = len(sample_events)
+        sample_last_pc = sample_events[-1].b
 
     print("CUSA triage")
     print("===========")
@@ -175,6 +183,8 @@ def main() -> int:
     )
     if runtime_symbol:
         print(f"first_hle={runtime_module}:{runtime_symbol} return=0x{runtime_ret:x}")
+    if sample_count:
+        print(f"pc_samples={sample_count} last_pc=0x{sample_last_pc:x}")
     if test_after:
         print(
             "test_after_guard="
@@ -189,6 +199,8 @@ def main() -> int:
             f"published={oracle_cont.c} region={signed64(oracle_cont.d)} "
             f"guard_reason={reason_text}"
         )
+    elif hle_return:
+        print(f"hle_return_event=continuation=0x{hle_return.c:x} rsp=0x{hle_return.d:x}")
     if oracle_stack:
         print(
             "oracle_stack="
@@ -199,8 +211,7 @@ def main() -> int:
     print("\nDiagnosis")
     print("---------")
     if guarded_status == -94 or (test_after and signed64(test_after.a) == -94):
-        reason = oracle_meta.a if oracle_meta else 0
-        reason_text = BOUNDARY_GUARD_REASONS.get(reason, str(reason))
+        reason_text = BOUNDARY_GUARD_REASONS.get(oracle_meta.a, str(oracle_meta.a)) if oracle_meta else "unknown"
         print("Return-continuation guard stopped the run before a guest crash.")
         print(f"Next fix: explain why the first HLE continuation is {reason_text}.")
         if oracle_cont:
@@ -210,13 +221,19 @@ def main() -> int:
                 print("The continuation is mapped but not published; fix native executable publication coverage.")
             else:
                 print("The continuation is mapped/published; inspect the guard reason and saved frame words.")
+        elif hle_return:
+            print(f"Fallback from GEWD: first HLE continuation was 0x{hle_return.c:x}.")
+            print("Next fix: inspect the callsite_probe/address_probe for that continuation and compare against shadPS4.")
         else:
             print("No oracle boundary event was found; rerun with ELISA_GUEST_EXEC_DEBUG_TRACE=1.")
     elif guarded_status == -3 and first_boundary == 0:
         print("Timeout before the first HLE boundary.")
         pc_valid = fact_int(facts, "guest_exec_signal_pc_valid")
         pc = fact_int(facts, "guest_exec_signal_pc")
-        if pc_valid and pc:
+        if sample_count and sample_last_pc:
+            print(f"PC sampler captured {sample_count} sample(s); last PC is 0x{sample_last_pc:x}.")
+            print("Next fix: disassemble the sampled loop and compare its inputs with shadPS4.")
+        elif pc_valid and pc:
             print(f"Timeout snapshot captured child PC 0x{pc:x}; disassemble that guest window next.")
         else:
             print("No child PC captured; check the timeout SIGTRAP snapshot path before guessing at guest code.")
