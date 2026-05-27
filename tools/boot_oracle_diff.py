@@ -27,9 +27,12 @@ def parse_boot_oracle(path: Path) -> list[Record]:
     if not path.exists():
         raise FileNotFoundError(path)
     for raw_line in path.read_text(errors="replace").splitlines():
-        line = raw_line.strip()
-        if not line.startswith("BOOT_ORACLE "):
+        # Tolerate a logger prefix (e.g. "[time] <Info> Core_Linker: BOOT_ORACLE ...")
+        # so the trace can be grepped straight out of shadPS4's log file.
+        pos = raw_line.find("BOOT_ORACLE ")
+        if pos < 0:
             continue
+        line = raw_line[pos:].strip()
         parts = line.split(maxsplit=2)
         if len(parts) < 2:
             continue
@@ -53,7 +56,7 @@ def parse_elisa_artifacts(path: Path) -> list[Record]:
         fields = parse_kv(payload)
         facts.update(fields)
         if "module" in fields and "host" in fields and "imports" in fields:
-            key = f"module:{fields.get('module', '')}"
+            key = f"module:{fields.get('index', len(records))}"
             records.append(Record("module", key, fields, line))
         elif payload.startswith("trace_event "):
             key = f"trace:{fields.get('index', len(records))}"
@@ -87,7 +90,7 @@ def parse_elisa_artifacts(path: Path) -> list[Record]:
 
 def oracle_key(kind: str, fields: dict[str, str], index: int) -> str:
     if kind == "module":
-        return f"module:{fields.get('name') or fields.get('module') or index}"
+        return f"module:{fields.get('index') or fields.get('name') or fields.get('module') or index}"
     if kind == "entry":
         return "entry"
     if kind == "hle":

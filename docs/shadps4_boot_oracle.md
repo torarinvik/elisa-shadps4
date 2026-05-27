@@ -7,22 +7,43 @@ The fastest path for real-game bring-up is to run shadPS4 as an executable oracl
 Each line is intentionally plain text:
 
 ```text
-BOOT_ORACLE module index=0 name=eboot.bin base=0x800000000 size=0x2e04000 exec_base=0x800000000 exec_size=0x...
-BOOT_ORACLE entry addr=0x800002030 argc=1 argv0=0x... rsp=0x... rdi=0x... rsi=0x... rdx=0x... rcx=0x...
-BOOT_ORACLE hle seq=1 module=libkernel symbol=posix_pthread_mutex_init nid=<nid> return=0x8008c3311 rdi=0x... rsi=0x... rdx=0x... rcx=0x... r8=0x... r9=0x...
+BOOT_ORACLE module index=0 module=eboot.bin base=0x800000000 size=0x2e04000
+BOOT_ORACLE entry entry=0x800002030 argc=1
+BOOT_ORACLE hle seq=1 module=libkernel symbol=posix_pthread_mutex_init nid=<nid> return=0x8008c3311 rdi=0x... rsi=0x... rdx=0x...
 ```
 
-Keep values numeric where possible. Use hex for guest addresses.
+Keep values numeric where possible. Use hex for guest addresses. Lines may carry a
+logger prefix (`[time] <Info> Core_Linker: BOOT_ORACLE ...`); the diff tool finds the
+`BOOT_ORACLE` token anywhere in the line, so grepping shadPS4's log file works directly.
+
+Field names must match the Elisa side: `module`/`index`/`base`/`size` for module records,
+`entry` for entry records, and `seq`/`module`/`symbol`/`return`/`rdi`/`rsi`/`rdx` for hle
+records. Records are keyed by `index` (module), the literal `entry`, and `seq` (hle).
 
 ## shadPS4 Insertion Points
 
 These are the minimum useful hooks:
 
-- `src/core/linker.cpp`, `Linker::LoadModule` after `module->LoadModuleToMemory(...)`: emit `BOOT_ORACLE module`.
-- `src/core/linker.cpp`, `Linker::Execute` immediately before `RunMainEntry(&params)`: emit `BOOT_ORACLE entry`.
-- HLE dispatch / wrapper boundary: emit `BOOT_ORACLE hle` with the guest return address and argument registers before entering the native HLE body.
+- `src/core/linker.cpp`, `Linker::LoadModule` after `m_modules.emplace_back(...)`: emit `BOOT_ORACLE module` (**done** — module layout: index/base/size).
+- `src/core/linker.cpp`, `Linker::Execute` immediately before `RunMainEntry(&params)`: emit `BOOT_ORACLE entry` (**done** — entry addr + argc).
+- HLE call boundary: emit `BOOT_ORACLE hle` with the guest return address and argument registers. **Not done — phase 2.**
 
-The first slice should capture only module table, entry state, and the first 10 HLE calls. That is enough to settle whether Elisa’s return continuation, argument registers, module layout, and first boundary match shadPS4.
+### Why `hle` is phase 2
+
+shadPS4 resolves each import straight to its native function address at relocation time
+(`Linker::Relocate` → `Resolve` → the GOT slot at `linker.cpp`), and the guest then `call`s
+that native function directly. There is **no central runtime chokepoint** every HLE call
+passes through, so `BOOT_ORACLE hle` (per-call return address + arg registers) cannot be a
+few log lines — it needs a logging trampoline that redirects each JUMP_SLOT through a
+per-NID stub that records the return address and args, then tail-calls the real function.
+
+Likewise, raw *resolved addresses* are not cross-comparable: shadPS4 resolves HLE imports to
+**host** C++ addresses while the Elisa port resolves to **guest** thunk VAs. Only structural
+facts (resolved-or-not, symbol type) would diff meaningfully there.
+
+The implemented slice (module layout + entry) is cross-comparable because both sides use the
+same ELF and `ModuleLoadBase`, so base/size/entry must match bit-for-bit. That alone catches
+the module-layout bug class (the fixed 32 MiB stride vs. real eboot size).
 
 ## Diff
 
