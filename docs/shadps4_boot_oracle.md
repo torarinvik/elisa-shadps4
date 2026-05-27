@@ -26,7 +26,8 @@ These are the minimum useful hooks:
 
 - `src/core/linker.cpp`, `Linker::LoadModule` after `m_modules.emplace_back(...)`: emit `BOOT_ORACLE module` (**done** — module layout: index/base/size).
 - `src/core/linker.cpp`, `Linker::Execute` immediately before `RunMainEntry(&params)`: emit `BOOT_ORACLE entry` (**done** — entry addr + argc).
-- HLE call boundary: emit `BOOT_ORACLE hle` with the guest return address and argument registers. **Not done — phase 2.**
+- `src/core/linker.cpp`, `Linker::Relocate` import path (after `Resolve(...)`): emit `BOOT_ORACLE resolve nid=… symtype=… resolved=…` (**done** — per-import structural facts). Catches missing-HLE-coverage (resolved 1 vs 0) and import-table parsing divergences, keyed by bare NID. Resolved *addresses* are deliberately omitted (host HLE addr vs guest thunk VA aren't cross-comparable; the "function import resolved to a data symbol" case is caught instead by the port's local `expected_symbol_type` invariant).
+- HLE call boundary: emit `BOOT_ORACLE hle` with the guest return address and argument registers. **Not done — phase 2**, gated on the first divergence being *after* import resolution.
 
 ### Why `hle` is phase 2
 

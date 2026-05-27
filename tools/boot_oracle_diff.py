@@ -58,6 +58,9 @@ def parse_elisa_artifacts(path: Path) -> list[Record]:
         if "module" in fields and "host" in fields and "imports" in fields:
             key = f"module:{fields.get('index', len(records))}"
             records.append(Record("module", key, fields, line))
+        elif payload.startswith("resolve "):
+            key = f"resolve:{fields.get('nid', len(records))}"
+            records.append(Record("resolve", key, fields, line))
         elif payload.startswith("trace_event "):
             key = f"trace:{fields.get('index', len(records))}"
             records.append(Record("trace", key, fields, line))
@@ -95,6 +98,8 @@ def oracle_key(kind: str, fields: dict[str, str], index: int) -> str:
         return "entry"
     if kind == "hle":
         return f"hle:{fields.get('seq', index)}"
+    if kind == "resolve":
+        return f"resolve:{fields.get('nid', index)}"
     if kind == "trace":
         return f"trace:{fields.get('index', index)}"
     return f"{kind}:{fields.get('seq') or fields.get('index') or index}"
