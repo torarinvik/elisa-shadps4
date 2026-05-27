@@ -791,6 +791,24 @@ def ge_debug_guard_mapped_guest_pointer(site: cstr, target: uintptr, size: u64, 
         ge_abort_active_guard_for_debug_trap(GE_DEBUG_TRAP_GUEST_PTR_UNMAPPED_STATUS)
     return false
 
+# Oracle slice for shadPS4 parity diffing: emit the first-HLE-boundary facts once
+# into the emergency tape (decoded by tools/decode_gewd.py). Symbol/module names
+# are already surfaced via the boundary-guard getters / fork report, so this only
+# carries the numeric facts that distinguish "wrong / unmapped / unpublished
+# continuation": the continuation address, its native protection, whether it is
+# published in the native exec table, the owning region index, and the top guest
+# stack words at the boundary.
+def ge_emit_oracle_first_boundary(saved_return: uintptr, reason: u64, sequence: u64) -> void:
+    if ge_oracle_first_boundary_emitted != 0:
+        return
+    ge_oracle_first_boundary_emitted <- 1
+    prot: uintptr = ge_native_prot_at(saved_return, 1u64).u64().uintptr()
+    published: uintptr = 1.uintptr() if ge_is_published_exec(saved_return, 1u64) else 0.uintptr()
+    region: uintptr = ge_find_native_region(saved_return, 1u64).i64().u64().uintptr()
+    ge_emergency_mark(GE_EV_ORACLE_BOUNDARY_CONT, saved_return, prot, published, region)
+    ge_emergency_mark(GE_EV_ORACLE_BOUNDARY_STACK, !ge_runtime_hle_guest_rsp, ge_runtime_hle_guest_stack_word0, ge_runtime_hle_guest_stack_word1, ge_runtime_hle_guest_stack_word2)
+    ge_emergency_mark(GE_EV_ORACLE_BOUNDARY_META, reason.uintptr(), !ge_runtime_hle_guest_rbp, !ge_runtime_hle_guest_return_addr, sequence.uintptr())
+
 def ge_debug_guard_guest_return_continuation(sequence: u64) -> bool can[Unsafe.SegmentMutation, Segment.Host]:
     if not ge_debug_trap_on_boundary_guard:
         return true
@@ -837,6 +855,7 @@ def ge_debug_guard_guest_return_continuation(sequence: u64) -> bool can[Unsafe.S
     if reason == GE_BOUNDARY_GUARD_NONE and ge_debug_trap_on_unpublished_exec and not ge_is_published_exec(saved_return, 1u64):
         reason <- GE_BOUNDARY_GUARD_UNPUBLISHED_EXEC
     ge_raw_breadcrumb("GE:RETG_DECIDE\n", 15usize)
+    ge_emit_oracle_first_boundary(saved_return, reason, sequence)
     if reason == GE_BOUNDARY_GUARD_NONE:
         return true
     ge_debug_trap_count <- ge_debug_trap_count + 1u64
@@ -1321,6 +1340,13 @@ const GE_EV_SSE4A_SIGILL_ENTER: u32 = 110u32
 const GE_EV_SSE4A_EXTRQ_HANDLED: u32 = 111u32
 const GE_EV_SSE4A_INSERTQ_HANDLED: u32 = 112u32
 const GE_EV_SSE4A_UNHANDLED: u32 = 113u32
+# Oracle slice: consolidated first-HLE-boundary facts for shadPS4 parity diffing.
+# CONT  payload = (continuation_addr, native_prot_at(cont), is_published?1:0, owning_region_index)
+# STACK payload = (guest_rsp, stack[0], stack[1], stack[2])
+# META  payload = (boundary_guard_reason, guest_rbp, guest_return_addr, sequence)
+const GE_EV_ORACLE_BOUNDARY_CONT: u32 = 120u32
+const GE_EV_ORACLE_BOUNDARY_STACK: u32 = 121u32
+const GE_EV_ORACLE_BOUNDARY_META: u32 = 122u32
 const GE_EV_MUTEX_INIT: u32 = 1001u32
 
 @fixed_layout
@@ -3453,6 +3479,10 @@ global mutable ge_runtime_hle_boundary_guard_module: static u8&? = null
 global mutable ge_runtime_hle_boundary_guard_symbol: static u8&? = null
 global mutable ge_runtime_hle_boundary_guard_value: uintptr = 0.uintptr()
 global mutable ge_runtime_hle_boundary_guard_return_addr: uintptr = 0.uintptr()
+# Oracle slice: emit the consolidated first-HLE-boundary facts exactly once so a
+# shadPS4-parity diff can stop at the first divergence (wrong / unmapped /
+# unpublished continuation). One-shot so the tape isn't flooded on later boundaries.
+global mutable ge_oracle_first_boundary_emitted: s32 = 0
 global mutable ge_runtime_hle_recorder_stack_word0: uintptr = 0.uintptr()
 global mutable ge_runtime_hle_recorder_stack_word1: uintptr = 0.uintptr()
 global mutable ge_runtime_hle_guest_return_addr: GuestPC = 0.uintptr().cast[GuestPC]
@@ -4073,6 +4103,7 @@ def GuestExec_ResetState() -> void:
     ge_debug_trap_reason <- GE_BOUNDARY_GUARD_NONE
     ge_debug_trap_value <- 0.uintptr()
     ge_debug_trap_sequence <- 0u64
+    ge_oracle_first_boundary_emitted <- 0
     ge_debug_trap_return_addr <- 0.uintptr()
     ge_debug_trap_arg0 <- 0.uintptr()
     ge_debug_trap_arg1 <- 0.uintptr()

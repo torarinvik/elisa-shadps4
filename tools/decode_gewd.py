@@ -72,6 +72,13 @@ EVENT_NAMES = {
     111: "SSE4A_EXTRQ_HANDLED",
     112: "SSE4A_INSERTQ_HANDLED",
     113: "SSE4A_UNHANDLED",
+    # Oracle slice (first-HLE-boundary parity facts):
+    #   CONT  a=continuation_addr b=native_prot c=is_published d=owning_region_index
+    #   STACK a=guest_rsp b=stack[0] c=stack[1] d=stack[2]
+    #   META  a=boundary_guard_reason b=guest_rbp c=guest_return_addr d=sequence
+    120: "ORACLE_BOUNDARY_CONT",
+    121: "ORACLE_BOUNDARY_STACK",
+    122: "ORACLE_BOUNDARY_META",
     1001: "MUTEX_INIT",
 }
 
