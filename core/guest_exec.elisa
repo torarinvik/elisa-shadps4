@@ -2985,7 +2985,24 @@ def ge_run_main_entry_guarded(params: mutable GuestEntryParams&, timeout_ms: u32
                     fr3.status <- -3
                     fr3.signal <- GE_SIG_ALRM.s32()
                     fr3.native_phase <- GE_PHASE_PARENT_TIMEOUT
-                _ = ge_kill(child, 9)
+                # Ask the child to take a catchable signal first. Its handler
+                # snapshots RIP/RSP/registers into the shared ForkReport before
+                # the parent falls back to SIGKILL, turning timeout hangs into a
+                # concrete guest PC instead of a blind kill.
+                _ = ge_kill(child, GE_SIG_TRAP)
+                snapshot_wait_ms: mutable u32 = 0u32
+                while snapshot_wait_ms < 50u32:
+                    snapshot_result: int = ge_waitpid(child, status.ref[mutable int&], GE_WNOHANG)
+                    if snapshot_result == child or snapshot_result < 0:
+                        break
+                    _ = ge_usleep(1000u32)
+                    snapshot_wait_ms <- snapshot_wait_ms + 1u32
+                ge_absorb_fork_report()
+                ge_last_status <- -3
+                if ge_last_signal == 0:
+                    ge_last_signal <- GE_SIG_ALRM.s32()
+                if snapshot_wait_ms >= 50u32:
+                    _ = ge_kill(child, 9)
                 reap_wait_ms: mutable u32 = 0u32
                 while reap_wait_ms < 250u32:
                     reap_result: int = ge_waitpid(child, status.ref[mutable int&], GE_WNOHANG)
@@ -2994,6 +3011,9 @@ def ge_run_main_entry_guarded(params: mutable GuestEntryParams&, timeout_ms: u32
                     _ = ge_usleep(1000u32)
                     reap_wait_ms <- reap_wait_ms + 1u32
                 ge_absorb_fork_report()
+                ge_last_status <- -3
+                if ge_last_signal == 0:
+                    ge_last_signal <- GE_SIG_ALRM.s32()
                 return -3
             _ = ge_usleep(1000u32)
             waited_ms <- waited_ms + 1u32
