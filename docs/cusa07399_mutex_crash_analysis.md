@@ -67,3 +67,30 @@ Pin the desync: trace guest rsp at three points for the **crashing** invocation
 where rsp shifts by the frame offset. Fix wherever Elisa fails to preserve the
 guest rsp across the HLE/guest re-entry. Then the attr ABI can be aligned to
 opaque handles as a hardening follow-up.
+
+## Reviewer ranking of likely causes (second opinion, concurs with above)
+
+"The mutexattr inline write is the smoking bullet, not the person holding the
+gun." A normal guest local for `pthread_mutexattr_t` must not overlap an active
+return address; that it does means one of:
+
+1. **Most likely:** the HLE boundary thunk / return mechanics subtly corrupts or
+   desyncs guest `rsp`. (Note: the generic thunk was verified balanced in
+   isolation — so suspect a *specific* path, not the common case.)
+2. **Also likely:** module-init / ELF-entry fallback uses the wrong call shape /
+   stack alignment vs shadPS4.
+3. **Real but secondary:** `ScePthreadMutexattr` should be modeled as an opaque
+   8-byte handle, not inline fields (hardening; would change `ret 0x1` into
+   `ret <handle>` but not remove the overlap).
+4. **Less likely now:** TLS, relocation, `%fs`, canaries, import resolution.
+
+Decisive method: trace guest `rsp` across the crashing call chain
+(before the attr-local-creating guest call → HLE entry → HLE return → next guest
+insn → eventual `ret`) and compare against shadPS4's oracle. **The first point
+where `rsp` differs is the bug.**
+
+Caveat for the comparison: the two emulators may place the guest stack at
+different base addresses, so compare the rsp **trajectory (deltas across calls)**,
+not absolute values — or do a self-contained Elisa check: assert that, inside the
+boundary thunk, `rsp` after the HLE `pop r10` equals the captured entry `rsp`
+(directly tests cause #1 without shadPS4).
