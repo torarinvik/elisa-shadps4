@@ -70,6 +70,8 @@ struct PthreadRwlock:
 global mutable g_default_mutex_attr: PthreadMutexAttr = PthreadMutexAttr(1, 0, 0)
 global mutable g_default_cond_attr: PthreadCondAttr = PthreadCondAttr(0, 0)
 global mutable g_default_rwlock_attr: PthreadRwlockAttr = PthreadRwlockAttr(0, 0)
+global mutable threads_sync_mutex_attr_pool: PthreadMutexAttr[128] = zeroed
+global mutable threads_sync_mutex_attr_pool_used: bool[128] = zeroed
 
 def threads_sync_low_guest_pointer(ptr: void&?) -> bool:
     # C++ resolves guest pointer slots before dereferencing. Real guest code can
@@ -84,6 +86,9 @@ def threads_sync_boundary_guest_ptr_mapped(site: cstr, ptr: GuestVAddr[void], si
         if optional and raw == 0.uintptr():
             return true
         if MemoryManager_AddressIsMapped(Memory_Instance(), raw, size):
+            return true
+        native_prot: u32 = GuestExec_AddressNativeProt(raw)
+        if native_prot != 0xffffffffu32:
             return true
         nearest_base: mutable VAddr = 0.uintptr()
         nearest_end: mutable VAddr = 0.uintptr()
@@ -123,6 +128,8 @@ def threads_sync_mutex_slot_reject_reason(mutex: mutable void&?&?) -> u64 can[Se
             return 1u64
         if MemoryManager_FindBackingIndex(Memory_Instance(), addr, 8) >= 0:
             return 0u64
+        if GuestExec_AddressNativeProt(addr) != 0xffffffffu32:
+            return 0u64
         if addr < 4096.uintptr():
             return 3u64
         return 4u64
@@ -133,23 +140,38 @@ def threads_sync_mutex_slot_addr(mutex: mutable void&?&) -> VAddr:
 def threads_sync_mutex_slot_is_guest_mapped(mutex: mutable void&?&) -> bool can[Segment.Host, Unsafe.SegmentMutation]:
     can Unsafe.SegmentMutation, Segment.Host:
         addr: VAddr = threads_sync_mutex_slot_addr(mutex)
-        return MemoryManager_FindBackingIndex(Memory_Instance(), addr, 8) >= 0
+        if MemoryManager_FindBackingIndex(Memory_Instance(), addr, 8) >= 0:
+            return true
+        return GuestExec_AddressNativeProt(addr) != 0xffffffffu32
 
 def threads_sync_mutex_slot_value(mutex: mutable void&?&) -> uintptr can[Segment.Host, Unsafe.SegmentMutation]:
     can Unsafe.SegmentMutation, Segment.Host:
-        if threads_sync_mutex_slot_is_guest_mapped(mutex):
-            return MemoryManager_ReadU64(Memory_Instance(), threads_sync_mutex_slot_addr(mutex)).uintptr()
+        addr: VAddr = threads_sync_mutex_slot_addr(mutex)
+        if MemoryManager_FindBackingIndex(Memory_Instance(), addr, 8) >= 0:
+            raw: mutable u64 = MemoryManager_ReadU64(Memory_Instance(), addr)
+            if raw == 0u64 and GuestExec_AddressNativeProt(addr) != 0xffffffffu32:
+                raw <- GuestExec_ReadContextU64(addr).u64()
+            return raw.uintptr()
+        if GuestExec_AddressNativeProt(addr) != 0xffffffffu32:
+            return GuestExec_ReadContextU64(addr).u64().uintptr()
         if mutex[0] == null:
             return 0.uintptr()
         return mutex[0].uintptr()
 
 def threads_sync_mutex_slot_write(mutex: mutable void&?&, value: void&?) -> bool can[Segment.Host, Unsafe.SegmentMutation]:
     can Unsafe.SegmentMutation, Segment.Host:
-        if threads_sync_mutex_slot_is_guest_mapped(mutex):
-            raw: mutable u64 = 0u64
-            if value != null:
-                raw <- value.uintptr().u64()
-            return MemoryManager_WriteU64(Memory_Instance(), threads_sync_mutex_slot_addr(mutex), raw)
+        addr: VAddr = threads_sync_mutex_slot_addr(mutex)
+        raw: mutable u64 = 0u64
+        if value != null:
+            raw <- value.uintptr().u64()
+        if MemoryManager_FindBackingIndex(Memory_Instance(), addr, 8) >= 0:
+            if MemoryManager_WriteU64(Memory_Instance(), addr, raw):
+                if GuestExec_AddressNativeProt(addr) != 0xffffffffu32:
+                    return GuestExec_WriteU64(addr, raw)
+                return true
+            return false
+        if GuestExec_AddressNativeProt(addr) != 0xffffffffu32:
+            return GuestExec_WriteU64(addr, raw)
         mutex[0] <- value
         return true
 
@@ -198,6 +220,50 @@ def threads_sync_record_mutex(op: static u8&, mutex: mutable void&?&?, ret: int)
                 _ = threads_sync_debug_guard_unmapped_slot(op, threads_sync_last_mutex_slot.uintptr().cast[GuestVAddr[void]], 8u64)
         GuestExec_RecordRuntimeHle("libkernel", op, threads_sync_last_mutex_slot.uintptr(), threads_sync_last_mutex_value.uintptr(), reason.uintptr(), ret.u64().uintptr())
         return ret
+
+def threads_sync_mutex_attr_alloc_default() -> mutable PthreadMutexAttr&?:
+    i: mutable usize = 0usize
+    while i < 128usize:
+        if not threads_sync_mutex_attr_pool_used[i]:
+            threads_sync_mutex_attr_pool_used[i] <- true
+            threads_sync_mutex_attr_pool[i] <- g_default_mutex_attr
+            return threads_sync_mutex_attr_pool[i].ref[mutable PthreadMutexAttr&]
+        i <- i + 1usize
+    return null
+
+def threads_sync_mutex_attr_pool_release(attr: PthreadMutexAttr&?) -> void:
+    if attr == null:
+        return
+    i: mutable usize = 0usize
+    while i < 128usize:
+        if threads_sync_mutex_attr_pool[i].ref[PthreadMutexAttr&].uintptr() == attr.uintptr():
+            threads_sync_mutex_attr_pool_used[i] <- false
+            threads_sync_mutex_attr_pool[i] <- g_default_mutex_attr
+            return
+        i <- i + 1usize
+
+def threads_sync_mutex_attr_read_slot(slot: GuestVAddr[void]) -> mutable PthreadMutexAttr&? can[Segment.Host, Unsafe.SegmentMutation]:
+    can Unsafe.SegmentMutation, Segment.Host:
+        if slot.cast[uintptr] == 0.uintptr():
+            return null
+        raw: mutable u64 = MemoryManager_ReadU64(Memory_Instance(), slot.cast[uintptr])
+        if raw == 0u64 and GuestExec_AddressNativeProt(slot.cast[uintptr]) != 0xffffffffu32:
+            raw <- GuestExec_ReadContextU64(slot.cast[uintptr]).u64()
+        return raw.uintptr().cast[mutable PthreadMutexAttr&?]
+
+def threads_sync_mutex_attr_write_slot(slot: GuestVAddr[void], attr: PthreadMutexAttr&?) -> bool can[Segment.Host, Unsafe.SegmentMutation]:
+    can Unsafe.SegmentMutation, Segment.Host:
+        raw: mutable u64 = 0u64
+        if attr != null:
+            raw <- attr.uintptr().u64()
+        addr: uintptr = slot.cast[uintptr]
+        if MemoryManager_WriteU64(Memory_Instance(), addr, raw):
+            if GuestExec_AddressNativeProt(addr) != 0xffffffffu32:
+                return GuestExec_WriteU64(addr, raw)
+            return true
+        if GuestExec_AddressNativeProt(addr) != 0xffffffffu32:
+            return GuestExec_WriteU64(addr, raw)
+        return false
 
 def threads_sync_mutex_init_slot(mutex: mutable void&?&?, mutex_attr: PthreadMutexAttr&?) -> int can[Segment.Host, Unsafe.SegmentMutation]:
     can Unsafe.SegmentMutation, Segment.Host:
@@ -256,25 +322,42 @@ def posix_pthread_mutex_init_hle(mutex: GuestVAddr[void], mutex_attr: GuestVAddr
             ge_emergency_mark(GE_EV_HLE_VALIDATE_END, GE_EV_MUTEX_INIT.u64().uintptr(), mutex.uintptr(), 0.uintptr(), POSIX_EINVAL.u64().uintptr())
             ge_raw_breadcrumb("GE:MTX_HLE_BAD_MUTEX\n", 21usize)
             return POSIX_EINVAL
-        if not threads_sync_boundary_guest_ptr_mapped("posix_pthread_mutex_init.mutex_attr", mutex_attr, 12u64, true):
+        if not threads_sync_boundary_guest_ptr_mapped("posix_pthread_mutex_init.mutex_attr", mutex_attr, 8u64, true):
             ge_emergency_mark(GE_EV_HLE_VALIDATE_END, GE_EV_MUTEX_INIT.u64().uintptr(), mutex.uintptr(), mutex_attr.uintptr(), POSIX_EINVAL.u64().uintptr())
             ge_raw_breadcrumb("GE:MTX_HLE_BAD_ATTR\n", 20usize)
             return POSIX_EINVAL
         ge_emergency_mark(GE_EV_HLE_VALIDATE_END, GE_EV_MUTEX_INIT.u64().uintptr(), mutex.uintptr(), mutex_attr.uintptr(), 0.uintptr())
         ge_raw_breadcrumb("GE:MTX_HLE_CAST\n", 16usize)
         trusted Unsafe.GuestHostPointerCast:
-            return posix_pthread_mutex_init(mutex.cast[mutable void&?&?], mutex_attr.cast[PthreadMutexAttr&?])
+            attr: mutable PthreadMutexAttr&? = threads_sync_mutex_attr_read_slot(mutex_attr)
+            return posix_pthread_mutex_init(mutex.cast[mutable void&?&?], attr)
         return POSIX_EINVAL
 
-def scePthreadMutexInit(mutex: mutable void&?&?, mutex_attr: PthreadMutexAttr&?, name: static u8&?) -> int can[Segment.Host, Unsafe.SegmentMutation]:
+@boundary_pointer_args(mutex, mutex_attr)
+def scePthreadMutexInit(mutex: GuestVAddr[void], mutex_attr: GuestVAddr[void], name: GuestVAddr[void]) -> int can[Segment.Host, Unsafe.SegmentMutation]:
     can Unsafe.SegmentMutation, Segment.Host:
         _ = name
-        return threads_sync_orbis_from_posix(posix_pthread_mutex_init(mutex, mutex_attr))
+        if not threads_sync_boundary_guest_ptr_mapped("scePthreadMutexInit.mutex", mutex, 8u64, false):
+            return ORBIS_KERNEL_ERROR_EINVAL
+        if not threads_sync_boundary_guest_ptr_mapped("scePthreadMutexInit.mutex_attr", mutex_attr, 8u64, true):
+            return ORBIS_KERNEL_ERROR_EINVAL
+        trusted Unsafe.GuestHostPointerCast:
+            attr: mutable PthreadMutexAttr&? = threads_sync_mutex_attr_read_slot(mutex_attr)
+            return threads_sync_orbis_from_posix(posix_pthread_mutex_init(mutex.cast[mutable void&?&?], attr))
+        return ORBIS_KERNEL_ERROR_EINVAL
 
-def scePthreadMutexInitPosix(mutex: mutable void&?&?, mutex_attr: PthreadMutexAttr&?, name: static u8&?) -> int can[Segment.Host, Unsafe.SegmentMutation]:
+@boundary_pointer_args(mutex, mutex_attr)
+def scePthreadMutexInitPosix(mutex: GuestVAddr[void], mutex_attr: GuestVAddr[void], name: GuestVAddr[void]) -> int can[Segment.Host, Unsafe.SegmentMutation]:
     can Unsafe.SegmentMutation, Segment.Host:
         _ = name
-        return posix_pthread_mutex_init(mutex, mutex_attr)
+        if not threads_sync_boundary_guest_ptr_mapped("scePthreadMutexInitPosix.mutex", mutex, 8u64, false):
+            return POSIX_EINVAL
+        if not threads_sync_boundary_guest_ptr_mapped("scePthreadMutexInitPosix.mutex_attr", mutex_attr, 8u64, true):
+            return POSIX_EINVAL
+        trusted Unsafe.GuestHostPointerCast:
+            attr: mutable PthreadMutexAttr&? = threads_sync_mutex_attr_read_slot(mutex_attr)
+            return posix_pthread_mutex_init(mutex.cast[mutable void&?&?], attr)
+        return POSIX_EINVAL
 
 def posix_pthread_mutex_destroy(mutex: mutable void&?&?) -> int can[Segment.Host, Unsafe.SegmentMutation]:
     can Unsafe.SegmentMutation, Segment.Host:
@@ -527,6 +610,104 @@ def posix_pthread_mutexattr_destroy(attr: mutable PthreadMutexAttr&?) -> int:
         return POSIX_EINVAL
     attr <- g_default_mutex_attr
     return 0
+
+@boundary_pointer_args(attr)
+def posix_pthread_mutexattr_init_hle(attr: GuestVAddr[void]) -> int can[Segment.Host, Unsafe.SegmentMutation, Memory.Allocate]:
+    can Unsafe.SegmentMutation, Segment.Host:
+        if not threads_sync_boundary_guest_ptr_mapped("posix_pthread_mutexattr_init.attr", attr, 8u64, false):
+            return POSIX_EINVAL
+        handle: mutable PthreadMutexAttr&? = threads_sync_mutex_attr_alloc_default()
+        if handle == null:
+            return POSIX_ENOMEM
+        if not threads_sync_mutex_attr_write_slot(attr, handle):
+            return POSIX_EINVAL
+        return 0
+
+@boundary_pointer_args(attr)
+def posix_pthread_mutexattr_setkind_np_hle(attr: GuestVAddr[void], kind: int) -> int can[Segment.Host, Unsafe.SegmentMutation]:
+    can Unsafe.SegmentMutation, Segment.Host:
+        handle: mutable PthreadMutexAttr&? = threads_sync_mutex_attr_read_slot(attr)
+        return posix_pthread_mutexattr_setkind_np(handle, kind)
+
+@boundary_pointer_args(attr)
+def posix_pthread_mutexattr_getkind_np_hle(attr: GuestVAddr[void]) -> int can[Segment.Host, Unsafe.SegmentMutation]:
+    can Unsafe.SegmentMutation, Segment.Host:
+        handle: mutable PthreadMutexAttr&? = threads_sync_mutex_attr_read_slot(attr)
+        return posix_pthread_mutexattr_getkind_np(handle)
+
+@boundary_pointer_args(attr)
+def posix_pthread_mutexattr_setprioceiling_hle(attr: GuestVAddr[void], prioceiling: int) -> int can[Segment.Host, Unsafe.SegmentMutation]:
+    can Unsafe.SegmentMutation, Segment.Host:
+        handle: mutable PthreadMutexAttr&? = threads_sync_mutex_attr_read_slot(attr)
+        return posix_pthread_mutexattr_setprioceiling(handle, prioceiling)
+
+@boundary_pointer_args(attr, prioceiling)
+def posix_pthread_mutexattr_getprioceiling_hle(attr: GuestVAddr[void], prioceiling: GuestVAddr[void]) -> int can[Segment.Host, Unsafe.SegmentMutation]:
+    can Unsafe.SegmentMutation, Segment.Host:
+        if not threads_sync_boundary_guest_ptr_mapped("posix_pthread_mutexattr_getprioceiling.prioceiling", prioceiling, 4u64, false):
+            return POSIX_EINVAL
+        trusted Unsafe.GuestHostPointerCast:
+            handle: mutable PthreadMutexAttr&? = threads_sync_mutex_attr_read_slot(attr)
+            return posix_pthread_mutexattr_getprioceiling(handle, prioceiling.cast[mutable int&])
+        return POSIX_EINVAL
+
+@boundary_pointer_args(attr)
+def posix_pthread_mutexattr_setprotocol_hle(attr: GuestVAddr[void], protocol: int) -> int can[Segment.Host, Unsafe.SegmentMutation]:
+    can Unsafe.SegmentMutation, Segment.Host:
+        handle: mutable PthreadMutexAttr&? = threads_sync_mutex_attr_read_slot(attr)
+        return posix_pthread_mutexattr_setprotocol(handle, protocol)
+
+@boundary_pointer_args(attr, protocol)
+def posix_pthread_mutexattr_getprotocol_hle(attr: GuestVAddr[void], protocol: GuestVAddr[void]) -> int can[Segment.Host, Unsafe.SegmentMutation]:
+    can Unsafe.SegmentMutation, Segment.Host:
+        if not threads_sync_boundary_guest_ptr_mapped("posix_pthread_mutexattr_getprotocol.protocol", protocol, 4u64, false):
+            return POSIX_EINVAL
+        trusted Unsafe.GuestHostPointerCast:
+            handle: mutable PthreadMutexAttr&? = threads_sync_mutex_attr_read_slot(attr)
+            return posix_pthread_mutexattr_getprotocol(handle, protocol.cast[mutable int&])
+        return POSIX_EINVAL
+
+@boundary_pointer_args(attr)
+def posix_pthread_mutexattr_setpshared_hle(attr: GuestVAddr[void], pshared: int) -> int can[Segment.Host, Unsafe.SegmentMutation]:
+    can Unsafe.SegmentMutation, Segment.Host:
+        handle: mutable PthreadMutexAttr&? = threads_sync_mutex_attr_read_slot(attr)
+        return posix_pthread_mutexattr_setpshared(handle, pshared)
+
+@boundary_pointer_args(attr, pshared)
+def posix_pthread_mutexattr_getpshared_hle(attr: GuestVAddr[void], pshared: GuestVAddr[void]) -> int can[Segment.Host, Unsafe.SegmentMutation]:
+    can Unsafe.SegmentMutation, Segment.Host:
+        if not threads_sync_boundary_guest_ptr_mapped("posix_pthread_mutexattr_getpshared.pshared", pshared, 4u64, false):
+            return POSIX_EINVAL
+        trusted Unsafe.GuestHostPointerCast:
+            handle: mutable PthreadMutexAttr&? = threads_sync_mutex_attr_read_slot(attr)
+            return posix_pthread_mutexattr_getpshared(handle, pshared.cast[mutable int&])
+        return POSIX_EINVAL
+
+@boundary_pointer_args(attr)
+def posix_pthread_mutexattr_settype_hle(attr: GuestVAddr[void], type_: int) -> int can[Segment.Host, Unsafe.SegmentMutation]:
+    can Unsafe.SegmentMutation, Segment.Host:
+        handle: mutable PthreadMutexAttr&? = threads_sync_mutex_attr_read_slot(attr)
+        return posix_pthread_mutexattr_settype(handle, type_)
+
+@boundary_pointer_args(attr, type_)
+def posix_pthread_mutexattr_gettype_hle(attr: GuestVAddr[void], type_: GuestVAddr[void]) -> int can[Segment.Host, Unsafe.SegmentMutation]:
+    can Unsafe.SegmentMutation, Segment.Host:
+        if not threads_sync_boundary_guest_ptr_mapped("posix_pthread_mutexattr_gettype.type", type_, 4u64, false):
+            return POSIX_EINVAL
+        trusted Unsafe.GuestHostPointerCast:
+            handle: mutable PthreadMutexAttr&? = threads_sync_mutex_attr_read_slot(attr)
+            return posix_pthread_mutexattr_gettype(handle, type_.cast[mutable int&])
+        return POSIX_EINVAL
+
+@boundary_pointer_args(attr)
+def posix_pthread_mutexattr_destroy_hle(attr: GuestVAddr[void]) -> int can[Segment.Host, Unsafe.SegmentMutation]:
+    can Unsafe.SegmentMutation, Segment.Host:
+        handle: mutable PthreadMutexAttr&? = threads_sync_mutex_attr_read_slot(attr)
+        if handle == null:
+            return POSIX_EINVAL
+        _ = threads_sync_mutex_attr_write_slot(attr, null)
+        threads_sync_mutex_attr_pool_release(handle)
+        return 0
 
 def posix_pthread_cond_init(cond: mutable PthreadCond&?, cond_attr: PthreadCondAttr&?) -> int can[Segment.Host, Unsafe.SegmentMutation]:
     can Unsafe.SegmentMutation, Segment.Host:
@@ -868,9 +1049,17 @@ def posix_pthread_rwlockattr_setpshared(rwlockattr: mutable PthreadRwlockAttr&?,
 def scePthreadMutexIsowned(mutex: mutable void&?&?) -> int can[Segment.Host, Unsafe.SegmentMutation]:
     can Unsafe.SegmentMutation, Segment.Host:
         return threads_sync_orbis_from_posix(posix_pthread_mutex_isowned_np(mutex))
-def scePthreadMutexInitOrbis(mutex: mutable void&?&?, mutex_attr: PthreadMutexAttr&?) -> int can[Segment.Host, Unsafe.SegmentMutation]:
+@boundary_pointer_args(mutex, mutex_attr)
+def scePthreadMutexInitOrbis(mutex: GuestVAddr[void], mutex_attr: GuestVAddr[void]) -> int can[Segment.Host, Unsafe.SegmentMutation]:
     can Unsafe.SegmentMutation, Segment.Host:
-        return threads_sync_orbis_from_posix(posix_pthread_mutex_init(mutex, mutex_attr))
+        if not threads_sync_boundary_guest_ptr_mapped("scePthreadMutexInitOrbis.mutex", mutex, 8u64, false):
+            return ORBIS_KERNEL_ERROR_EINVAL
+        if not threads_sync_boundary_guest_ptr_mapped("scePthreadMutexInitOrbis.mutex_attr", mutex_attr, 8u64, true):
+            return ORBIS_KERNEL_ERROR_EINVAL
+        trusted Unsafe.GuestHostPointerCast:
+            attr: mutable PthreadMutexAttr&? = threads_sync_mutex_attr_read_slot(mutex_attr)
+            return threads_sync_orbis_from_posix(posix_pthread_mutex_init(mutex.cast[mutable void&?&?], attr))
+        return ORBIS_KERNEL_ERROR_EINVAL
 @boundary_pointer_args(mutex)
 def scePthreadMutexLock(mutex: GuestVAddr[void]) -> int can[Segment.Host, Unsafe.SegmentMutation]:
     can Unsafe.SegmentMutation, Segment.Host:
@@ -904,30 +1093,42 @@ def scePthreadMutexSetyieldloops(mutex: mutable void&?&?, count: int) -> int can
 def scePthreadMutexDestroy(mutex: mutable void&?&?) -> int can[Segment.Host, Unsafe.SegmentMutation]:
     can Unsafe.SegmentMutation, Segment.Host:
         return threads_sync_orbis_from_posix(posix_pthread_mutex_destroy(mutex))
-def scePthreadMutexattrInit(attr: mutable PthreadMutexAttr&?) -> int:
-    return threads_sync_orbis_from_posix(posix_pthread_mutexattr_init(attr))
-def scePthreadMutexattrGetkind(attr: PthreadMutexAttr&?) -> int:
-    return threads_sync_orbis_from_posix(posix_pthread_mutexattr_getkind_np(attr))
-def scePthreadMutexattrGetprioceiling(attr: PthreadMutexAttr&?, prioceiling: mutable int&) -> int:
-    return threads_sync_orbis_from_posix(posix_pthread_mutexattr_getprioceiling(attr, prioceiling))
-def scePthreadMutexattrGetprotocol(attr: PthreadMutexAttr&?, protocol: mutable int&) -> int:
-    return threads_sync_orbis_from_posix(posix_pthread_mutexattr_getprotocol(attr, protocol))
-def scePthreadMutexattrGetpshared(attr: PthreadMutexAttr&?, pshared: mutable int&) -> int:
-    return threads_sync_orbis_from_posix(posix_pthread_mutexattr_getpshared(attr, pshared))
-def scePthreadMutexattrGettype(attr: PthreadMutexAttr&?, type_: mutable int&) -> int:
-    return threads_sync_orbis_from_posix(posix_pthread_mutexattr_gettype(attr, type_))
-def scePthreadMutexattrSetkind(attr: mutable PthreadMutexAttr&?, kind: int) -> int:
-    return threads_sync_orbis_from_posix(posix_pthread_mutexattr_setkind_np(attr, kind))
-def scePthreadMutexattrSetprioceiling(attr: mutable PthreadMutexAttr&?, prioceiling: int) -> int:
-    return threads_sync_orbis_from_posix(posix_pthread_mutexattr_setprioceiling(attr, prioceiling))
-def scePthreadMutexattrSetprotocol(attr: mutable PthreadMutexAttr&?, protocol: int) -> int:
-    return threads_sync_orbis_from_posix(posix_pthread_mutexattr_setprotocol(attr, protocol))
-def scePthreadMutexattrSetpshared(attr: PthreadMutexAttr&?, pshared: int) -> int:
-    return threads_sync_orbis_from_posix(posix_pthread_mutexattr_setpshared(attr, pshared))
-def scePthreadMutexattrSettype(attr: mutable PthreadMutexAttr&?, type_: int) -> int:
-    return threads_sync_orbis_from_posix(posix_pthread_mutexattr_settype(attr, type_))
-def scePthreadMutexattrDestroy(attr: mutable PthreadMutexAttr&?) -> int:
-    return threads_sync_orbis_from_posix(posix_pthread_mutexattr_destroy(attr))
+def scePthreadMutexattrInit(attr: GuestVAddr[void]) -> int can[Segment.Host, Unsafe.SegmentMutation, Memory.Allocate]:
+    can Unsafe.SegmentMutation, Segment.Host:
+        return threads_sync_orbis_from_posix(posix_pthread_mutexattr_init_hle(attr))
+def scePthreadMutexattrGetkind(attr: GuestVAddr[void]) -> int can[Segment.Host, Unsafe.SegmentMutation]:
+    can Unsafe.SegmentMutation, Segment.Host:
+        return threads_sync_orbis_from_posix(posix_pthread_mutexattr_getkind_np_hle(attr))
+def scePthreadMutexattrGetprioceiling(attr: GuestVAddr[void], prioceiling: GuestVAddr[void]) -> int can[Segment.Host, Unsafe.SegmentMutation]:
+    can Unsafe.SegmentMutation, Segment.Host:
+        return threads_sync_orbis_from_posix(posix_pthread_mutexattr_getprioceiling_hle(attr, prioceiling))
+def scePthreadMutexattrGetprotocol(attr: GuestVAddr[void], protocol: GuestVAddr[void]) -> int can[Segment.Host, Unsafe.SegmentMutation]:
+    can Unsafe.SegmentMutation, Segment.Host:
+        return threads_sync_orbis_from_posix(posix_pthread_mutexattr_getprotocol_hle(attr, protocol))
+def scePthreadMutexattrGetpshared(attr: GuestVAddr[void], pshared: GuestVAddr[void]) -> int can[Segment.Host, Unsafe.SegmentMutation]:
+    can Unsafe.SegmentMutation, Segment.Host:
+        return threads_sync_orbis_from_posix(posix_pthread_mutexattr_getpshared_hle(attr, pshared))
+def scePthreadMutexattrGettype(attr: GuestVAddr[void], type_: GuestVAddr[void]) -> int can[Segment.Host, Unsafe.SegmentMutation]:
+    can Unsafe.SegmentMutation, Segment.Host:
+        return threads_sync_orbis_from_posix(posix_pthread_mutexattr_gettype_hle(attr, type_))
+def scePthreadMutexattrSetkind(attr: GuestVAddr[void], kind: int) -> int can[Segment.Host, Unsafe.SegmentMutation]:
+    can Unsafe.SegmentMutation, Segment.Host:
+        return threads_sync_orbis_from_posix(posix_pthread_mutexattr_setkind_np_hle(attr, kind))
+def scePthreadMutexattrSetprioceiling(attr: GuestVAddr[void], prioceiling: int) -> int can[Segment.Host, Unsafe.SegmentMutation]:
+    can Unsafe.SegmentMutation, Segment.Host:
+        return threads_sync_orbis_from_posix(posix_pthread_mutexattr_setprioceiling_hle(attr, prioceiling))
+def scePthreadMutexattrSetprotocol(attr: GuestVAddr[void], protocol: int) -> int can[Segment.Host, Unsafe.SegmentMutation]:
+    can Unsafe.SegmentMutation, Segment.Host:
+        return threads_sync_orbis_from_posix(posix_pthread_mutexattr_setprotocol_hle(attr, protocol))
+def scePthreadMutexattrSetpshared(attr: GuestVAddr[void], pshared: int) -> int can[Segment.Host, Unsafe.SegmentMutation]:
+    can Unsafe.SegmentMutation, Segment.Host:
+        return threads_sync_orbis_from_posix(posix_pthread_mutexattr_setpshared_hle(attr, pshared))
+def scePthreadMutexattrSettype(attr: GuestVAddr[void], type_: int) -> int can[Segment.Host, Unsafe.SegmentMutation]:
+    can Unsafe.SegmentMutation, Segment.Host:
+        return threads_sync_orbis_from_posix(posix_pthread_mutexattr_settype_hle(attr, type_))
+def scePthreadMutexattrDestroy(attr: GuestVAddr[void]) -> int can[Segment.Host, Unsafe.SegmentMutation]:
+    can Unsafe.SegmentMutation, Segment.Host:
+        return threads_sync_orbis_from_posix(posix_pthread_mutexattr_destroy_hle(attr))
 
 def scePthreadCondattrInit(attr: mutable PthreadCondAttr&?) -> int:
     return threads_sync_orbis_from_posix(posix_pthread_condattr_init(attr))
@@ -1004,18 +1205,18 @@ def RegisterMutex(sym: void&?) -> void:
     LIB_FUNCTION("5-ncLMtL5+g", "libScePosix", 1, "libkernel", posix_pthread_mutex_setspinloops_np)
     LIB_FUNCTION("frFuGprJmPc", "libScePosix", 1, "libkernel", posix_pthread_mutex_setyieldloops_np)
     LIB_FUNCTION("ltCfaGr2JGE", "libScePosix", 1, "libkernel", posix_pthread_mutex_destroy_hle)
-    LIB_FUNCTION("dQHWEsJtoE4", "libScePosix", 1, "libkernel", posix_pthread_mutexattr_init)
-    LIB_FUNCTION("U6SNV+RnyLQ", "libScePosix", 1, "libkernel", posix_pthread_mutexattr_getkind_np)
-    LIB_FUNCTION("+m8+quqOwhM", "libScePosix", 1, "libkernel", posix_pthread_mutexattr_getprioceiling)
-    LIB_FUNCTION("yDaWxUE50s0", "libScePosix", 1, "libkernel", posix_pthread_mutexattr_getprotocol)
-    LIB_FUNCTION("PmL-TwKUzXI", "libScePosix", 1, "libkernel", posix_pthread_mutexattr_getpshared)
-    LIB_FUNCTION("GZFlI7RhuQo", "libScePosix", 1, "libkernel", posix_pthread_mutexattr_gettype)
-    LIB_FUNCTION("J9rlRuQ8H5s", "libScePosix", 1, "libkernel", posix_pthread_mutexattr_setkind_np)
-    LIB_FUNCTION("ZLvf6lVAc4M", "libScePosix", 1, "libkernel", posix_pthread_mutexattr_setprioceiling)
-    LIB_FUNCTION("5txKfcMUAok", "libScePosix", 1, "libkernel", posix_pthread_mutexattr_setprotocol)
-    LIB_FUNCTION("EXv3ztGqtDM", "libScePosix", 1, "libkernel", posix_pthread_mutexattr_setpshared)
-    LIB_FUNCTION("mDmgMOGVUqg", "libScePosix", 1, "libkernel", posix_pthread_mutexattr_settype)
-    LIB_FUNCTION("HF7lK46xzjY", "libScePosix", 1, "libkernel", posix_pthread_mutexattr_destroy)
+    LIB_FUNCTION("dQHWEsJtoE4", "libScePosix", 1, "libkernel", posix_pthread_mutexattr_init_hle)
+    LIB_FUNCTION("U6SNV+RnyLQ", "libScePosix", 1, "libkernel", posix_pthread_mutexattr_getkind_np_hle)
+    LIB_FUNCTION("+m8+quqOwhM", "libScePosix", 1, "libkernel", posix_pthread_mutexattr_getprioceiling_hle)
+    LIB_FUNCTION("yDaWxUE50s0", "libScePosix", 1, "libkernel", posix_pthread_mutexattr_getprotocol_hle)
+    LIB_FUNCTION("PmL-TwKUzXI", "libScePosix", 1, "libkernel", posix_pthread_mutexattr_getpshared_hle)
+    LIB_FUNCTION("GZFlI7RhuQo", "libScePosix", 1, "libkernel", posix_pthread_mutexattr_gettype_hle)
+    LIB_FUNCTION("J9rlRuQ8H5s", "libScePosix", 1, "libkernel", posix_pthread_mutexattr_setkind_np_hle)
+    LIB_FUNCTION("ZLvf6lVAc4M", "libScePosix", 1, "libkernel", posix_pthread_mutexattr_setprioceiling_hle)
+    LIB_FUNCTION("5txKfcMUAok", "libScePosix", 1, "libkernel", posix_pthread_mutexattr_setprotocol_hle)
+    LIB_FUNCTION("EXv3ztGqtDM", "libScePosix", 1, "libkernel", posix_pthread_mutexattr_setpshared_hle)
+    LIB_FUNCTION("mDmgMOGVUqg", "libScePosix", 1, "libkernel", posix_pthread_mutexattr_settype_hle)
+    LIB_FUNCTION("HF7lK46xzjY", "libScePosix", 1, "libkernel", posix_pthread_mutexattr_destroy_hle)
     LIB_FUNCTION("ttHNfU+qDBU", "libkernel", 1, "libkernel", posix_pthread_mutex_init_hle)
     LIB_FUNCTION("gKqzW-zWhvY", "libkernel", 1, "libkernel", posix_pthread_mutex_isowned_np)
     LIB_FUNCTION("7H0iTOciTLo", "libkernel", 1, "libkernel", posix_pthread_mutex_lock_hle)
@@ -1027,18 +1228,18 @@ def RegisterMutex(sym: void&?) -> void:
     LIB_FUNCTION("5-ncLMtL5+g", "libkernel", 1, "libkernel", posix_pthread_mutex_setspinloops_np)
     LIB_FUNCTION("frFuGprJmPc", "libkernel", 1, "libkernel", posix_pthread_mutex_setyieldloops_np)
     LIB_FUNCTION("ltCfaGr2JGE", "libkernel", 1, "libkernel", posix_pthread_mutex_destroy_hle)
-    LIB_FUNCTION("dQHWEsJtoE4", "libkernel", 1, "libkernel", posix_pthread_mutexattr_init)
-    LIB_FUNCTION("U6SNV+RnyLQ", "libkernel", 1, "libkernel", posix_pthread_mutexattr_getkind_np)
-    LIB_FUNCTION("+m8+quqOwhM", "libkernel", 1, "libkernel", posix_pthread_mutexattr_getprioceiling)
-    LIB_FUNCTION("yDaWxUE50s0", "libkernel", 1, "libkernel", posix_pthread_mutexattr_getprotocol)
-    LIB_FUNCTION("PmL-TwKUzXI", "libkernel", 1, "libkernel", posix_pthread_mutexattr_getpshared)
-    LIB_FUNCTION("GZFlI7RhuQo", "libkernel", 1, "libkernel", posix_pthread_mutexattr_gettype)
-    LIB_FUNCTION("J9rlRuQ8H5s", "libkernel", 1, "libkernel", posix_pthread_mutexattr_setkind_np)
-    LIB_FUNCTION("ZLvf6lVAc4M", "libkernel", 1, "libkernel", posix_pthread_mutexattr_setprioceiling)
-    LIB_FUNCTION("5txKfcMUAok", "libkernel", 1, "libkernel", posix_pthread_mutexattr_setprotocol)
-    LIB_FUNCTION("EXv3ztGqtDM", "libkernel", 1, "libkernel", posix_pthread_mutexattr_setpshared)
-    LIB_FUNCTION("mDmgMOGVUqg", "libkernel", 1, "libkernel", posix_pthread_mutexattr_settype)
-    LIB_FUNCTION("HF7lK46xzjY", "libkernel", 1, "libkernel", posix_pthread_mutexattr_destroy)
+    LIB_FUNCTION("dQHWEsJtoE4", "libkernel", 1, "libkernel", posix_pthread_mutexattr_init_hle)
+    LIB_FUNCTION("U6SNV+RnyLQ", "libkernel", 1, "libkernel", posix_pthread_mutexattr_getkind_np_hle)
+    LIB_FUNCTION("+m8+quqOwhM", "libkernel", 1, "libkernel", posix_pthread_mutexattr_getprioceiling_hle)
+    LIB_FUNCTION("yDaWxUE50s0", "libkernel", 1, "libkernel", posix_pthread_mutexattr_getprotocol_hle)
+    LIB_FUNCTION("PmL-TwKUzXI", "libkernel", 1, "libkernel", posix_pthread_mutexattr_getpshared_hle)
+    LIB_FUNCTION("GZFlI7RhuQo", "libkernel", 1, "libkernel", posix_pthread_mutexattr_gettype_hle)
+    LIB_FUNCTION("J9rlRuQ8H5s", "libkernel", 1, "libkernel", posix_pthread_mutexattr_setkind_np_hle)
+    LIB_FUNCTION("ZLvf6lVAc4M", "libkernel", 1, "libkernel", posix_pthread_mutexattr_setprioceiling_hle)
+    LIB_FUNCTION("5txKfcMUAok", "libkernel", 1, "libkernel", posix_pthread_mutexattr_setprotocol_hle)
+    LIB_FUNCTION("EXv3ztGqtDM", "libkernel", 1, "libkernel", posix_pthread_mutexattr_setpshared_hle)
+    LIB_FUNCTION("mDmgMOGVUqg", "libkernel", 1, "libkernel", posix_pthread_mutexattr_settype_hle)
+    LIB_FUNCTION("HF7lK46xzjY", "libkernel", 1, "libkernel", posix_pthread_mutexattr_destroy_hle)
     LIB_FUNCTION("cmo1RIYva9o", "libkernel", 1, "libkernel", scePthreadMutexInit)
     LIB_FUNCTION("W6OrTBO95UY", "libkernel", 1, "libkernel", scePthreadMutexIsowned)
     LIB_FUNCTION("qH1gXoq71RY", "libkernel", 1, "libkernel", scePthreadMutexInitOrbis)

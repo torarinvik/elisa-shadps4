@@ -11,6 +11,22 @@ const KERNEL_MEMORY_PAGE_SIZE: u64 = 16 * 1024
 const KERNEL_MEMORY_MMAP_FAILED: uintptr = 0.uintptr() - 1.uintptr()
 const KERNEL_DIRECT_MEMORY_TYPE_DEFAULT: int = 0
 const KERNEL_DIRECT_MEMORY_BASE: u64 = 0x100000000u64
+const ORBIS_KERNEL_MAP_FIXED_FLAG: int = 0x10
+const ORBIS_KERNEL_MAP_OP_MAP_DIRECT: s32 = 0
+const ORBIS_KERNEL_MAP_OP_UNMAP: s32 = 1
+const ORBIS_KERNEL_MAP_OP_PROTECT: s32 = 2
+const ORBIS_KERNEL_MAP_OP_MAP_FLEXIBLE: s32 = 3
+const ORBIS_KERNEL_MAP_OP_TYPE_PROTECT: s32 = 4
+
+@fixed_layout
+struct OrbisKernelBatchMapEntry:
+    start: mutable void&?
+    offset: u64
+    length: u64
+    protection: u8
+    type: u8
+    reserved: s16
+    operation: s32
 
 def KernelMemory_Is16KBAligned(value: u64) -> bool:
     return (value % KERNEL_MEMORY_PAGE_SIZE) == 0
@@ -263,10 +279,17 @@ def sceKernelMunmap(addr: void&?, len: u64) -> int:
         return ORBIS_KERNEL_ERROR_EINVAL
     return MemoryManager_UnmapMemory(Memory_Instance(), addr.cast[VAddr], len)
 
-def sceKernelMapNamedFlexibleMemory(addr_in_out: mutable void&?&, len: u64, prot: int, flags: int, name: u8&?) -> int:
+def sceKernelMapNamedFlexibleMemory(addr_in_out: mutable void&?&, len: u64, prot: int, flags: int, name: u8&?) -> int can[Unsafe.SegmentMutation, Segment.Host]:
+    can Unsafe.SegmentMutation, Segment.Host:
+        GuestExec_RecordRuntimeHle("libkernel", "sceKernelMapNamedFlexibleMemory_enter", addr_in_out.ref[mutable void&?&].uintptr(), len.uintptr(), prot.uintptr(), flags.uintptr())
     if name == null:
+        can Unsafe.SegmentMutation, Segment.Host:
+            GuestExec_RecordRuntimeHle("libkernel", "sceKernelMapNamedFlexibleMemory_fault", addr_in_out.ref[mutable void&?&].uintptr(), len.uintptr(), prot.uintptr(), ORBIS_KERNEL_ERROR_EFAULT.u64().uintptr())
         return ORBIS_KERNEL_ERROR_EFAULT
-    return KernelMemory_MapFlexible(addr_in_out, len, prot, flags, "anon")
+    result: int = KernelMemory_MapFlexible(addr_in_out, len, prot, flags, "anon")
+    can Unsafe.SegmentMutation, Segment.Host:
+        GuestExec_RecordRuntimeHle("libkernel", "sceKernelMapNamedFlexibleMemory", addr_in_out.uintptr(), len.uintptr(), prot.uintptr(), result.u64().uintptr())
+    return result
 
 def sceKernelAvailableFlexibleMemorySize(out_size: mutable u64&) -> int:
     out_size <- MemoryManager_GetAvailableFlexibleSize(Memory_Instance())
@@ -282,18 +305,48 @@ def _sceKernelRtldSetApplicationHeapAPI(func: void&?) -> void can[Unsafe.Segment
         GuestExec_RecordRuntimeHle("libkernel", "_sceKernelRtldSetApplicationHeapAPI", func.uintptr(), 0.uintptr(), 0.uintptr(), 0.uintptr())
     return
 
-def sceKernelBatchMap(entries: void&?, numEntries: int, numEntriesOut: void&?) -> int:
-    _ = entries
-    _ = numEntries
-    _ = numEntriesOut
-    return ORBIS_OK
+def sceKernelBatchMap(entries: void&?, numEntries: int, numEntriesOut: void&?) -> int can[Unsafe.SegmentMutation, Segment.Host]:
+    can Unsafe.SegmentMutation, Segment.Host:
+        return sceKernelBatchMap2(entries, numEntries, numEntriesOut, ORBIS_KERNEL_MAP_FIXED_FLAG)
 
-def sceKernelBatchMap2(entries: void&?, numEntries: int, numEntriesOut: void&?, flags: int) -> int:
-    _ = entries
-    _ = numEntries
-    _ = numEntriesOut
-    _ = flags
-    return ORBIS_OK
+def sceKernelBatchMap2(entries: void&?, numEntries: int, numEntriesOut: void&?, flags: int) -> int can[Unsafe.SegmentMutation, Segment.Host]:
+    processed: mutable s32 = 0
+    result: mutable int = ORBIS_OK
+    out: mutable s32&? = numEntriesOut as mutable s32&?
+    batch: mutable OrbisKernelBatchMapEntry&? = entries as mutable OrbisKernelBatchMapEntry&?
+    if numEntries < 0:
+        if out != null:
+            out[0] <- 0
+        return ORBIS_KERNEL_ERROR_EINVAL
+    i: mutable int = 0
+    while i < numEntries:
+        if batch == null:
+            result <- ORBIS_KERNEL_ERROR_EINVAL
+            break
+        entry: mutable OrbisKernelBatchMapEntry& = batch[i].ref[mutable OrbisKernelBatchMapEntry&]
+        if entry.length == 0 or entry.operation > ORBIS_KERNEL_MAP_OP_TYPE_PROTECT:
+            result <- ORBIS_KERNEL_ERROR_EINVAL
+            break
+        processed <- processed + 1
+        if entry.operation == ORBIS_KERNEL_MAP_OP_MAP_DIRECT:
+            result <- sceKernelMapNamedDirectMemory(entry.start.ref[mutable void&?&], entry.length, entry.protection.int(), flags, entry.offset.i64(), 0u64, "anon")
+        elif entry.operation == ORBIS_KERNEL_MAP_OP_UNMAP:
+            result <- sceKernelMunmap(entry.start, entry.length)
+        elif entry.operation == ORBIS_KERNEL_MAP_OP_PROTECT:
+            result <- sceKernelMprotect(entry.start, entry.length, entry.protection.int())
+        elif entry.operation == ORBIS_KERNEL_MAP_OP_MAP_FLEXIBLE:
+            can Unsafe.SegmentMutation, Segment.Host:
+                result <- sceKernelMapNamedFlexibleMemory(entry.start.ref[mutable void&?&], entry.length, entry.protection.int(), flags, "anon")
+        elif entry.operation == ORBIS_KERNEL_MAP_OP_TYPE_PROTECT:
+            result <- sceKernelMtypeprotect(entry.start, entry.length, entry.type.int(), entry.protection.int())
+        else:
+            result <- ORBIS_KERNEL_ERROR_EINVAL
+        if result != ORBIS_OK:
+            break
+        i <- i + 1
+    if out != null:
+        out[0] <- processed
+    return result
 
 def sceKernelSetVirtualRangeName(addr: void&?, len: u64, name: u8&?) -> int:
     _ = addr

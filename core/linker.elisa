@@ -43,6 +43,14 @@ const LINKER_NATIVE_HLE_THUNK_CAP: usize = 2048usize
 global mutable linker_native_hle_thunk_targets: u64[2048] = zeroed
 global mutable linker_native_hle_thunk_addrs: u64[2048] = zeroed
 global mutable linker_native_hle_thunk_count: usize = 0usize
+# Generic HLE call ring: a per-thunk recorder prefix stub writes the symbol-name
+# C-string pointer of every guest->HLE call into this ring (masked by 1023), then
+# jmps through to the real boundary thunk. This captures EVERY boundary crossing
+# without manually instrumenting each HLE function, so the last few calls before a
+# crash can be read back from the tail of the ring. See GuestExec_DumpHleCallRing.
+const LINKER_HLE_CALL_RING_CAP: usize = 1024usize
+global mutable linker_hle_call_ring: u64[1024] = zeroed
+global mutable linker_hle_call_ring_index: u64 = 0u64
 global mutable linker_native_hle_function_relocation_count: u64 = 0
 global mutable linker_native_hle_data_relocation_count: u64 = 0
 global mutable linker_native_hle_unthunked_function_count: u64 = 0
@@ -1110,7 +1118,7 @@ def Linker_ShouldThunkNativeHleRelocation(rel_type: u32, symbol_found: bool, sym
     typ: u8 = ElfSymbol_GetType(symbol)
     return typ == STT_FUN or (typ == STT_NOTYPE and rel_type == R_X86_64_JUMP_SLOT)
 
-def Linker_CreateNativeHleBoundaryThunk(target: u64) -> u64:
+def Linker_CreateNativeHleBoundaryThunk(target: u64, symbol_name: static u8&?) -> u64:
     if target == 0u64:
         return 0u64
     if not Linker_UseNativeHleBoundaryThunk():
@@ -1234,13 +1242,114 @@ def Linker_CreateNativeHleBoundaryThunk(target: u64) -> u64:
             if not GuestExec_PublishExecutableCode(thunk, 156u64):
                 return target
         GuestExec_RecordHleBoundaryThunkContract(thunk, target.uintptr(), 156u64, host_selector)
+        # Wrap the real thunk in a recorder prefix that logs the symbol-name pointer
+        # of this call into linker_hle_call_ring, then jmps through. The GOT ends up
+        # pointing at the prefix; the prefix preserves %rsp and all SysV arg regs
+        # (it only clobbers %r10/%r11, which the real thunk reloads immediately) so
+        # the boundary contract is unaffected.
+        sym_ptr: u64 = Linker_SymbolNamePtr(symbol_name)
+        entry_addr: u64 = Linker_CreateHleRecorderPrefix(thunk.u64(), sym_ptr)
+        final_addr: u64 = entry_addr if entry_addr != 0u64 else thunk.u64()
         if linker_native_hle_thunk_count < LINKER_NATIVE_HLE_THUNK_CAP:
             linker_native_hle_thunk_targets[linker_native_hle_thunk_count] <- target
-            linker_native_hle_thunk_addrs[linker_native_hle_thunk_count] <- thunk.u64()
+            linker_native_hle_thunk_addrs[linker_native_hle_thunk_count] <- final_addr
             linker_native_hle_thunk_count <- linker_native_hle_thunk_count + 1usize
-        return thunk.u64()
+        return final_addr
     static else:
         return target
+
+def Linker_SymbolNamePtr(symbol_name: static u8&?) -> u64:
+    if symbol_name == null:
+        return 0u64
+    name: static u8& = symbol_name
+    return name.ref[void&].uintptr().u64()
+
+# Build a small recorder prefix stub that logs `sym_ptr` into linker_hle_call_ring
+# (masked by 1023) and then jmps to `real_thunk`. It preserves %rsp (push/pop %rax
+# is balanced) and every SysV argument register, clobbering only %r10/%r11 which the
+# real boundary thunk reloads on entry. Returns the stub address, or 0 on failure.
+def Linker_CreateHleRecorderPrefix(real_thunk: u64, sym_ptr: u64) -> u64:
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        stub: mutable u8[74] = zeroed
+        idx_addr: u64 = linker_hle_call_ring_index.ref[void&].uintptr().u64()
+        ring_addr: u64 = linker_hle_call_ring[0].ref[void&].uintptr().u64()
+        # push %rax
+        stub[0] <- 0x50u8
+        # movabs $&index, %r10 ; mov (%r10), %rax
+        stub[1] <- 0x49u8
+        stub[2] <- 0xBAu8
+        Linker_WriteU64LE(stub[0].ref[mutable u8&], 3usize, idx_addr)
+        stub[11] <- 0x49u8
+        stub[12] <- 0x8Bu8
+        stub[13] <- 0x02u8
+        # and $0x3ff, %rax
+        stub[14] <- 0x48u8
+        stub[15] <- 0x25u8
+        stub[16] <- 0xFFu8
+        stub[17] <- 0x03u8
+        stub[18] <- 0x00u8
+        stub[19] <- 0x00u8
+        # movabs $&ring, %r11
+        stub[20] <- 0x49u8
+        stub[21] <- 0xBBu8
+        Linker_WriteU64LE(stub[0].ref[mutable u8&], 22usize, ring_addr)
+        # movabs $sym_ptr, %r10
+        stub[30] <- 0x49u8
+        stub[31] <- 0xBAu8
+        Linker_WriteU64LE(stub[0].ref[mutable u8&], 32usize, sym_ptr)
+        # mov %r10, (%r11,%rax,8)
+        stub[40] <- 0x4Du8
+        stub[41] <- 0x89u8
+        stub[42] <- 0x14u8
+        stub[43] <- 0xC3u8
+        # inc %rax
+        stub[44] <- 0x48u8
+        stub[45] <- 0xFFu8
+        stub[46] <- 0xC0u8
+        # movabs $&index, %r11 ; mov %rax, (%r11)
+        stub[47] <- 0x49u8
+        stub[48] <- 0xBBu8
+        Linker_WriteU64LE(stub[0].ref[mutable u8&], 49usize, idx_addr)
+        stub[57] <- 0x49u8
+        stub[58] <- 0x89u8
+        stub[59] <- 0x03u8
+        # pop %rax
+        stub[60] <- 0x58u8
+        # movabs $real_thunk, %r11 ; jmp *%r11
+        stub[61] <- 0x49u8
+        stub[62] <- 0xBBu8
+        Linker_WriteU64LE(stub[0].ref[mutable u8&], 63usize, real_thunk)
+        stub[71] <- 0x41u8
+        stub[72] <- 0xFFu8
+        stub[73] <- 0xE3u8
+        prefix: VAddr = GuestExec_AllocateRegion(4096u64, 5u32)
+        if prefix == 0.uintptr():
+            return 0u64
+        trusted Unsafe.MachineCodeBuilder:
+            if not GuestExec_WriteBytes(prefix, stub[0].ref[void&], 74u64):
+                return 0u64
+        trusted Unsafe.ExecutableCodePublish:
+            if not GuestExec_PublishExecutableCode(prefix, 74u64):
+                return 0u64
+        return prefix.u64()
+    static else:
+        return 0u64
+
+# Accessors over the HLE call ring (oldest retained call .. newest). The dump
+# helper lives in guest_exec.elisa where the text/output primitives are declared.
+def Linker_HleCallRingTotal() -> u64:
+    return linker_hle_call_ring_index
+
+def Linker_HleCallRingCount() -> u64:
+    total: u64 = linker_hle_call_ring_index
+    return total if total < LINKER_HLE_CALL_RING_CAP.u64() else LINKER_HLE_CALL_RING_CAP.u64()
+
+def Linker_HleCallRingSymbolAt(seq: u64) -> static u8&?:
+    slot: usize = (seq & (LINKER_HLE_CALL_RING_CAP.u64() - 1u64)).usize()
+    ptr: u64 = linker_hle_call_ring[slot]
+    if ptr == 0u64:
+        return null
+    return ptr.uintptr().cast[void&].cast[static u8&]
 
 def Linker_RelocateAnyImports(self: mutable Linker&, module: mutable Module&) -> void:
     ge_emergency_mark(GE_EV_RELOC_MODULE_BEGIN, module.base_virtual_addr, module.import_symbols.count.uintptr(), module.dynamic_info.rela_table_total_size.uintptr(), module.dynamic_info.jmp_relocation_total_size.uintptr())
@@ -1355,7 +1464,7 @@ def Linker_ApplyRelocationEntry(self: mutable Linker&, module: mutable Module&, 
                         if abs_addend > linker_native_hle_function_max_addend:
                             linker_native_hle_function_max_addend <- abs_addend
                     raw_native_hle_addr: u64 = resolved_addr
-                    resolved_addr <- Linker_CreateNativeHleBoundaryThunk(resolved_addr)
+                    resolved_addr <- Linker_CreateNativeHleBoundaryThunk(resolved_addr, symbol_name)
                     if Linker_UseNativeHleBoundaryThunk() and raw_native_hle_addr != 0u64 and resolved_addr == raw_native_hle_addr:
                         if linker_native_hle_unthunked_function_count == 0u64:
                             linker_native_hle_unthunked_function_first_target <- raw_native_hle_addr
@@ -1870,6 +1979,11 @@ def Linker_Execute(self: mutable Linker&, args: darray[static u8&]) -> s32 can[U
             return -2
         ge_emergency_mark(GE_EV_MAIN_ENTRY_SYNC_END, self.last_entry_addr, args.count.uintptr(), 0.uintptr(), 0.uintptr())
         argv0: mutable void&? = null
+        GuestExec_ClearEntryArgs()
+        arg_index: mutable usize = 0usize
+        while arg_index < args.count and arg_index < 33usize:
+            GuestExec_SetEntryArg(arg_index, args[arg_index])
+            arg_index <- arg_index + 1usize
         if args.count > 0:
             argv0 <- args[0].cast[void&?]
         ge_emergency_mark(GE_EV_MAIN_ENTRY_PREPARE_BEGIN, self.last_entry_addr, args.count.uintptr(), argv0.uintptr(), 0.uintptr())

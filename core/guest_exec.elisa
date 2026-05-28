@@ -155,6 +155,7 @@ const GE_DEBUG_TRAP_CALLABLE_GUARD_STATUS: s32 = -92
 const GE_DEBUG_TRAP_THREAD_AFFINITY_STATUS: s32 = -93
 const GE_DEBUG_TRAP_GUEST_PTR_UNMAPPED_STATUS: s32 = -94
 const GE_DEBUG_TRAP_FS_STATE_STATUS: s32 = -95
+const GE_GUEST_FATAL_HLE_STATUS: s32 = -96
 const GE_FS_OWNER_UNKNOWN: u32 = 0u32
 const GE_FS_OWNER_HOST: u32 = 1u32
 const GE_FS_OWNER_GUEST: u32 = 2u32
@@ -234,6 +235,10 @@ global mutable ge_hle_thunk_contract_last_thunk: uintptr = 0.uintptr()
 global mutable ge_hle_thunk_contract_last_target: uintptr = 0.uintptr()
 global mutable ge_hle_thunk_contract_last_size: u64 = 0u64
 global mutable ge_hle_thunk_contract_last_host_selector: uintptr = 0.uintptr()
+const GE_HLE_THUNK_CONTRACT_CAP: u64 = 2048u64
+global mutable ge_hle_thunk_contract_addrs: uintptr[2048] = zeroed
+global mutable ge_hle_thunk_contract_targets: uintptr[2048] = zeroed
+global mutable ge_hle_thunk_contract_sizes: u64[2048] = zeroed
 global mutable ge_debug_trace_enabled: bool = false
 global mutable ge_orbis_mxcsr: u32 = 0x9fc0u32
 global mutable ge_orbis_fpucw: u16 = 0x037fu16
@@ -456,6 +461,21 @@ def ge_native_prot_at(address: uintptr, size: u64) -> u32:
         return ge_native_regions[index.usize()].prot
     return 0xffffffffu32
 
+@reentrant_safe
+def ge_find_hle_thunk_target_from_stack_value(value: uintptr) -> uintptr:
+    if value == 0.uintptr():
+        return 0.uintptr()
+    i: mutable u64 = 0u64
+    while i < ge_hle_thunk_contract_count and i < GE_HLE_THUNK_CONTRACT_CAP:
+        base: uintptr = ge_hle_thunk_contract_addrs[i.usize()]
+        size: mutable u64 = ge_hle_thunk_contract_sizes[i.usize()]
+        if size == 0u64:
+            size <- 4096u64
+        if base != 0.uintptr() and value >= base and value < base + size.uintptr():
+            return ge_hle_thunk_contract_targets[i.usize()]
+        i <- i + 1u64
+    return 0.uintptr()
+
 def ge_boundary_guard_reason_for_value(value: uintptr) -> u64:
     if value.u64() == GE_BOUNDARY_POISON_WORD:
         return GE_BOUNDARY_GUARD_POISON
@@ -590,6 +610,15 @@ def ge_abort_active_guard_for_debug_trap(status: s32) -> void can[Unsafe.Segment
         fr.cross_thread_signal_fault_thread <- current_thread
         fr.cross_thread_signal_number <- status
     ge_exit_now((0 - status).int())
+
+def GuestExec_AbortGuestFatalHle(reason: uintptr) -> void can[Unsafe.SegmentMutation, Segment.Host]:
+    ge_debug_trap_count <- ge_debug_trap_count + 1u64
+    ge_debug_trap_reason <- GE_GUEST_FATAL_HLE_STATUS.u64()
+    ge_debug_trap_value <- reason
+    ge_debug_trap_sequence <- ge_debug_trap_count
+    ge_last_status <- GE_GUEST_FATAL_HLE_STATUS
+    can Unsafe.SegmentMutation, Segment.Host:
+        ge_abort_active_guard_for_debug_trap(GE_GUEST_FATAL_HLE_STATUS)
 
 def ge_debug_guard_guest_pointer(target: uintptr, sequence: u64) -> bool can[Unsafe.SegmentMutation, Segment.Host]:
     if not ge_debug_trap_on_boundary_guard:
@@ -1193,11 +1222,16 @@ def c_GuestExec_IsExecutableCodePublished(address: uintptr, size: u64) -> s32:
     return 1 if ge_is_published_exec(address, size) else 0
 
 def c_GuestExec_RecordHleBoundaryThunkContract(thunk: uintptr, target: uintptr, size: u64, host_selector: u16) -> void:
-    ge_hle_thunk_contract_count <- ge_hle_thunk_contract_count + 1u64
+    idx: u64 = ge_hle_thunk_contract_count
+    ge_hle_thunk_contract_count <- idx + 1u64
     ge_hle_thunk_contract_last_thunk <- thunk
     ge_hle_thunk_contract_last_target <- target
     ge_hle_thunk_contract_last_size <- size
     ge_hle_thunk_contract_last_host_selector <- host_selector.uintptr()
+    if idx < GE_HLE_THUNK_CONTRACT_CAP:
+        ge_hle_thunk_contract_addrs[idx.usize()] <- thunk
+        ge_hle_thunk_contract_targets[idx.usize()] <- target
+        ge_hle_thunk_contract_sizes[idx.usize()] <- size
 
 def c_GuestExec_DebugTrapCount() -> u64:
     return ge_debug_trap_count
@@ -2103,7 +2137,11 @@ def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
             if bt_addr.u64() + 8u64 > bt_page_end:
                 bt_i <- 32u64
             else:
-                ge_emergency_mark(GE_EV_STACK_DUMP, bt_i.uintptr(), bt_addr, ge_read_context_word(bt_addr), 0.uintptr())
+                bt_word: uintptr = ge_read_context_word(bt_addr)
+                ge_emergency_mark(GE_EV_STACK_DUMP, bt_i.uintptr(), bt_addr, bt_word, 0.uintptr())
+                bt_target: uintptr = ge_find_hle_thunk_target_from_stack_value(bt_word)
+                if bt_target != 0.uintptr():
+                    ge_emergency_mark(GE_EV_SIGNAL_CALL_TARGET, bt_word, bt_target, bt_i.uintptr(), ge_native_prot_at(bt_target, 8u64).u64().uintptr())
                 bt_i <- bt_i + 1u64
     return_call_start: mutable uintptr = 0.uintptr()
     return_direct_target: mutable uintptr = 0.uintptr()
@@ -4359,6 +4397,7 @@ global mutable guest_exec_last_map_result: s32 = 0
 global mutable guest_exec_last_entry_addr: VAddr = 0.uintptr()
 global mutable guest_exec_last_argc: int = 0
 global mutable guest_exec_last_argv0: static u8&? = null
+global mutable guest_exec_last_argv: static u8&?[33] = zeroed
 global mutable guest_exec_run_count: usize = 0
 global mutable guest_exec_failed_relocation_count: u64 = 0
 global mutable guest_exec_last_main_entry_addr: VAddr = 0.uintptr()
@@ -4432,6 +4471,10 @@ def GuestExec_ResetState() -> void:
     guest_exec_last_entry_addr <- 0.uintptr()
     guest_exec_last_argc <- 0
     guest_exec_last_argv0 <- null
+    argv_i: mutable usize = 0usize
+    while argv_i < 33usize:
+        guest_exec_last_argv[argv_i] <- null
+        argv_i <- argv_i + 1usize
     guest_exec_run_count <- 0
     guest_exec_last_main_entry_addr <- 0.uintptr()
     guest_exec_main_run_count <- 0
@@ -4499,6 +4542,12 @@ def GuestExec_ResetState() -> void:
     ge_hle_thunk_contract_last_target <- 0.uintptr()
     ge_hle_thunk_contract_last_size <- 0u64
     ge_hle_thunk_contract_last_host_selector <- 0.uintptr()
+    hle_thunk_i: mutable u64 = 0u64
+    while hle_thunk_i < GE_HLE_THUNK_CONTRACT_CAP:
+        ge_hle_thunk_contract_addrs[hle_thunk_i.usize()] <- 0.uintptr()
+        ge_hle_thunk_contract_targets[hle_thunk_i.usize()] <- 0.uintptr()
+        ge_hle_thunk_contract_sizes[hle_thunk_i.usize()] <- 0u64
+        hle_thunk_i <- hle_thunk_i + 1u64
     c_GuestExec_ResetCrashState()
 
 def GuestExec_Enable(enabled: bool) -> void:
@@ -4886,6 +4935,38 @@ def GuestExec_RecordHandoff(entry_addr: VAddr, argc: int, is_main_executable: bo
         guest_exec_main_run_count <- guest_exec_main_run_count + 1
         guest_exec_execution_stage <- GUEST_EXEC_STAGE_HANDOFF
 
+def GuestExec_SetEntryArg(index: usize, arg: static u8&?) -> void:
+    if index >= 33usize:
+        return
+    guest_exec_last_argv[index] <- arg
+    if index == 0usize:
+        guest_exec_last_argv0 <- arg
+
+def GuestExec_ClearEntryArgs() -> void:
+    i: mutable usize = 0usize
+    while i < 33usize:
+        guest_exec_last_argv[i] <- null
+        i <- i + 1usize
+    guest_exec_last_argv0 <- null
+
+def GuestExec_FillEntryParamsArgv(params: mutable GuestEntryParams&, argc: int, argv0: void&?) -> void:
+    i: mutable usize = 0usize
+    while i < 33usize:
+        params.argv[i] <- null
+        i <- i + 1usize
+    if argv0 != null:
+        params.argv[0] <- argv0.cast[static u8&?]
+        return
+    i <- 0usize
+    limit: mutable usize = argc.usize()
+    if limit > 33usize:
+        limit <- 33usize
+    while i < limit:
+        params.argv[i] <- guest_exec_last_argv[i]
+        i <- i + 1usize
+    if params.argv[0] == null and guest_exec_last_argv0 != null:
+        params.argv[0] <- guest_exec_last_argv0
+
 def GuestExec_RecordLastModuleSymbol(module: static u8&, symbol: static u8&) -> void:
     guest_exec_last_module <- module
     guest_exec_last_symbol <- symbol
@@ -4901,6 +4982,7 @@ def GuestExec_RunModuleEntry(entry_addr: VAddr, argc: int, argv: void&?, is_main
         return
     if argv != null:
         guest_exec_last_argv0 <- argv.cast[static u8&?]
+        guest_exec_last_argv[0] <- argv.cast[static u8&?]
     GuestExec_RecordHandoff(entry_addr, argc, is_main_executable)
 
 def GuestExec_RunMainEntry(entry_addr: VAddr, argc: int, argv: void&?) -> void:
@@ -4920,10 +5002,7 @@ def GuestExec_RunMainEntryGuarded(entry_addr: VAddr, argc: int, argv: void&?, ti
     params.argc <- argc.s32()
     params.padding <- 0
     params.entry_addr <- entry_addr
-    if argv != null:
-        params.argv[0] <- argv.cast[static u8&?]
-    elif guest_exec_last_argv0 != null:
-        params.argv[0] <- guest_exec_last_argv0
+    GuestExec_FillEntryParamsArgv(params.ref[mutable GuestEntryParams&], argc, argv)
     status: mutable s32 = 0
     can Unsafe.SegmentMutation, Segment.Host, Segment.Guest:
         status <- c_GuestExec_RunMainEntryGuarded(params.ref[mutable GuestEntryParams&], timeout_ms)
@@ -4958,10 +5037,7 @@ def GuestExec_RunMainEntryGuardedInProcess(entry_addr: VAddr, argc: int, argv: v
     params.argc <- argc.s32()
     params.padding <- 0
     params.entry_addr <- entry_addr
-    if argv != null:
-        params.argv[0] <- argv.cast[static u8&?]
-    elif guest_exec_last_argv0 != null:
-        params.argv[0] <- guest_exec_last_argv0
+    GuestExec_FillEntryParamsArgv(params.ref[mutable GuestEntryParams&], argc, argv)
     status: mutable s32 = 0
     can Unsafe.SegmentMutation, Segment.Host, Segment.Guest:
         status <- c_GuestExec_RunMainEntryGuardedInProcess(params.ref[mutable GuestEntryParams&], timeout_ms)
@@ -5756,6 +5832,33 @@ def GuestExec_EmitCusaArtifactKV(key: static u8&?, value: u64) -> void:
 def GuestExec_CusaPutFormatted(line: mutable u8&, size: usize, written: int) -> void:
     if written > 0 and written.usize() < size:
         _ = puts(line) can Console.Write
+
+# Print the generic HLE call ring (every guest->HLE boundary crossing, recorded
+# by the linker's recorder-prefix thunks) oldest-to-newest as CUSA07399_ARTIFACT
+# lines, so the last calls before a crash are visible without a debugger.
+def GuestExec_DumpHleCallRingLine(line: mutable u8&, size: usize, written: int) -> void can[Unsafe.SegmentMutation, Segment.Host]:
+    if written > 0 and written.usize() < size:
+        line[written.usize()] <- 0x0Au8
+        can Unsafe.SegmentMutation, Segment.Host:
+            _ = ge_raw_write(1, line.ref[void&], (written + 1).usize())
+
+def GuestExec_DumpHleCallRing() -> void can[Console.Format, Unsafe.SegmentMutation, Segment.Host]:
+    total: u64 = Linker_HleCallRingTotal()
+    count: u64 = Linker_HleCallRingCount()
+    start: u64 = total - count
+    line: mutable u8[256] = zeroed
+    written0: int = snprintf(line[0].ref[mutable u8&], 256usize, "CUSA07399_ARTIFACT hle_call_ring_total=%llu count=%llu", total, count) can Console.Format
+    can Unsafe.SegmentMutation, Segment.Host:
+        GuestExec_DumpHleCallRingLine(line[0].ref[mutable u8&], 256usize, written0)
+    k: mutable u64 = 0u64
+    while k < count:
+        seq: u64 = start + k
+        sym: static u8&? = Linker_HleCallRingSymbolAt(seq)
+        sym_text: static u8& = sym if sym != null else "(null)"
+        written: int = snprintf(line[0].ref[mutable u8&], 256usize, "CUSA07399_ARTIFACT hle_call seq=%llu symbol=%s", seq, sym_text) can Console.Format
+        can Unsafe.SegmentMutation, Segment.Host:
+            GuestExec_DumpHleCallRingLine(line[0].ref[mutable u8&], 256usize, written)
+        k <- k + 1u64
 
 def ElisaGuestExec_EmitCusaArtifactStage() -> void:
     _ = puts("CUSA07399_EXEC_STAGE stage=load link=pass handoff=pass") can Console.Write
