@@ -2565,6 +2565,15 @@ def ge_reset_crash_state() -> void:
     ge_runtime_hle_caller_frame_word1 <- 0.uintptr()
     ge_runtime_hle_caller_frame_word2 <- 0.uintptr()
     ge_runtime_hle_caller_frame_word3 <- 0.uintptr()
+    hle_oracle_reset_i: mutable usize = 0usize
+    while hle_oracle_reset_i < 64usize:
+        ge_hle_oracle_modules[hle_oracle_reset_i] <- null
+        ge_hle_oracle_symbols[hle_oracle_reset_i] <- null
+        ge_hle_oracle_returns[hle_oracle_reset_i] <- 0.uintptr()
+        ge_hle_oracle_rdi[hle_oracle_reset_i] <- 0.uintptr()
+        ge_hle_oracle_rsi[hle_oracle_reset_i] <- 0.uintptr()
+        ge_hle_oracle_rdx[hle_oracle_reset_i] <- 0.uintptr()
+        hle_oracle_reset_i <- hle_oracle_reset_i + 1usize
     ge_clear_writable_page_cache()
     ge_timeout_fired <- 0
     ge_emergency_seq <- 0u64
@@ -3664,6 +3673,12 @@ global mutable ge_runtime_hle_caller_frame_word0: uintptr = 0.uintptr()
 global mutable ge_runtime_hle_caller_frame_word1: uintptr = 0.uintptr()
 global mutable ge_runtime_hle_caller_frame_word2: uintptr = 0.uintptr()
 global mutable ge_runtime_hle_caller_frame_word3: uintptr = 0.uintptr()
+global mutable ge_hle_oracle_modules: static u8&?[64] = zeroed
+global mutable ge_hle_oracle_symbols: static u8&?[64] = zeroed
+global mutable ge_hle_oracle_returns: uintptr[64] = zeroed
+global mutable ge_hle_oracle_rdi: uintptr[64] = zeroed
+global mutable ge_hle_oracle_rsi: uintptr[64] = zeroed
+global mutable ge_hle_oracle_rdx: uintptr[64] = zeroed
 global mutable ge_failed_relocation_count: u64 = 0u64
 
 @fixed_layout
@@ -3825,6 +3840,14 @@ def c_GuestExec_RecordRuntimeHle(module: static u8&?, symbol: static u8&?, arg0:
     ge_runtime_hle_arg1 <- arg1
     ge_runtime_hle_arg2 <- arg2
     ge_runtime_hle_ret <- ret
+    if ge_runtime_hle_sequence <= 64u64:
+        hle_oracle_index: usize = (ge_runtime_hle_sequence - 1u64).usize()
+        ge_hle_oracle_modules[hle_oracle_index] <- ge_runtime_hle_module
+        ge_hle_oracle_symbols[hle_oracle_index] <- ge_runtime_hle_symbol
+        ge_hle_oracle_returns[hle_oracle_index] <- !ge_runtime_hle_guest_return_addr
+        ge_hle_oracle_rdi[hle_oracle_index] <- ge_runtime_hle_guest_rdi
+        ge_hle_oracle_rsi[hle_oracle_index] <- ge_runtime_hle_guest_rsi
+        ge_hle_oracle_rdx[hle_oracle_index] <- ge_runtime_hle_guest_rdx
     ge_emergency_mark(GE_EV_HLE_RETURN_BEGIN, ge_current_hle_id.u64().uintptr(), ret, ge_current_return_pc, ge_current_guest_sp)
     ge_debug_trace_boundary("guest-exec-hle-args", arg0, arg1, arg2)
     ge_debug_trace_boundary("guest-exec-hle-ret", ret, ge_runtime_hle_sequence.uintptr(), !ge_runtime_hle_guest_return_addr)
@@ -4153,6 +4176,43 @@ def c_GuestExec_RuntimeHleCallerFrameWord2() -> uintptr:
 @c_abi(c)
 def c_GuestExec_RuntimeHleCallerFrameWord3() -> uintptr:
     return ge_runtime_hle_caller_frame_word3
+
+def c_GuestExec_HleOracleTraceCount() -> u64:
+    if ge_runtime_hle_sequence > 64u64:
+        return 64u64
+    return ge_runtime_hle_sequence
+
+def c_GuestExec_HleOracleTraceModule(index: u64) -> static u8&:
+    if index >= 64u64:
+        return ""
+    s: static u8&? = ge_hle_oracle_modules[index.usize()]
+    return s if s != null else ""
+
+def c_GuestExec_HleOracleTraceSymbol(index: u64) -> static u8&:
+    if index >= 64u64:
+        return ""
+    s: static u8&? = ge_hle_oracle_symbols[index.usize()]
+    return s if s != null else ""
+
+def c_GuestExec_HleOracleTraceReturn(index: u64) -> uintptr:
+    if index >= 64u64:
+        return 0.uintptr()
+    return ge_hle_oracle_returns[index.usize()]
+
+def c_GuestExec_HleOracleTraceRdi(index: u64) -> uintptr:
+    if index >= 64u64:
+        return 0.uintptr()
+    return ge_hle_oracle_rdi[index.usize()]
+
+def c_GuestExec_HleOracleTraceRsi(index: u64) -> uintptr:
+    if index >= 64u64:
+        return 0.uintptr()
+    return ge_hle_oracle_rsi[index.usize()]
+
+def c_GuestExec_HleOracleTraceRdx(index: u64) -> uintptr:
+    if index >= 64u64:
+        return 0.uintptr()
+    return ge_hle_oracle_rdx[index.usize()]
 
 global mutable guest_exec_enabled: bool = false
 global mutable guest_exec_probe_mode: bool = false
@@ -5437,6 +5497,27 @@ def GuestExec_RuntimeHleCallerFrameWord2() -> VAddr:
 
 def GuestExec_RuntimeHleCallerFrameWord3() -> VAddr:
     return c_GuestExec_RuntimeHleCallerFrameWord3()
+
+def GuestExec_HleOracleTraceCount() -> u64:
+    return c_GuestExec_HleOracleTraceCount()
+
+def GuestExec_HleOracleTraceModule(index: u64) -> static u8&:
+    return c_GuestExec_HleOracleTraceModule(index)
+
+def GuestExec_HleOracleTraceSymbol(index: u64) -> static u8&:
+    return c_GuestExec_HleOracleTraceSymbol(index)
+
+def GuestExec_HleOracleTraceReturn(index: u64) -> VAddr:
+    return c_GuestExec_HleOracleTraceReturn(index)
+
+def GuestExec_HleOracleTraceRdi(index: u64) -> VAddr:
+    return c_GuestExec_HleOracleTraceRdi(index)
+
+def GuestExec_HleOracleTraceRsi(index: u64) -> VAddr:
+    return c_GuestExec_HleOracleTraceRsi(index)
+
+def GuestExec_HleOracleTraceRdx(index: u64) -> VAddr:
+    return c_GuestExec_HleOracleTraceRdx(index)
 
 def GuestExec_LastHleModule() -> static u8&?:
     return guest_exec_last_hle_module

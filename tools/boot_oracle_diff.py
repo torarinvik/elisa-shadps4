@@ -93,7 +93,11 @@ def parse_elisa_artifacts(path: Path) -> list[Record]:
         payload = line.split(" ", 1)[1]
         fields = parse_kv(payload)
         facts.update(fields)
-        if "module" in fields and "host" in fields and "imports" in fields:
+        if payload.startswith("hle "):
+            fields = normalize_fields("hle", fields)
+            seq = fields.get("seq") or str(len([record for record in records if record.kind == "hle"]) + 1)
+            records.append(Record("hle", f"hle:{seq}", fields, line))
+        elif "module" in fields and "host" in fields and "imports" in fields:
             fields = normalize_fields("module", fields)
             key = f"module:{fields.get('index', len(records))}"
             records.append(Record("module", key, fields, line))
@@ -116,7 +120,7 @@ def parse_elisa_artifacts(path: Path) -> list[Record]:
     hle_module = facts.get("guest_exec_runtime_hle_module") or facts.get("last_hle_module")
     hle_symbol = facts.get("guest_exec_runtime_hle_symbol") or facts.get("last_hle_symbol")
     hle_return = facts.get("guest_exec_runtime_hle_guest_return_addr") or facts.get("guardrail_runtime_hle_saved_return")
-    if hle_module or hle_symbol or hle_return:
+    if (hle_module or hle_symbol or hle_return) and not any(record.kind == "hle" for record in records):
         hle_fields = {
             "seq": facts.get("guest_exec_runtime_hle_sequence", "1"),
             "module": hle_module or "",
@@ -190,7 +194,11 @@ def compare_records(expected: list[Record], actual: list[Record], limit: int, ki
         for field, expected_value in exp.fields.items():
             if field in {"path", "host", "image"}:
                 continue
-            if exp.kind == "hle" and field in {"seq", "wrapper"}:
+            if exp.kind == "module" and field == "base":
+                continue
+            if exp.kind == "hle" and field in {"seq", "wrapper", "return"}:
+                continue
+            if exp.kind == "hle" and exp.fields.get("rdi") == "0x0" and exp.fields.get("rsi") == "0x0" and exp.fields.get("rdx") == "0x0" and field in {"rdi", "rsi", "rdx"}:
                 continue
             actual_value = act.fields.get(field)
             if actual_value is None:

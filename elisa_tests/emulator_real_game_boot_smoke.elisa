@@ -328,6 +328,16 @@ def RealGameBoot_EmitArtifactLastHle(file: mutable IOFile&, module: static u8&?,
         written: int = snprintf(line[0].ref[mutable u8&], 256usize, "CUSA07399_ARTIFACT last_hle_module=%s last_hle_symbol=%s", module_text, symbol_text)
         RealGameBoot_WriteLine(file, line[0].ref[mutable u8&], written)
 
+def RealGameBoot_EmitHleOracleTrace(file: mutable IOFile&) -> void:
+    can Memory.Allocate, Console.Format:
+        count: u64 = GuestExec_HleOracleTraceCount()
+        i: mutable u64 = 0u64
+        while i < count:
+            line: mutable u8[512] = zeroed
+            written: int = snprintf(line[0].ref[mutable u8&], 512usize, "CUSA07399_ARTIFACT hle seq=%llu module=%s symbol=%s return=0x%llx rdi=0x%llx rsi=0x%llx rdx=0x%llx", i + 1u64, GuestExec_HleOracleTraceModule(i), GuestExec_HleOracleTraceSymbol(i), GuestExec_HleOracleTraceReturn(i).u64(), GuestExec_HleOracleTraceRdi(i).u64(), GuestExec_HleOracleTraceRsi(i).u64(), GuestExec_HleOracleTraceRdx(i).u64())
+            RealGameBoot_WriteLine(file, line[0].ref[mutable u8&], written)
+            i <- i + 1u64
+
 def RealGameBoot_EmitResolvedImportDebug(file: mutable IOFile&, linker: Linker&, nid: static u8&) -> void:
     for mi in 0..<linker.modules.count:
         module: Module = linker.modules[mi]
@@ -1150,6 +1160,20 @@ def RealGameBoot_EmitArtifacts(linker: Linker&, guarded_status: s32) -> void:
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "hle_symbols", linker.hle_registered_symbol_count.u64())
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "entry", linker.modules[0].last_start_entry_addr.u64())
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "main_entry", guest_exec_last_main_entry_addr.u64())
+        proc_param_addr: VAddr = Linker_GetProcParam(linker)
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "proc_param_addr", proc_param_addr.u64())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "proc_param_size", MemoryManager_ReadU64(Memory_Instance(), proc_param_addr))
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "proc_param_sdk_version", MemoryManager_ReadU64(Memory_Instance(), proc_param_addr + 16.uintptr()))
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "proc_param_libc_param", MemoryManager_ReadU64(Memory_Instance(), proc_param_addr + 56.uintptr()))
+        proc_param_mem_param: u64 = MemoryManager_ReadU64(Memory_Instance(), proc_param_addr + 64.uintptr())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "proc_param_mem_param", proc_param_mem_param)
+        if proc_param_mem_param != 0u64:
+            RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "proc_param_mem_param_size", MemoryManager_ReadU64(Memory_Instance(), proc_param_mem_param.uintptr()))
+            flexible_memory_ptr: u64 = MemoryManager_ReadU64(Memory_Instance(), proc_param_mem_param.uintptr() + 16.uintptr())
+            RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "proc_param_flexible_memory_ptr", flexible_memory_ptr)
+            if flexible_memory_ptr != 0u64:
+                RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "proc_param_flexible_memory_size", MemoryManager_ReadU64(Memory_Instance(), flexible_memory_ptr.uintptr()))
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "linker_flexible_memory_size", Linker_GetFlexibleMemorySize(linker))
         RealGameBoot_EmitArtifactAddrWords(file.ref[mutable IOFile&], "init_entry", linker.modules[0].last_start_entry_addr)
         RealGameBoot_EmitArtifactAddrWords(file.ref[mutable IOFile&], "main_entry", guest_exec_last_main_entry_addr)
         RealGameBoot_EmitArtifactSignedKV(file.ref[mutable IOFile&], "guarded_status", guarded_status)
@@ -1306,6 +1330,7 @@ def RealGameBoot_EmitArtifacts(linker: Linker&, guarded_status: s32) -> void:
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "hle_tiny_callable_first_value", Linker_HleTinyCallableFirstValue())
         RealGameBoot_EmitArtifactStringKV(file.ref[mutable IOFile&], "hle_tiny_callable_first_name", Linker_HleTinyCallableFirstName())
         RealGameBoot_EmitArtifactStringKV(file.ref[mutable IOFile&], "hle_tiny_callable_first_nid", Linker_HleTinyCallableFirstNid())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "linker_heap_api", Linker_GetHeapAPI().u64())
         RealGameBoot_EmitTraceTape(file.ref[mutable IOFile&])
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "tls_get_addr_calls", Linker_TlsGetAddrCalls())
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "tls_last_module_index", Linker_TlsLastModuleIndex())
@@ -1613,6 +1638,7 @@ def RealGameBoot_EmitArtifacts(linker: Linker&, guarded_status: s32) -> void:
                     elif Linker_StringHasPrefix(rec.library, "libSceAppContent") or Linker_StringHasPrefix(rec.library, "libSceContentExport"):
                         subsystem <- "kernel"
                 RealGameBoot_EmitArtifactImport(file.ref[mutable IOFile&], mod_ref.file, rec.nid, rec.library, rec.module, subsystem, rec.resolution_kind.u64())
+        RealGameBoot_EmitHleOracleTrace(file.ref[mutable IOFile&])
         RealGameBoot_EmitArtifactLastHle(file.ref[mutable IOFile&], GuestExec_LastHleModule(), GuestExec_LastHleSymbol())
         _ = IOFile_Flush(file)
         IOFile_Close(file)

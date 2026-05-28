@@ -72,6 +72,7 @@ global mutable linker_hle_tiny_callable_count: u64 = 0
 global mutable linker_hle_tiny_callable_first_value: u64 = 0
 global mutable linker_hle_tiny_callable_first_name: static u8&? = null
 global mutable linker_hle_tiny_callable_first_nid: static u8&? = null
+global mutable linker_application_heap_api: uintptr = 0.uintptr()
 
 # TLS-base provenance: record __tls_get_addr inputs and the resolved per-thread
 # DTV block, so a module_index==0 (failed DTPMOD64) or a null/garbage DTV gets
@@ -300,6 +301,7 @@ def Linker_Reset() -> void:
     linker_hle_tiny_callable_first_value <- 0
     linker_hle_tiny_callable_first_name <- null
     linker_hle_tiny_callable_first_nid <- null
+    linker_application_heap_api <- 0.uintptr()
     linker_singleton <- Linker_New()
 
 def Linker_GetHLESymbols(self: mutable Linker&) -> mutable SymbolsResolver&:
@@ -343,6 +345,15 @@ def Linker_HleTinyCallableFirstName() -> static u8&?:
 
 def Linker_HleTinyCallableFirstNid() -> static u8&?:
     return linker_hle_tiny_callable_first_nid
+
+def Linker_SetHeapAPI(func: void&?) -> void:
+    if func == null:
+        linker_application_heap_api <- 0.uintptr()
+        return
+    linker_application_heap_api <- func.uintptr()
+
+def Linker_GetHeapAPI() -> uintptr:
+    return linker_application_heap_api
 
 def SymbolsResolver_Count(self: SymbolsResolver&) -> usize:
     return self.symbols.count
@@ -395,7 +406,7 @@ def Linker_GetFlexibleMemorySize(self: Linker&) -> u64:
     proc_param: VAddr = module.proc_param_virtual_addr
     if proc_param == 0.uintptr():
         return ORBIS_KERNEL_FLEXIBLE_MEMORY_SIZE
-    mem_param: u64 = Module_ReadImageU64(module, proc_param.u64() + 56u64)
+    mem_param: u64 = Module_ReadImageU64(module, proc_param.u64() + 64u64)
     if mem_param == 0u64:
         return ORBIS_KERNEL_FLEXIBLE_MEMORY_SIZE
     requested: u64 = Module_ReadImageU64(module, mem_param + 16u64)
@@ -852,6 +863,14 @@ def Linker_LoadGuestDependency(self: mutable Linker&, dependency_name: static u8
     can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
         _ = Module_Start(mod_ref, 0, null, null)
     return idx
+
+def Linker_PreloadLibkernelGameModules(self: mutable Linker&) -> void can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host]:
+    # shadPS4's sceSysmodulePreloadModuleForLibkernel loads these app-local
+    # modules before the guest entry runs. Do this before the eager dependency
+    # closure so the module table order matches the executable oracle.
+    can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
+        _ = Linker_LoadGuestDependency(self.ref[mutable Linker&], "libSceFios2")
+        _ = Linker_LoadGuestDependency(self.ref[mutable Linker&], "libc")
 
 def Linker_LoadDependencyClosure(self: mutable Linker&) -> void can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host]:
     initial_count: usize = self.modules.count
@@ -1795,6 +1814,7 @@ def Linker_Execute(self: mutable Linker&, args: darray[static u8&]) -> s32 can[U
         self.last_entry_addr <- 0.uintptr()
         return -1
     can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
+        Linker_PreloadLibkernelGameModules(self.ref[mutable Linker&])
         Linker_LoadDependencyClosure(self.ref[mutable Linker&])
     ge_emergency_mark(GE_EV_EXEC_AFTER_DEP_CLOSURE, self.modules.count.uintptr(), (1u64 if self.relocated_all_imports else 0u64).uintptr(), 0.uintptr(), 0.uintptr())
     GuestExec_RecordLoad()
