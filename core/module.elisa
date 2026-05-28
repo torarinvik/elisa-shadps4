@@ -459,7 +459,14 @@ def Module_LoadElfSegments(self: mutable Module&, elf: mutable Elf&, memory: mut
             if not Module_LoadImageSegment(self.ref[mutable Module&], elf, memory, phdr):
                 return false
         if phdr.p_type == PT_SCE_RELRO and phdr.p_memsz > 0:
-            if not Module_MapImageSegment(self.ref[mutable Module&], memory, phdr, false):
+            # RELRO carries initialized file data (e.g. the sceLibcParam header:
+            # Size/version constants alongside relocated pointers). Map it writable
+            # and copy the file bytes like PT_LOAD; the protect pass below restores
+            # read-only. Without the copy, non-relocated constants stay zero and the
+            # guest's libc skips application-heap setup.
+            if not Module_MapImageSegment(self.ref[mutable Module&], memory, phdr, true):
+                return false
+            if phdr.p_filesz > 0 and not Module_LoadImageSegment(self.ref[mutable Module&], elf, memory, phdr):
                 return false
         if phdr.p_type == PT_DYNAMIC and phdr.p_filesz > 0:
             dyn_owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
