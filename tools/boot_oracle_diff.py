@@ -51,6 +51,11 @@ def normalize_fields(kind: str, fields: dict[str, str]) -> dict[str, str]:
             normalized["kind"] = normalized["resolution"]
         if "resolution" not in normalized and "kind" in normalized:
             normalized["resolution"] = normalized["kind"]
+    elif kind == "modstart":
+        if "module" in normalized:
+            normalized["module"] = normalized["module"].rstrip("/").rsplit("/", 1)[-1]
+            if normalized["module"].endswith(".prx"):
+                normalized["module"] = normalized["module"][:-4]
     return normalized
 
 
@@ -97,6 +102,10 @@ def parse_elisa_artifacts(path: Path) -> list[Record]:
             fields = normalize_fields("hle", fields)
             seq = fields.get("seq") or str(len([record for record in records if record.kind == "hle"]) + 1)
             records.append(Record("hle", f"hle:{seq}", fields, line))
+        elif payload.startswith("modstart "):
+            fields = normalize_fields("modstart", fields)
+            seq = fields.get("seq") or str(len([record for record in records if record.kind == "modstart"]) + 1)
+            records.append(Record("modstart", f"modstart:{seq}", fields, line))
         elif "module" in fields and "host" in fields and "imports" in fields:
             fields = normalize_fields("module", fields)
             key = f"module:{fields.get('index', len(records))}"
@@ -142,6 +151,8 @@ def oracle_key(kind: str, fields: dict[str, str], index: int) -> str:
         return "entry"
     if kind == "hle":
         return f"hle:{index}"
+    if kind == "modstart":
+        return f"modstart:{index}"
     if kind == "resolve":
         return resolve_key(fields, index)
     if kind == "trace":
@@ -198,6 +209,8 @@ def compare_records(expected: list[Record], actual: list[Record], limit: int, ki
                 continue
             if exp.kind == "hle" and field in {"seq", "wrapper", "return"}:
                 continue
+            if exp.kind == "modstart" and field in {"seq", "base", "entry", "array"}:
+                continue
             if exp.kind == "hle" and exp.fields.get("rdi") == "0x0" and exp.fields.get("rsi") == "0x0" and exp.fields.get("rdx") == "0x0" and field in {"rdi", "rsi", "rdx"}:
                 continue
             actual_value = act.fields.get(field)
@@ -212,7 +225,7 @@ def compare_records(expected: list[Record], actual: list[Record], limit: int, ki
     for act in actual:
         if limit and checked >= limit:
             break
-        if act.key not in expected_by_key and act.kind in {"module", "entry", "hle"}:
+        if act.key not in expected_by_key and act.kind in {"module", "entry", "hle", "modstart"}:
             print(f"FIRST_DIVERGENCE extra-actual key={act.key}")
             print(f"actual: {act.line}")
             return 1

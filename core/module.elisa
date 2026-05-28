@@ -242,6 +242,74 @@ def Module_ShouldExecuteGuestStart() -> bool:
     static else:
         return false
 
+global mutable module_start_oracle_count: u64 = 0
+global mutable module_start_oracle_phase: static u8&?[64] = zeroed
+global mutable module_start_oracle_module: static u8&?[64] = zeroed
+global mutable module_start_oracle_label: static u8&?[64] = zeroed
+global mutable module_start_oracle_entry: uintptr[64] = zeroed
+global mutable module_start_oracle_count_field: u64[64] = zeroed
+global mutable module_start_oracle_ret: s32[64] = zeroed
+
+def Module_StartOracleReset() -> void:
+    module_start_oracle_count <- 0
+    i: mutable usize = 0usize
+    while i < 64usize:
+        module_start_oracle_phase[i] <- null
+        module_start_oracle_module[i] <- null
+        module_start_oracle_label[i] <- null
+        module_start_oracle_entry[i] <- 0.uintptr()
+        module_start_oracle_count_field[i] <- 0u64
+        module_start_oracle_ret[i] <- 0
+        i <- i + 1usize
+
+def Module_StartOracleRecord(phase: static u8&, module_name: static u8&, label: static u8&, entry: VAddr, count_field: u64, ret: s32) -> void:
+    if module_start_oracle_count >= 64u64:
+        return
+    index: usize = module_start_oracle_count.usize()
+    module_start_oracle_phase[index] <- phase
+    module_start_oracle_module[index] <- module_name
+    module_start_oracle_label[index] <- label
+    module_start_oracle_entry[index] <- entry
+    module_start_oracle_count_field[index] <- count_field
+    module_start_oracle_ret[index] <- ret
+    module_start_oracle_count <- module_start_oracle_count + 1u64
+
+def Module_StartOracleTraceCount() -> u64:
+    return module_start_oracle_count
+
+def Module_StartOracleTracePhase(index: u64) -> static u8&:
+    if index >= 64u64:
+        return ""
+    s: static u8&? = module_start_oracle_phase[index.usize()]
+    return s if s != null else ""
+
+def Module_StartOracleTraceModule(index: u64) -> static u8&:
+    if index >= 64u64:
+        return ""
+    s: static u8&? = module_start_oracle_module[index.usize()]
+    return s if s != null else ""
+
+def Module_StartOracleTraceLabel(index: u64) -> static u8&:
+    if index >= 64u64:
+        return ""
+    s: static u8&? = module_start_oracle_label[index.usize()]
+    return s if s != null else ""
+
+def Module_StartOracleTraceEntry(index: u64) -> VAddr:
+    if index >= 64u64:
+        return 0.uintptr()
+    return module_start_oracle_entry[index.usize()]
+
+def Module_StartOracleTraceCountField(index: u64) -> u64:
+    if index >= 64u64:
+        return 0u64
+    return module_start_oracle_count_field[index.usize()]
+
+def Module_StartOracleTraceRet(index: u64) -> s32:
+    if index >= 64u64:
+        return 0
+    return module_start_oracle_ret[index.usize()]
+
 def Module_CallGuestInitEntry(entry_addr: VAddr, args: u64, argp: void&?, param: void&?) -> s32 can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host]:
     if entry_addr == 0.uintptr():
         return 0
@@ -286,9 +354,11 @@ def Module_CallGuestInitArray(self: Module&, array_virtual_addr: u64, array_size
     memory: mutable MemoryManager& = Memory_Instance()
     base: VAddr = self.base_virtual_addr + array_virtual_addr.uintptr()
     count: usize = (array_size / 8u64).usize()
+    Module_StartOracleRecord("init-array", self.name, "DT_INIT_ARRAY" if array_virtual_addr == self.dynamic_info.init_array_virtual_addr else "DT_PREINIT_ARRAY", base, count.u64(), 0)
     i: mutable usize = 0usize
     while i < count:
         entry_addr: VAddr = MemoryManager_ReadU64(memory, base + (i.u64() * 8u64).uintptr()).uintptr()
+        Module_StartOracleRecord("init-array-entry", self.name, "DT_INIT_ARRAY" if array_virtual_addr == self.dynamic_info.init_array_virtual_addr else "DT_PREINIT_ARRAY", entry_addr, i.u64(), 0)
         can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
             Module_CallGuestInitArrayEntry(entry_addr)
         i <- i + 1usize
@@ -296,6 +366,7 @@ def Module_CallGuestInitArray(self: Module&, array_virtual_addr: u64, array_size
 def Module_Start(self: mutable Module&, args: u64, argp: void&?, param: void&?) -> s32 can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host]:
     if not self.is_valid:
         return -1
+    Module_StartOracleRecord("begin", self.name, "", self.base_virtual_addr, args, 0)
     ge_emergency_mark(GE_EV_MODULE_START_BEGIN, self.base_virtual_addr, args.uintptr(), argp.uintptr(), param.uintptr())
     self.last_start_preinit_count <- 0
     if self.dynamic_info.preinit_array_virtual_addr != 0 and self.dynamic_info.preinit_array_size >= 8:
@@ -309,6 +380,7 @@ def Module_Start(self: mutable Module&, args: u64, argp: void&?, param: void&?) 
     else:
         self.last_start_entry_addr <- Module_GetEntryAddress(self, 0.uintptr())
     if Module_ShouldExecuteGuestStart() and self.dynamic_info.init_virtual_addr != 0:
+        Module_StartOracleRecord("dt-init", self.name, "", self.last_start_entry_addr, 0u64, 0)
         can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
             result <- Module_CallGuestInitEntry(self.last_start_entry_addr, args, argp, param)
     self.last_start_init_count <- 0
@@ -318,6 +390,7 @@ def Module_Start(self: mutable Module&, args: u64, argp: void&?, param: void&?) 
             Module_CallGuestInitArray(self, self.dynamic_info.init_array_virtual_addr, self.dynamic_info.init_array_size)
     if GuestExec_IsEnabled():
         GuestExec_RunModuleEntry(self.last_start_entry_addr, args.int(), argp, false)
+    Module_StartOracleRecord("end", self.name, "", 0.uintptr(), 0u64, result)
     ge_emergency_mark(GE_EV_MODULE_START_END, self.last_start_entry_addr, result.u64().uintptr(), self.last_start_preinit_count.uintptr(), self.last_start_init_count.uintptr())
     return result
 
