@@ -21,6 +21,7 @@ REC_SIZE = 48  # seq:u64 kind:u32 phase:u32 a:u64 b:u64 c:u64 d:u64
 KIND_SIGNAL_FIRED = 11
 KIND_SIGNAL_STACK_WORDS = 17
 KIND_STACK_DUMP = 123
+KIND_WATCH_HIT = 124
 
 
 def parse_tape(path: str) -> list[tuple]:
@@ -80,6 +81,9 @@ def main() -> int:
         elif kind == KIND_SIGNAL_STACK_WORDS:
             tc = {2: "ret-to-word_m1", 3: "call/jmp-to-word0", 4: "call/jmp-to-word1"}.get(d, str(d))
             print(f"STACK  word_m1={hex(a)} word0={hex(b)} word1={hex(c)} transfer_class={tc}")
+        elif kind == KIND_WATCH_HIT:
+            print(f"WATCH  addr={hex(a)} became value={hex(b)} at hle_seq={d} (poll_site={c})"
+                  f"  addr->{symbolize(a, mods) or 'stack/unmapped'}")
 
     print("\nGUEST BACKTRACE (stack words landing in known modules):")
     found = False

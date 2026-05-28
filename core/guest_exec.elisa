@@ -1359,6 +1359,8 @@ const GE_EV_ORACLE_BOUNDARY_META: u32 = 122u32
 # stack slot at/above the faulting SP, so a post-run symbolizer can reconstruct
 # the guest call chain from the emergency tape without touching live guest state.
 const GE_EV_STACK_DUMP: u32 = 123u32
+# Value-watchpoint hit: (watched_addr, observed_value, poll_site, hle_sequence).
+const GE_EV_WATCH_HIT: u32 = 124u32
 const GE_EV_MUTEX_INIT: u32 = 1001u32
 
 const GE_LONGJMP_SOURCE_DEBUG_TRAP_ABORT: u32 = 1u32
@@ -3841,8 +3843,37 @@ global mutable ge_fork_report: ElisaGuestExecForkReport&? = null
 def ge_pc_source_is_fallback(source: s32) -> bool:
     return source == GE_PC_SOURCE_FALLBACK_CHILD_SIGLONGJMP or source == GE_PC_SOURCE_FALLBACK_PARENT_SILENT_CHILD or source == GE_PC_SOURCE_FALLBACK_PARENT_STATUS
 
+# --- Value watchpoint (debug): flag when a chosen guest address first holds a
+# chosen value, recording the HLE boundary it was observed at. Polled at every
+# recorded HLE boundary and at crash; no page protection / single-step, so it is
+# safe under Rosetta. Narrows "what corrupted address X" to an HLE-call window. ---
+global mutable ge_watch_addr: uintptr = 0.uintptr()
+global mutable ge_watch_value: u64 = 0u64
+global mutable ge_watch_enabled: bool = false
+global mutable ge_watch_hit_seq: u64 = 0u64
+
+def GuestExec_SetValueWatch(addr: uintptr, value: u64) -> void:
+    ge_watch_addr <- addr
+    ge_watch_value <- value
+    ge_watch_enabled <- addr != 0.uintptr()
+    ge_watch_hit_seq <- 0u64
+
+def GuestExec_ValueWatchHitSeq() -> u64:
+    return ge_watch_hit_seq
+
+def ge_watch_poll(site: u64) -> void can[Unsafe.SegmentMutation, Segment.Host]:
+    if not ge_watch_enabled or ge_watch_hit_seq != 0u64 or ge_watch_addr == 0.uintptr():
+        return
+    if ge_native_prot_at(ge_watch_addr, 8u64) == 0xffffffffu32:
+        return
+    if ge_read_context_word(ge_watch_addr).u64() == ge_watch_value:
+        ge_watch_hit_seq <- ge_runtime_hle_sequence + 1u64
+        ge_emergency_mark(GE_EV_WATCH_HIT, ge_watch_addr, ge_watch_value.uintptr(), site.uintptr(), ge_watch_hit_seq.uintptr())
+
 # --- Runtime-HLE recording (ported; recorder + getters move together) ---
 def c_GuestExec_RecordRuntimeHle(module: static u8&?, symbol: static u8&?, arg0: uintptr, arg1: uintptr, arg2: uintptr, ret: uintptr) -> void can[Unsafe.SegmentMutation, Segment.Host]:
+    can Unsafe.SegmentMutation, Segment.Host:
+        ge_watch_poll(ge_runtime_hle_sequence)
     ge_current_return_pc <- !ge_runtime_hle_guest_return_addr
     ge_current_guest_pc <- !ge_runtime_hle_guest_return_addr
     ge_current_guest_sp <- !ge_runtime_hle_guest_rsp
