@@ -171,12 +171,17 @@ def main() -> int:
     boundary_reason_name = facts.get("guest_exec_boundary_reason_name", "")
     sample_count = fact_int(facts, "guest_exec_pc_sample_count")
     sample_last_pc = fact_int(facts, "guest_exec_pc_sample_last_pc")
+    sse4a_extrq = fact_int(facts, "guest_exec_sse4a_extrq_handled_count")
+    sse4a_insertq = fact_int(facts, "guest_exec_sse4a_insertq_handled_count")
+    sse4a_last_pc = fact_int(facts, "guest_exec_sse4a_last_pc")
+    sse4a_last_word = fact_int(facts, "guest_exec_sse4a_last_word")
 
     test_after = latest(events, 22)
     oracle_cont = latest(events, 120)
     oracle_stack = latest(events, 121)
     oracle_meta = latest(events, 122)
     signal_event = latest(events, 11) or latest(events, 13)
+    sse4a_unhandled = latest(events, 113)
     longjmp_event = latest(events, 24)
     sample_events = [event for event in events if event.kind == 23]
     hle_return = latest(events, 8) or latest(events, 9)
@@ -204,6 +209,17 @@ def main() -> int:
         )
     if sample_count:
         print(f"pc_samples={sample_count} last_pc=0x{sample_last_pc:x}")
+    if sse4a_extrq or sse4a_insertq or sse4a_last_pc or sse4a_unhandled:
+        print(
+            "sse4a="
+            f"extrq={sse4a_extrq} insertq={sse4a_insertq} "
+            f"last_pc=0x{sse4a_last_pc:x} last_word=0x{sse4a_last_word:x}"
+        )
+        if sse4a_unhandled:
+            print(
+                "sse4a_unhandled="
+                f"pc=0x{sse4a_unhandled.a:x} word=0x{sse4a_unhandled.b:x} reason={sse4a_unhandled.c}"
+            )
     if test_after:
         print(
             "test_after_guard="
@@ -266,10 +282,16 @@ def main() -> int:
             print(f"Timeout snapshot captured child PC 0x{pc:x}; disassemble that guest window next.")
         else:
             print("No child PC captured; check the timeout SIGTRAP snapshot path before guessing at guest code.")
+    elif last_signal == 4 and sse4a_unhandled:
+        print("Rosetta raised SIGILL on an SSE4A-like instruction the fallback did not handle.")
+        print("Next fix: decode the word above and add the missing SSE4A form to the signal-time fallback or prepatcher.")
     elif last_signal:
         pc = fact_int(facts, "guest_exec_signal_pc")
         print(f"Guest/host signal captured: signal={last_signal} pc=0x{pc:x}.")
         print("Next fix: disassemble the captured PC and compare native backing bytes with the image.")
+    elif sse4a_extrq or sse4a_insertq:
+        print("SSE4A fallback handled at least one Rosetta SIGILL and execution continued past it.")
+        print("Next fix: inspect the next terminal condition; SSE4A was not the final blocker for this run.")
     elif test_after and signed64(test_after.a) == 0:
         print("Guard returned success and the crash happened in the host test tail.")
         print("Next fix: move artifact/tape emission behind a host-only cleanup path and inspect post-guard helpers.")
