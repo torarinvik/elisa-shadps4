@@ -1649,7 +1649,7 @@ def ge_try_handle_sse4a_sigill(uctx: void&?) -> bool:
         b2: u8 = ((word >> 16u32) & 0xffu32).u8()
         modrm: u8 = ((word >> 24u32) & 0xffu32).u8()
         ge_emergency_mark(GE_EV_SSE4A_SIGILL_ENTER, !pc, word.u64().uintptr(), 0.uintptr(), 0.uintptr())
-        if b1 != 0x0fu8 or b2 != 0x79u8:
+        if b1 != 0x0fu8 or (b2 != 0x79u8 and b2 != 0x78u8):
             ge_emergency_mark(GE_EV_SSE4A_UNHANDLED, !pc, word.u64().uintptr(), 1.uintptr(), 0.uintptr())
             return false
         mod_bits: u8 = (modrm >> 6u8) & 0x03u8
@@ -1658,15 +1658,24 @@ def ge_try_handle_sse4a_sigill(uctx: void&?) -> bool:
             return false
         dst: u8 = (modrm >> 3u8) & 0x07u8
         src: u8 = modrm & 0x07u8
+        immediate_form: bool = b2 == 0x78u8
+        imm_length: u64 = 0u64
+        imm_index: u64 = 0u64
+        if immediate_form:
+            imm_word: u64 = ge_read_context_word(!pc + 4.uintptr()).u64()
+            imm_length <- imm_word & 0xffu64
+            imm_index <- (imm_word >> 8u64) & 0xffu64
         if b0 == 0x66u8:
-            src_low: u64 = ge_read_xmm_low(mctx, src)
             dst_low: u64 = ge_read_xmm_low(mctx, dst)
-            length: u64 = src_low & 0x3Fu64
-            index: u64 = (src_low >> 8u64) & 0x3Fu64
+            src_low: u64 = ge_read_xmm_low(mctx, src)
+            length: u64 = imm_length if immediate_form else (src_low & 0x3Fu64)
+            index: u64 = imm_index if immediate_form else ((src_low >> 8u64) & 0x3Fu64)
+            index <- index & 0x3Fu64
             mask: u64 = ge_sse4a_mask(length)
             result: u64 = (dst_low >> index) & mask
             ge_write_xmm_low_zero_high(mctx, dst, result)
-            ge_write_pc(uctx, (!pc + 4.uintptr()).cast[GuestPC])
+            advance: uintptr = 6.uintptr() if immediate_form else 4.uintptr()
+            ge_write_pc(uctx, (!pc + advance).cast[GuestPC])
             ge_sse4a_extrq_handled_count <- ge_sse4a_extrq_handled_count + 1u64
             ge_sse4a_last_pc <- !pc
             ge_sse4a_last_word <- word
@@ -1676,12 +1685,14 @@ def ge_try_handle_sse4a_sigill(uctx: void&?) -> bool:
             src_low: u64 = ge_read_xmm_low(mctx, src)
             src_high: u64 = ge_read_xmm_high(mctx, src)
             dst_low: u64 = ge_read_xmm_low(mctx, dst)
-            length: u64 = src_high & 0x3Fu64
-            index: u64 = (src_high >> 8u64) & 0x3Fu64
+            length: u64 = imm_length if immediate_form else (src_high & 0x3Fu64)
+            index: u64 = imm_index if immediate_form else ((src_high >> 8u64) & 0x3Fu64)
+            index <- index & 0x3Fu64
             mask: u64 = ge_sse4a_mask(length)
             result: u64 = (dst_low & ~(mask << index)) | ((src_low & mask) << index)
             ge_write_xmm_low_zero_high(mctx, dst, result)
-            ge_write_pc(uctx, (!pc + 4.uintptr()).cast[GuestPC])
+            advance: uintptr = 6.uintptr() if immediate_form else 4.uintptr()
+            ge_write_pc(uctx, (!pc + advance).cast[GuestPC])
             ge_sse4a_insertq_handled_count <- ge_sse4a_insertq_handled_count + 1u64
             ge_sse4a_last_pc <- !pc
             ge_sse4a_last_word <- word
