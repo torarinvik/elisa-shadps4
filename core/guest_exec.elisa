@@ -1896,6 +1896,7 @@ global mutable ge_pw_page_base: uintptr = 0.uintptr()
 global mutable ge_pw_watch_addr: uintptr = 0.uintptr()
 global mutable ge_pw_armed: bool = false
 global mutable ge_pw_stepping: bool = false
+global mutable ge_pw_pending_value_record: bool = false
 global mutable ge_pw_hit_count: u64 = 0u64
 
 def GuestExec_SetPageWatch(addr: uintptr) -> void can[Unsafe.SegmentMutation, Segment.Host]:
@@ -1938,7 +1939,12 @@ def ge_pw_handle(sig: int, info: void&?, uctx: void&?) -> bool can[Unsafe.Segmen
     if not ge_pw_armed:
         return false
     if sig == GE_SIG_TRAP and ge_pw_stepping:
-        # Single-step completed: re-arm the protection and clear TF.
+        # Single-step completed: re-arm the protection and clear TF. If the write
+        # targeted the watched slot, record the value that was just stored so the
+        # timeline shows real-return vs corrupting-value writes.
+        if ge_pw_pending_value_record:
+            ge_emergency_mark(GE_EV_WATCH_HIT, ge_pw_watch_addr, ge_read_context_word(ge_pw_watch_addr), ge_pw_hit_count.uintptr(), 0xA10E.uintptr())
+            ge_pw_pending_value_record <- false
         _ = ge_mprotect(ge_pw_page_base, 0x1000usize, 1)
         ge_pw_set_tf(uctx, false)
         ge_pw_stepping <- false
@@ -1948,6 +1954,7 @@ def ge_pw_handle(sig: int, info: void&?, uctx: void&?) -> bool can[Unsafe.Segmen
         if fault.u64() >= ge_pw_page_base.u64() and fault.u64() < (ge_pw_page_base.u64() + 0x1000u64):
             if fault.u64() >= ge_pw_watch_addr.u64() and fault.u64() < (ge_pw_watch_addr.u64() + 8u64):
                 ge_pw_hit_count <- ge_pw_hit_count + 1u64
+                ge_pw_pending_value_record <- true
                 ge_emergency_mark(GE_EV_WATCH_HIT, fault, (!ge_extract_pc(uctx)), ge_pw_hit_count.uintptr(), (!ge_extract_sp(uctx)))
             # Let the write proceed, then single-step to re-protect.
             _ = ge_mprotect(ge_pw_page_base, 0x1000usize, 3)  # PROT_READ|PROT_WRITE
@@ -1961,6 +1968,12 @@ def ge_pw_handle(sig: int, info: void&?, uctx: void&?) -> bool can[Unsafe.Segmen
 @segment_establishing
 @reentrant_safe
 def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
+    # Instruction-precise page watchpoint: consume watchpoint write faults and
+    # single-step traps first, before any breadcrumb/FS work, so watched writes
+    # are not treated as fatal and do not flood the emergency tape.
+    can Unsafe.SegmentMutation, Segment.Host:
+        if ge_pw_handle(sig, info, uctx):
+            return
     ge_raw_breadcrumb("GE:SIGNAL_ENTRY_RAW\n", 20usize)
     ge_emergency_mark(GE_EV_SIGNAL_ENTRY_RAW, sig.u64().uintptr(), info.uintptr(), uctx.uintptr(), 0.uintptr())
     static if PLATFORM_APPLE and ARCH_X86_64:
@@ -1975,12 +1988,6 @@ def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
             ge_assert_host_fs_owner("signal-handler-after-host-fs-restore")
         ge_raw_breadcrumb("GE:SIGNAL_AFTER_ASSERT\n", 23usize)
         ge_emergency_mark(GE_EV_SIGNAL_AFTER_ASSERT, sig.u64().uintptr(), info.uintptr(), uctx.uintptr(), 0.uintptr())
-    # Instruction-precise page watchpoint: consume watchpoint write faults and
-    # single-step traps before any crash classification, so a watched write does
-    # not get treated as a fatal fault.
-    can Unsafe.SegmentMutation, Segment.Host:
-        if ge_pw_handle(sig, info, uctx):
-            return
     ge_set_native_phase(GE_PHASE_SIGNAL_HANDLER_ENTERED)
     ge_last_status <- (0 - sig).s32()
     ge_last_signal <- sig.s32()
