@@ -2717,6 +2717,7 @@ def ge_reset_crash_state() -> void:
         ge_hle_oracle_modules[hle_oracle_reset_i] <- null
         ge_hle_oracle_symbols[hle_oracle_reset_i] <- null
         ge_hle_oracle_returns[hle_oracle_reset_i] <- 0.uintptr()
+        ge_hle_oracle_results[hle_oracle_reset_i] <- 0.uintptr()
         ge_hle_oracle_rdi[hle_oracle_reset_i] <- 0.uintptr()
         ge_hle_oracle_rsi[hle_oracle_reset_i] <- 0.uintptr()
         ge_hle_oracle_rdx[hle_oracle_reset_i] <- 0.uintptr()
@@ -3822,7 +3823,10 @@ global mutable ge_runtime_hle_caller_frame_word2: uintptr = 0.uintptr()
 global mutable ge_runtime_hle_caller_frame_word3: uintptr = 0.uintptr()
 global mutable ge_hle_oracle_modules: static u8&?[64] = zeroed
 global mutable ge_hle_oracle_symbols: static u8&?[64] = zeroed
+# Guest return address after the HLE call. Kept for shadPS4 oracle parity.
 global mutable ge_hle_oracle_returns: uintptr[64] = zeroed
+# Actual value returned by the HLE implementation to guest code.
+global mutable ge_hle_oracle_results: uintptr[64] = zeroed
 global mutable ge_hle_oracle_rdi: uintptr[64] = zeroed
 global mutable ge_hle_oracle_rsi: uintptr[64] = zeroed
 global mutable ge_hle_oracle_rdx: uintptr[64] = zeroed
@@ -4017,14 +4021,14 @@ def c_GuestExec_RecordRuntimeHle(module: static u8&?, symbol: static u8&?, arg0:
     ge_runtime_hle_arg1 <- arg1
     ge_runtime_hle_arg2 <- arg2
     ge_runtime_hle_ret <- ret
-    if ge_runtime_hle_sequence <= 64u64:
-        hle_oracle_index: usize = (ge_runtime_hle_sequence - 1u64).usize()
-        ge_hle_oracle_modules[hle_oracle_index] <- ge_runtime_hle_module
-        ge_hle_oracle_symbols[hle_oracle_index] <- ge_runtime_hle_symbol
-        ge_hle_oracle_returns[hle_oracle_index] <- !ge_runtime_hle_guest_return_addr
-        ge_hle_oracle_rdi[hle_oracle_index] <- ge_runtime_hle_guest_rdi
-        ge_hle_oracle_rsi[hle_oracle_index] <- ge_runtime_hle_guest_rsi
-        ge_hle_oracle_rdx[hle_oracle_index] <- ge_runtime_hle_guest_rdx
+    hle_oracle_index: usize = ((ge_runtime_hle_sequence - 1u64) & 63u64).usize()
+    ge_hle_oracle_modules[hle_oracle_index] <- ge_runtime_hle_module
+    ge_hle_oracle_symbols[hle_oracle_index] <- ge_runtime_hle_symbol
+    ge_hle_oracle_returns[hle_oracle_index] <- !ge_runtime_hle_guest_return_addr
+    ge_hle_oracle_results[hle_oracle_index] <- ret
+    ge_hle_oracle_rdi[hle_oracle_index] <- ge_runtime_hle_guest_rdi
+    ge_hle_oracle_rsi[hle_oracle_index] <- ge_runtime_hle_guest_rsi
+    ge_hle_oracle_rdx[hle_oracle_index] <- ge_runtime_hle_guest_rdx
     ge_emergency_mark(GE_EV_HLE_RETURN_BEGIN, ge_current_hle_id.u64().uintptr(), ret, ge_current_return_pc, ge_current_guest_sp)
     ge_debug_trace_boundary("guest-exec-hle-args", arg0, arg1, arg2)
     ge_debug_trace_boundary("guest-exec-hle-ret", ret, ge_runtime_hle_sequence.uintptr(), !ge_runtime_hle_guest_return_addr)
@@ -4375,6 +4379,11 @@ def c_GuestExec_HleOracleTraceReturn(index: u64) -> uintptr:
     if index >= 64u64:
         return 0.uintptr()
     return ge_hle_oracle_returns[index.usize()]
+
+def c_GuestExec_HleOracleTraceResult(index: u64) -> uintptr:
+    if index >= 64u64:
+        return 0.uintptr()
+    return ge_hle_oracle_results[index.usize()]
 
 def c_GuestExec_HleOracleTraceRdi(index: u64) -> uintptr:
     if index >= 64u64:
@@ -5731,6 +5740,9 @@ def GuestExec_HleOracleTraceSymbol(index: u64) -> static u8&:
 def GuestExec_HleOracleTraceReturn(index: u64) -> VAddr:
     return c_GuestExec_HleOracleTraceReturn(index)
 
+def GuestExec_HleOracleTraceResult(index: u64) -> VAddr:
+    return c_GuestExec_HleOracleTraceResult(index)
+
 def GuestExec_HleOracleTraceRdi(index: u64) -> VAddr:
     return c_GuestExec_HleOracleTraceRdi(index)
 
@@ -5865,6 +5877,26 @@ def GuestExec_DumpHleCallRing() -> void can[Console.Format, Unsafe.SegmentMutati
         can Unsafe.SegmentMutation, Segment.Host:
             GuestExec_DumpHleCallRingLine(line[0].ref[mutable u8&], 256usize, written)
         k <- k + 1u64
+    oracle_count: u64 = c_GuestExec_HleOracleTraceCount()
+    written1: int = snprintf(line[0].ref[mutable u8&], 256usize, "CUSA07399_ARTIFACT hle_oracle_count=%llu total=%llu", oracle_count, ge_runtime_hle_sequence) can Console.Format
+    can Unsafe.SegmentMutation, Segment.Host:
+        GuestExec_DumpHleCallRingLine(line[0].ref[mutable u8&], 256usize, written1)
+    oracle_start: u64 = ge_runtime_hle_sequence - oracle_count
+    j: mutable u64 = 0u64
+    while j < oracle_count:
+        abs_seq: u64 = oracle_start + j + 1u64
+        slot: u64 = ((abs_seq - 1u64) & 63u64)
+        module: static u8& = c_GuestExec_HleOracleTraceModule(slot)
+        symbol: static u8& = c_GuestExec_HleOracleTraceSymbol(slot)
+        return_pc: uintptr = c_GuestExec_HleOracleTraceReturn(slot)
+        result: uintptr = c_GuestExec_HleOracleTraceResult(slot)
+        rdi: uintptr = c_GuestExec_HleOracleTraceRdi(slot)
+        rsi: uintptr = c_GuestExec_HleOracleTraceRsi(slot)
+        rdx: uintptr = c_GuestExec_HleOracleTraceRdx(slot)
+        written_oracle: int = snprintf(line[0].ref[mutable u8&], 256usize, "CUSA07399_ARTIFACT hle_oracle seq=%llu module=%s symbol=%s return=0x%llx result=0x%llx rdi=0x%llx rsi=0x%llx rdx=0x%llx", abs_seq, module, symbol, return_pc.u64(), result.u64(), rdi.u64(), rsi.u64(), rdx.u64()) can Console.Format
+        can Unsafe.SegmentMutation, Segment.Host:
+            GuestExec_DumpHleCallRingLine(line[0].ref[mutable u8&], 256usize, written_oracle)
+        j <- j + 1u64
 
 def ElisaGuestExec_EmitCusaArtifactStage() -> void:
     _ = puts("CUSA07399_EXEC_STAGE stage=load link=pass handoff=pass") can Console.Write

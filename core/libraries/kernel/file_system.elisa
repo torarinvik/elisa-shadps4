@@ -73,6 +73,22 @@ def KernelFileHandle_new() -> KernelFileHandle:
     return KernelFileHandle(false, 0, 0, null, "", 0, KERNEL_FILE_KIND_REGULAR)
 
 global mutable g_kernel_file_handles: array[KernelFileHandle, 1024] = zeroed
+global mutable kernel_file_last_write_fd: int = -1
+global mutable kernel_file_last_write_nbytes: u64 = 0u64
+global mutable kernel_file_last_write_ret: i64 = 0i64
+global mutable kernel_file_last_write_errno: int = 0
+
+def KernelFile_DebugLastWriteFd() -> int:
+    return kernel_file_last_write_fd
+
+def KernelFile_DebugLastWriteNbytes() -> u64:
+    return kernel_file_last_write_nbytes
+
+def KernelFile_DebugLastWriteRet() -> i64:
+    return kernel_file_last_write_ret
+
+def KernelFile_DebugLastWriteErrno() -> int:
+    return kernel_file_last_write_errno
 
 def KernelFile_SetErrno(err: int) -> void:
     SetPosixErrno(err)
@@ -478,29 +494,59 @@ def sceKernelFcntl(fd: int, cmd: int, arg: i64) -> int:
     return result
 
 def KernelFile_Write(fd: int, buf: void&?, nbytes: u64) -> i64:
+    kernel_file_last_write_fd <- fd
+    kernel_file_last_write_nbytes <- nbytes
+    kernel_file_last_write_ret <- 0i64
+    kernel_file_last_write_errno <- 0
+    # shadPS4 wires stdout/stderr to console devices. Until the device table is
+    # ported, treat writes to those descriptors as successful sinks so guest
+    # startup diagnostics do not fail with EBADF.
+    if fd == 1 or fd == 2:
+        if buf == null and nbytes > 0:
+            kernel_file_last_write_ret <- -1i64
+            kernel_file_last_write_errno <- POSIX_EFAULT
+            return KernelFile_PosixFail64(POSIX_EFAULT)
+        kernel_file_last_write_ret <- nbytes.i64()
+        return nbytes.i64()
     h: mutable KernelFileHandle&? = KernelFile_GetHandle(fd)
     if h == null:
+        kernel_file_last_write_ret <- -1i64
+        kernel_file_last_write_errno <- POSIX_EBADF
         return KernelFile_PosixFail64(POSIX_EBADF)
     handle: mutable KernelFileHandle& = h
     if handle.kind == KERNEL_FILE_KIND_DIRECTORY:
+        kernel_file_last_write_ret <- -1i64
+        kernel_file_last_write_errno <- POSIX_EBADF
         return KernelFile_PosixFail64(POSIX_EBADF)
     if KernelFile_IsReadOnlyFlags(handle.open_flags):
+        kernel_file_last_write_ret <- -1i64
+        kernel_file_last_write_errno <- POSIX_EBADF
         return KernelFile_PosixFail64(POSIX_EBADF)
     if handle.file == null:
+        kernel_file_last_write_ret <- -1i64
+        kernel_file_last_write_errno <- POSIX_EBADF
         return KernelFile_PosixFail64(POSIX_EBADF)
     if buf == null and nbytes > 0:
+        kernel_file_last_write_ret <- -1i64
+        kernel_file_last_write_errno <- POSIX_EFAULT
         return KernelFile_PosixFail64(POSIX_EFAULT)
     if not io_seek(handle.file.cast[void&], handle.offset, SeekOrigin.SetOrigin):
+        kernel_file_last_write_ret <- -1i64
+        kernel_file_last_write_errno <- POSIX_EINVAL
         return KernelFile_PosixFail64(POSIX_EINVAL)
     if nbytes == 0:
+        kernel_file_last_write_ret <- 0i64
         return 0
     if buf == null:
+        kernel_file_last_write_ret <- -1i64
+        kernel_file_last_write_errno <- POSIX_EFAULT
         return KernelFile_PosixFail64(POSIX_EFAULT)
     write_buf: void& = buf.cast[void&]
     written: usize = io_write(handle.file.cast[void&], write_buf, 1, nbytes.usize())
     handle.offset <- handle.offset + written.i64()
     if handle.offset > handle.size:
         handle.size <- handle.offset
+    kernel_file_last_write_ret <- written.i64()
     return written.i64()
 
 def posix_write(fd: int, buf: void&?, nbytes: u64) -> i64:

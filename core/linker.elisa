@@ -42,6 +42,7 @@ const LINKER_NATIVE_HLE_THUNK_CAP: usize = 2048usize
 
 global mutable linker_native_hle_thunk_targets: u64[2048] = zeroed
 global mutable linker_native_hle_thunk_addrs: u64[2048] = zeroed
+global mutable linker_native_hle_thunk_symbol_ptrs: u64[2048] = zeroed
 global mutable linker_native_hle_thunk_count: usize = 0usize
 # Generic HLE call ring: a per-thunk recorder prefix stub writes the symbol-name
 # C-string pointer of every guest->HLE call into this ring (masked by 1023), then
@@ -1123,9 +1124,10 @@ def Linker_CreateNativeHleBoundaryThunk(target: u64, symbol_name: static u8&?) -
         return 0u64
     if not Linker_UseNativeHleBoundaryThunk():
         return target
+    sym_ptr: u64 = Linker_SymbolNamePtr(symbol_name)
     cache_index: mutable usize = 0usize
     while cache_index < linker_native_hle_thunk_count and cache_index < LINKER_NATIVE_HLE_THUNK_CAP:
-        if linker_native_hle_thunk_targets[cache_index] == target:
+        if linker_native_hle_thunk_targets[cache_index] == target and linker_native_hle_thunk_symbol_ptrs[cache_index] == sym_ptr:
             return linker_native_hle_thunk_addrs[cache_index]
         cache_index <- cache_index + 1usize
     static if PLATFORM_APPLE and ARCH_X86_64:
@@ -1247,12 +1249,12 @@ def Linker_CreateNativeHleBoundaryThunk(target: u64, symbol_name: static u8&?) -
         # pointing at the prefix; the prefix preserves %rsp and all SysV arg regs
         # (it only clobbers %r10/%r11, which the real thunk reloads immediately) so
         # the boundary contract is unaffected.
-        sym_ptr: u64 = Linker_SymbolNamePtr(symbol_name)
         entry_addr: u64 = Linker_CreateHleRecorderPrefix(thunk.u64(), sym_ptr)
         final_addr: u64 = entry_addr if entry_addr != 0u64 else thunk.u64()
         if linker_native_hle_thunk_count < LINKER_NATIVE_HLE_THUNK_CAP:
             linker_native_hle_thunk_targets[linker_native_hle_thunk_count] <- target
             linker_native_hle_thunk_addrs[linker_native_hle_thunk_count] <- final_addr
+            linker_native_hle_thunk_symbol_ptrs[linker_native_hle_thunk_count] <- sym_ptr
             linker_native_hle_thunk_count <- linker_native_hle_thunk_count + 1usize
         return final_addr
     static else:
