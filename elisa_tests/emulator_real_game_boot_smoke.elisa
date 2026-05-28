@@ -1753,6 +1753,21 @@ def emulator_real_game_boot_smoke_probes_native_guest_exec_handoff() -> void:
         else:
             RealGameBoot_Check(boundary_status == GUEST_EXEC_BOUNDARY_UNSUPPORTED_HOST, "expected unsupported host boundary classification")
 
+def RealGameBoot_EmitModuleTable(linker: Linker&) -> void:
+    # Write the loaded module ranges to a stable file before the guarded run, so
+    # tools/crash_backtrace.py can symbolize PRX frames (not just the eboot) even
+    # though the crash truncates the main artifact emission.
+    can Memory.Allocate, Console.Format:
+        file: mutable IOFile = IOFile_opened("/tmp/elisa_modules.txt", FileAccessMode.Create, FileType.TextFile)
+        i: mutable usize = 0usize
+        while i < linker.modules.count:
+            m: Module& = linker.modules[i].ref[Module&]
+            line: mutable u8[320] = zeroed
+            written: int = snprintf(line[0].ref[mutable u8&], 320usize, "MODULE %s %llu %llu", m.name, m.base_virtual_addr.u64(), m.aligned_base_size)
+            RealGameBoot_WriteLine(file.ref[mutable IOFile&], line[0].ref[mutable u8&], written)
+            i <- i + 1usize
+        IOFile_Close(file.ref[mutable IOFile&])
+
 @test
 def emulator_real_game_boot_smoke_guarded_game_entry_reports_host_status() -> void:
     can Memory.Allocate, Abort.Panic:
@@ -1799,6 +1814,7 @@ def emulator_real_game_boot_smoke_guarded_game_entry_reports_host_status() -> vo
             GuestExec_DebugTraceReset()
             RealGameBoot_EmitPhaseBreadcrumb(37u64)
 
+        RealGameBoot_EmitModuleTable(linker)
         status: mutable s32 = 0
         if RealGameBoot_UseNoForkGuestExec():
             RealGameBoot_EmitPhaseBreadcrumb(38u64)

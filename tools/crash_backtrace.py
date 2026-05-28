@@ -34,8 +34,19 @@ def parse_tape(path: str) -> list[tuple]:
     return out
 
 
-def parse_modules(specs: list[str]) -> list[tuple[str, int, int]]:
-    mods = [("eboot.bin", 0x800000000, 0x2E04000)]
+def parse_modules(specs: list[str], table_path: str | None) -> list[tuple[str, int, int]]:
+    mods: list[tuple[str, int, int]] = []
+    # Module table written by the boot harness: "MODULE <name> <base> <size>".
+    if table_path:
+        try:
+            for line in open(table_path):
+                f = line.split()
+                if len(f) == 4 and f[0] == "MODULE":
+                    mods.append((f[1], int(f[2], 0), int(f[3], 0)))
+        except FileNotFoundError:
+            pass
+    if not mods:
+        mods = [("eboot.bin", 0x800000000, 0x2E04000)]
     for spec in specs or []:
         name, rng = spec.split("=", 1)
         base, size = rng.split(":", 1)
@@ -53,12 +64,14 @@ def symbolize(value: int, mods: list[tuple[str, int, int]]) -> str | None:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--tape", default="/tmp/elisa_gewd.bin")
+    ap.add_argument("--modules", default="/tmp/elisa_modules.txt",
+                    help="module table file (MODULE name base size lines)")
     ap.add_argument("--module", action="append", default=[],
-                    help="name=base:size, e.g. libc=0x809380000:0xf8000")
+                    help="extra name=base:size, e.g. libc=0x809380000:0xf8000")
     args = ap.parse_args()
 
     evs = parse_tape(args.tape)
-    mods = parse_modules(args.module)
+    mods = parse_modules(args.module, args.modules)
 
     for seq, kind, phase, a, b, c, d in evs:
         if kind == KIND_SIGNAL_FIRED:
