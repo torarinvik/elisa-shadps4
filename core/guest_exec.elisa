@@ -1355,6 +1355,10 @@ const GE_EV_SSE4A_UNHANDLED: u32 = 113u32
 const GE_EV_ORACLE_BOUNDARY_CONT: u32 = 120u32
 const GE_EV_ORACLE_BOUNDARY_STACK: u32 = 121u32
 const GE_EV_ORACLE_BOUNDARY_META: u32 = 122u32
+# Crash backtrace: each mark carries (stack_addr, word_value) for one guest
+# stack slot at/above the faulting SP, so a post-run symbolizer can reconstruct
+# the guest call chain from the emergency tape without touching live guest state.
+const GE_EV_STACK_DUMP: u32 = 123u32
 const GE_EV_MUTEX_INIT: u32 = 1001u32
 
 const GE_LONGJMP_SOURCE_DEBUG_TRAP_ABORT: u32 = 1u32
@@ -1996,6 +2000,21 @@ def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
             fr.execution_stage <- 6
     ge_emergency_mark(GE_EV_SIGNAL_FIRED, sig.u64().uintptr(), (!ge_last_guest_pc), (!ge_last_guest_sp), (!ge_last_fault_address))
     ge_emergency_mark(GE_EV_SIGNAL_STACK_WORDS, ge_signal_stack_word_m1, ge_signal_stack_word0, ge_signal_stack_word1, ge_fault_transfer_class.uintptr())
+    # Crash backtrace window: dump 32 stack slots at/above the faulting SP into
+    # the tape so a post-run symbolizer can recover the guest call chain. Reads
+    # only upward (older, mapped frames) to avoid faulting past the stack top.
+    if !ge_last_guest_sp != 0.uintptr():
+        # Stop at the stack page top so the window never reads into the unmapped
+        # guard page above it (which would fault recursively inside the handler).
+        bt_page_end: u64 = ((!ge_last_guest_sp).u64() | 0xfffu64) + 1u64
+        bt_i: mutable u64 = 0u64
+        while bt_i < 32u64:
+            bt_addr: uintptr = !ge_last_guest_sp + (bt_i * 8u64).uintptr()
+            if bt_addr.u64() + 8u64 > bt_page_end:
+                bt_i <- 32u64
+            else:
+                ge_emergency_mark(GE_EV_STACK_DUMP, bt_i.uintptr(), bt_addr, ge_read_context_word(bt_addr), 0.uintptr())
+                bt_i <- bt_i + 1u64
     return_call_start: mutable uintptr = 0.uintptr()
     return_direct_target: mutable uintptr = 0.uintptr()
     return_callsite_window: mutable uintptr = 0.uintptr()
