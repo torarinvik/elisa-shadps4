@@ -29,16 +29,19 @@ These are the minimum useful hooks:
 - `src/core/linker.cpp`, `Linker::LoadModule` after `m_modules.emplace_back(...)`: emit `BOOT_ORACLE module` (**done** — module layout: index/base/size).
 - `src/core/linker.cpp`, `Linker::Execute` immediately before `RunMainEntry(&params)`: emit `BOOT_ORACLE entry` (**done** — entry addr + argc).
 - `src/core/linker.cpp`, `Linker::Relocate` import path (after `Resolve(...)`): emit `BOOT_ORACLE resolve nid=… symtype=… resolved=…` (**done** — per-import structural facts). Catches missing-HLE-coverage (resolved 1 vs 0) and import-table parsing divergences, keyed by bare NID. Resolved *addresses* are deliberately omitted (host HLE addr vs guest thunk VA aren't cross-comparable; the "function import resolved to a data symbol" case is caught instead by the port's local `expected_symbol_type` invariant).
-- HLE call boundary: emit `BOOT_ORACLE hle` with the guest return address and argument registers. **Not done — phase 2**, gated on the first divergence being *after* import resolution.
+- HLE call boundary: emit `BOOT_ORACLE hle` with the guest return address and argument registers. **Done** in the shadPS4 oracle branch via `HOST_CALL` wrappers, gated by `SHADPS4_TRACE_HLE_CALLS=1`.
 
-### Why `hle` is phase 2
+### HLE capture shape
 
 shadPS4 resolves each import straight to its native function address at relocation time
 (`Linker::Relocate` → `Resolve` → the GOT slot at `linker.cpp`), and the guest then `call`s
-that native function directly. There is **no central runtime chokepoint** every HLE call
-passes through, so `BOOT_ORACLE hle` (per-call return address + arg registers) cannot be a
-few log lines — it needs a logging trampoline that redirects each JUMP_SLOT through a
-per-NID stub that records the return address and args, then tail-calls the real function.
+that native function directly. The oracle branch captures this by enriching `HOST_CALL`:
+each registered HLE wrapper records the wrapper metadata, return address, and first three
+integer/pointer argument registers before tailing into the real HLE.
+
+The diff tool drops unregistered helper wrappers and keys `hle` records by filtered call
+order rather than by shadPS4's global trace sequence, because shadPS4 may emit early
+non-game helper calls before the first guest-main HLE.
 
 Likewise, raw *resolved addresses* are not cross-comparable: shadPS4 resolves HLE imports to
 **host** C++ addresses while the Elisa port resolves to **guest** thunk VAs. Only structural
@@ -55,8 +58,12 @@ trampolines exist.
 After running instrumented shadPS4:
 
 ```bash
+SHADPS4_TRACE_HLE_CALLS=1 ./build-current-x86/shadps4 -g Games/CUSA07399 --config-clean --fullscreen false \
+  2>&1 | tee /tmp/shadps4_cusa07399_oracle_full.log
+rg "BOOT_ORACLE" /tmp/shadps4_cusa07399_oracle_full.log > /tmp/shadps4_cusa07399_boot_oracle.txt
+
 python3 tools/boot_oracle_diff.py \
-  --expected /path/to/shadps4_cusa07399_boot_oracle.txt \
+  --expected /tmp/shadps4_cusa07399_boot_oracle.txt \
   --actual cusa07399_artifacts.txt
 ```
 

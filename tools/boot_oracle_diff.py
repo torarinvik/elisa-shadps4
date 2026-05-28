@@ -29,6 +29,10 @@ def normalize_fields(kind: str, fields: dict[str, str]) -> dict[str, str]:
             normalized["name"] = normalized["module"]
         if "module" not in normalized and "name" in normalized:
             normalized["module"] = normalized["name"]
+        if "module" in normalized:
+            normalized["module"] = normalized["module"].rstrip("/").rsplit("/", 1)[-1]
+        if "name" in normalized:
+            normalized["name"] = normalized["name"].rstrip("/").rsplit("/", 1)[-1]
     elif kind == "entry":
         if "addr" not in normalized and "entry" in normalized:
             normalized["addr"] = normalized["entry"]
@@ -52,6 +56,7 @@ def normalize_fields(kind: str, fields: dict[str, str]) -> dict[str, str]:
 
 def parse_boot_oracle(path: Path) -> list[Record]:
     records: list[Record] = []
+    kind_counts: dict[str, int] = {}
     if not path.exists():
         raise FileNotFoundError(path)
     for raw_line in path.read_text(errors="replace").splitlines():
@@ -66,7 +71,12 @@ def parse_boot_oracle(path: Path) -> list[Record]:
             continue
         kind = parts[1]
         fields = normalize_fields(kind, parse_kv(parts[2] if len(parts) > 2 else ""))
-        key = oracle_key(kind, fields, len(records))
+        if kind == "hle" and (
+            not fields.get("module") or fields.get("symbol", "").startswith("unknown_hle_wrapper_")
+        ):
+            continue
+        kind_counts[kind] = kind_counts.get(kind, 0) + 1
+        key = oracle_key(kind, fields, kind_counts[kind])
         records.append(Record(kind, key, fields, line))
     return records
 
@@ -116,7 +126,7 @@ def parse_elisa_artifacts(path: Path) -> list[Record]:
             "rsi": facts.get("guest_exec_runtime_hle_arg1", "0"),
             "rdx": facts.get("guest_exec_runtime_hle_arg2", "0"),
         }
-        records.append(Record("hle", f"hle:{hle_fields['seq']}", hle_fields, "CUSA07399_ARTIFACT synthesized hle"))
+        records.append(Record("hle", "hle:1", hle_fields, "CUSA07399_ARTIFACT synthesized hle"))
 
     return records
 
@@ -127,7 +137,7 @@ def oracle_key(kind: str, fields: dict[str, str], index: int) -> str:
     if kind == "entry":
         return "entry"
     if kind == "hle":
-        return f"hle:{fields.get('seq', index)}"
+        return f"hle:{index}"
     if kind == "resolve":
         return resolve_key(fields, index)
     if kind == "trace":
@@ -159,7 +169,11 @@ def values_equal(left: str, right: str) -> bool:
     return left == right
 
 
-def compare_records(expected: list[Record], actual: list[Record], limit: int) -> int:
+def compare_records(expected: list[Record], actual: list[Record], limit: int, kinds: set[str] | None) -> int:
+    if kinds is not None:
+        expected = [record for record in expected if record.kind in kinds]
+        actual = [record for record in actual if record.kind in kinds]
+
     expected_by_key = {record.key: record for record in expected}
     actual_by_key = {record.key: record for record in actual}
 
@@ -175,6 +189,8 @@ def compare_records(expected: list[Record], actual: list[Record], limit: int) ->
             return 1
         for field, expected_value in exp.fields.items():
             if field in {"path", "host", "image"}:
+                continue
+            if exp.kind == "hle" and field in {"seq", "wrapper"}:
                 continue
             actual_value = act.fields.get(field)
             if actual_value is None:
@@ -202,6 +218,11 @@ def main() -> int:
     parser.add_argument("--expected", required=True, help="shadPS4 BOOT_ORACLE trace file")
     parser.add_argument("--actual", default="cusa07399_artifacts.txt", help="Elisa CUSA07399 artifact file")
     parser.add_argument("--limit", type=int, default=0, help="maximum expected records to compare")
+    parser.add_argument(
+        "--kinds",
+        default="module,entry,resolve,hle",
+        help="comma-separated record kinds to compare (default: module,entry,resolve,hle)",
+    )
     args = parser.parse_args()
 
     expected = parse_boot_oracle(Path(args.expected))
@@ -212,7 +233,8 @@ def main() -> int:
     if not actual:
         print("No Elisa artifact records found in actual trace.")
         return 2
-    return compare_records(expected, actual, args.limit)
+    kinds = {kind.strip() for kind in args.kinds.split(",") if kind.strip()}
+    return compare_records(expected, actual, args.limit, kinds or None)
 
 
 if __name__ == "__main__":
