@@ -11,6 +11,7 @@ const KERNEL_MEMORY_PAGE_SIZE: u64 = 16 * 1024
 const KERNEL_MEMORY_MMAP_FAILED: uintptr = 0.uintptr() - 1.uintptr()
 const KERNEL_DIRECT_MEMORY_TYPE_DEFAULT: int = 0
 const KERNEL_DIRECT_MEMORY_BASE: u64 = 0u64
+const ORBIS_KERNEL_MAXIMUM_NAME_LENGTH: usize = 32
 const ORBIS_KERNEL_MAP_FIXED_FLAG: int = 0x10
 const ORBIS_KERNEL_MAP_OP_MAP_DIRECT: s32 = 0
 const ORBIS_KERNEL_MAP_OP_UNMAP: s32 = 1
@@ -73,7 +74,6 @@ def KernelMemory_ReadInOutPtr(in_out_ptr: mutable void&?&) -> VAddr:
         return 0.uintptr()
     return in_out_ptr[0].uintptr()
 
-global mutable g_kernel_direct_alloc_cursor: u64 = KERNEL_DIRECT_MEMORY_BASE
 global mutable kernel_debug_last_direct_alloc_result: int = 0
 global mutable kernel_debug_last_direct_alloc_phys: i64 = 0
 global mutable kernel_debug_last_direct_alloc_len: u64 = 0
@@ -89,6 +89,9 @@ def KernelMemory_MapDirect(addr: mutable void&?&, len: u64, prot: int, flags: in
         return ORBIS_KERNEL_ERROR_EINVAL
     if alignment != 0 and not KernelMemory_Is16KBAligned(alignment):
         return ORBIS_KERNEL_ERROR_EINVAL
+    # Oracle: name longer than the kernel limit is rejected before the prot check.
+    if runtime_strlen(name) >= ORBIS_KERNEL_MAXIMUM_NAME_LENGTH:
+        return ORBIS_KERNEL_ERROR_ENAMETOOLONG
     if (prot.u32() & MemoryProt_CpuExec) != 0u32:
         return ORBIS_KERNEL_ERROR_EACCES
     mapped: mutable VAddr = 0.uintptr()
@@ -240,24 +243,15 @@ def sceKernelAvailableDirectMemorySize(searchStart: u64, searchEnd: u64, alignme
     out_phys: mutable i64&? = physAddrOut as mutable i64&?
     out_size: mutable u64&? = sizeOut as mutable u64&?
     if out_phys == null or out_size == null:
-        return ORBIS_KERNEL_ERROR_EFAULT
-    if searchEnd <= searchStart:
         return ORBIS_KERNEL_ERROR_EINVAL
-    if alignment != 0 and not KernelMemory_Is16KBAligned(alignment):
-        return ORBIS_KERNEL_ERROR_EINVAL
-    align: mutable u64 = alignment
-    if align == 0:
-        align <- KERNEL_MEMORY_PAGE_SIZE
-    start: mutable u64 = KernelMemory_AlignUp(searchStart, align)
-    if start < g_kernel_direct_alloc_cursor:
-        start <- KernelMemory_AlignUp(g_kernel_direct_alloc_cursor, align)
-    if start >= searchEnd:
-        out_phys[0] <- 0
-        out_size[0] <- 0u64
-        return ORBIS_OK
-    out_phys[0] <- start.i64()
-    out_size[0] <- KernelMemory_AlignDown(searchEnd - start, KERNEL_MEMORY_PAGE_SIZE)
-    return ORBIS_OK
+    phys_addr: mutable PAddr = 0.uintptr()
+    size: mutable u64 = 0u64
+    result: int = MemoryManager_DirectQueryAvailable(Memory_Instance(), searchStart.uintptr(), searchEnd.uintptr(), alignment, phys_addr.ref[mutable PAddr&], size.ref[mutable u64&])
+    if size == 0u64:
+        return ORBIS_KERNEL_ERROR_ENOMEM
+    out_phys[0] <- phys_addr.u64().i64()
+    out_size[0] <- size
+    return result
 
 # @port core/libraries/kernel/memory.cpp::sceKernelCheckedReleaseDirectMemory sha256=e9d939dde18cc230 oracle@a3773841
 def sceKernelCheckedReleaseDirectMemory(start: u64, len: u64) -> int:
@@ -325,7 +319,11 @@ def sceKernelIsAddressSanitizerEnabled() -> u32:
 def sceKernelMapNamedDirectMemory(addr: mutable void&?&, len: u64, prot: int, flags: int, phys_addr: i64, alignment: u64, name: u8&?) -> int:
     if name == null:
         return ORBIS_KERNEL_ERROR_EFAULT
-    return KernelMemory_MapDirect(addr, len, prot, flags, phys_addr, alignment, "anon")
+    # The guest name pointer is directly addressable as host memory (same as
+    # other guest string params, e.g. KernelFile_Open); pass it through to the
+    # VMA instead of hardcoding "anon". The strlen >= 32 -> ENAMETOOLONG check
+    # lives in KernelMemory_MapDirect to preserve the oracle's validation order.
+    return KernelMemory_MapDirect(addr, len, prot, flags, phys_addr, alignment, name.cast[static u8&])
 
 # @port core/libraries/kernel/memory.cpp::sceKernelMapDirectMemory sha256=68881a2372bf212d oracle@a3773841
 def sceKernelMapDirectMemory(addr: mutable void&?&, len: u64, prot: int, flags: int, phys_addr: i64, alignment: u64) -> int can[Unsafe.SegmentMutation, Segment.Host]:
@@ -504,7 +502,6 @@ def KernelMemory_BootstrapApplicationHeapDirectArena() -> void can[Unsafe.Segmen
     if kernel_application_heap_bootstrap_done:
         return
     kernel_application_heap_bootstrap_done <- true
-    g_kernel_direct_alloc_cursor <- KERNEL_DIRECT_MEMORY_BASE
     direct_size: mutable u64 = 0u64
     can Unsafe.SegmentMutation, Segment.Host:
         direct_size <- sceKernelGetDirectMemorySize()
