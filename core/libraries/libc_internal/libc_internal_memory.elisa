@@ -19,21 +19,26 @@ def internal_memcpy_s(dest: mutable void&, destsz: usize, src: void&, count: usi
 def internal_memcmp(s1: void&, s2: void&, n: usize) -> s32:
     return memcmp(s1, s2, n)
 
+# @port core/libraries/libc_internal/libc_internal_memory.cpp::internal_malloc
+# Oracle: `void* internal_malloc(u64 size) { return std::malloc(size); }`
+# (NID gQX+4GDQjpM). Under single-view memory the guest runs at host addresses, so
+# a host-heap pointer is directly usable by guest code — same as shadPS4. (The prior
+# mmap-per-call via GuestExec_AllocateRegion diverged and stalled libc init.)
 def internal_malloc(size: u64) -> mutable void&? can[Unsafe.SegmentMutation, Segment.Host]:
     result: mutable void&? = null
     can Unsafe.SegmentMutation, Segment.Host:
         GuestExec_RecordRuntimeHle("libSceLibcInternal", "malloc_enter", size.uintptr(), 0.uintptr(), 0.uintptr(), 0.uintptr())
-        alloc_size: mutable u64 = size
-        if alloc_size == 0u64:
-            alloc_size <- 1u64
-        result <- GuestExec_AllocateRegion(alloc_size, 3u32).cast[mutable void&?]
+        result <- malloc(size.usize())
         GuestExec_RecordRuntimeHle("libSceLibcInternal", "malloc", size.uintptr(), 0.uintptr(), 0.uintptr(), result.uintptr())
-        return result
+    return result
 
+# @port core/libraries/libc_internal/libc_internal_memory.cpp::internal_free
+# Oracle: `void internal_free(void* ptr) { std::free(ptr); }` (NID tIhsqj0qsFE).
 def internal_free(ptr: void&?) -> void can[Unsafe.SegmentMutation, Segment.Host]:
     can Unsafe.SegmentMutation, Segment.Host:
         GuestExec_RecordRuntimeHle("libSceLibcInternal", "free_enter", ptr.uintptr(), 0.uintptr(), 0.uintptr(), 0.uintptr())
-        _ = ptr
+        if ptr != null:
+            free(ptr.cast[mutable void&])
         GuestExec_RecordRuntimeHle("libSceLibcInternal", "free", ptr.uintptr(), 0.uintptr(), 0.uintptr(), 0.uintptr())
 
 def sceLibcMspaceCreate(name: void&?, base: mutable void&?, capacity: u64, flags: u64) -> mutable void&? can[Unsafe.SegmentMutation, Segment.Host]:
