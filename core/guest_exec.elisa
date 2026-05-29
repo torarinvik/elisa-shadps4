@@ -3226,7 +3226,7 @@ def ge_prepare_main_entry_snapshot(params: mutable GuestEntryParams&) -> void:
         fr.entry_native_word1 <- ge_entry_native_word1
         fr.entry_native_prot <- ge_entry_native_prot
 
-def ge_run_main_entry_guarded_in_process(params: mutable GuestEntryParams&, timeout_ms: u32) -> s32 can[Unsafe.SegmentMutation, Segment.Host, Segment.Guest]:
+def ge_run_main_entry_guarded_in_process(params: mutable GuestEntryParams&, timeout_ms: u32) -> s32 can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Host, Segment.Guest]:
     ge_set_native_phase(GE_PHASE_FUNCTION_ENTRY)
     if params.entry_addr == 0.uintptr():
         ge_reset_crash_state()
@@ -3268,13 +3268,20 @@ def ge_run_main_entry_guarded_in_process(params: mutable GuestEntryParams&, time
             if ge_last_status == 0:
                 ge_last_status <- -11
                 ge_raw_breadcrumb("GE:GUARD_LONGJMP_DEFAULT\n", 25usize)
-            if ge_debug_trace_enabled:
+            if ge_debug_trace_enabled or getenv("ELISA_FORCE_TAPE_DUMP".cast[u8&]) != null:
                 ge_emergency_dump_raw()
             ge_raw_breadcrumb("GE:GUARD_LONGJMP_RETURN\n", 24usize)
             return ge_last_status
         ge_set_native_phase(GE_PHASE_CHILD_BEFORE_MAIN_ENTRY)
         can Unsafe.SegmentMutation, Segment.Host:
             ge_assert_host_fs_owner("guarded-in-process-before-main-entry")
+        # Run deferred dependency module inits (libc heap bootstrap etc.) under the
+        # guard, before jumping to the eboot entry, so a fault during init is caught
+        # by the signal handler / longjmp rather than hard-crashing the host.
+        can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
+            Linker_StartDeferredDependencies()
+        can Unsafe.SegmentMutation, Segment.Host:
+            ge_assert_host_fs_owner("guarded-in-process-after-deferred-inits")
         can Unsafe.SegmentMutation, Segment.Host, Segment.Guest:
             ge_jump_main_entry(params, ge_guarded_exit as uintptr)
         ge_raw_breadcrumb("GE:GUARD_AFTER_JUMP\n", 20usize)
@@ -3470,8 +3477,8 @@ def c_GuestExec_RunMainEntryGuarded(params: mutable GuestEntryParams&, timeout_m
     can Unsafe.SegmentMutation, Segment.Host, Segment.Guest:
         return ge_run_main_entry_guarded(params, timeout_ms)
 
-def c_GuestExec_RunMainEntryGuardedInProcess(params: mutable GuestEntryParams&, timeout_ms: u32) -> s32 can[Unsafe.SegmentMutation, Segment.Host, Segment.Guest]:
-    can Unsafe.SegmentMutation, Segment.Host, Segment.Guest:
+def c_GuestExec_RunMainEntryGuardedInProcess(params: mutable GuestEntryParams&, timeout_ms: u32) -> s32 can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Host, Segment.Guest]:
+    can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Host, Segment.Guest:
         return ge_run_main_entry_guarded_in_process(params, timeout_ms)
 
 def c_GuestExec_RunSyntheticFunction(entry_addr: uintptr, arg0: u64, arg1: u64) -> u64:
@@ -5195,7 +5202,7 @@ def GuestExec_RunMainEntryGuarded(entry_addr: VAddr, argc: int, argv: void&?, ti
         guest_exec_execution_stage <- GUEST_EXEC_STAGE_FIRST_BOUNDARY
     return status
 
-def GuestExec_RunMainEntryGuardedInProcess(entry_addr: VAddr, argc: int, argv: void&?, timeout_ms: u32) -> s32 can[Unsafe.SegmentMutation, Segment.Host, Segment.Guest]:
+def GuestExec_RunMainEntryGuardedInProcess(entry_addr: VAddr, argc: int, argv: void&?, timeout_ms: u32) -> s32 can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Host, Segment.Guest]:
     if entry_addr == 0.uintptr():
         guest_exec_last_game_execution_status <- -1
         return -1
@@ -5211,7 +5218,7 @@ def GuestExec_RunMainEntryGuardedInProcess(entry_addr: VAddr, argc: int, argv: v
     params.entry_addr <- entry_addr
     GuestExec_FillEntryParamsArgv(params.ref[mutable GuestEntryParams&], argc, argv)
     status: mutable s32 = 0
-    can Unsafe.SegmentMutation, Segment.Host, Segment.Guest:
+    can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Host, Segment.Guest:
         status <- c_GuestExec_RunMainEntryGuardedInProcess(params.ref[mutable GuestEntryParams&], timeout_ms)
     guest_exec_last_game_execution_status <- status
     GuestExec_AbsorbNativeBoundaryReport()

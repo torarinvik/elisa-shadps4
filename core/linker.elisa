@@ -109,6 +109,14 @@ global mutable linker_tiny_pointer_first_type: u32 = 0u32
 global mutable linker_tiny_pointer_first_name: static u8&? = null
 global mutable linker_tiny_pointer_first_module: static u8&? = null
 global mutable linker_defer_native_relocation_writes: bool = false
+# When true, Linker_LoadGuestDependency loads + relocates a dependency module but
+# does NOT run its Module_Start (init arrays / module_start). Boot uses this so the
+# PRX inits run only AFTER the native backing is synced to guest-exec (otherwise a
+# PRX's PREINIT executes against a stale, unsynced GOT — its HLE calls like
+# GetProcParam never dispatch, the libc heap bootstrap silently no-ops, and a
+# once-guard inside the PRX prevents a later retry). shadPS4 runs these inits after
+# relocation, before RunMainEntry; this mirrors that ordering.
+global mutable linker_defer_dependency_start: bool = false
 global mutable linker_last_relocation_retryable: bool = false
 global mutable linker_hle_tiny_callable_count: u64 = 0
 global mutable linker_hle_tiny_callable_first_value: u64 = 0
@@ -340,7 +348,81 @@ def Linker_HleSymbolsStringChecksum(self: Linker&) -> u64:
 def Linker_GetInstance() -> mutable Linker&:
     return linker_singleton.ref[mutable Linker&]
 
+global mutable linker_deferred_starts_done: bool = false
+# Captured guest init-array function pointers for the dependency PRXs, collected
+# during load (while the host Module structs are alive) and replayed under the
+# guarded executor. The Module metadata arena is recycled after load, so the
+# guarded executor must NOT read Module structs directly (they read back as host
+# string garbage); it replays from these stable primitives instead.
+const LINKER_DEFERRED_INIT_CAP: usize = 1024usize
+global mutable linker_deferred_init_fns: u64[1024] = zeroed
+global mutable linker_deferred_init_count: usize = 0usize
+
+def Linker_CaptureInitArrayFns(self: Module&, array_va: u64, array_size: u64, memory: mutable MemoryManager&) -> void:
+    if array_va == 0u64 or array_size < 8u64:
+        return
+    # Sanity-bound the array: a plausible init/preinit array is small. A huge size
+    # is garbage (uninitialized dynamic_info) and would spin the loop, so clamp it.
+    if array_size > 0x10000u64:
+        return
+    base: u64 = self.base_virtual_addr.u64() + array_va
+    count: usize = (array_size / 8u64).usize()
+    i: mutable usize = 0usize
+    while i < count and i < 2048usize and linker_deferred_init_count < LINKER_DEFERRED_INIT_CAP:
+        # At load time (right after per-module relocation) the relocated init-array
+        # pointer lives in the MemoryManager backing -- the same source the original
+        # Module_Start read here. (Do NOT read native memory: it is not mapped/synced
+        # yet during load and would fault/hang.)
+        entry: u64 = MemoryManager_ReadU64(memory, base.uintptr() + (i.u64() * 8u64).uintptr()).u64()
+        if entry != 0u64 and entry != 0xffffffffffffffffu64:
+            linker_deferred_init_fns[linker_deferred_init_count] <- entry
+            linker_deferred_init_count <- linker_deferred_init_count + 1usize
+        i <- i + 1usize
+
+# Capture (during load) the preinit_array + init_array function pointers of every
+# dependency module, in dependency order. Must run AFTER relocations so the
+# captured pointers are the relocated guest function addresses.
+# Capture one module's preinit_array + init_array function pointers (in that order)
+# into the deferred-init list. Called during load, right after the module's
+# relocation, while the relocated pointers are readable in the MemoryManager backing.
+def Linker_CaptureModuleInits(self: Module&) -> void:
+    memory: mutable MemoryManager& = Memory_Instance()
+    Linker_CaptureInitArrayFns(self, self.dynamic_info.preinit_array_virtual_addr, self.dynamic_info.preinit_array_size, memory)
+    Linker_CaptureInitArrayFns(self, self.dynamic_info.init_array_virtual_addr, self.dynamic_info.init_array_size, memory)
+
+# Run the dependency modules' inits (Module_Start) that were deferred during load
+# (see linker_defer_dependency_start). Called from inside the guarded executor,
+# just before the eboot entry jump, so a PRX's PREINIT runs under the signal guard
+# against a fully relocated + synced GOT. libc's PREINIT performs the heap bootstrap
+# (GetProcParam / RtldSetApplicationHeapAPI / DirectMemory) and calls back into the
+# eboot's heap setup, initializing the runtime singletons the eboot's main needs.
+# Idempotent: runs at most once per boot.
+def Linker_StartDeferredDependencies() -> void can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host]:
+    # No-op unless dependency starts were actually deferred (see Linker_Execute).
+    # When not deferred, the PRXs were already started during preload, so running
+    # them here would double-init them.
+    if not linker_defer_dependency_start:
+        return
+    if linker_deferred_starts_done:
+        return
+    linker_deferred_starts_done <- true
+    linker_defer_dependency_start <- false
+    # Replay the init function pointers captured during load. Module_CallGuestInitArrayEntry
+    # takes a raw guest function address and reads NO host Module struct (only the
+    # guest stack/TLS globals, which are stable), so it is safe here even though the
+    # Module metadata arena has been recycled.
+    ge_emergency_mark(GE_EV_MODULE_START_BEGIN, linker_deferred_init_count.uintptr(), 0.uintptr(), 0.uintptr(), 0xDEF0u64.uintptr())
+    i: mutable usize = 0usize
+    while i < linker_deferred_init_count:
+        fn_addr: u64 = linker_deferred_init_fns[i]
+        ge_emergency_mark(GE_EV_MODULE_INIT_ARRAY_BEGIN, fn_addr.uintptr(), i.uintptr(), 0.uintptr(), 0xDEF1u64.uintptr())
+        can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
+            Module_CallGuestInitArrayEntry(fn_addr.uintptr())
+        i <- i + 1usize
+
 def Linker_Reset() -> void:
+    linker_deferred_starts_done <- false
+    linker_defer_dependency_start <- false
     Memory_Reset()
     GuestExec_ResetState()
     TLS_ResetForTests()
@@ -1011,8 +1093,17 @@ def Linker_LoadGuestDependency(self: mutable Linker&, dependency_name: static u8
     Linker_RelocateAnyImports(self.ref[mutable Linker&], mod_ref)
     if mod_ref.tls.image_size != 0:
         Linker_AdvanceGenerationCounter(self.ref[mutable Linker&])
-    can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
-        _ = Module_Start(mod_ref, 0, null, null)
+    if not linker_defer_dependency_start:
+        can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
+            _ = Module_Start(mod_ref, 0, null, null)
+    else:
+        # Deferred-start mode: capture this module's init-array function pointers
+        # NOW, right after its per-module relocation (the exact point the original
+        # Module_Start read them), into stable globals. They are replayed under the
+        # guarded executor before the eboot entry. Capturing here avoids the later
+        # relocation/sync passes (which leave the entries unreadable) and the Module
+        # struct recycle (which corrupts struct reads in the guarded context).
+        Linker_CaptureModuleInits(mod_ref.ref[Module&])
     return idx
 
 def Linker_PreloadLibkernelGameModules(self: mutable Linker&) -> void can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host]:
@@ -2251,6 +2342,14 @@ def Linker_Execute(self: mutable Linker&, args: darray[static u8&]) -> s32 can[U
     MemoryManager_SetupMemoryRegions(memory, flexible_size, use_extended_mem1, use_extended_mem2)
     ge_emergency_mark(GE_EV_EXEC_MEMORY_SETUP_END, self.modules.count.uintptr(), self.static_tls_size.uintptr(), flexible_size.uintptr(), MemoryManager_GetTotalDirectSize(memory).uintptr())
     Linker_EnsureMainGuestStack(memory)
+    # Defer dependency module inits until after the native backing is synced
+    # (below), so their PREINIT/init runs against a fully relocated + synced GOT and
+    # the libc heap bootstrap (GetProcParam / RtldSetApplicationHeapAPI / DirectMemory)
+    # dispatches before the eboot entry. Opt-in while the guarded-context host-struct
+    # corruption (see docs) is resolved; default keeps the original preload-start.
+    if getenv("ELISA_DEFER_PRX_INIT".cast[u8&]) != null:
+        linker_defer_dependency_start <- true
+        linker_deferred_init_count <- 0usize
     can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
         Linker_PreloadLibkernelGameModules(self.ref[mutable Linker&])
         Linker_LoadDependencyClosure(self.ref[mutable Linker&])

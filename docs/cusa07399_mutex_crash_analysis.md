@@ -257,3 +257,62 @@ the libc.prx init path that issues GetProcParam at 0x8093d5c93, then replicate
 that preload bootstrap in Elisa before `RunMainEntry`. The libc.prx init evidently
 calls back into the eboot's heap-setup (0x800dcf...) which initializes the
 singleton at 0x802d85190.
+
+---
+
+# UPDATE 4: deferred libc-init implementation attempt (gated, WIP)
+
+Implemented the structurally-correct fix and hit deeper Elisa memory-architecture
+issues. All changes are gated behind `ELISA_DEFER_PRX_INIT` (default OFF → original
+behavior; default tree stays green: x64 smoke 9/9, cusa 1/3 unchanged).
+
+## What was built (core/linker.elisa, core/guest_exec.elisa)
+
+- `linker_defer_dependency_start`: when set (env), `Linker_LoadGuestDependency`
+  loads + relocates a PRX but does NOT run its `Module_Start` during preload.
+- Instead it captures the PRX's preinit/init-array function pointers
+  (`Linker_CaptureModuleInits` → `Linker_CaptureInitArrayFns`) at that point.
+- `Linker_StartDeferredDependencies` replays the captured pointers via
+  `Module_CallGuestInitArrayEntry` (raw address, reads no Module struct) from
+  INSIDE the guarded executor (`ge_run_main_entry_guarded_in_process`, just before
+  `ge_jump_main_entry`), so faults are caught by the signal handler/longjmp.
+- `Unsafe.GuestSegmentInstall` threaded through the guarded-executor call chain.
+- `ELISA_FORCE_TAPE_DUMP`: dump the emergency tape on guarded longjmp return even
+  without debug-trace, for diagnosis.
+
+## Why this is the right shape
+
+shadPS4 runs libc.prx's DT_PREINIT_ARRAY entry (the heap bootstrap: GetProcParam →
+RtldSetApplicationHeapAPI → DirectMemory) BEFORE the eboot entry. Elisa ran it too
+early (pre-sync) so it no-oped. Deferring + replaying post-sync under the guard is
+correct.
+
+## Remaining blockers (deep Elisa memory architecture)
+
+1. **Module struct lifetime.** Verified: a Module's `base_virtual_addr` reads
+   `0x803604000` (correct) in host/load context but `0x2075253d78646920` (host
+   format-string bytes) when re-read from the guarded executor — the module
+   metadata arena is recycled after load. Worked around by capturing raw init
+   pointers during load instead of reading structs later.
+2. **Init-array pointer layer.** The relocated init-array entry is readable via
+   `MemoryManager_ReadU64` during preload (the original `Module_Start` read
+   `0x803f90600` there) but reads back 0 post-sync from both backing and native,
+   and at the `LoadGuestDependency` capture point the `dynamic_info` array sizes
+   sometimes read implausibly large (garbage), so capture currently yields
+   `captured_count=0`. The init-array's valid contents live in a different memory
+   layer (image vs backing vs native) than assumed; a reliable cross-layer read
+   model is needed.
+3. **Guarded init execution.** When init pointers ARE replayed, libc PREINIT
+   executes guest code under the guard but currently faults (SIGBUS in the native
+   HLE region) or hangs — the HLE dispatch from the deferred-init context differs
+   from the main-entry context (host-TLS/%fs state), the systemic
+   "host-runtime-from-HLE" hazard noted earlier.
+
+## Next step
+
+Build a reliable accessor that reads a guest VA from the layer the guest actually
+executes against at a given phase (image during load, native post-sync), and audit
+why `dynamic_info` array sizes read garbage at the `LoadGuestDependency` point
+(likely reading before the module's dynamic segment is fully parsed for transitive
+deps). Then the capture yields the real libc PREINIT pointer and the replay can be
+validated under the guard.
