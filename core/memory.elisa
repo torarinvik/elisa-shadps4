@@ -29,6 +29,12 @@ const ORBIS_KERNEL_FLEXIBLE_MEMORY_BASE: u64 = 64 * 1024 * 1024
 const ORBIS_KERNEL_FLEXIBLE_MEMORY_SIZE: u64 = 512 * 1024 * 1024
 const ORBIS_KERNEL_TOTAL_MEM: u64 = 5248 * 1024 * 1024
 
+# Maps at/above this size skip the byte-by-byte MappedMemoryBytes backing under guest-exec
+# (single view: native MAP_FIXED is the real storage). 64MB sits above the largest guest
+# module image (~48MB eboot, which still needs a backing for relocation reads) and below
+# the guest's large runtime heaps/direct-memory pools (256MB..GBs), which do not.
+const MEMORY_NATIVE_ONLY_BACKING_THRESHOLD: u64 = 64 * 1024 * 1024
+
 type PhysicalMemoryType = u32
 const PhysicalMemoryType_Free: PhysicalMemoryType = 0u32
 const PhysicalMemoryType_Allocated: PhysicalMemoryType = 1u32
@@ -503,8 +509,17 @@ def MemoryManager_MapCommit(self: mutable MemoryManager&, txn: MapTxn, vma_type:
     map_owner: mutable Arena& = memory_arena.ref[mutable Arena&]
     in map_owner:
         self.vma_areas.push(VirtualMemoryArea(m, sz, vma_type, effective_prot, name, 0, false))
+    # AddBacking fills a MappedMemoryBytes buffer one byte at a time. For the guest's own
+    # large runtime regions (libc heap / direct-memory pools, hundreds of MB to GBs) that
+    # is catastrophic — a 3GB libc-heap MapDirectMemory would push ~3.2 billion bytes and
+    # trip the guarded-run watchdog. Those large regions are guest-owned and accessed via
+    # the native single-view MAP_FIXED mapping, never through the byte buffer (only module
+    # images, which are small, are read via the backing for relocation). So skip the byte
+    # backing for large maps under guest-exec; keep it for small (module-sized) maps.
     if vma_type != VMAType_Reserved:
-        MemoryManager_AddBacking(self.ref[mutable MemoryManager&], m, sz)
+        skip_backing: bool = GuestExec_IsEnabled() and GuestExec_IsSupported() and sz >= MEMORY_NATIVE_ONLY_BACKING_THRESHOLD
+        if not skip_backing:
+            MemoryManager_AddBacking(self.ref[mutable MemoryManager&], m, sz)
 
 # Consumes the transaction and undoes the AddressSpace mapping (and the native
 # guest-exec map, if any) so no half-mapped state survives a failed map.
