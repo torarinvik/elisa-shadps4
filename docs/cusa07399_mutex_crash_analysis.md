@@ -316,3 +316,38 @@ why `dynamic_info` array sizes read garbage at the `LoadGuestDependency` point
 (likely reading before the module's dynamic segment is fully parsed for transitive
 deps). Then the capture yields the real libc PREINIT pointer and the replay can be
 validated under the guard.
+
+---
+
+# UPDATE 5: Module_Start parity with shadPS4 Module::Start
+
+Aligned Elisa's `Module_Start` (core/module.elisa) to shadPS4 `Module::Start`
+(module.cpp:99-150). These are correct, verified parity fixes (x64 boot smoke 9/9,
+default cusa unchanged):
+
+1. **ELF-entry fallback gating.** shadPS4 runs the ELF entry as module_start only
+   when `IsSharedLib() && !IsSystemLib()` (and there is no DT_INIT). Elisa ran it
+   unconditionally. Added `Module_IsSystemLib` (mirrors module.h:168 — path under
+   the sys-modules dir) and gated the fallback accordingly.
+2. **Proc param argument.** shadPS4 calls `module->Start(args, argp, param)` with
+   `param = module->GetProcParam()`. Elisa passed `null`. Now passes
+   `Module_GetProcParam(mod_ref)` at all three Module_Start call sites
+   (Linker_LoadGuestDependency + Linker_LoadAndStartModule x2).
+
+## Still-open parity gaps (deviations that remain)
+
+- **System-lib classification / load source.** shadPS4 loads libc.prx from its
+  bundled sys_modules dir, so `IsSystemLib(libc)=true` and it skips libc's ELF
+  entry (the trace shows libc.prx runs ONLY its PREINIT). Elisa loads libc.prx
+  from `/app0/sce_module` (game-local), so `IsSystemLib=false` and it still runs
+  libc's ELF entry (an extra execution shadPS4 does not do). To match, Elisa must
+  resolve/load system libraries from the sys-modules dir (and/or normalize the
+  IsSystemLib path comparison to absolute paths). This did NOT change the crash,
+  so it is a correctness/parity item, not the boot blocker.
+- **The boot blocker is architectural, not a code deviation:** libc's PREINIT
+  bootstrap runs in Elisa's LOAD phase (host-emulated, before native-backing sync
+  / HLE-thunk setup), so its GetProcParam HLE never dispatches. shadPS4 runs all
+  guest code natively, so PREINIT's GetProcParam works in place. Making Elisa
+  match requires running the PRX inits in the synced execution phase (the gated
+  ELISA_DEFER_PRX_INIT work in UPDATE 4), which is blocked on the cross-layer
+  init-array read + module-arena lifetime issues documented there.

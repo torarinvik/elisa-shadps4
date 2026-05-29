@@ -221,6 +221,24 @@ def Module_IsValid(self: Module&) -> bool:
 def Module_IsSharedLib(self: Module&) -> bool:
     return self.is_shared_lib
 
+# Mirror of shadPS4 Module::IsSystemLib (module.h:168): true when the module's
+# on-disk path is under the system-modules directory. Used by Module_Start to
+# decide whether to run the ELF-entry fallback (shadPS4 skips it for system libs).
+def Module_IsSystemLib(self: Module&) -> bool:
+    sys_dir: static u8& = EmulatorSettings_GetSysModulesDir(EmulatorSettings_GetInstance())
+    n: usize = static_strlen(sys_dir)
+    if n == 0usize:
+        return false
+    path: static u8& = self.host_file if static_strlen(self.host_file) != 0usize else self.file
+    if static_strlen(path) < n:
+        return false
+    i: mutable usize = 0usize
+    while i < n:
+        if path[i] != sys_dir[i]:
+            return false
+        i <- i + 1usize
+    return true
+
 def Module_GetProcParam(self: Module&) -> VAddr:
     return self.proc_param_virtual_addr
 
@@ -392,11 +410,18 @@ def Module_Start(self: mutable Module&, args: u64, argp: void&?, param: void&?) 
             Module_CallGuestInitArray(self, self.dynamic_info.preinit_array_virtual_addr, self.dynamic_info.preinit_array_size)
     self.last_start_entry_addr <- 0.uintptr()
     result: mutable s32 = 0
+    # Match shadPS4 Module::Start (module.cpp:135-148): run DT_INIT if present;
+    # otherwise run the ELF-entry fallback ONLY for non-system shared libraries.
+    # System libs (libc.prx etc.) have no separate module_start to invoke this way,
+    # so running their ELF entry executes code that is not meant to be a module_start.
+    run_module_entry: mutable bool = false
     if self.dynamic_info.init_virtual_addr != 0:
         self.last_start_entry_addr <- self.base_virtual_addr + self.dynamic_info.init_virtual_addr.uintptr()
-    else:
+        run_module_entry <- true
+    elif Module_IsSharedLib(self) and not Module_IsSystemLib(self):
         self.last_start_entry_addr <- Module_GetEntryAddress(self, 0.uintptr())
-    if Module_ShouldExecuteGuestStart() and self.last_start_entry_addr != 0.uintptr():
+        run_module_entry <- true
+    if Module_ShouldExecuteGuestStart() and run_module_entry and self.last_start_entry_addr != 0.uintptr():
         Module_StartOracleRecord("dt-init" if self.dynamic_info.init_virtual_addr != 0 else "elf-entry-fallback", self.name, "", self.last_start_entry_addr, 0u64, 0)
         can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
             result <- Module_CallGuestInitEntry(self.last_start_entry_addr, args, argp, param)
