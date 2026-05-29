@@ -76,6 +76,15 @@ global mutable linker_hle_call_rdi_ring: u64[1024] = zeroed
 global mutable linker_hle_call_rsi_ring: u64[1024] = zeroed
 global mutable linker_hle_call_rdx_ring: u64[1024] = zeroed
 global mutable linker_hle_call_ring_index: u64 = 0u64
+# Relocation probe: record any relocation write whose target falls in the 8-byte
+# window at linker_reloc_probe_addr (default 0x802d85190, the null-global crash
+# site). Distinguishes "global is a relocation target" (and whether the write
+# applied) from "global is code-initialized" without a debugger.
+global mutable linker_reloc_probe_addr: u64 = 0x802d85190u64
+global mutable linker_reloc_probe_count: u64 = 0u64
+global mutable linker_reloc_probe_value: u64 = 0u64
+global mutable linker_reloc_probe_type: u32 = 0u32
+global mutable linker_reloc_probe_path: u32 = 0u32  # 1=WriteRelocationU64, 2=WriteRelativeRelocationFast
 global mutable linker_native_hle_function_relocation_count: u64 = 0
 global mutable linker_native_hle_data_relocation_count: u64 = 0
 global mutable linker_native_hle_unthunked_function_count: u64 = 0
@@ -1195,7 +1204,32 @@ def Linker_IsQualifiedImportSymbol(raw_symbol: static u8&) -> bool:
         return false
     return static_strlen(parsed_library) > 0 and static_strlen(parsed_module) > 0
 
+def Linker_RelocProbeNote(addr: u64, value: u64, rel_type: u32, path: u32) -> void:
+    if linker_reloc_probe_addr == 0u64:
+        return
+    if addr >= linker_reloc_probe_addr and addr < (linker_reloc_probe_addr + 8u64):
+        linker_reloc_probe_count <- linker_reloc_probe_count + 1u64
+        linker_reloc_probe_value <- value
+        linker_reloc_probe_type <- rel_type
+        linker_reloc_probe_path <- path
+
+def Linker_RelocProbeCount() -> u64:
+    return linker_reloc_probe_count
+
+def Linker_RelocProbeValue() -> u64:
+    return linker_reloc_probe_value
+
+def Linker_RelocProbeType() -> u32:
+    return linker_reloc_probe_type
+
+def Linker_RelocProbePath() -> u32:
+    return linker_reloc_probe_path
+
+def Linker_RelocProbeAddr() -> u64:
+    return linker_reloc_probe_addr
+
 def Linker_WriteRelocationU64(module: mutable Module&, memory: mutable MemoryManager&, addr: u64, value: u64) -> bool:
+    Linker_RelocProbeNote(addr, value, 0xFFFFFFFFu32, 1u32)
     image_ok: bool = Module_WriteImageU64(module.ref[mutable Module&], addr, value)
     memory_ok: mutable bool = false
     if linker_defer_native_relocation_writes and GuestExec_IsEnabled() and GuestExec_IsSupported():
@@ -1205,6 +1239,7 @@ def Linker_WriteRelocationU64(module: mutable Module&, memory: mutable MemoryMan
     return image_ok or memory_ok
 
 def Linker_WriteRelativeRelocationFast(module: mutable Module&, memory: mutable MemoryManager&, addr: u64, value: u64, cached_backing_index: mutable s32&) -> bool:
+    Linker_RelocProbeNote(addr, value, 8u32, 2u32)  # 8 = R_X86_64_RELATIVE
     image_ok: mutable bool = false
     image_offset: mutable usize = 0usize
     if Module_ImageOffsetForVirtualAddress(module, addr, image_offset.ref[mutable usize&]):
