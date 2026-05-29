@@ -8,26 +8,40 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parent
+# Single source of truth for C++ reference: the shadPS4 oracle repo (the local
+# core/**.cpp reference copies were removed). Its src/ mirrors the same tree, so
+# cpp_rel() yields identical "core/libraries/..." keys and the regenerated matrix
+# is unchanged.
+SHAD_SRC = (ROOT.parent / "shadPS4" / "src").resolve()
+
+
+def cpp_rel(path: Path) -> str:
+    """Relative key for a C++ reference path, oracle-aware ("core/libraries/...")."""
+    try:
+        return path.relative_to(SHAD_SRC).as_posix()
+    except ValueError:
+        return path.relative_to(ROOT).as_posix()
+
 
 CPP_FILES = [
-    ROOT / "core/libraries/libs.cpp",
-    ROOT / "core/libraries/ajm/ajm_instance_statistics.cpp",
-    ROOT / "core/libraries/avplayer/avplayer_common.cpp",
-    ROOT / "core/libraries/avplayer/avplayer_file_streamer.cpp",
-    ROOT / "core/libraries/ime/error_dialog.cpp",
-    ROOT / "core/libraries/ime/ime_dialog.cpp",
-    ROOT / "core/libraries/ime/ime_dialog_ui.cpp",
-    ROOT / "core/libraries/ime/ime_kb_layout.cpp",
-    ROOT / "core/libraries/ime/ime_ui.cpp",
-    ROOT / "core/libraries/ime/ime_ui_shared.cpp",
-    ROOT / "core/libraries/save_data/save_backup.cpp",
-    ROOT / "core/libraries/save_data/save_instance.cpp",
-    ROOT / "core/libraries/save_data/save_memory.cpp",
-    ROOT / "core/libraries/share_play/shareplay.cpp",
-    ROOT / "core/libraries/signin_dialog/signindialog.cpp",
-    ROOT / "core/libraries/sysmodule/sysmodule_internal.cpp",
-    ROOT / "core/libraries/videoout/driver.cpp",
-    ROOT / "core/libraries/videoout/video_out.cpp",
+    SHAD_SRC / "core/libraries/libs.cpp",
+    SHAD_SRC / "core/libraries/ajm/ajm_instance_statistics.cpp",
+    SHAD_SRC / "core/libraries/avplayer/avplayer_common.cpp",
+    SHAD_SRC / "core/libraries/avplayer/avplayer_file_streamer.cpp",
+    SHAD_SRC / "core/libraries/ime/error_dialog.cpp",
+    SHAD_SRC / "core/libraries/ime/ime_dialog.cpp",
+    SHAD_SRC / "core/libraries/ime/ime_dialog_ui.cpp",
+    SHAD_SRC / "core/libraries/ime/ime_kb_layout.cpp",
+    SHAD_SRC / "core/libraries/ime/ime_ui.cpp",
+    SHAD_SRC / "core/libraries/ime/ime_ui_shared.cpp",
+    SHAD_SRC / "core/libraries/save_data/save_backup.cpp",
+    SHAD_SRC / "core/libraries/save_data/save_instance.cpp",
+    SHAD_SRC / "core/libraries/save_data/save_memory.cpp",
+    SHAD_SRC / "core/libraries/share_play/shareplay.cpp",
+    SHAD_SRC / "core/libraries/signin_dialog/signindialog.cpp",
+    SHAD_SRC / "core/libraries/sysmodule/sysmodule_internal.cpp",
+    SHAD_SRC / "core/libraries/videoout/driver.cpp",
+    SHAD_SRC / "core/libraries/videoout/video_out.cpp",
 ]
 
 ELISA_FILES = [
@@ -186,7 +200,7 @@ def classify_cpp_behavior(file_rel: str, body: str) -> str:
 
 def parse_cpp_exports(path: Path) -> list[CppExport]:
     text = path.read_text()
-    rel = path.relative_to(ROOT).as_posix()
+    rel = cpp_rel(path)
     out: list[CppExport] = []
     for m in re.finditer(
         r'LIB_FUNCTION\([^,]+,\s*"[^"]+",\s*\d+,\s*"[^"]+",\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)',
@@ -289,7 +303,7 @@ def generate() -> dict:
     counts = {k: 0 for k in STATUSES}
 
     for cpp in CPP_FILES:
-        rel = cpp.relative_to(ROOT).as_posix()
+        rel = cpp_rel(cpp)
         exports = parse_cpp_exports(cpp)
         if not exports:
             req = INTERNAL_FILE_REQUIREMENTS.get(rel, [])
@@ -364,7 +378,7 @@ def generate() -> dict:
         "status_values": STATUSES,
         "counts": counts,
         "entries": entries,
-        "cpp_files": [p.relative_to(ROOT).as_posix() for p in CPP_FILES],
+        "cpp_files": [cpp_rel(p) for p in CPP_FILES],
         "test_files": [p.relative_to(ROOT).as_posix() for p in TEST_FILES],
     }
 
