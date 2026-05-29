@@ -122,11 +122,21 @@ def normalize(src: str) -> str:
     return "\n".join(lines).strip()
 
 
+_FILE_CACHE: dict[str, str | None] = {}
+
+
+def _oracle_text(rel_path: str) -> str | None:
+    if rel_path not in _FILE_CACHE:
+        f = ORACLE_SRC / rel_path
+        _FILE_CACHE[rel_path] = f.read_text(errors="replace") if f.is_file() else None
+    return _FILE_CACHE[rel_path]
+
+
 def hash_symbol(rel_path: str, symbol: str) -> tuple[str | None, str]:
-    f = ORACLE_SRC / rel_path
-    if not f.is_file():
+    text = _oracle_text(rel_path)
+    if text is None:
         return None, "missing-file"
-    src, status = extract_symbol_source(f.read_text(errors="replace"), symbol)
+    src, status = extract_symbol_source(text, symbol)
     if status != "ok":
         return None, status
     return hashlib.sha256(normalize(src).encode()).hexdigest()[:16], "ok"
@@ -136,16 +146,115 @@ def elisa_files() -> list[Path]:
     return [p for p in ROOT.rglob("*.elisa") if ".git" not in p.parts]
 
 
+# PS4 HLE-style names: high-precision signal that an Elisa `def` is a port of a
+# same-named shadPS4 C++ symbol (these keep their names across the port).
+HLE_NAME_RE = re.compile(r"^(sce[A-Z]\w*|_sce[A-Z]\w*|posix_\w+)$")
+DEF_RE = re.compile(r"^(?P<indent>\s*)def\s+(?P<name>[A-Za-z_]\w*)\s*\(")
+
+
+# Definition-header pattern for ripgrep: `<name> ( <args> ) <quals> {`. ripgrep
+# (Rust regex / PCRE2) scans the whole oracle in well under a second.
+DEF_RG_PATTERN = r"\b(sce[A-Z]\w*|_sce[A-Z]\w*|posix_[a-z_]+)\s*\([^;{}]*\)[^;{}]*\{"
+
+
+def build_oracle_index(wanted: set[str]) -> dict[str, str | None]:
+    """For each wanted symbol, the single oracle relpath that defines it, else None
+    (zero or multiple defining files). One fast ripgrep pass over shadPS4/src."""
+    name_files: dict[str, set[str]] = {}
+    try:
+        out = subprocess.run(
+            ["rg", "--pcre2", "-U", "-tcpp", "-oH", "-N", "-r", "$1",
+             DEF_RG_PATTERN, str(ORACLE_SRC)],
+            capture_output=True, text=True,
+        ).stdout
+    except FileNotFoundError:
+        return {n: None for n in wanted}
+    base = str(ORACLE_SRC) + "/"
+    for line in out.splitlines():
+        # rg -oH -r '$1' emits "<abspath>:<name>"; split on the last ':'.
+        path, _, name = line.rpartition(":")
+        if name not in wanted:
+            continue
+        rel = path[len(base):] if path.startswith(base) else path
+        name_files.setdefault(name, set()).add(rel)
+    out: dict[str, str | None] = {}
+    for n, fs in name_files.items():
+        if len(fs) != 1:
+            out[n] = None  # defined in 0 or >1 files
+            continue
+        rel = next(iter(fs))
+        # Reject overloads: the symbol must have exactly one in-file definition so
+        # it can be uniquely hashed (otherwise the anchor would be BROKEN/ambiguous).
+        _, status = extract_symbol_source(_oracle_text(rel) or "", n)
+        out[n] = rel if status == "ok" else None
+    return out
+
+
+def autoanchor(dry_run: bool) -> int:
+    # Pass 1: collect anchor sites + the set of HLE names to resolve.
+    sites: list[tuple[Path, int, str, str]] = []  # (file, line_idx, indent, name)
+    wanted: set[str] = set()
+    file_lines: dict[Path, list[str]] = {}
+    for path in elisa_files():
+        lines = path.read_text().split("\n")
+        file_lines[path] = lines
+        for i, line in enumerate(lines):
+            m = DEF_RE.match(line)
+            if not (m and HLE_NAME_RE.match(m["name"])):
+                continue
+            # Insert ABOVE any decorator lines (@...) attached to this def, never
+            # between a decorator and its def (which would break the binding).
+            j = i
+            while j > 0 and lines[j - 1].lstrip().startswith("@"):
+                j -= 1
+            if j > 0 and lines[j - 1].strip().startswith("# @port"):
+                continue  # already anchored
+            sites.append((path, j, m["indent"], m["name"]))
+            wanted.add(m["name"])
+
+    # Pass 2: resolve each wanted name to its unique oracle definition file.
+    index = build_oracle_index(wanted)
+
+    # Pass 3: insert anchors (highest line first per file so indices stay valid).
+    added = skipped_nomatch = 0
+    by_file: dict[Path, list[tuple[int, str, str]]] = {}
+    for path, i, indent, name in sites:
+        rel = index.get(name)
+        if rel is None:
+            skipped_nomatch += 1
+            continue
+        by_file.setdefault(path, []).append((i, indent, name + "\x00" + rel))
+        added += 1
+    if not dry_run:
+        for path, inserts in by_file.items():
+            lines = file_lines[path]
+            for i, indent, packed in sorted(inserts, reverse=True):
+                name, rel = packed.split("\x00")
+                lines.insert(i, f"{indent}# @port {rel}::{name}")
+            path.write_text("\n".join(lines))
+    print(f"autoanchor: {'(dry-run) ' if dry_run else ''}{added} added, "
+          f"{skipped_nomatch} skipped (no unique oracle def), "
+          f"{len(wanted)} distinct HLE names considered")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--update", action="store_true",
                     help="(re)stamp sha256/oracle@ for all @port annotations")
+    ap.add_argument("--autoanchor", action="store_true",
+                    help="insert @port anchors above HLE-named defs with a unique oracle def")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="with --autoanchor, report counts without editing files")
     ap.add_argument("--summary", action="store_true")
     args = ap.parse_args()
 
     if not ORACLE_SRC.exists():
         print(f"oracle not found: {ORACLE_SRC}", file=sys.stderr)
         return 2
+
+    if args.autoanchor:
+        return autoanchor(args.dry_run)
 
     head = oracle_head()
     ok = drifted = broken = stamped = 0
