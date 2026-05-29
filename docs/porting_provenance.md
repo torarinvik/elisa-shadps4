@@ -64,6 +64,21 @@ drift-tracking* link — it does not by itself certify the port is bug-free, onl
 "this ports that; alert me if that C++ changes." Hand-verified review of a function
 is recorded the same way: re-read the C++, fix the port if needed, `--update`.
 
+## Reviewing faithfulness (port_review.py)
+
+The checker proves the anchored C++ hasn't *changed*; it does not prove the Elisa
+code does the *same thing*. To review that, pair the two bodies side-by-side:
+
+```bash
+python3 tools/port_review.py core/libraries/kernel/memory.elisa                       # all anchors in a file
+python3 tools/port_review.py core/libraries/kernel/memory.elisa::sceKernelMapDirectMemory
+```
+
+It prints the oracle C++ definition next to the Elisa definition for each anchor.
+Read them, fix any divergence, then `port_provenance.py --update` to re-stamp (your
+record that this function was reviewed against this C++). This is the exact-port
+loop: review boot-critical functions first.
+
 ## What the checker reports
 
 For each anchor it re-extracts the named C++ symbol from the current oracle, hashes
