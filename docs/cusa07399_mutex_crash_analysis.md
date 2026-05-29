@@ -396,3 +396,35 @@ HLE context with wrong host %fs/TLS" hazard flagged earlier, NOT the architectur
 init-ordering block (which is resolved). The libc bootstrap calls an HLE
 (internal_malloc -> host malloc) while %fs is in a guest/transitional state and the
 host allocator dereferences host TLS at +0x68. That is the next thing to fix.
+
+---
+
+# UPDATE 7: substrate parity — single-view guest memory (gap 1, step 1)
+
+Making Elisa's guest-memory model match shadPS4's: one mapping, written and read
+directly, instead of a host-side backing buffer mirrored into native via a sync.
+
+shadPS4 maps guest memory MAP_FIXED (guest VA == host VA) and reads/writes that one
+mapping. Elisa's native region is ALSO MAP_FIXED at the guest VA -- but it kept a
+parallel host-side `mapped_bytes` backing buffer that the loader/relocator wrote to,
+read from, and synced into native. Writes went to BOTH; reads came from the backing;
+relocations had a deferred "backing-only" batch path. That dual model is the root of
+the whole layer-mismatch bug class (the relocated value present in one layer, 0 in
+another -- see UPDATE 4/6).
+
+Changes (core/memory.elisa, core/linker.elisa), active when guest-exec is enabled:
+- MemoryManager_ReadU64 / ReadU8 now read the native MAP_FIXED mapping (the same
+  memory the guest executes against) -- native is the single source of truth. The
+  backing-index check still validates the address is mapped.
+- Removed the deferred backing-only relocation path (linker_defer_native_relocation_
+  writes no longer set in Linker_Execute): relocations write native directly.
+  ge_make_writable_cached keeps repeated same-page writes cheap.
+
+The host-side backing buffer is now legacy (still written, no longer the read source
+when exec is active); a follow-up can delete it + the Sync step + WriteU64BackingOnly
+entirely. The non-exec (model-only) path is unchanged (guarded by GuestExec_IsEnabled).
+
+Verified: x64 boot smoke 9/9; deferred-init boot still runs the libc bootstrap and
+reaches the gap-3 host-malloc fault (0x68); default boot unchanged. (The
+kernel-memory-parity-tests target fails to compile both before and after this change
+-- a pre-existing target-include issue, not a regression.)
