@@ -19,26 +19,71 @@ def internal_memcpy_s(dest: mutable void&, destsz: usize, src: void&, count: usi
 def internal_memcmp(s1: void&, s2: void&, n: usize) -> s32:
     return memcmp(s1, s2, n)
 
+# Guest-heap arena for the libc malloc HLE.
+#
+# shadPS4's internal_malloc is `return std::malloc(size);` — but that only works
+# because shadPS4 runs on x86 hosts where the emulator process and the guest share one
+# clean libc world. On Elisa's cross-substrate model (x86_64 guest under Rosetta,
+# host TLS via %gs, guest TLS via an LDT %fs, guest code on a guest stack), calling
+# host libsystem malloc from inside guarded guest execution faults: libsystem reads a
+# null zone pointer from its global zone table (the 0x68 boot fault, root-caused via
+# the emergency tape). The contract internal_malloc must satisfy is only "return a
+# writable, guest-usable block"; under single-view memory (guest VA == host VA) a host
+# anonymous mapping satisfies that directly. So back the HLE with our own arena instead
+# of dragging host libsystem's hidden global state into the guest world.
+#
+# Bump allocator over one large anonymous region (reserved once). free() is a no-op for
+# now (the region is large enough for boot/libc init); a size-classed free list is the
+# obvious follow-up if a workload exhausts the arena.
+const LIBC_HEAP_ARENA_SIZE: u64 = 256u64 * 1024u64 * 1024u64
+const LIBC_HEAP_ALIGN: u64 = 16u64
+global mutable libc_heap_cursor: u64 = 0u64
+global mutable libc_heap_limit: u64 = 0u64
+global mutable libc_heap_bytes_served: u64 = 0u64
+
+def libc_heap_align_up(value: u64, alignment: u64) -> u64:
+    remainder: u64 = value % alignment
+    if remainder == 0u64:
+        return value
+    return value + (alignment - remainder)
+
+def libc_heap_alloc(size: u64) -> mutable void&? can[Unsafe.SegmentMutation, Segment.Host]:
+    request: mutable u64 = size
+    if request == 0u64:
+        request <- 1u64
+    request <- libc_heap_align_up(request, LIBC_HEAP_ALIGN)
+    if libc_heap_limit == 0u64:
+        base: VAddr = GuestExec_AllocateRegion(LIBC_HEAP_ARENA_SIZE, 3u32)
+        if base == 0.uintptr():
+            return null
+        libc_heap_cursor <- base.u64()
+        libc_heap_limit <- base.u64() + LIBC_HEAP_ARENA_SIZE
+    start: u64 = libc_heap_align_up(libc_heap_cursor, LIBC_HEAP_ALIGN)
+    if start + request > libc_heap_limit:
+        return null
+    libc_heap_cursor <- start + request
+    libc_heap_bytes_served <- libc_heap_bytes_served + request
+    return start.uintptr().cast[mutable void&?]
+
 # @port core/libraries/libc_internal/libc_internal_memory.cpp::internal_malloc
-# Oracle: `void* internal_malloc(u64 size) { return std::malloc(size); }`
-# (NID gQX+4GDQjpM). Under single-view memory the guest runs at host addresses, so
-# a host-heap pointer is directly usable by guest code — same as shadPS4. (The prior
-# mmap-per-call via GuestExec_AllocateRegion diverged and stalled libc init.)
+# Oracle: `void* internal_malloc(u64 size) { return std::malloc(size); }` (NID
+# gQX+4GDQjpM). Backed by the guest-heap arena (see above) rather than host malloc,
+# to avoid host libsystem's null-zone fault under guarded guest execution.
 def internal_malloc(size: u64) -> mutable void&? can[Unsafe.SegmentMutation, Segment.Host]:
     result: mutable void&? = null
     can Unsafe.SegmentMutation, Segment.Host:
         GuestExec_RecordRuntimeHle("libSceLibcInternal", "malloc_enter", size.uintptr(), 0.uintptr(), 0.uintptr(), 0.uintptr())
-        result <- malloc(size.usize())
+        result <- libc_heap_alloc(size)
         GuestExec_RecordRuntimeHle("libSceLibcInternal", "malloc", size.uintptr(), 0.uintptr(), 0.uintptr(), result.uintptr())
     return result
 
 # @port core/libraries/libc_internal/libc_internal_memory.cpp::internal_free
 # Oracle: `void internal_free(void* ptr) { std::free(ptr); }` (NID tIhsqj0qsFE).
+# No-op against the bump arena for now (see LIBC_HEAP note); records the call.
 def internal_free(ptr: void&?) -> void can[Unsafe.SegmentMutation, Segment.Host]:
     can Unsafe.SegmentMutation, Segment.Host:
         GuestExec_RecordRuntimeHle("libSceLibcInternal", "free_enter", ptr.uintptr(), 0.uintptr(), 0.uintptr(), 0.uintptr())
-        if ptr != null:
-            free(ptr.cast[mutable void&])
+        _ = ptr
         GuestExec_RecordRuntimeHle("libSceLibcInternal", "free", ptr.uintptr(), 0.uintptr(), 0.uintptr(), 0.uintptr())
 
 def sceLibcMspaceCreate(name: void&?, base: mutable void&?, capacity: u64, flags: u64) -> mutable void&? can[Unsafe.SegmentMutation, Segment.Host]:
