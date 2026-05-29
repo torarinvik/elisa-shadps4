@@ -5,6 +5,15 @@ include "../error_codes.elisa"
 include "./orbis_error.elisa"
 include "./posix_error.elisa"
 include "./lib_function_stub.elisa"
+# rdtsc-based clock (faithful port of shadPS4 Common::NativeClock). Using this
+# instead of the host high-resolution clock keeps all guest time reads off host
+# libsystem during guarded guest execution, where a host clock call faults
+# (null+8, same class as the host-malloc/null-zone fault the arena fix removed).
+# Calibration happens once at host init (RegisterTime); guest-context reads are
+# pure rdtsc. Path-deduped if already included elsewhere.
+include "../../../common/uint128.elisa"
+include "../../../common/rdtsc.elisa"
+include "../../../common/native_clock.elisa"
 
 @fixed_layout
 struct OrbisKernelTimeval:
@@ -54,40 +63,35 @@ extern __Error() -> void&?
 extern SetPosixErrno(e: int) -> void
 extern ErrnoToSceKernelError(err: int) -> int
 
-global mutable time_initial_ptc_ns: i64 = 0
-global mutable time_tsc_frequency: u64 = 1000000000u64
+# shadPS4 time.cpp keeps a single Common::NativeClock plus the initial ptc taken
+# at init (time.cpp:32,547-548). Mirror that here. zeroed until RegisterTime runs.
+global mutable g_time_clock: NativeClock = zeroed
+global mutable g_time_initial_ptc: u64 = 0u64
 
 def time_now_ns() -> i64:
-    return high_resolution_now_ns()
+    # Monotonic ns derived from rdtsc (no host libsystem call). Matches
+    # NativeClock::GetTimeNS; callers only use it for deltas.
+    return NativeClock_GetTimeNS(g_time_clock.ref[NativeClock&]).i64()
 
 # @port core/libraries/kernel/time.cpp::sceKernelGetTscFrequency sha256=fdaec0b7be3795dc oracle@a3773841
 def sceKernelGetTscFrequency() -> u64:
-    return time_tsc_frequency
+    return NativeClock_GetTscFrequency(g_time_clock.ref[NativeClock&])
 
 # @port core/libraries/kernel/time.cpp::sceKernelGetProcessTime sha256=194f2589f809687a oracle@a3773841
 def sceKernelGetProcessTime() -> u64:
-    delta: i64 = time_now_ns() - time_initial_ptc_ns
-    if delta < 0:
-        return 0
-    return (delta / 1000).u64()
+    return NativeClock_GetTimeUS(g_time_clock.ref[NativeClock&], g_time_initial_ptc)
 
 # @port core/libraries/kernel/time.cpp::sceKernelGetProcessTimeCounter sha256=82bce08748835eae oracle@a3773841
 def sceKernelGetProcessTimeCounter() -> u64:
-    delta: i64 = time_now_ns() - time_initial_ptc_ns
-    if delta < 0:
-        return 0
-    return delta.u64()
+    return NativeClock_GetUptime(g_time_clock.ref[NativeClock&]) - g_time_initial_ptc
 
 # @port core/libraries/kernel/time.cpp::sceKernelGetProcessTimeCounterFrequency sha256=e1775df7b89142e6 oracle@a3773841
 def sceKernelGetProcessTimeCounterFrequency() -> u64:
-    return time_tsc_frequency
+    return NativeClock_GetTscFrequency(g_time_clock.ref[NativeClock&])
 
 # @port core/libraries/kernel/time.cpp::sceKernelReadTsc sha256=af8ef3c696611b18 oracle@a3773841
 def sceKernelReadTsc() -> u64:
-    now: i64 = time_now_ns()
-    if now < 0:
-        return 0
-    return now.u64()
+    return NativeClock_GetUptime(g_time_clock.ref[NativeClock&])
 
 # @port core/libraries/kernel/time.cpp::posix_nanosleep_impl sha256=b8ceca1c2fd12259 oracle@a3773841
 def posix_nanosleep_impl(rqtp: void&?, rmtp: void&?, interruptible: bool) -> int:
@@ -363,8 +367,10 @@ def sceKernelSettimeofday(_tv: void&?, _tz: void&?) -> int:
 
 def RegisterTime(sym: void&?) -> void:
     _ = sym
-    time_initial_ptc_ns <- time_now_ns()
-    time_tsc_frequency <- 1000000000u64
+    # shadPS4 time.cpp:547-548: construct the clock (calibrates rdtsc frequency in
+    # host context here, before any guest execution) and capture the initial ptc.
+    g_time_clock <- NativeClock_new()
+    g_time_initial_ptc <- NativeClock_GetUptime(g_time_clock.ref[NativeClock&])
 
     LIB_FUNCTION("NhpspxdjEKU", "libkernel", 1, "libkernel", posix_nanosleep)
     LIB_FUNCTION("NhpspxdjEKU", "libScePosix", 1, "libkernel", posix_nanosleep)
