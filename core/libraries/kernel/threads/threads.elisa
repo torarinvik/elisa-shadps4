@@ -524,13 +524,29 @@ def threads_is_current_self_handle(thread: void&?) -> bool:
     self_thread: void&? = posix_pthread_self()
     return thread != null and self_thread != null and posix_pthread_equal(thread, self_thread) == 1
 
+# Guest one-time init routine: a guest PS4-SYSV function taking no args.
+type PthreadOnceInit = func() -> void
+
 # @port core/libraries/kernel/threads/pthread.cpp::posix_pthread_once sha256=84f6455e05d11f7b oracle@a3773841
 def posix_pthread_once(once_control: mutable PthreadOnce&?, init_routine: void&?) -> int:
     threads_bootstrap_runtime()
     if once_control == null or init_routine == null:
         return POSIX_EINVAL
-    if once_control.state != 1:
-        once_control.state <- 1
+    # shadPS4 pthread.cpp::posix_pthread_once runs init_routine() exactly once and
+    # transitions NeverDone -> InProgress -> (run) -> Done. The prior Elisa stub
+    # set state=Done WITHOUT running init_routine, so any guest pthread_once-based
+    # setup (locks, buffers, flags) silently never happened and the guest then
+    # spin-waited on uninitialized state. We run the guest init routine directly,
+    # the same way TSD destructors are invoked (cast guest fn ptr + call); the
+    # guest-exec boundary is re-entrant for HLE->guest->HLE. Guest-exec serializes
+    # threads, so the full atomic wait state machine is unnecessary here.
+    # PthreadOnceState: NeverDone=0, Done=1, InProgress=2 (see pthread.elisa).
+    if once_control.state == 1:
+        return 0
+    once_control.state <- 2
+    fn: PthreadOnceInit = init_routine.cast[PthreadOnceInit]
+    fn()
+    once_control.state <- 1
     return 0
 
 # @port core/libraries/kernel/threads/pthread.cpp::posix_pthread_equal sha256=b25c425acd4291e4 oracle@a3773841
