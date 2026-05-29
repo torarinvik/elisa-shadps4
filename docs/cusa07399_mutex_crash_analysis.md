@@ -163,3 +163,61 @@ SHADPS4_TRACE_HLE_CALLS=1 ../shadPS4/build-current-x86/shadps4 \
   -g ../shadPS4/Games/CUSA07399 --config-clean --fullscreen false 2>&1 \
   | grep BOOT_ORACLE > /tmp/shad_oracle.txt
 ```
+
+---
+
+# UPDATE 2: DECISIVE — libc init runs too early in Elisa (ordering bug)
+
+Further oracle diffing pinned the mechanism precisely.
+
+## The ordering fact (shadPS4)
+
+In the shadPS4 trace, `BOOT_ORACLE entry entry=0x800002030` appears AFTER the
+entire heap bootstrap:
+
+```
+seq 2  sceKernelGetProcParam               (libc.prx 0x8093d5c93)
+seq 3  _sceKernelRtldSetApplicationHeapAPI (libc.prx 0x8093d5e9a)
+seq 4  sceKernelGetProcParam
+seq 5  sceLibcHeapGetTraceInfo
+seq 6-8 GetDirectMemorySize/Allocate/MapDirectMemory (eboot 0x800dcf...)
+seq 9-15 mutexattr/MutexInit, more GetProcParam/Rtld
+...
+BOOT_ORACLE entry   <-- only NOW jump to eboot _start
+```
+
+So shadPS4 runs the **complete libc heap bootstrap during preload /
+module-init**, then `RunMainEntry`. The runtime singleton at 0x802d85190 is
+initialized by this pre-entry bootstrap.
+
+## The Elisa bug (Linker_Execute ordering)
+
+`Linker_Execute` (core/linker.elisa) runs the PRX init too early:
+
+- line ~2255: `Linker_PreloadLibkernelGameModules` -> `Linker_LoadGuestDependency`
+  -> `Module_Start(libc)` (runs libc PREINIT + elf-entry).
+- line ~2262: `Linker_RelocateAllImports` (with deferred native writes).
+- line ~2268: `Linker_AllocateTlsForThread`.
+- line ~2285: `MemoryManager_SyncNativeBackingToGuestExec`.
+
+libc's init thus executes BEFORE its imports are fully relocated and BEFORE the
+guest-exec native backing is synced, so its HLE calls (GetProcParam, Rtld,
+DirectMemory) never fire (confirmed: Elisa's recorded HLEs are only mutex_init
++ malloc; `fallback_slot_count=0`, so this is NOT a resolution failure). The
+heap bootstrap silently no-ops; the eboot then runs with 0x802d85190 null and
+crashes.
+
+## Fix direction (Linker_Execute ordering — agent lane)
+
+Make Elisa match shadPS4's order: finish relocation + TLS + guest-backing sync
+FIRST, then run the preloaded PRX module inits (libc bootstrap), then
+RunMainEntry. Concretely: split `Linker_PreloadLibkernelGameModules` into a
+LOAD phase (kept early so the module table/relocation closure is complete) and
+a START phase (`Module_Start` for the PRXs) that runs AFTER
+`RelocateAllImports` + `AllocateTlsForThread` + `SyncNativeBackingToGuestExec`,
+just before the eboot `RunMainEntry`.
+
+Verify after the fix: Elisa's HLE trace should begin with GetProcParam /
+RtldSetApplicationHeapAPI / DirectMemory (matching shadPS4 seq 2-8), the
+`reloc_probe`/read of 0x802d85190 should see it non-null, and the crash at
+0x8018244ad should be gone.
