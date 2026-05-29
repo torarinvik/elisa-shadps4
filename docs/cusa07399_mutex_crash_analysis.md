@@ -94,3 +94,72 @@ different base addresses, so compare the rsp **trajectory (deltas across calls)*
 not absolute values — or do a self-contained Elisa check: assert that, inside the
 boundary thunk, `rsp` after the HLE `pop r10` equals the captured entry `rsp`
 (directly tests cause #1 without shadPS4).
+
+---
+
+# UPDATE: null-global crash at 0x8018244ad — root cause localized to skipped libc heap bootstrap
+
+The boot moved well past the earlier mutex/argv/abort stages. The current
+crash is a guest read of an **uninitialized runtime singleton**:
+
+- Fault: `pc=0x8018244ad`, instr `mov rcx,[rax+8]`, `rax=[0x802d85190]=0`.
+- `0x802d85190` is a RIP-relative global (`lea rcx,[rip+0x1560ced]` at
+  `0x80182449c`). The crashing function `malloc(0xb0)`s an object then copies
+  fields from two sibling singletons (`0x802f9e520` OK, `0x802d85190` null).
+
+## Verified facts (debug tooling, all committed)
+
+1. **Page watchpoint, PROT_NONE mode** (`ELISA_PAGEWATCH_PROT_NONE=1
+   ELISA_PAGEWATCH_ADDR=0x802d85190`): the only access to the global before
+   the fault is the faulting read itself, from the native page we protect.
+   No two-layer/mirror desync; the global is simply **never written**.
+2. **Relocation probe** (`reloc_probe count=0`): `0x802d85190` is **not a
+   relocation target** -> it is **code-initialized**, by guest code that never
+   runs before the read.
+3. **HLE traces**: Elisa's recorded HLEs before the crash are only
+   `posix_pthread_mutex_init x3` + `malloc x3`. It jumps straight to the
+   eboot's constructors.
+4. **shadPS4 oracle** (boots this game fully, 522k HLE calls): its first HLEs
+   are `sceKernelGetProcParam` -> `_sceKernelRtldSetApplicationHeapAPI` ->
+   `sceLibcHeapGetTraceInfo` (all from libc.prx @0x809380000), then the eboot's
+   `GetDirectMemorySize`/`AllocateDirectMemory`/`MapDirectMemory` heap setup.
+   This libc heap bootstrap initializes the runtime singletons. Elisa never
+   makes these calls.
+5. **modstart oracle**: both load the same 4 modules; the eboot is entered via
+   RunMainEntry (correct). Elisa runs `Module_Start` for the 3 PRXs, but libc
+   gets an `elf-entry-fallback` (shadPS4 `Module::Start` SKIPS elf-entry for
+   *system* libs: `IsSharedLib() && !IsSystemLib()`), and no heap bootstrap
+   fires.
+
+## Root cause
+
+shadPS4's `GetProcParam`/`Rtld` heap bootstrap runs from **libc.prx code that
+the eboot crt calls into** (guest->guest), before the eboot's own DirectMemory
+setup. In Elisa that call into libc.prx's init export never happens, so the
+libc/runtime singleton `0x802d85190` stays null and is later dereferenced.
+
+## Fix lane (linker/module-init — agent territory)
+
+1. **Primary:** find the libc.prx init export the eboot crt calls (in shadPS4
+   it returns into libc.prx @0x8093d5c93) and check Elisa's resolution of that
+   import — likely resolved to an aerolib fallback stub / wrong target, so the
+   bootstrap is skipped. Confirm with the resolve/fallback artifacts.
+2. **Parity:** shadPS4 `Module::Start` does NOT elf-entry-fallback system libs;
+   Elisa does (modstart shows libc elf-entry-fallback). Align this.
+3. **Pre-entry env:** shadPS4 `Linker::Execute` also runs
+   `sceSysmodulePreloadModuleForLibkernel()` and an explicit GnmDriver
+   DirectMemory pre-map at `0xfe0000000` ("Some games fail without accurately
+   emulating this behavior") before RunMainEntry. Elisa lacks both.
+
+## Reproduce
+
+```bash
+# Crash + the diagnostic artifact lines (reloc_probe, modstart, hle_call ring):
+ELISA_GUEST_EXEC_NO_FORK=1 ../compiler/bin/elisacore test \
+  emulator-cusa07399-x64-exec --project . 2>/dev/null | grep CUSA07399_ARTIFACT
+
+# shadPS4 oracle (boots fully):
+SHADPS4_TRACE_HLE_CALLS=1 ../shadPS4/build-current-x86/shadps4 \
+  -g ../shadPS4/Games/CUSA07399 --config-clean --fullscreen false 2>&1 \
+  | grep BOOT_ORACLE > /tmp/shad_oracle.txt
+```
