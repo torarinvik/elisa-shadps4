@@ -221,3 +221,39 @@ Verify after the fix: Elisa's HLE trace should begin with GetProcParam /
 RtldSetApplicationHeapAPI / DirectMemory (matching shadPS4 seq 2-8), the
 `reloc_probe`/read of 0x802d85190 should see it non-null, and the crash at
 0x8018244ad should be gone.
+
+---
+
+# UPDATE 3: ruled out naive fixes — bootstrap is a libc-preload dance, not simple ordering
+
+Two reversible experiments (env-gated, now reverted) both FAILED to trigger the
+heap bootstrap or move the crash:
+
+1. `ELISA_RESTART_PRX_AFTER_SYNC`: re-ran `Module_Start` for the PRXs (libc etc.)
+   AFTER `RelocateAllImports` + TLS + `SyncNativeBackingToGuestExec`, just before
+   `RunMainEntry`. Result: no GetProcParam/DirectMemory HLEs, identical crash at
+   0x8018244ad.
+2. `ELISA_RUN_EBOOT_INIT_ARRAY`: ran the eboot's own preinit/DT_INIT/init_array
+   before `RunMainEntry`. Result: identical crash, no bootstrap HLEs.
+
+Conclusion: simply running more init code (PRX or eboot, early or late) does NOT
+reproduce shadPS4's bootstrap. So this is NOT a plain init-ordering miss.
+
+## Refined model (for the agent)
+
+In shadPS4 the WHOLE bootstrap — GetProcParam, _sceKernelRtldSetApplicationHeapAPI,
+sceLibcHeapGetTraceInfo, and the eboot's own GetDirectMemorySize/Allocate/
+MapDirectMemory at 0x800dcf... — happens BEFORE `RunMainEntry` (trace lines
+1890-1904 precede the entry line at 2258). This is driven by
+`sceSysmodulePreloadModuleForLibkernel()` and the GnmDriver DirectMemory pre-map
+in shadPS4's `Linker::Execute` (src/core/linker.cpp ~156-200), i.e. an
+interdependent preload/SDK bootstrap, not a one-shot init_array run. Elisa's
+`Linker_PreloadLibkernelGameModules` is a simplified stub (loads libSceFios2 +
+libc only) and does not reproduce this dance.
+
+Recommended next step: study `sceSysmodulePreloadModuleForLibkernel` /
+`preloadModulesForLibkernel` (shadPS4 src/core/libraries/system/sysmodule_*) and
+the libc.prx init path that issues GetProcParam at 0x8093d5c93, then replicate
+that preload bootstrap in Elisa before `RunMainEntry`. The libc.prx init evidently
+calls back into the eboot's heap-setup (0x800dcf...) which initializes the
+singleton at 0x802d85190.
