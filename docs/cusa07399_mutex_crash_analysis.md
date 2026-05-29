@@ -351,3 +351,48 @@ default cusa unchanged):
   match requires running the PRX inits in the synced execution phase (the gated
   ELISA_DEFER_PRX_INIT work in UPDATE 4), which is blocked on the cross-layer
   init-array read + module-arena lifetime issues documented there.
+
+---
+
+# UPDATE 6: ARCHITECTURAL BLOCK SOLVED — init trampoline runs the libc heap bootstrap
+
+The deferred-init refactor now works (gated behind ELISA_DEFER_PRX_INIT). The libc
+heap bootstrap runs as native guest code before the eboot entry, matching shadPS4,
+and the old null-singleton crash at 0x8018244ad is GONE.
+
+## Design (the fix)
+
+1. **Capture (load phase, transient window):** in Linker_LoadGuestDependency, right
+   after each dependency's per-module relocation -- the only point where the
+   relocated init-array function pointers are present in the MemoryManager backing
+   (the same point the original Module_Start reads them) -- copy the preinit/init
+   array entry VALUES into a stable global list (Linker_CaptureInitValuesNow). They
+   are gone from every memory layer (backing/image/native) by execution time, so
+   this is the only place to read them.
+2. **Trampoline (execution phase):** after the native-backing sync, emit a small
+   guest machine-code trampoline (Linker_BuildInitTrampoline): push rdi/rsi (preserve
+   the entry ABI), align rsp, `call` each captured init fn, restore rsp/rdi/rsi, then
+   `jmp` the real eboot entry. Pure guest code.
+3. **Redirect:** the guarded executor (ge_run_main_entry_guarded_in_process) jumps to
+   the trampoline instead of the eboot entry. So the PRX inits run as NATIVE guest
+   code, under the signal guard, with live HLE dispatch -- exactly like shadPS4 runs
+   PRX inits before _start -- then control falls into the eboot entry.
+   last_entry_addr stays the real eboot entry for reporting/assertions.
+
+## Result
+
+HLE trace now matches shadPS4's boot order:
+  seq 1 sceKernelGetProcParam            (libc.prx 0x803fe5c93)
+  seq 2 _sceKernelRtldSetApplicationHeapAPI
+  seq 3 sceKernelGetProcParam
+The captured pointer is libc's PREINIT entry 0x803f90600 (matches the earlier
+modstart). Default tree unchanged (smoke 9/9; cusa default still 1/3).
+
+## Next blocker (separate, known issue)
+
+The boot now advances into libc's heap setup and faults at a HOST address
+(pc=0x7ff80ceac15c, fault_addr=0x68) -- the systemic "host malloc/CRT called from
+HLE context with wrong host %fs/TLS" hazard flagged earlier, NOT the architectural
+init-ordering block (which is resolved). The libc bootstrap calls an HLE
+(internal_malloc -> host malloc) while %fs is in a guest/transitional state and the
+host allocator dereferences host TLS at +0x68. That is the next thing to fix.

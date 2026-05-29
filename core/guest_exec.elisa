@@ -3275,13 +3275,15 @@ def ge_run_main_entry_guarded_in_process(params: mutable GuestEntryParams&, time
         ge_set_native_phase(GE_PHASE_CHILD_BEFORE_MAIN_ENTRY)
         can Unsafe.SegmentMutation, Segment.Host:
             ge_assert_host_fs_owner("guarded-in-process-before-main-entry")
-        # Run deferred dependency module inits (libc heap bootstrap etc.) under the
-        # guard, before jumping to the eboot entry, so a fault during init is caught
-        # by the signal handler / longjmp rather than hard-crashing the host.
-        can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
-            Linker_StartDeferredDependencies()
-        can Unsafe.SegmentMutation, Segment.Host:
-            ge_assert_host_fs_owner("guarded-in-process-after-deferred-inits")
+        # If an init trampoline was built (deferred-init mode), jump to it instead of
+        # the eboot entry. The trampoline runs the dependency PRX inits (libc heap
+        # bootstrap) as native guest code -- under this guard, with live HLE dispatch --
+        # then jmps to the real eboot entry. This mirrors shadPS4 running PRX inits
+        # before _start. last_entry_addr / params.entry_addr stay the real entry for
+        # reporting; only the actual jump target is redirected.
+        ge_init_trampoline: u64 = Linker_InitTrampolineAddr()
+        if ge_init_trampoline != 0u64:
+            params.entry_addr <- ge_init_trampoline.uintptr()
         can Unsafe.SegmentMutation, Segment.Host, Segment.Guest:
             ge_jump_main_entry(params, ge_guarded_exit as uintptr)
         ge_raw_breadcrumb("GE:GUARD_AFTER_JUMP\n", 20usize)
@@ -6032,6 +6034,15 @@ def GuestExec_DumpHleCallRing() -> void can[Console.Format, Unsafe.SegmentMutati
     wp: int = snprintf(line[0].ref[mutable u8&], 256usize, "CUSA07399_ARTIFACT reloc_probe addr=0x%llx count=%llu value=0x%llx type=0x%x path=%u", Linker_RelocProbeAddr(), Linker_RelocProbeCount(), Linker_RelocProbeValue(), Linker_RelocProbeType(), Linker_RelocProbePath()) can Console.Format
     can Unsafe.SegmentMutation, Segment.Host:
         GuestExec_DumpHleCallRingLine(line[0].ref[mutable u8&], 256usize, wp)
+    tp: int = snprintf(line[0].ref[mutable u8&], 256usize, "CUSA07399_ARTIFACT init_trampoline addr=0x%llx captured=%llu cap_calls=%llu modcount=%llu", Linker_InitTrampolineAddr(), Linker_DeferredInitCount(), Linker_CaptureDbgCalls(), Linker_CaptureModCount()) can Console.Format
+    can Unsafe.SegmentMutation, Segment.Host:
+        GuestExec_DumpHleCallRingLine(line[0].ref[mutable u8&], 256usize, tp)
+    dbgi: mutable usize = 0usize
+    while dbgi < Linker_CaptureDbgCalls().usize() and dbgi < 16usize:
+        dl: int = snprintf(line[0].ref[mutable u8&], 256usize, "CUSA07399_ARTIFACT init_dbg idx=%llu base=0x%llx preinit_size=0x%llx init_size=0x%llx preinit_va=0x%llx", dbgi.u64(), Linker_CaptureDbgBase(dbgi.u64()), Linker_CaptureDbgVa(dbgi.u64()), Linker_CaptureDbgSize(dbgi.u64()), Linker_CaptureDbgEntry0(dbgi.u64())) can Console.Format
+        can Unsafe.SegmentMutation, Segment.Host:
+            GuestExec_DumpHleCallRingLine(line[0].ref[mutable u8&], 256usize, dl)
+        dbgi <- dbgi + 1usize
     # Fallback-slot list: imports that resolved to the aerolib fallback stub
     # (i.e. Elisa could not resolve them to a real HLE/PRX export). A missing
     # libc/runtime init export here is the smoking gun for the skipped boot path.
