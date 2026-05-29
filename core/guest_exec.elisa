@@ -2903,7 +2903,7 @@ def ge_reset_crash_state() -> void:
     ge_runtime_hle_caller_frame_word2 <- 0.uintptr()
     ge_runtime_hle_caller_frame_word3 <- 0.uintptr()
     hle_oracle_reset_i: mutable usize = 0usize
-    while hle_oracle_reset_i < 128usize:
+    while hle_oracle_reset_i < 2048usize:
         ge_hle_oracle_modules[hle_oracle_reset_i] <- null
         ge_hle_oracle_symbols[hle_oracle_reset_i] <- null
         ge_hle_oracle_returns[hle_oracle_reset_i] <- 0.uintptr()
@@ -4020,15 +4020,18 @@ global mutable ge_runtime_hle_caller_frame_word0: uintptr = 0.uintptr()
 global mutable ge_runtime_hle_caller_frame_word1: uintptr = 0.uintptr()
 global mutable ge_runtime_hle_caller_frame_word2: uintptr = 0.uintptr()
 global mutable ge_runtime_hle_caller_frame_word3: uintptr = 0.uintptr()
-global mutable ge_hle_oracle_modules: static u8&?[128] = zeroed
-global mutable ge_hle_oracle_symbols: static u8&?[128] = zeroed
+# Oracle trace ring enlarged 128 -> 2048 (diagnostic) to capture the full boot
+# HLE sequence (~803 calls) without ring truncation, for first-divergence diff
+# against shadPS4. Keep mask/cap/reset bounds below in sync (2047 / 2048).
+global mutable ge_hle_oracle_modules: static u8&?[2048] = zeroed
+global mutable ge_hle_oracle_symbols: static u8&?[2048] = zeroed
 # Guest return address after the HLE call. Kept for shadPS4 oracle parity.
-global mutable ge_hle_oracle_returns: uintptr[128] = zeroed
+global mutable ge_hle_oracle_returns: uintptr[2048] = zeroed
 # Actual value returned by the HLE implementation to guest code.
-global mutable ge_hle_oracle_results: uintptr[128] = zeroed
-global mutable ge_hle_oracle_rdi: uintptr[128] = zeroed
-global mutable ge_hle_oracle_rsi: uintptr[128] = zeroed
-global mutable ge_hle_oracle_rdx: uintptr[128] = zeroed
+global mutable ge_hle_oracle_results: uintptr[2048] = zeroed
+global mutable ge_hle_oracle_rdi: uintptr[2048] = zeroed
+global mutable ge_hle_oracle_rsi: uintptr[2048] = zeroed
+global mutable ge_hle_oracle_rdx: uintptr[2048] = zeroed
 global mutable ge_failed_relocation_count: u64 = 0u64
 
 @fixed_layout
@@ -4220,7 +4223,7 @@ def c_GuestExec_RecordRuntimeHle(module: static u8&?, symbol: static u8&?, arg0:
     ge_runtime_hle_ret <- ret
     if ge_symbol_is_kernel_write(symbol):
         GuestExec_RecordWriteBuffer(arg0.u64().int(), arg1.cast[void&?], arg2.u64())
-    hle_oracle_index: usize = ((ge_runtime_hle_sequence - 1u64) & 127u64).usize()
+    hle_oracle_index: usize = ((ge_runtime_hle_sequence - 1u64) & 2047u64).usize()
     ge_hle_oracle_modules[hle_oracle_index] <- ge_runtime_hle_module
     ge_hle_oracle_symbols[hle_oracle_index] <- ge_runtime_hle_symbol
     ge_hle_oracle_returns[hle_oracle_index] <- !ge_runtime_hle_guest_return_addr
@@ -4556,44 +4559,44 @@ def c_GuestExec_RuntimeHleCallerFrameWord3() -> uintptr:
     return ge_runtime_hle_caller_frame_word3
 
 def c_GuestExec_HleOracleTraceCount() -> u64:
-    if ge_runtime_hle_sequence > 128u64:
-        return 128u64
+    if ge_runtime_hle_sequence > 2048u64:
+        return 2048u64
     return ge_runtime_hle_sequence
 
 def c_GuestExec_HleOracleTraceModule(index: u64) -> static u8&:
-    if index >= 128u64:
+    if index >= 2048u64:
         return ""
     s: static u8&? = ge_hle_oracle_modules[index.usize()]
     return s if s != null else ""
 
 def c_GuestExec_HleOracleTraceSymbol(index: u64) -> static u8&:
-    if index >= 128u64:
+    if index >= 2048u64:
         return ""
     s: static u8&? = ge_hle_oracle_symbols[index.usize()]
     return s if s != null else ""
 
 def c_GuestExec_HleOracleTraceReturn(index: u64) -> uintptr:
-    if index >= 128u64:
+    if index >= 2048u64:
         return 0.uintptr()
     return ge_hle_oracle_returns[index.usize()]
 
 def c_GuestExec_HleOracleTraceResult(index: u64) -> uintptr:
-    if index >= 128u64:
+    if index >= 2048u64:
         return 0.uintptr()
     return ge_hle_oracle_results[index.usize()]
 
 def c_GuestExec_HleOracleTraceRdi(index: u64) -> uintptr:
-    if index >= 128u64:
+    if index >= 2048u64:
         return 0.uintptr()
     return ge_hle_oracle_rdi[index.usize()]
 
 def c_GuestExec_HleOracleTraceRsi(index: u64) -> uintptr:
-    if index >= 128u64:
+    if index >= 2048u64:
         return 0.uintptr()
     return ge_hle_oracle_rsi[index.usize()]
 
 def c_GuestExec_HleOracleTraceRdx(index: u64) -> uintptr:
-    if index >= 128u64:
+    if index >= 2048u64:
         return 0.uintptr()
     return ge_hle_oracle_rdx[index.usize()]
 
@@ -6132,7 +6135,7 @@ def GuestExec_DumpHleCallRing() -> void can[Console.Format, Unsafe.SegmentMutati
     j: mutable u64 = 0u64
     while j < oracle_count:
         abs_seq: u64 = oracle_start + j + 1u64
-        slot: u64 = ((abs_seq - 1u64) & 63u64)
+        slot: u64 = ((abs_seq - 1u64) & 2047u64)
         module: static u8& = c_GuestExec_HleOracleTraceModule(slot)
         symbol: static u8& = c_GuestExec_HleOracleTraceSymbol(slot)
         return_pc: uintptr = c_GuestExec_HleOracleTraceReturn(slot)
