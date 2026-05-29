@@ -1413,6 +1413,11 @@ const GE_EV_SIGNAL_FAULT_INSN: u32 = 135u32
 # Diagnostic: segment selectors from the faulting thread state (__ss): fs(+152),
 # gs(+160), cs(+144). Distinguishes guest-fs vs host-gs faults.
 const GE_EV_SIGNAL_SEGMENTS: u32 = 136u32
+# Diagnostic: if the instruction at fault_pc-16 is `mov rax,[rip+disp32]` (48 8b 05),
+# resolve that RIP-relative global's address and read its value. Tells us whether the
+# null that drove the fault came from a genuinely-null/zeroed global (and its address,
+# to classify shadowed-by-guest-mapping vs uninitialized).
+const GE_EV_SIGNAL_FAULT_GLOBAL: u32 = 137u32
 const GE_EV_MUTEX_INIT: u32 = 1001u32
 
 const GE_LONGJMP_SOURCE_DEBUG_TRAP_ABORT: u32 = 1u32
@@ -2220,6 +2225,20 @@ def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
         ss_seg: uintptr = ge_darwin_mcontext64_ss(uctx)
         ge_emergency_mark(GE_EV_SIGNAL_FAULT_INSN, fault_pc, ge_read_context_word(fault_pc), ge_read_context_word(fault_pc + 8.uintptr()), ge_read_context_word(fault_pc + 16.uintptr()))
         ge_emergency_mark(GE_EV_SIGNAL_FAULT_INSN, fault_pc - 16.uintptr(), ge_read_context_word(fault_pc - 16.uintptr()), ge_read_context_word(fault_pc - 8.uintptr()), ge_last_guest_rdi)
+        # Wider preceding window (pc-48 .. pc-16) to find the instruction that loaded
+        # the null zone into rdi (e.g. a %gs-relative per-thread default-zone read).
+        ge_emergency_mark(GE_EV_SIGNAL_FAULT_INSN, fault_pc - 48.uintptr(), ge_read_context_word(fault_pc - 48.uintptr()), ge_read_context_word(fault_pc - 40.uintptr()), ge_read_context_word(fault_pc - 32.uintptr()))
+        ge_emergency_mark(GE_EV_SIGNAL_FAULT_INSN, fault_pc - 24.uintptr(), ge_read_context_word(fault_pc - 24.uintptr()), ge_read_context_word(fault_pc - 16.uintptr()), ge_read_context_word(fault_pc - 8.uintptr()))
+        # If fault_pc-16 is `mov rax,[rip+disp32]` (opcode 48 8b 05), resolve the
+        # global it loaded and read its value to confirm the null source.
+        pre_word: u64 = ge_read_context_word(fault_pc - 16.uintptr()).u64()
+        if (pre_word & 0xffffffu64) == 0x058b48u64:
+            disp32: u64 = (pre_word >> 24u64) & 0xffffffffu64
+            disp_se: mutable u64 = disp32
+            if (disp32 & 0x80000000u64) != 0u64:
+                disp_se <- disp32 | 0xffffffff00000000u64
+            global_addr: uintptr = (fault_pc - 16.uintptr() + 7.uintptr()) + disp_se.uintptr()
+            ge_emergency_mark(GE_EV_SIGNAL_FAULT_GLOBAL, global_addr, ge_read_context_word(global_addr), pre_word.uintptr(), disp32.uintptr())
         ge_emergency_mark(GE_EV_SIGNAL_SEGMENTS, ge_read_context_word(ss_seg + 152.uintptr()), ge_read_context_word(ss_seg + 160.uintptr()), ge_read_context_word(ss_seg + 144.uintptr()), ss_seg)
     ge_signal_sp_valid <- 1 if !ge_signal_mctx != 0.uintptr() else 0
     ge_signal_bp_valid <- ge_signal_sp_valid
