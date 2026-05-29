@@ -30,6 +30,8 @@ extern ElisaTls_ReadFs0Asm() -> SegmentSelfPointer
 extern ElisaTls_AtomicExchangeU32Asm(ptr: HostPtr[u32], value: u32) -> u32
 @segment_transition(host)
 extern ElisaTls_CallGuestThreadEntryWithFsAsm(entry: GuestThreadEntry, arg: GuestThreadArg, guest_fs_selector: GuestFsSelector, host_fs_selector: HostFsSelector) -> GuestThreadResult can[Unsafe.SegmentMutation, Segment.Host, Segment.Guest]
+@segment_transition(host)
+extern ElisaTls_CallGuestInitEntryOnStackWithFsAsm(ctx: HostPtr[void]) -> u64 can[Unsafe.SegmentMutation, Segment.Host, Segment.Guest]
 
 @fixed_layout
 @abi_layout(size, 16, align, 8, field, counter, 0, field, pointer, 8)
@@ -489,6 +491,32 @@ def TLS_CallGuestThreadEntryWithPreparedSegment(fn: void&?, arg: void&?, guest_s
         _ = guest_selector
         _ = host_selector
         return null
+
+def TLS_CallGuestInitEntryOnStackWithPreparedSegment(fn: void&?, args: u64, argp: void&?, param: void&?, stack_top: uintptr, guest_selector: GuestFsSelector, host_selector: HostFsSelector) -> s32 can[Unsafe.SegmentMutation, Segment.Host, Segment.Guest]:
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        if fn == null or stack_top == 0.uintptr() or !guest_selector == 0u32:
+            return 0
+        ctx: mutable u64[7] = zeroed
+        ctx[0] <- fn.uintptr().u64()
+        ctx[1] <- args
+        ctx[2] <- argp.uintptr().u64()
+        ctx[3] <- param.uintptr().u64()
+        ctx[4] <- stack_top.u64()
+        ctx[5] <- (!guest_selector).u64()
+        ctx[6] <- (!host_selector).u64()
+        result: mutable u64 = 0u64
+        can Unsafe.SegmentMutation, Segment.Host, Segment.Guest:
+            result <- ElisaTls_CallGuestInitEntryOnStackWithFsAsm(ctx[0].ref[u64&].uintptr().cast[HostPtr[void]])
+        return result.s32()
+    static else:
+        _ = fn
+        _ = args
+        _ = argp
+        _ = param
+        _ = stack_top
+        _ = guest_selector
+        _ = host_selector
+        return 0
 
 def TLS_EnterHostFromGuest() -> void can[Unsafe.SegmentMutation, Segment.Host]:
     static if PLATFORM_APPLE and ARCH_X86_64:

@@ -10,7 +10,7 @@ include "./lib_function_stub.elisa"
 const KERNEL_MEMORY_PAGE_SIZE: u64 = 16 * 1024
 const KERNEL_MEMORY_MMAP_FAILED: uintptr = 0.uintptr() - 1.uintptr()
 const KERNEL_DIRECT_MEMORY_TYPE_DEFAULT: int = 0
-const KERNEL_DIRECT_MEMORY_BASE: u64 = 0x100000000u64
+const KERNEL_DIRECT_MEMORY_BASE: u64 = 0u64
 const ORBIS_KERNEL_MAP_FIXED_FLAG: int = 0x10
 const ORBIS_KERNEL_MAP_OP_MAP_DIRECT: s32 = 0
 const ORBIS_KERNEL_MAP_OP_UNMAP: s32 = 1
@@ -27,6 +27,13 @@ struct OrbisKernelBatchMapEntry:
     type: u8
     reserved: s16
     operation: s32
+
+@fixed_layout
+@abi_layout(size, 24, align, 8, field, start, 0, field, end, 8, field, memoryType, 16)
+struct OrbisQueryInfo:
+    start: mutable uintptr
+    end: mutable uintptr
+    memoryType: mutable s32
 
 def KernelMemory_Is16KBAligned(value: u64) -> bool:
     return (value % KERNEL_MEMORY_PAGE_SIZE) == 0
@@ -45,9 +52,35 @@ def KernelMemory_AlignDown(value: u64, alignment: u64) -> u64:
     return value - (value % alignment)
 
 def KernelMemory_WriteOutPtr(out_ptr: mutable void&?&, value: void&?) -> void:
-    out_ptr <- value
+    out_ptr[0] <- value
+
+def KernelMemory_WriteOutI64(out_ptr: void&?, value: i64) -> bool:
+    if out_ptr == null:
+        return false
+    # Guest out-pointers must update both the native execution mapping and the
+    # AddressSpace backing. Internal loader calls pass host-stack pointers, so
+    # fall back to a plain store when the address is not guest-backed.
+    if MemoryManager_WriteU64(Memory_Instance(), out_ptr.uintptr(), value.u64()):
+        return true
+    raw: mutable i64&? = out_ptr as mutable i64&?
+    if raw == null:
+        return false
+    raw[0] <- value
+    return true
+
+def KernelMemory_ReadInOutPtr(in_out_ptr: mutable void&?&) -> VAddr:
+    if in_out_ptr[0] == null:
+        return 0.uintptr()
+    return in_out_ptr[0].uintptr()
 
 global mutable g_kernel_direct_alloc_cursor: u64 = KERNEL_DIRECT_MEMORY_BASE
+global mutable kernel_debug_last_direct_alloc_result: int = 0
+global mutable kernel_debug_last_direct_alloc_phys: i64 = 0
+global mutable kernel_debug_last_direct_alloc_len: u64 = 0
+global mutable kernel_debug_last_direct_map_result: int = 0
+global mutable kernel_debug_last_direct_map_addr: uintptr = 0.uintptr()
+global mutable kernel_debug_last_direct_map_phys: i64 = 0
+global mutable kernel_debug_last_direct_map_len: u64 = 0
 
 def KernelMemory_MapDirect(addr: mutable void&?&, len: u64, prot: int, flags: int, phys_addr: i64, alignment: u64, name: static u8&) -> int:
     if len == 0 or not KernelMemory_Is16KBAligned(len):
@@ -62,7 +95,7 @@ def KernelMemory_MapDirect(addr: mutable void&?&, len: u64, prot: int, flags: in
     result: s32 = MemoryManager_MapMemory(
         Memory_Instance(),
         mapped.ref[mutable VAddr&],
-        addr.cast[VAddr],
+        KernelMemory_ReadInOutPtr(addr),
         len,
         prot.u32(),
         flags.u32(),
@@ -73,6 +106,9 @@ def KernelMemory_MapDirect(addr: mutable void&?&, len: u64, prot: int, flags: in
         alignment
     )
     if result == 0:
+        if not MemoryManager_MarkDirectMapped(Memory_Instance(), phys_addr.uintptr(), len, 0):
+            _ = MemoryManager_UnmapMemory(Memory_Instance(), mapped, len)
+            return ORBIS_KERNEL_ERROR_EACCES
         KernelMemory_WriteOutPtr(addr, mapped.cast[void&?])
         return ORBIS_OK
     return result
@@ -84,7 +120,7 @@ def KernelMemory_MapFlexible(addr_in_out: mutable void&?&, len: u64, prot: int, 
     result: s32 = MemoryManager_MapMemory(
         Memory_Instance(),
         mapped.ref[mutable VAddr&],
-        addr_in_out.cast[VAddr],
+        KernelMemory_ReadInOutPtr(addr_in_out),
         len,
         prot.u32(),
         flags.u32(),
@@ -126,14 +162,23 @@ def sceKernelEnableDmemAliasing() -> int:
     return ORBIS_OK
 
 def sceKernelAllocateDirectMemory(searchStart: i64, searchEnd: i64, len: u64, alignment: u64, memoryType: int, physAddrOut: void&?) -> int:
-    out_addr: mutable i64&? = physAddrOut as mutable i64&?
-    if out_addr == null:
+    can Unsafe.SegmentMutation, Segment.Host:
+        ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d4142u64.uintptr(), searchStart.u64().uintptr(), searchEnd.u64().uintptr(), len.uintptr())
+    if physAddrOut == null:
+        can Unsafe.SegmentMutation, Segment.Host:
+            ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d4145u64.uintptr(), ORBIS_KERNEL_ERROR_EFAULT.u64().uintptr(), physAddrOut.uintptr(), 0.uintptr())
         return ORBIS_KERNEL_ERROR_EFAULT
     if len == 0 or not KernelMemory_Is16KBAligned(len):
+        can Unsafe.SegmentMutation, Segment.Host:
+            ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d4145u64.uintptr(), ORBIS_KERNEL_ERROR_EINVAL.u64().uintptr(), len.uintptr(), alignment.uintptr())
         return ORBIS_KERNEL_ERROR_EINVAL
     if alignment != 0 and not KernelMemory_Is16KBAligned(alignment):
+        can Unsafe.SegmentMutation, Segment.Host:
+            ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d4145u64.uintptr(), ORBIS_KERNEL_ERROR_EINVAL.u64().uintptr(), len.uintptr(), alignment.uintptr())
         return ORBIS_KERNEL_ERROR_EINVAL
     if searchEnd <= searchStart:
+        can Unsafe.SegmentMutation, Segment.Host:
+            ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d4145u64.uintptr(), ORBIS_KERNEL_ERROR_EINVAL.u64().uintptr(), searchStart.u64().uintptr(), searchEnd.u64().uintptr())
         return ORBIS_KERNEL_ERROR_EINVAL
     _ = memoryType
     align: mutable u64 = alignment
@@ -147,15 +192,53 @@ def sceKernelAllocateDirectMemory(searchStart: i64, searchEnd: i64, len: u64, al
         alloc_start <- KernelMemory_AlignUp(min_addr, align)
     alloc_end: u64 = alloc_start + len
     if alloc_end <= alloc_start:
+        kernel_debug_last_direct_alloc_result <- ORBIS_KERNEL_ERROR_ENOMEM
+        kernel_debug_last_direct_alloc_phys <- 0
+        kernel_debug_last_direct_alloc_len <- len
+        can Unsafe.SegmentMutation, Segment.Host:
+            ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d4145u64.uintptr(), ORBIS_KERNEL_ERROR_ENOMEM.u64().uintptr(), alloc_start.uintptr(), len.uintptr())
         return ORBIS_KERNEL_ERROR_ENOMEM
     if alloc_end > searchEnd.u64():
+        kernel_debug_last_direct_alloc_result <- ORBIS_KERNEL_ERROR_ENOMEM
+        kernel_debug_last_direct_alloc_phys <- 0
+        kernel_debug_last_direct_alloc_len <- len
+        can Unsafe.SegmentMutation, Segment.Host:
+            ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d4145u64.uintptr(), ORBIS_KERNEL_ERROR_ENOMEM.u64().uintptr(), alloc_end.uintptr(), searchEnd.u64().uintptr())
         return ORBIS_KERNEL_ERROR_ENOMEM
-    out_addr[0] <- alloc_start.i64()
+    allocated: PAddr = MemoryManager_Allocate(Memory_Instance(), alloc_start.uintptr(), searchEnd.u64().uintptr(), len, align, memoryType)
+    if allocated == searchEnd.u64().uintptr():
+        kernel_debug_last_direct_alloc_result <- ORBIS_KERNEL_ERROR_ENOMEM
+        kernel_debug_last_direct_alloc_phys <- 0
+        kernel_debug_last_direct_alloc_len <- len
+        can Unsafe.SegmentMutation, Segment.Host:
+            ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d4145u64.uintptr(), ORBIS_KERNEL_ERROR_ENOMEM.u64().uintptr(), alloc_start.uintptr(), searchEnd.u64().uintptr())
+        return ORBIS_KERNEL_ERROR_ENOMEM
+    if not KernelMemory_WriteOutI64(physAddrOut, allocated.u64().i64()):
+        kernel_debug_last_direct_alloc_result <- ORBIS_KERNEL_ERROR_EFAULT
+        kernel_debug_last_direct_alloc_phys <- allocated.u64().i64()
+        kernel_debug_last_direct_alloc_len <- len
+        can Unsafe.SegmentMutation, Segment.Host:
+            ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d4145u64.uintptr(), ORBIS_KERNEL_ERROR_EFAULT.u64().uintptr(), physAddrOut.uintptr(), allocated)
+        return ORBIS_KERNEL_ERROR_EFAULT
     g_kernel_direct_alloc_cursor <- alloc_end
+    kernel_debug_last_direct_alloc_result <- ORBIS_OK
+    kernel_debug_last_direct_alloc_phys <- allocated.u64().i64()
+    kernel_debug_last_direct_alloc_len <- len
+    can Unsafe.SegmentMutation, Segment.Host:
+        ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d414fu64.uintptr(), allocated, g_kernel_direct_alloc_cursor.uintptr(), len.uintptr())
     return ORBIS_OK
 
-def sceKernelAllocateMainDirectMemory(len: u64, alignment: u64, memoryType: int, physAddrOut: void&?) -> int:
-    return sceKernelAllocateDirectMemory(KERNEL_DIRECT_MEMORY_BASE.i64(), (KERNEL_DIRECT_MEMORY_BASE + MemoryManager_GetTotalDirectSize(Memory_Instance())).i64(), len, alignment, memoryType, physAddrOut)
+def HLE_sceKernelAllocateDirectMemory(searchStart: i64, searchEnd: i64, len: u64, alignment: u64, memoryType: int, physAddrOut: void&?) -> int:
+    result: mutable int = 0
+    can Unsafe.SegmentMutation, Segment.Host:
+        result <- sceKernelAllocateDirectMemory(searchStart, searchEnd, len, alignment, memoryType, physAddrOut)
+    return result
+
+def sceKernelAllocateMainDirectMemory(len: u64, alignment: u64, memoryType: int, physAddrOut: void&?) -> int can[Unsafe.SegmentMutation, Segment.Host]:
+    result: mutable int = 0
+    can Unsafe.SegmentMutation, Segment.Host:
+        result <- sceKernelAllocateDirectMemory(KERNEL_DIRECT_MEMORY_BASE.i64(), (KERNEL_DIRECT_MEMORY_BASE + MemoryManager_GetTotalDirectSize(Memory_Instance())).i64(), len, alignment, memoryType, physAddrOut)
+    return result
 
 def sceKernelAvailableDirectMemorySize(searchStart: u64, searchEnd: u64, alignment: u64, physAddrOut: void&?, sizeOut: void&?) -> int:
     out_phys: mutable i64&? = physAddrOut as mutable i64&?
@@ -214,8 +297,17 @@ def sceKernelGetDirectMemoryType(addr: u64, directMemoryTypeOut: void&?, directM
     out_end[0] <- direct_end.i64()
     return ORBIS_OK
 
-def sceKernelGetDirectMemorySize() -> u64:
-    return MemoryManager_GetTotalDirectSize(Memory_Instance())
+def sceKernelGetDirectMemorySize() -> u64 can[Unsafe.SegmentMutation, Segment.Host]:
+    size: u64 = MemoryManager_GetTotalDirectSize(Memory_Instance())
+    can Unsafe.SegmentMutation, Segment.Host:
+        ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d535au64.uintptr(), size.uintptr(), 0.uintptr(), 0.uintptr())
+    return size
+
+def HLE_sceKernelGetDirectMemorySize() -> u64:
+    size: mutable u64 = 0u64
+    can Unsafe.SegmentMutation, Segment.Host:
+        size <- sceKernelGetDirectMemorySize()
+    return size
 
 def sceKernelIsStack(addr: void&?, start: void&?, end: void&?) -> int:
     _ = addr
@@ -231,8 +323,44 @@ def sceKernelMapNamedDirectMemory(addr: mutable void&?&, len: u64, prot: int, fl
         return ORBIS_KERNEL_ERROR_EFAULT
     return KernelMemory_MapDirect(addr, len, prot, flags, phys_addr, alignment, "anon")
 
-def sceKernelMapDirectMemory(addr: mutable void&?&, len: u64, prot: int, flags: int, phys_addr: i64, alignment: u64) -> int:
-    return KernelMemory_MapDirect(addr, len, prot, flags, phys_addr, alignment, "anon")
+def sceKernelMapDirectMemory(addr: mutable void&?&, len: u64, prot: int, flags: int, phys_addr: i64, alignment: u64) -> int can[Unsafe.SegmentMutation, Segment.Host]:
+    can Unsafe.SegmentMutation, Segment.Host:
+        ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d4d42u64.uintptr(), addr.cast[void&].uintptr(), KernelMemory_ReadInOutPtr(addr), len.uintptr())
+    result: int = KernelMemory_MapDirect(addr, len, prot, flags, phys_addr, alignment, "anon")
+    kernel_debug_last_direct_map_result <- result
+    kernel_debug_last_direct_map_addr <- KernelMemory_ReadInOutPtr(addr)
+    kernel_debug_last_direct_map_phys <- phys_addr
+    kernel_debug_last_direct_map_len <- len
+    can Unsafe.SegmentMutation, Segment.Host:
+        ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d4d45u64.uintptr(), result.u64().uintptr(), addr.cast[void&].uintptr(), KernelMemory_ReadInOutPtr(addr))
+    return result
+
+def Kernel_DebugLastDirectAllocResult() -> int:
+    return kernel_debug_last_direct_alloc_result
+
+def Kernel_DebugLastDirectAllocPhys() -> i64:
+    return kernel_debug_last_direct_alloc_phys
+
+def Kernel_DebugLastDirectAllocLen() -> u64:
+    return kernel_debug_last_direct_alloc_len
+
+def Kernel_DebugLastDirectMapResult() -> int:
+    return kernel_debug_last_direct_map_result
+
+def Kernel_DebugLastDirectMapAddr() -> uintptr:
+    return kernel_debug_last_direct_map_addr
+
+def Kernel_DebugLastDirectMapPhys() -> i64:
+    return kernel_debug_last_direct_map_phys
+
+def Kernel_DebugLastDirectMapLen() -> u64:
+    return kernel_debug_last_direct_map_len
+
+def HLE_sceKernelMapDirectMemory(addr: mutable void&?&, len: u64, prot: int, flags: int, phys_addr: i64, alignment: u64) -> int:
+    result: mutable int = 0
+    can Unsafe.SegmentMutation, Segment.Host:
+        result <- sceKernelMapDirectMemory(addr, len, prot, flags, phys_addr, alignment)
+    return result
 
 def sceKernelMapDirectMemory2(addr: mutable void&?&, len: u64, type: int, prot: int, flags: int, phys_addr: i64, alignment: u64) -> int:
     _ = type
@@ -254,11 +382,66 @@ def sceKernelQueryMemoryProtection(addr: void&?, start: mutable void&?&, end: mu
     return ORBIS_OK
 
 def sceKernelDirectMemoryQuery(offset: u64, flags: int, query_info: void&?, infoSize: u64) -> int:
-    _ = offset
-    _ = flags
-    _ = query_info
-    _ = infoSize
+    out: mutable OrbisQueryInfo&? = query_info as mutable OrbisQueryInfo&?
+    if out == null or infoSize < size_of(OrbisQueryInfo).u64():
+        can Unsafe.SegmentMutation, Segment.Host:
+            ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, GuestExec_RuntimeHleGuestReturnAddr(), offset.uintptr(), ORBIS_KERNEL_ERROR_EFAULT.u64().uintptr(), query_info.uintptr())
+        return ORBIS_KERNEL_ERROR_EFAULT
+    if offset >= MemoryManager_GetTotalDirectSize(Memory_Instance()):
+        can Unsafe.SegmentMutation, Segment.Host:
+            ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, GuestExec_RuntimeHleGuestReturnAddr(), offset.uintptr(), ORBIS_KERNEL_ERROR_EACCES.u64().uintptr(), query_info.uintptr())
+        return ORBIS_KERNEL_ERROR_EACCES
+    find_next: bool = flags == 1
+    best_index: mutable s32 = -1
+    best_base: mutable u64 = 0xffffffffffffffffu64
+    memory: mutable MemoryManager& = Memory_Instance()
+    for i in 0..<memory.dmem_areas.count:
+        area: PhysicalMemoryArea = memory.dmem_areas[i]
+        area_start: u64 = area.base.u64()
+        area_end: u64 = area_start + area.size
+        if offset >= area_start and offset < area_end:
+            if area.dma_type != PhysicalMemoryType_Free:
+                best_index <- i.s32()
+                best_base <- area_start
+            elif find_next:
+                j: mutable usize = i + 1usize
+                while j < memory.dmem_areas.count and best_index < 0:
+                    next_area: PhysicalMemoryArea = memory.dmem_areas[j]
+                    if next_area.dma_type != PhysicalMemoryType_Free:
+                        best_index <- j.s32()
+                        best_base <- next_area.base.u64()
+                    j <- j + 1usize
+        elif find_next and area.dma_type != PhysicalMemoryType_Free and area_start > offset and area_start < best_base:
+            best_index <- i.s32()
+            best_base <- area_start
+    if best_index < 0:
+        can Unsafe.SegmentMutation, Segment.Host:
+            ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, GuestExec_RuntimeHleGuestReturnAddr(), offset.uintptr(), ORBIS_KERNEL_ERROR_EACCES.u64().uintptr(), query_info.uintptr())
+        return ORBIS_KERNEL_ERROR_EACCES
+    selected: mutable PhysicalMemoryArea = memory.dmem_areas[best_index.usize()]
+    out.start <- selected.base
+    out.memoryType <- selected.memory_type
+    out.end <- selected.base + selected.size.uintptr()
+    j: mutable usize = best_index.usize() + 1
+    while j < memory.dmem_areas.count:
+        next_area: PhysicalMemoryArea = memory.dmem_areas[j]
+        if next_area.memory_type != out.memoryType:
+            break
+        if next_area.dma_type != PhysicalMemoryType_Allocated and next_area.dma_type != PhysicalMemoryType_Mapped:
+            break
+        out.end <- next_area.base + next_area.size.uintptr()
+        j <- j + 1
+    can Unsafe.SegmentMutation, Segment.Host:
+        ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, GuestExec_RuntimeHleGuestReturnAddr(), offset.uintptr(), ORBIS_OK.u64().uintptr(), query_info.uintptr())
+        ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d5159.uintptr(), offset.uintptr(), out.start, out.end)
+        ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d5154.uintptr(), offset.uintptr(), out.memoryType.u64().uintptr(), flags.u64().uintptr())
     return ORBIS_OK
+
+def HLE_sceKernelDirectMemoryQuery(offset: u64, flags: int, query_info: void&?, infoSize: u64) -> int:
+    result: mutable int = 0
+    can Unsafe.SegmentMutation, Segment.Host:
+        result <- sceKernelDirectMemoryQuery(offset, flags, query_info, infoSize)
+    return result
 
 def sceKernelReleaseDirectMemory(start: u64, len: u64) -> int:
     _ = start
@@ -298,12 +481,51 @@ def sceKernelAvailableFlexibleMemorySize(out_size: mutable u64&) -> int:
 def sceKernelMapFlexibleMemory(addr_in_out: mutable void&?&, len: u64, prot: int, flags: int) -> int:
     return KernelMemory_MapFlexible(addr_in_out, len, prot, flags, "anon")
 
+global mutable kernel_debug_heap_api_func: uintptr = 0.uintptr()
+global mutable kernel_debug_heap_api_return_addr: uintptr = 0.uintptr()
+global mutable kernel_application_heap_bootstrap_done: bool = false
+
+def KernelMemory_BootstrapApplicationHeapDirectArena() -> void can[Unsafe.SegmentMutation, Segment.Host]:
+    if kernel_application_heap_bootstrap_done:
+        return
+    kernel_application_heap_bootstrap_done <- true
+    g_kernel_direct_alloc_cursor <- KERNEL_DIRECT_MEMORY_BASE
+    direct_size: mutable u64 = 0u64
+    can Unsafe.SegmentMutation, Segment.Host:
+        direct_size <- sceKernelGetDirectMemorySize()
+    heap_direct_size: u64 = 0xc0000000u64
+    if direct_size < heap_direct_size:
+        return
+    phys_addr: mutable i64 = 0i64
+    alloc: mutable int = 0
+    can Unsafe.SegmentMutation, Segment.Host:
+        alloc <- sceKernelAllocateDirectMemory(0i64, direct_size.i64(), heap_direct_size, 0x200000u64, 0, phys_addr.ref[mutable i64&].cast[void&?])
+    if alloc != ORBIS_OK:
+        can Unsafe.SegmentMutation, Segment.Host:
+            ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, GuestExec_RuntimeHleGuestReturnAddr(), 0x48454150.uintptr(), alloc.u64().uintptr(), direct_size.uintptr())
+        return
+    mapped_addr: mutable void&? = null
+    map_result: mutable int = 0
+    can Unsafe.SegmentMutation, Segment.Host:
+        map_result <- sceKernelMapDirectMemory(mapped_addr.ref[mutable void&?&], heap_direct_size, 0x33, 0, phys_addr, 0x200000u64)
+    can Unsafe.SegmentMutation, Segment.Host:
+        ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, GuestExec_RuntimeHleGuestReturnAddr(), 0x48454150.uintptr(), phys_addr.u64().uintptr(), mapped_addr.uintptr())
+        ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, GuestExec_RuntimeHleGuestReturnAddr(), 0x48454151.uintptr(), map_result.u64().uintptr(), direct_size.uintptr())
+
 def _sceKernelRtldSetApplicationHeapAPI(func: void&?) -> void can[Unsafe.SegmentMutation, Segment.Host]:
+    kernel_debug_heap_api_func <- func.uintptr()
+    kernel_debug_heap_api_return_addr <- GuestExec_RuntimeHleGuestReturnAddr()
     Linker_SetHeapAPI(func)
     GuestExec_RecordFirstBoundary(GUEST_EXEC_BOUNDARY_REASON_NATIVE_HLE)
     can Unsafe.SegmentMutation, Segment.Host:
         GuestExec_RecordRuntimeHle("libkernel", "_sceKernelRtldSetApplicationHeapAPI", func.uintptr(), 0.uintptr(), 0.uintptr(), 0.uintptr())
     return
+
+def Kernel_DebugHeapApiFunc() -> uintptr:
+    return kernel_debug_heap_api_func
+
+def Kernel_DebugHeapApiReturnAddr() -> uintptr:
+    return kernel_debug_heap_api_return_addr
 
 def sceKernelBatchMap(entries: void&?, numEntries: int, numEntriesOut: void&?) -> int can[Unsafe.SegmentMutation, Segment.Host]:
     can Unsafe.SegmentMutation, Segment.Host:

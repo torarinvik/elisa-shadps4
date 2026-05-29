@@ -1398,6 +1398,15 @@ const GE_EV_STACK_DUMP: u32 = 123u32
 const GE_EV_WATCH_HIT: u32 = 124u32
 # Per-HLE-boundary guest rsp trace: (guest_rsp, guest_return_addr, hle_seq, 0).
 const GE_EV_HLE_RSP: u32 = 125u32
+const GE_EV_WRITE_BUFFER_META: u32 = 126u32
+const GE_EV_WRITE_BUFFER_CHUNK: u32 = 127u32
+const GE_EV_DEBUG_RAISE: u32 = 128u32
+const GE_EV_HLE_RING_SYMBOL: u32 = 129u32
+const GE_EV_HLE_RING_TARGET: u32 = 130u32
+const GE_EV_HLE_KNOWN_TARGET: u32 = 131u32
+const GE_EV_DEBUG_RAISE_STACK: u32 = 132u32
+const GE_EV_SIGNAL_CALLEE_SAVED: u32 = 133u32
+const GE_EV_SIGNAL_GPRS: u32 = 134u32
 const GE_EV_MUTEX_INIT: u32 = 1001u32
 
 const GE_LONGJMP_SOURCE_DEBUG_TRAP_ABORT: u32 = 1u32
@@ -1425,6 +1434,16 @@ global mutable ge_current_guest_pc: uintptr = 0.uintptr()
 global mutable ge_current_return_pc: uintptr = 0.uintptr()
 global mutable ge_current_guest_sp: uintptr = 0.uintptr()
 global mutable ge_current_segment_owner: u32 = GE_FS_OWNER_UNKNOWN
+global mutable ge_last_write_fd: int = -1
+global mutable ge_last_write_nbytes: u64 = 0u64
+global mutable ge_last_write_limit: usize = 0usize
+global mutable ge_last_write_hle_seq: u64 = 0u64
+global mutable ge_last_write_bytes: u8[128] = zeroed
+global mutable ge_write_stream_len: usize = 0usize
+global mutable ge_write_stream_bytes: u8[512] = zeroed
+global mutable ge_known_kernel_file_write_target: u64 = 0u64
+global mutable ge_known_posix_write_target: u64 = 0u64
+global mutable ge_known_sce_kernel_write_target: u64 = 0u64
 
 @reentrant_safe
 def ge_emergency_mark(kind: u32, a: uintptr, b: uintptr, c: uintptr, d: uintptr) -> void:
@@ -1451,6 +1470,121 @@ def ge_emergency_dump_raw() -> void:
         _ = ge_raw_fchmod(fd, GE_CREATE_MODE_0644)
         _ = ge_raw_write(fd, ge_emergency_events[0].ref[void&], GE_EMERGENCY_DUMP_BYTES)
         _ = ge_raw_close(fd)
+
+def ge_pack_bytes_u64(bytes: u8&, start: usize, limit: usize) -> u64:
+    value: mutable u64 = 0u64
+    j: mutable usize = 0usize
+    while j < 8usize:
+        idx: usize = start + j
+        if idx < limit:
+            value <- value | (bytes[idx].u64() << (j.u64() * 8u64))
+        j <- j + 1usize
+    return value
+
+def GuestExec_RecordWriteBuffer(fd: int, buf: void&?, nbytes: u64) -> void:
+    if buf == null or nbytes == 0u64:
+        return
+    limit: mutable usize = nbytes.usize()
+    if limit > 128usize:
+        limit <- 128usize
+    ge_last_write_fd <- fd
+    ge_last_write_nbytes <- nbytes
+    ge_last_write_limit <- limit
+    ge_last_write_hle_seq <- ge_runtime_hle_sequence
+    source: u8& = buf.cast[u8&]
+    copy_i: mutable usize = 0usize
+    while copy_i < limit:
+        ge_last_write_bytes[copy_i] <- source[copy_i]
+        copy_i <- copy_i + 1usize
+    if fd == 1 or fd == 2:
+        append_limit: mutable usize = limit
+        if append_limit > 512usize:
+            append_limit <- 512usize
+        if ge_write_stream_len + append_limit > 512usize:
+            drop: usize = ge_write_stream_len + append_limit - 512usize
+            keep: usize = ge_write_stream_len - drop
+            move_i: mutable usize = 0usize
+            while move_i < keep:
+                ge_write_stream_bytes[move_i] <- ge_write_stream_bytes[move_i + drop]
+                move_i <- move_i + 1usize
+            ge_write_stream_len <- keep
+        append_i: mutable usize = 0usize
+        while append_i < append_limit:
+            ge_write_stream_bytes[ge_write_stream_len + append_i] <- source[append_i]
+            append_i <- append_i + 1usize
+        ge_write_stream_len <- ge_write_stream_len + append_limit
+    ge_emergency_mark(GE_EV_WRITE_BUFFER_META, fd.u64().uintptr(), nbytes.uintptr(), limit.uintptr(), ge_runtime_hle_sequence.uintptr())
+    offset: mutable usize = 0usize
+    chunk_index: mutable u64 = 0u64
+    while offset < limit:
+        a: u64 = ge_pack_bytes_u64(source, offset, limit)
+        b: u64 = ge_pack_bytes_u64(source, offset + 8usize, limit)
+        c: u64 = ge_pack_bytes_u64(source, offset + 16usize, limit)
+        d: u64 = ge_pack_bytes_u64(source, offset + 24usize, limit)
+        ge_emergency_mark(GE_EV_WRITE_BUFFER_CHUNK, chunk_index.uintptr(), a.uintptr(), b.uintptr(), c.uintptr())
+        ge_emergency_mark(GE_EV_WRITE_BUFFER_CHUNK, (chunk_index | 0x80000000u64).uintptr(), d.uintptr(), 0.uintptr(), 0.uintptr())
+        offset <- offset + 32usize
+        chunk_index <- chunk_index + 1u64
+
+def GuestExec_ReemitLastWriteBuffer() -> void:
+    if ge_last_write_limit == 0usize:
+        return
+    ge_emergency_mark(GE_EV_WRITE_BUFFER_META, ge_last_write_fd.u64().uintptr(), ge_last_write_nbytes.uintptr(), ge_last_write_limit.uintptr(), ge_last_write_hle_seq.uintptr())
+    offset: mutable usize = 0usize
+    chunk_index: mutable u64 = 0u64
+    while offset < ge_last_write_limit:
+        a: u64 = ge_pack_bytes_u64(ge_last_write_bytes[0].ref[u8&], offset, ge_last_write_limit)
+        b: u64 = ge_pack_bytes_u64(ge_last_write_bytes[0].ref[u8&], offset + 8usize, ge_last_write_limit)
+        c: u64 = ge_pack_bytes_u64(ge_last_write_bytes[0].ref[u8&], offset + 16usize, ge_last_write_limit)
+        d: u64 = ge_pack_bytes_u64(ge_last_write_bytes[0].ref[u8&], offset + 24usize, ge_last_write_limit)
+        ge_emergency_mark(GE_EV_WRITE_BUFFER_CHUNK, chunk_index.uintptr(), a.uintptr(), b.uintptr(), c.uintptr())
+        ge_emergency_mark(GE_EV_WRITE_BUFFER_CHUNK, (chunk_index | 0x80000000u64).uintptr(), d.uintptr(), 0.uintptr(), 0.uintptr())
+        offset <- offset + 32usize
+        chunk_index <- chunk_index + 1u64
+
+def GuestExec_ReemitWriteStream() -> void:
+    if ge_write_stream_len == 0usize:
+        return
+    ge_emergency_mark(GE_EV_WRITE_BUFFER_META, 0xffffu64.uintptr(), ge_write_stream_len.u64().uintptr(), ge_write_stream_len.uintptr(), ge_runtime_hle_sequence.uintptr())
+    offset: mutable usize = 0usize
+    chunk_index: mutable u64 = 0u64
+    while offset < ge_write_stream_len:
+        a: u64 = ge_pack_bytes_u64(ge_write_stream_bytes[0].ref[u8&], offset, ge_write_stream_len)
+        b: u64 = ge_pack_bytes_u64(ge_write_stream_bytes[0].ref[u8&], offset + 8usize, ge_write_stream_len)
+        c: u64 = ge_pack_bytes_u64(ge_write_stream_bytes[0].ref[u8&], offset + 16usize, ge_write_stream_len)
+        d: u64 = ge_pack_bytes_u64(ge_write_stream_bytes[0].ref[u8&], offset + 24usize, ge_write_stream_len)
+        ge_emergency_mark(GE_EV_WRITE_BUFFER_CHUNK, chunk_index.uintptr(), a.uintptr(), b.uintptr(), c.uintptr())
+        ge_emergency_mark(GE_EV_WRITE_BUFFER_CHUNK, (chunk_index | 0x80000000u64).uintptr(), d.uintptr(), 0.uintptr(), 0.uintptr())
+        offset <- offset + 32usize
+        chunk_index <- chunk_index + 1u64
+
+def GuestExec_RecordDebugRaise(err_code: int, unk: i64) -> void:
+    GuestExec_ReemitWriteStream()
+    GuestExec_ReemitLastWriteBuffer()
+    ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 1.uintptr(), ge_known_kernel_file_write_target.uintptr(), ge_known_posix_write_target.uintptr(), ge_known_sce_kernel_write_target.uintptr())
+    sp: uintptr = !ge_runtime_hle_guest_rsp
+    ge_emergency_mark(GE_EV_DEBUG_RAISE_STACK, sp, ge_read_native_word(sp), ge_read_native_word(sp + 8.uintptr()), ge_read_native_word(sp + 16.uintptr()))
+    ge_emergency_mark(GE_EV_DEBUG_RAISE_STACK, sp + 24.uintptr(), ge_read_native_word(sp + 24.uintptr()), ge_read_native_word(sp + 32.uintptr()), ge_read_native_word(sp + 40.uintptr()))
+    ge_emergency_mark(GE_EV_DEBUG_RAISE, err_code.u64().uintptr(), unk.u64().uintptr(), !ge_runtime_hle_guest_return_addr, !ge_runtime_hle_guest_rsp)
+
+def ge_symbol_is_kernel_write(symbol: static u8&?) -> bool:
+    if symbol == null:
+        return false
+    s: static u8& = symbol.ref[static u8&]
+    return s[0] == 0x46u8 and s[1] == 0x78u8 and s[2] == 0x56u8 and s[3] == 0x5au8 and s[4] == 0x71u8 and s[5] == 0x42u8 and s[6] == 0x41u8 and s[7] == 0x41u8 and s[8] == 0x37u8 and s[9] == 0x6bu8 and s[10] == 0x73u8 and s[11] == 0u8
+
+def GuestExec_RecordHleRingSymbol(seq: u64, symbol: static u8&?) -> void:
+    if symbol == null:
+        ge_emergency_mark(GE_EV_HLE_RING_SYMBOL, seq.uintptr(), 0.uintptr(), 0.uintptr(), 0.uintptr())
+        return
+    text: u8& = symbol.ref[u8&]
+    a: u64 = ge_pack_bytes_u64(text, 0usize, 24usize)
+    b: u64 = ge_pack_bytes_u64(text, 8usize, 24usize)
+    c: u64 = ge_pack_bytes_u64(text, 16usize, 24usize)
+    ge_emergency_mark(GE_EV_HLE_RING_SYMBOL, seq.uintptr(), a.uintptr(), b.uintptr(), c.uintptr())
+
+def GuestExec_RecordHleRingTarget(seq: u64, target: u64) -> void:
+    ge_emergency_mark(GE_EV_HLE_RING_TARGET, seq.uintptr(), target.uintptr(), 0.uintptr(), 0.uintptr())
 
 # macOS struct sigaction (16 bytes): handler ptr, sa_mask (u32), sa_flags (int).
 # Linux's is larger/different — modeled for the validated macOS path; Linux is
@@ -1593,6 +1727,7 @@ def ge_extract_bp(uctx: void&?) -> GuestFramePointer:
         return 0.uintptr().cast[GuestFramePointer]
 
 # reg index: 0=rdi 1=rsi 2=rax 3=rbx 4=rdx 5=rcx 6=r8 7=r9
+#            8=r12 9=r13 10=r14 11=r15
 @reentrant_safe
 def ge_extract_greg(uctx: void&?, reg: int) -> uintptr:
     static if ARCH_X86_64 and PLATFORM_APPLE:
@@ -1614,6 +1749,14 @@ def ge_extract_greg(uctx: void&?, reg: int) -> uintptr:
             off <- 64u64
         elif reg == 7:
             off <- 72u64
+        elif reg == 8:
+            off <- 96u64
+        elif reg == 9:
+            off <- 104u64
+        elif reg == 10:
+            off <- 112u64
+        elif reg == 11:
+            off <- 120u64
         else:
             return 0.uintptr()
         return ge_read_context_word(ss + off.uintptr())
@@ -1635,6 +1778,14 @@ def ge_extract_greg(uctx: void&?, reg: int) -> uintptr:
             gi <- 0u64
         elif reg == 7:
             gi <- 1u64
+        elif reg == 8:
+            gi <- 4u64
+        elif reg == 9:
+            gi <- 5u64
+        elif reg == 10:
+            gi <- 6u64
+        elif reg == 11:
+            gi <- 7u64
         else:
             return 0.uintptr()
         return ge_uctx_word(uctx, 40u64 + gi * 8u64)
@@ -1931,6 +2082,7 @@ def ge_pc_sampler_alarm_handler(sig: int, info: void&?, uctx: void&?) -> void:
 global mutable ge_pw_page_base: uintptr = 0.uintptr()
 global mutable ge_pw_watch_addr: uintptr = 0.uintptr()
 global mutable ge_pw_armed: bool = false
+global mutable ge_pw_arm_prot: int = 1  # PROT_READ default (traps writes); 0=PROT_NONE traps reads too
 global mutable ge_pw_stepping: bool = false
 global mutable ge_pw_pending_value_record: bool = false
 global mutable ge_pw_hit_count: u64 = 0u64
@@ -1945,7 +2097,9 @@ def GuestExec_SetPageWatch(addr: uintptr) -> void can[Unsafe.SegmentMutation, Se
         prot_before: u32 = ge_native_prot_at(ge_pw_watch_addr, 8u64)
         if prot_before == 0xffffffffu32:
             ge_raw_breadcrumb("GE:PW_ARM_UNMAPPED\n", 19usize)
-        mp: int = ge_mprotect(ge_pw_page_base, 0x1000usize, 1)  # PROT_READ only
+        if getenv("ELISA_PAGEWATCH_PROT_NONE".cast[u8&]) != null:
+            ge_pw_arm_prot <- 0  # PROT_NONE: trap reads AND writes to the page
+        mp: int = ge_mprotect(ge_pw_page_base, 0x1000usize, ge_pw_arm_prot)
         if mp == 0:
             ge_raw_breadcrumb("GE:PW_ARM_OK\n", 13usize)
         else:
@@ -1981,7 +2135,7 @@ def ge_pw_handle(sig: int, info: void&?, uctx: void&?) -> bool can[Unsafe.Segmen
         if ge_pw_pending_value_record:
             ge_emergency_mark(GE_EV_WATCH_HIT, ge_pw_watch_addr, ge_read_context_word(ge_pw_watch_addr), ge_pw_hit_count.uintptr(), 0xA10E.uintptr())
             ge_pw_pending_value_record <- false
-        _ = ge_mprotect(ge_pw_page_base, 0x1000usize, 1)
+        _ = ge_mprotect(ge_pw_page_base, 0x1000usize, ge_pw_arm_prot)
         ge_pw_set_tf(uctx, false)
         ge_pw_stepping <- false
         return true
@@ -2050,6 +2204,8 @@ def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
     ge_last_guest_rcx <- ge_extract_greg(uctx, 5)
     ge_last_guest_r8 <- ge_extract_greg(uctx, 6)
     ge_last_guest_r9 <- ge_extract_greg(uctx, 7)
+    ge_emergency_mark(GE_EV_SIGNAL_GPRS, ge_last_guest_rax, ge_last_guest_rbx, ge_last_guest_rcx, ge_last_guest_rdx)
+    ge_emergency_mark(GE_EV_SIGNAL_CALLEE_SAVED, ge_extract_greg(uctx, 8), ge_extract_greg(uctx, 9), ge_extract_greg(uctx, 10), ge_extract_greg(uctx, 11))
     ge_signal_sp_valid <- 1 if !ge_signal_mctx != 0.uintptr() else 0
     ge_signal_bp_valid <- ge_signal_sp_valid
     ge_signal_rdi_valid <- ge_signal_sp_valid
@@ -2713,7 +2869,7 @@ def ge_reset_crash_state() -> void:
     ge_runtime_hle_caller_frame_word2 <- 0.uintptr()
     ge_runtime_hle_caller_frame_word3 <- 0.uintptr()
     hle_oracle_reset_i: mutable usize = 0usize
-    while hle_oracle_reset_i < 64usize:
+    while hle_oracle_reset_i < 128usize:
         ge_hle_oracle_modules[hle_oracle_reset_i] <- null
         ge_hle_oracle_symbols[hle_oracle_reset_i] <- null
         ge_hle_oracle_returns[hle_oracle_reset_i] <- 0.uintptr()
@@ -3821,15 +3977,15 @@ global mutable ge_runtime_hle_caller_frame_word0: uintptr = 0.uintptr()
 global mutable ge_runtime_hle_caller_frame_word1: uintptr = 0.uintptr()
 global mutable ge_runtime_hle_caller_frame_word2: uintptr = 0.uintptr()
 global mutable ge_runtime_hle_caller_frame_word3: uintptr = 0.uintptr()
-global mutable ge_hle_oracle_modules: static u8&?[64] = zeroed
-global mutable ge_hle_oracle_symbols: static u8&?[64] = zeroed
+global mutable ge_hle_oracle_modules: static u8&?[128] = zeroed
+global mutable ge_hle_oracle_symbols: static u8&?[128] = zeroed
 # Guest return address after the HLE call. Kept for shadPS4 oracle parity.
-global mutable ge_hle_oracle_returns: uintptr[64] = zeroed
+global mutable ge_hle_oracle_returns: uintptr[128] = zeroed
 # Actual value returned by the HLE implementation to guest code.
-global mutable ge_hle_oracle_results: uintptr[64] = zeroed
-global mutable ge_hle_oracle_rdi: uintptr[64] = zeroed
-global mutable ge_hle_oracle_rsi: uintptr[64] = zeroed
-global mutable ge_hle_oracle_rdx: uintptr[64] = zeroed
+global mutable ge_hle_oracle_results: uintptr[128] = zeroed
+global mutable ge_hle_oracle_rdi: uintptr[128] = zeroed
+global mutable ge_hle_oracle_rsi: uintptr[128] = zeroed
+global mutable ge_hle_oracle_rdx: uintptr[128] = zeroed
 global mutable ge_failed_relocation_count: u64 = 0u64
 
 @fixed_layout
@@ -4009,11 +4165,9 @@ def c_GuestExec_RecordRuntimeHle(module: static u8&?, symbol: static u8&?, arg0:
     ge_current_guest_sp <- !ge_runtime_hle_guest_rsp
     ge_emergency_mark(GE_EV_HLE_RSP, !ge_runtime_hle_guest_rsp, !ge_runtime_hle_guest_return_addr, ge_runtime_hle_sequence.uintptr(), 0.uintptr())
     ge_emergency_mark(GE_EV_HLE_ENTER, ge_current_hle_id.u64().uintptr(), arg0, arg1, arg2)
-    ge_raw_breadcrumb("GE:HLE_REC_ENTER\n", 17usize)
     ge_shadow_fs_transition("runtime-hle-thunk-transition-to-host", GE_FS_OWNER_HOST)
     can Unsafe.SegmentMutation, Segment.Host:
         ge_observe_fs_owner("runtime-hle-entry", false)
-    ge_raw_breadcrumb("GE:HLE_REC_OBSERVED\n", 20usize)
     ge_runtime_hle_sequence <- ge_runtime_hle_sequence + 1u64
     ge_runtime_hle_module <- module if module != null else ""
     ge_runtime_hle_symbol <- symbol if symbol != null else ""
@@ -4021,7 +4175,9 @@ def c_GuestExec_RecordRuntimeHle(module: static u8&?, symbol: static u8&?, arg0:
     ge_runtime_hle_arg1 <- arg1
     ge_runtime_hle_arg2 <- arg2
     ge_runtime_hle_ret <- ret
-    hle_oracle_index: usize = ((ge_runtime_hle_sequence - 1u64) & 63u64).usize()
+    if ge_symbol_is_kernel_write(symbol):
+        GuestExec_RecordWriteBuffer(arg0.u64().int(), arg1.cast[void&?], arg2.u64())
+    hle_oracle_index: usize = ((ge_runtime_hle_sequence - 1u64) & 127u64).usize()
     ge_hle_oracle_modules[hle_oracle_index] <- ge_runtime_hle_module
     ge_hle_oracle_symbols[hle_oracle_index] <- ge_runtime_hle_symbol
     ge_hle_oracle_returns[hle_oracle_index] <- !ge_runtime_hle_guest_return_addr
@@ -4162,7 +4318,6 @@ def c_GuestExec_RecordRuntimeHle(module: static u8&?, symbol: static u8&?, arg0:
         fr.runtime_hle_caller_frame_word1 <- ge_runtime_hle_caller_frame_word1
         fr.runtime_hle_caller_frame_word2 <- ge_runtime_hle_caller_frame_word2
         fr.runtime_hle_caller_frame_word3 <- ge_runtime_hle_caller_frame_word3
-    ge_raw_breadcrumb("GE:HLE_REC_RETGUARD\n", 20usize)
     can Unsafe.SegmentMutation, Segment.Host:
         # Oracle parity slice: record the first boundary's continuation facts on
         # every run (independent of whether the boundary-guard referee is armed).
@@ -4170,7 +4325,6 @@ def c_GuestExec_RecordRuntimeHle(module: static u8&?, symbol: static u8&?, arg0:
         if not ge_debug_guard_guest_return_continuation(ge_runtime_hle_sequence):
             ge_raw_breadcrumb("GE:HLE_REC_RET_BAD\n", 19usize)
             return
-    ge_raw_breadcrumb("GE:HLE_REC_DONE\n", 16usize)
     ge_emergency_mark(GE_EV_HLE_RETURN_END, ge_current_hle_id.u64().uintptr(), ret, ge_current_return_pc, ge_current_guest_sp)
     ge_maybe_debug_trap_boundary_guard()
 
@@ -4359,44 +4513,44 @@ def c_GuestExec_RuntimeHleCallerFrameWord3() -> uintptr:
     return ge_runtime_hle_caller_frame_word3
 
 def c_GuestExec_HleOracleTraceCount() -> u64:
-    if ge_runtime_hle_sequence > 64u64:
-        return 64u64
+    if ge_runtime_hle_sequence > 128u64:
+        return 128u64
     return ge_runtime_hle_sequence
 
 def c_GuestExec_HleOracleTraceModule(index: u64) -> static u8&:
-    if index >= 64u64:
+    if index >= 128u64:
         return ""
     s: static u8&? = ge_hle_oracle_modules[index.usize()]
     return s if s != null else ""
 
 def c_GuestExec_HleOracleTraceSymbol(index: u64) -> static u8&:
-    if index >= 64u64:
+    if index >= 128u64:
         return ""
     s: static u8&? = ge_hle_oracle_symbols[index.usize()]
     return s if s != null else ""
 
 def c_GuestExec_HleOracleTraceReturn(index: u64) -> uintptr:
-    if index >= 64u64:
+    if index >= 128u64:
         return 0.uintptr()
     return ge_hle_oracle_returns[index.usize()]
 
 def c_GuestExec_HleOracleTraceResult(index: u64) -> uintptr:
-    if index >= 64u64:
+    if index >= 128u64:
         return 0.uintptr()
     return ge_hle_oracle_results[index.usize()]
 
 def c_GuestExec_HleOracleTraceRdi(index: u64) -> uintptr:
-    if index >= 64u64:
+    if index >= 128u64:
         return 0.uintptr()
     return ge_hle_oracle_rdi[index.usize()]
 
 def c_GuestExec_HleOracleTraceRsi(index: u64) -> uintptr:
-    if index >= 64u64:
+    if index >= 128u64:
         return 0.uintptr()
     return ge_hle_oracle_rsi[index.usize()]
 
 def c_GuestExec_HleOracleTraceRdx(index: u64) -> uintptr:
-    if index >= 64u64:
+    if index >= 128u64:
         return 0.uintptr()
     return ge_hle_oracle_rdx[index.usize()]
 
@@ -4567,6 +4721,9 @@ def GuestExec_SetProbeMode(enabled: bool) -> void:
 
 def GuestExec_SetMainStackTop(stack_top: VAddr) -> void:
     guest_exec_main_stack_top <- stack_top
+
+def GuestExec_MainStackTop() -> VAddr:
+    return guest_exec_main_stack_top
 
 def GuestExec_IsEnabled() -> bool:
     return guest_exec_enabled and (guest_exec_probe_mode or GuestExec_IsSupported())
@@ -5872,8 +6029,16 @@ def GuestExec_DumpHleCallRing() -> void can[Console.Format, Unsafe.SegmentMutati
     while k < count:
         seq: u64 = start + k
         sym: static u8&? = Linker_HleCallRingSymbolAt(seq)
+        target: u64 = Linker_HleCallRingTargetAt(seq)
+        return_pc: u64 = Linker_HleCallRingReturnAt(seq)
+        rdi: u64 = Linker_HleCallRingRdiAt(seq)
+        rsi: u64 = Linker_HleCallRingRsiAt(seq)
+        rdx: u64 = Linker_HleCallRingRdxAt(seq)
+        if k + 16u64 >= count:
+            GuestExec_RecordHleRingSymbol(seq, sym)
+            GuestExec_RecordHleRingTarget(seq, target)
         sym_text: static u8& = sym if sym != null else "(null)"
-        written: int = snprintf(line[0].ref[mutable u8&], 256usize, "CUSA07399_ARTIFACT hle_call seq=%llu symbol=%s", seq, sym_text) can Console.Format
+        written: int = snprintf(line[0].ref[mutable u8&], 256usize, "CUSA07399_ARTIFACT hle_call seq=%llu symbol=%s target=0x%llx return=0x%llx rdi=0x%llx rsi=0x%llx rdx=0x%llx", seq, sym_text, target, return_pc, rdi, rsi, rdx) can Console.Format
         can Unsafe.SegmentMutation, Segment.Host:
             GuestExec_DumpHleCallRingLine(line[0].ref[mutable u8&], 256usize, written)
         k <- k + 1u64

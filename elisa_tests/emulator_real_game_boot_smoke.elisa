@@ -403,8 +403,71 @@ def RealGameBoot_EmitAddressProbe(file: mutable IOFile&, linker: Linker&, label:
                 module_offset <- addr.u64() - mod.base_virtual_addr.u64()
             i <- i + 1
         line: mutable u8[512] = zeroed
-        written: int = snprintf(line[0].ref[mutable u8&], 512usize, "CUSA07399_ARTIFACT address_probe label=%s addr=%llu native_prot=%llu native_word0=%llu guest_module_hit=%llu guest_module=%s guest_base=%llu guest_offset=%llu", label, addr.u64(), GuestExec_AddressNativeProt(addr).u64(), GuestExec_ReadNativeU64(addr).u64(), module_hit, module_name, module_base, module_offset)
+        written: int = snprintf(line[0].ref[mutable u8&], 512usize, "CUSA07399_ARTIFACT address_probe label=%s addr=%llu native_prot=%llu native_word0=%llu context_word0=%llu guest_module_hit=%llu guest_module=%s guest_base=%llu guest_offset=%llu", label, addr.u64(), GuestExec_AddressNativeProt(addr).u64(), GuestExec_ReadNativeU64(addr).u64(), GuestExec_ReadContextU64(addr).u64(), module_hit, module_name, module_base, module_offset)
         RealGameBoot_WriteLine(file, line[0].ref[mutable u8&], written)
+
+def RealGameBoot_EmitNearestSymbolProbe(file: mutable IOFile&, linker: Linker&, label: static u8&, addr: VAddr) -> void:
+    can Memory.Allocate, Console.Format:
+        best_hit: mutable u64 = 0u64
+        best_module: mutable static u8& = ""
+        best_name: mutable static u8& = ""
+        best_nid: mutable static u8& = ""
+        best_addr: mutable u64 = 0u64
+        best_size: mutable u64 = 0u64
+        best_type: mutable u64 = 0u64
+        best_bind: mutable u64 = 0u64
+        best_delta: mutable u64 = 0xffffffffffffffffu64
+        mi: mutable usize = 0usize
+        while mi < linker.modules.count:
+            module: Module = linker.modules[mi]
+            if module.dynamic_info.symbol_table_offset != 0u64 and module.dynamic_info.symbol_table_total_size != 0u64:
+                entry_size: mutable u64 = module.dynamic_info.symbol_table_entries_size
+                if entry_size == 0u64:
+                    entry_size <- size_of(elf_symbol).u64()
+                sym_end: u64 = module.dynamic_info.symbol_table_offset + module.dynamic_info.symbol_table_total_size
+                sym_offset: mutable u64 = module.dynamic_info.symbol_table_offset
+                while sym_offset + size_of(elf_symbol).u64() <= sym_end and sym_offset + size_of(elf_symbol).u64() <= module.dynamic_data.count.u64():
+                    sym: elf_symbol = Module_ReadSymbolAt(module, sym_offset.usize())
+                    if sym.st_shndx != ELF_SHN_UNDEF and sym.st_value != 0u64 and sym.st_name != 0u32:
+                        sym_addr: u64 = module.base_virtual_addr.u64() + sym.st_value
+                        if sym_addr <= addr.u64():
+                            delta: u64 = addr.u64() - sym_addr
+                            if delta < best_delta:
+                                symbol_name: mutable static u8& = ""
+                                symbol_nid: mutable static u8& = ""
+                                _ = Module_SymbolNameAndNidAt(module, (module.dynamic_info.str_table_offset + sym.st_name.u64()).u32(), symbol_name.ref[mutable static u8&], symbol_nid.ref[mutable static u8&])
+                                best_hit <- 1u64
+                                best_module <- module.name
+                                best_name <- symbol_name
+                                best_nid <- symbol_nid
+                                best_addr <- sym_addr
+                                best_size <- sym.st_size
+                                best_type <- ElfSymbol_GetType(sym).u64()
+                                best_bind <- ElfSymbol_GetBind(sym).u64()
+                                best_delta <- delta
+                        
+                    sym_offset <- sym_offset + entry_size
+            mi <- mi + 1usize
+        line: mutable u8[768] = zeroed
+        written: int = snprintf(line[0].ref[mutable u8&], 768usize, "CUSA07399_ARTIFACT nearest_symbol label=%s addr=%llu hit=%llu module=%s symbol=%s nid=%s symbol_addr=%llu delta=%llu size=%llu type=%llu bind=%llu native_word0=%llu context_word0=%llu", label, addr.u64(), best_hit, best_module, best_name, best_nid, best_addr, best_delta, best_size, best_type, best_bind, GuestExec_ReadNativeU64(addr).u64(), GuestExec_ReadContextU64(addr).u64())
+        RealGameBoot_WriteLine(file, line[0].ref[mutable u8&], written)
+
+def RealGameBoot_EmitMainInitArrays(file: mutable IOFile&, linker: mutable Linker&) -> void:
+    if linker.modules.count == 0:
+        return
+    module: Module = linker.modules[0usize]
+    can Memory.Allocate, Console.Format:
+        line: mutable u8[512] = zeroed
+        written: mutable int = snprintf(line[0].ref[mutable u8&], 512usize, "CUSA07399_ARTIFACT main_init_arrays dt_init=%llu dt_fini=%llu preinit_va=%llu preinit_size=%llu init_va=%llu init_size=%llu fini_va=%llu fini_size=%llu", module.dynamic_info.init_virtual_addr, module.dynamic_info.fini_virtual_addr, module.dynamic_info.preinit_array_virtual_addr, module.dynamic_info.preinit_array_size, module.dynamic_info.init_array_virtual_addr, module.dynamic_info.init_array_size, module.dynamic_info.fini_array_virtual_addr, module.dynamic_info.fini_array_size)
+        RealGameBoot_WriteLine(file, line[0].ref[mutable u8&], written)
+        init_base: VAddr = module.base_virtual_addr + module.dynamic_info.init_array_virtual_addr.uintptr()
+        init_count: u64 = module.dynamic_info.init_array_size / 8u64
+        i: mutable u64 = 0u64
+        while i < init_count and i < 64u64:
+            entry: u64 = MemoryManager_ReadU64(Memory_Instance(), init_base + (i * 8u64).uintptr())
+            written <- snprintf(line[0].ref[mutable u8&], 512usize, "CUSA07399_ARTIFACT main_init_array_entry index=%llu addr=%llu", i, entry)
+            RealGameBoot_WriteLine(file, line[0].ref[mutable u8&], written)
+            i <- i + 1u64
 
 def RealGameBoot_NativeByteAt(addr: VAddr) -> u8:
     return (GuestExec_ReadNativeU64(addr).u64() & 0xffu64).u8()
@@ -1087,6 +1150,83 @@ def RealGameBoot_EmitUnalignedPointerReferences(file: mutable IOFile&, linker: L
         written_summary: int = snprintf(summary[0].ref[mutable u8&], 384usize, "CUSA07399_ARTIFACT unaligned_pointer_ref_summary label=%s target=%llu total=%llu emitted=%llu", label, target.u64(), total, emitted)
         RealGameBoot_WriteLine(file, summary[0].ref[mutable u8&], written_summary)
 
+def RealGameBoot_EmitRipRelativeRefs(file: mutable IOFile&, linker: Linker&, label: static u8&, target: VAddr) -> void:
+    if target == 0.uintptr():
+        return
+    can Memory.Allocate, Console.Format:
+        emitted: mutable u64 = 0u64
+        total: mutable u64 = 0u64
+        mi: mutable usize = 0usize
+        while mi < linker.modules.count:
+            module: Module = linker.modules[mi]
+            start: VAddr = module.first_executable_segment_addr
+            size: u64 = module.first_executable_segment_size
+            if start != 0.uintptr() and size > 4u64:
+                pos: mutable VAddr = start
+                end: VAddr = start + size.uintptr() - 4.uintptr()
+                trusted Unsafe.AssumeProgress:
+                    while pos < end:
+                        raw: u32 = RealGameBoot_ReadGuestDisp32At(pos)
+                        candidate: VAddr = RealGameBoot_GuestRipRelativeSlot(pos + 4.uintptr(), raw)
+                        if candidate == target:
+                            total <- total + 1u64
+                            if emitted < 24u64:
+                                line: mutable u8[768] = zeroed
+                                prev8: mutable u64 = 0u64
+                                if pos.u64() >= 8u64:
+                                    prev8 <- GuestExec_ReadNativeU64(pos - 8.uintptr()).u64()
+                                written: int = snprintf(line[0].ref[mutable u8&], 768usize, "CUSA07399_ARTIFACT riprel_ref label=%s index=%llu module=%s disp_addr=%llu next_ip=%llu target=%llu module_offset=%llu prev8=%llu next8=%llu", label, emitted, module.file, pos.u64(), (pos + 4.uintptr()).u64(), target.u64(), pos.u64() - module.base_virtual_addr.u64(), prev8, GuestExec_ReadNativeU64(pos + 4.uintptr()).u64())
+                                RealGameBoot_WriteLine(file, line[0].ref[mutable u8&], written)
+                                if pos.u64() >= 16u64:
+                                    RealGameBoot_EmitByteWindow(file, "riprel_ref_before16", pos - 16.uintptr())
+                                RealGameBoot_EmitByteWindow(file, "riprel_ref_at", pos)
+                                emitted <- emitted + 1u64
+                        pos <- pos + 1.uintptr()
+            mi <- mi + 1usize
+        summary: mutable u8[384] = zeroed
+        written_summary: int = snprintf(summary[0].ref[mutable u8&], 384usize, "CUSA07399_ARTIFACT riprel_ref_summary label=%s target=%llu total=%llu emitted=%llu", label, target.u64(), total, emitted)
+        RealGameBoot_WriteLine(file, summary[0].ref[mutable u8&], written_summary)
+
+def RealGameBoot_EmitRelocationProbe(file: mutable IOFile&, linker: Linker&, label: static u8&, target: VAddr) -> void:
+    if target == 0.uintptr():
+        return
+    can Memory.Allocate, Console.Format:
+        emitted: mutable u64 = 0u64
+        mi: mutable usize = 0usize
+        while mi < linker.modules.count and emitted < 16u64:
+            module: Module = linker.modules[mi]
+            entry_size: u64 = Module_GetRelaEntrySize(module)
+            if entry_size == 0u64:
+                mi <- mi + 1usize
+                continue
+            table_pass: mutable u64 = 0u64
+            while table_pass < 2u64 and emitted < 16u64:
+                table_offset: u64 = module.dynamic_info.rela_table_offset if table_pass == 0u64 else module.dynamic_info.jmp_relocation_offset
+                table_size: u64 = module.dynamic_info.rela_table_total_size if table_pass == 0u64 else module.dynamic_info.jmp_relocation_total_size
+                if table_offset != 0u64 and table_size >= entry_size:
+                    count: usize = (table_size / entry_size).usize()
+                    i: mutable usize = 0usize
+                    while i < count and emitted < 16u64:
+                        offset: u64 = table_offset + i.u64() * entry_size
+                        if offset + size_of(elf_relocation).u64() <= module.dynamic_data.count.u64():
+                            rel: elf_relocation = Module_ReadRelocationAt(module, offset.usize())
+                            rel_addr: VAddr = module.base_virtual_addr + rel.rel_offset.uintptr()
+                            if rel_addr == target:
+                                rel_type: u32 = (rel.rel_info & 0xffffffff.u64()).u32()
+                                symbol_index: u32 = (rel.rel_info >> 32.u64()).u32()
+                                symbol_name: static u8& = Module_GetSymbolNameByIndex(module.ref[mutable Module&], symbol_index)
+                                line: mutable u8[768] = zeroed
+                                written: int = snprintf(line[0].ref[mutable u8&], 768usize, "CUSA07399_ARTIFACT relocation_probe label=%s index=%llu module=%s table=%llu rel_index=%llu addr=%llu type=%llu symbol_index=%llu symbol=%s addend=%lld word=%llu", label, emitted, module.file, table_pass, i.u64(), rel_addr.u64(), rel_type.u64(), symbol_index.u64(), symbol_name, rel.rel_addend, GuestExec_ReadNativeU64(rel_addr).u64())
+                                RealGameBoot_WriteLine(file, line[0].ref[mutable u8&], written)
+                                emitted <- emitted + 1u64
+                        i <- i + 1usize
+                table_pass <- table_pass + 1u64
+            mi <- mi + 1usize
+        if emitted == 0u64:
+            line2: mutable u8[256] = zeroed
+            written2: int = snprintf(line2[0].ref[mutable u8&], 256usize, "CUSA07399_ARTIFACT relocation_probe label=%s index=none target=%llu", label, target.u64())
+            RealGameBoot_WriteLine(file, line2[0].ref[mutable u8&], written2)
+
 def RealGameBoot_EmitThunkProbe(file: mutable IOFile&, linker: Linker&, label: static u8&, addr: VAddr) -> void:
     can Memory.Allocate, Console.Format:
         thunk_base: u64 = Linker_FindNativeHleBoundaryThunkBase(addr.u64())
@@ -1185,7 +1325,13 @@ def RealGameBoot_EmitArtifacts(linker: Linker&, guarded_status: s32) -> void:
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "proc_param_addr", proc_param_addr.u64())
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "proc_param_size", MemoryManager_ReadU64(Memory_Instance(), proc_param_addr))
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "proc_param_sdk_version", MemoryManager_ReadU64(Memory_Instance(), proc_param_addr + 16.uintptr()))
-        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "proc_param_libc_param", MemoryManager_ReadU64(Memory_Instance(), proc_param_addr + 56.uintptr()))
+        libc_param_addr: u64 = MemoryManager_ReadU64(Memory_Instance(), proc_param_addr + 56.uintptr())
+        RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "proc_param_libc_param", libc_param_addr)
+        if libc_param_addr != 0u64:
+            word_i: mutable u64 = 0u64
+            while word_i < 16u64:
+                RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "libc_param_word", MemoryManager_ReadU64(Memory_Instance(), libc_param_addr.uintptr() + (word_i * 8u64).uintptr()))
+                word_i <- word_i + 1u64
         proc_param_mem_param: u64 = MemoryManager_ReadU64(Memory_Instance(), proc_param_addr + 64.uintptr())
         RealGameBoot_EmitArtifactKV(file.ref[mutable IOFile&], "proc_param_mem_param", proc_param_mem_param)
         if proc_param_mem_param != 0u64:
@@ -1731,7 +1877,7 @@ def emulator_real_game_boot_smoke_probes_native_guest_exec_handoff() -> void:
         arena: Arena = zeroed
         result: mutable int = -1
         in arena:
-            args: mutable darray[static u8&] = ["shadps4", "--native-guest-exec-probe", REAL_GAME_BOOT_ROOT, "--", "-RealBootSmoke"]
+            args: mutable darray[static u8&] = ["shadps4", "--native-guest-exec-probe", REAL_GAME_BOOT_ROOT]
             can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
                 result <- Main_Run(args)
         RealGameBoot_Check(result == 0, "expected native guest exec probe launch success")
@@ -1788,7 +1934,7 @@ def RealGameBoot_DumpGuestCode(start: u64, words: u64) -> void:
         while i < words:
             addr: u64 = start + i * 8u64
             line: mutable u8[64] = zeroed
-            written: int = snprintf(line[0].ref[mutable u8&], 64usize, "%llx %llx", addr, GuestExec_ReadNativeU64(addr.uintptr()).u64())
+            written: int = snprintf(line[0].ref[mutable u8&], 96usize, "%llx %llx %llx", addr, GuestExec_ReadNativeU64(addr.uintptr()).u64(), GuestExec_ReadContextU64(addr.uintptr()).u64())
             RealGameBoot_WriteLine(file.ref[mutable IOFile&], line[0].ref[mutable u8&], written)
             i <- i + 1u64
         IOFile_Close(file.ref[mutable IOFile&])
@@ -1802,12 +1948,15 @@ def emulator_real_game_boot_smoke_guarded_game_entry_reports_host_status() -> vo
         GuestExec_SetEmergencyWatchdogFailfast(emergency_watchdog)
         ge_emergency_mark(GE_EV_MAIN_RUN_BEGIN, 1.uintptr(), 0.uintptr(), 0.uintptr(), 0.uintptr())
         if emergency_watchdog:
-            GuestExec_DebugArmEmergencyTimer(120000.u32())
+            setup_watchdog_ms: mutable u64 = RealGameBoot_GetEnvU64("ELISA_GUEST_EXEC_EMERGENCY_WATCHDOG_MS")
+            if setup_watchdog_ms == 0u64:
+                setup_watchdog_ms <- 120000u64
+            GuestExec_DebugArmEmergencyTimer(setup_watchdog_ms.u32())
 
         arena: Arena = zeroed
         result: mutable int = -1
         in arena:
-            args: mutable darray[static u8&] = ["shadps4", "--native-guest-exec-probe", REAL_GAME_BOOT_ROOT, "--", "-RealBootSmoke"]
+            args: mutable darray[static u8&] = ["shadps4", "--native-guest-exec-probe", REAL_GAME_BOOT_ROOT]
             can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
                 result <- Main_Run(args)
         if emergency_watchdog:
@@ -1843,6 +1992,58 @@ def emulator_real_game_boot_smoke_guarded_game_entry_reports_host_status() -> vo
         dump_code_addr: u64 = RealGameBoot_GetEnvU64("ELISA_DUMP_CODE_ADDR")
         if dump_code_addr != 0u64:
             RealGameBoot_DumpGuestCode(dump_code_addr, 96u64)
+        find_ref_addr: u64 = RealGameBoot_GetEnvU64("ELISA_FIND_REF_ADDR")
+        if find_ref_addr != 0u64:
+            ref_file: mutable IOFile = IOFile_opened("/tmp/elisa_find_refs.txt", FileAccessMode.Create, FileType.TextFile)
+            find_ref: VAddr = find_ref_addr.uintptr()
+            RealGameBoot_EmitAddressProbe(ref_file.ref[mutable IOFile&], linker, "find_ref_addr", find_ref)
+            RealGameBoot_EmitPointerReferences(ref_file.ref[mutable IOFile&], linker, "find_ref_addr", find_ref)
+            RealGameBoot_EmitUnalignedPointerReferences(ref_file.ref[mutable IOFile&], linker, "find_ref_addr", find_ref)
+            RealGameBoot_EmitRipRelativeRefs(ref_file.ref[mutable IOFile&], linker, "find_ref_addr", find_ref)
+            RealGameBoot_EmitDirectCallers(ref_file.ref[mutable IOFile&], linker, "find_ref_addr", find_ref)
+            RealGameBoot_EmitIndirectTransfersToValue(ref_file.ref[mutable IOFile&], linker, "find_ref_addr", find_ref)
+            RealGameBoot_EmitRelocationProbe(ref_file.ref[mutable IOFile&], linker, "find_ref_addr", find_ref)
+            _ = IOFile_Flush(ref_file)
+            IOFile_Close(ref_file)
+        call_init_addr: u64 = RealGameBoot_GetEnvU64("ELISA_CALL_GUEST_INIT_ADDR")
+        if call_init_addr != 0u64:
+            can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
+                Module_CallGuestInitArrayEntry(call_init_addr.uintptr())
+        proc_file: mutable IOFile = IOFile_opened("/tmp/elisa_procparam.txt", FileAccessMode.Create, FileType.TextFile)
+        proc_param_probe: VAddr = Linker_GetProcParam(linker)
+        RealGameBoot_EmitAddressProbe(proc_file.ref[mutable IOFile&], linker, "proc_param", proc_param_probe)
+        RealGameBoot_EmitMainInitArrays(proc_file.ref[mutable IOFile&], linker)
+        if proc_param_probe != 0.uintptr():
+            libc_param_probe: VAddr = MemoryManager_ReadU64(Memory_Instance(), proc_param_probe + 56.uintptr()).uintptr()
+            RealGameBoot_EmitAddressProbe(proc_file.ref[mutable IOFile&], linker, "libc_param", libc_param_probe)
+            word_i: mutable u64 = 0u64
+            while word_i < 16u64:
+                RealGameBoot_EmitArtifactKV(proc_file.ref[mutable IOFile&], "libc_param_word", MemoryManager_ReadU64(Memory_Instance(), libc_param_probe + (word_i * 8u64).uintptr()))
+                word_i <- word_i + 1u64
+        RealGameBoot_EmitResolvedImportProbe(proc_file.ref[mutable IOFile&], linker, "malloc", "gQX+4GDQjpM")
+        RealGameBoot_EmitResolvedImportProbe(proc_file.ref[mutable IOFile&], linker, "free", "tIhsqj0qsFE")
+        RealGameBoot_EmitResolvedImportProbe(proc_file.ref[mutable IOFile&], linker, "__cxa_guard_acquire", "3GPpjQdAMTw")
+        RealGameBoot_EmitResolvedImportProbe(proc_file.ref[mutable IOFile&], linker, "__cxa_guard_release", "9rAeANT2tyE")
+        RealGameBoot_EmitResolvedImportProbe(proc_file.ref[mutable IOFile&], linker, "__cxa_atexit", "tsvEmnenz48")
+        RealGameBoot_EmitResolvedImportProbe(proc_file.ref[mutable IOFile&], linker, "sceKernelGetDirectMemorySize", "pO96TwzOm5E")
+        RealGameBoot_EmitResolvedImportProbe(proc_file.ref[mutable IOFile&], linker, "sceKernelAllocateDirectMemory", "rTXw65xmLIA")
+        RealGameBoot_EmitResolvedImportProbe(proc_file.ref[mutable IOFile&], linker, "sceKernelMapDirectMemory", "L-Q3LEjIbgA")
+        RealGameBoot_EmitResolvedImportProbe(proc_file.ref[mutable IOFile&], linker, "sceKernelDirectMemoryQuery", "BHouLQzh0X0")
+        RealGameBoot_EmitAddressProbe(proc_file.ref[mutable IOFile&], linker, "crash_global_802d85190", 0x802d85190.uintptr())
+        RealGameBoot_EmitNearestSymbolProbe(proc_file.ref[mutable IOFile&], linker, "crash_global_802d85190", 0x802d85190.uintptr())
+        RealGameBoot_EmitAddressProbe(proc_file.ref[mutable IOFile&], linker, "neighbor_global_802d852c0", 0x802d852c0.uintptr())
+        RealGameBoot_EmitNearestSymbolProbe(proc_file.ref[mutable IOFile&], linker, "neighbor_global_802d852c0", 0x802d852c0.uintptr())
+        RealGameBoot_EmitAddressProbe(proc_file.ref[mutable IOFile&], linker, "suspect_initializer_800dcf7a0", 0x800dcf7a0.uintptr())
+        RealGameBoot_EmitNearestSymbolProbe(proc_file.ref[mutable IOFile&], linker, "suspect_initializer_800dcf7a0", 0x800dcf7a0.uintptr())
+        RealGameBoot_EmitAddressProbe(proc_file.ref[mutable IOFile&], linker, "crash_object_vtable_8022ff800", 0x8022ff800.uintptr())
+        RealGameBoot_EmitAddressProbe(proc_file.ref[mutable IOFile&], linker, "crash_object_vslot_c0_8022ff8c0", 0x8022ff8c0.uintptr())
+        RealGameBoot_EmitNearestSymbolProbe(proc_file.ref[mutable IOFile&], linker, "crash_object_vslot_c0_target", GuestExec_ReadNativeU64(0x8022ff8c0.uintptr()).uintptr())
+        RealGameBoot_EmitArtifactKV(proc_file.ref[mutable IOFile&], "ptr_HLE_sceKernelGetDirectMemorySize", HLE_sceKernelGetDirectMemorySize.uintptr().u64())
+        RealGameBoot_EmitArtifactKV(proc_file.ref[mutable IOFile&], "ptr_HLE_sceKernelAllocateDirectMemory", HLE_sceKernelAllocateDirectMemory.uintptr().u64())
+        RealGameBoot_EmitArtifactKV(proc_file.ref[mutable IOFile&], "ptr_HLE_sceKernelMapDirectMemory", HLE_sceKernelMapDirectMemory.uintptr().u64())
+        RealGameBoot_EmitArtifactKV(proc_file.ref[mutable IOFile&], "ptr_HLE_sceKernelDirectMemoryQuery", HLE_sceKernelDirectMemoryQuery.uintptr().u64())
+        _ = IOFile_Flush(proc_file)
+        IOFile_Close(proc_file)
         watch_addr: u64 = RealGameBoot_GetEnvU64("ELISA_WATCH_ADDR")
         if watch_addr != 0u64:
             GuestExec_SetValueWatch(watch_addr.uintptr(), RealGameBoot_GetEnvU64("ELISA_WATCH_VALUE"))
@@ -1865,6 +2066,12 @@ def emulator_real_game_boot_smoke_guarded_game_entry_reports_host_status() -> vo
             ge_raw_breadcrumb("GE:TEST_AFTER_GUARD\n", 20usize)
             can Console.Format, Unsafe.SegmentMutation, Segment.Host:
                 GuestExec_DumpHleCallRing()
+            heap_api: uintptr = Linker_GetHeapAPI()
+            ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, heap_api, GuestExec_ReadNativeU64(heap_api), GuestExec_ReadNativeU64(heap_api + 8.uintptr()), GuestExec_ReadNativeU64(heap_api + 16.uintptr()))
+            ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, Kernel_DebugHeapApiFunc(), Kernel_DebugHeapApiReturnAddr(), Linker_GetHeapAPI(), GuestExec_ReadNativeU64(Linker_GetHeapAPI()))
+            ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d4441.uintptr(), Kernel_DebugLastDirectAllocResult().u64().uintptr(), Kernel_DebugLastDirectAllocPhys().u64().uintptr(), Kernel_DebugLastDirectAllocLen().uintptr())
+            ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d444d.uintptr(), Kernel_DebugLastDirectMapResult().u64().uintptr(), Kernel_DebugLastDirectMapPhys().u64().uintptr(), Kernel_DebugLastDirectMapLen().uintptr())
+            ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d444e.uintptr(), Kernel_DebugLastDirectMapAddr(), 0.uintptr(), 0.uintptr())
             ge_emergency_mark(GE_EV_TEST_AFTER_GUARD, status.u64().uintptr(), GuestExec_LastSignal().u64().uintptr(), GuestExec_FsStateShadowOwner().u64().uintptr(), GuestExec_LastStatus().u64().uintptr())
             ge_emergency_dump_raw()
         else:

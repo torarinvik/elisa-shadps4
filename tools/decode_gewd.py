@@ -84,8 +84,78 @@ EVENT_NAMES = {
     123: "STACK_DUMP",
     124: "WATCH_HIT",
     125: "HLE_RSP",
+    126: "WRITE_BUFFER_META",
+    127: "WRITE_BUFFER_CHUNK",
+    128: "DEBUG_RAISE",
+    129: "HLE_RING_SYMBOL",
+    130: "HLE_RING_TARGET",
+    131: "HLE_KNOWN_TARGET",
+    132: "DEBUG_RAISE_STACK",
+    133: "SIGNAL_CALLEE_SAVED",
+    134: "SIGNAL_GPRS",
     1001: "MUTEX_INIT",
 }
+
+def _u64_to_bytes(value: int) -> bytes:
+    return value.to_bytes(8, "little", signed=False)
+
+def _print_write_buffers(events: list[tuple[int, int, int, int, int, int, int, int]]) -> None:
+    current: dict[int, bytearray] | None = None
+    buffers: list[tuple[int, int, int, int, bytes]] = []
+    for seq, _slot, kind, _phase, a, b, c, d in events:
+        if kind == 126:
+            if current is not None:
+                buffers.append((
+                    current["seq"],
+                    current["fd"],
+                    current["nbytes"],
+                    current["limit"],
+                    bytes(current["data"])[: current["limit"]],
+                ))
+            current = {
+                "seq": seq,
+                "fd": a,
+                "nbytes": b,
+                "limit": c,
+                "data": bytearray(),
+            }
+        elif kind == 127 and current is not None:
+            marker = a
+            if marker & 0x80000000:
+                current["data"].extend(_u64_to_bytes(b))
+            else:
+                current["data"].extend(_u64_to_bytes(b))
+                current["data"].extend(_u64_to_bytes(c))
+                current["data"].extend(_u64_to_bytes(d))
+    if current is not None:
+        buffers.append((
+            current["seq"],
+            current["fd"],
+            current["nbytes"],
+            current["limit"],
+            bytes(current["data"])[: current["limit"]],
+        ))
+    for seq, fd, nbytes, limit, payload in buffers[-8:]:
+        text = payload.decode("utf-8", errors="replace")
+        print(f"WRITE_BUFFER seq={seq} fd={fd} nbytes={nbytes} captured={limit} text={text!r}")
+
+def _print_hle_ring_symbols(events: list[tuple[int, int, int, int, int, int, int, int]]) -> None:
+    symbols = {}
+    targets = {}
+    for _seq, _slot, kind, _phase, a, b, c, d in events:
+        if kind == 129:
+            payload = _u64_to_bytes(b) + _u64_to_bytes(c) + _u64_to_bytes(d)
+            text = payload.split(b"\0", 1)[0].decode("utf-8", errors="replace")
+            symbols[a] = text
+        elif kind == 130:
+            targets[a] = b
+    seqs = sorted(set(symbols) | set(targets))
+    if seqs:
+        print("HLE_RING_TAIL")
+        for seq in seqs[-24:]:
+            text = symbols.get(seq, "")
+            target = targets.get(seq, 0)
+            print(f"  seq={seq} symbol={text!r} target=0x{target:x}")
 
 
 def main() -> int:
@@ -103,6 +173,8 @@ def main() -> int:
     events.sort()
 
     print(f"events={len(events)} last_seq={events[-1][0] if events else 0}")
+    _print_write_buffers(events)
+    _print_hle_ring_symbols(events)
     for seq, slot, kind, phase, a, b, c, d in events[-args.tail:]:
         name = EVENT_NAMES.get(kind, str(kind))
         print(

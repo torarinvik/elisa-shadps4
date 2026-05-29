@@ -323,7 +323,15 @@ def Module_CallGuestInitEntry(entry_addr: VAddr, args: u64, argp: void&?, param:
             trusted Unsafe.PointerCast:
                 fn <- entry_addr.cast[void&?]
             if fn != null:
-                result <- TLS_CallGuestInitEntry(guard.ref[FsGuard&], fn, args, argp, param)
+                stack_top: VAddr = GuestExec_MainStackTop()
+                if stack_top != 0.uintptr():
+                    host_selector: HostFsSelector = TLS_CaptureHostFsSelector()
+                    guest_selector: mutable GuestFsSelector = (!host_selector).cast[GuestFsSelector]
+                    if !TLS_PrimaryTcbBase() != 0.uintptr():
+                        guest_selector <- TLS_PrepareTcbBase((!TLS_PrimaryTcbBase()).cast[void&?])
+                    result <- TLS_CallGuestInitEntryOnStackWithPreparedSegment(fn, args, argp, param, stack_top, guest_selector, host_selector)
+                else:
+                    result <- TLS_CallGuestInitEntry(guard.ref[FsGuard&], fn, args, argp, param)
             ge_emergency_mark(GE_EV_MODULE_INIT_ENTRY_AFTER_CALL, entry_addr, result.u64().uintptr(), argp.uintptr(), param.uintptr())
             TLS_RestoreHostSegment(move guard)
             ge_emergency_mark(GE_EV_MODULE_INIT_ENTRY_AFTER_RESTORE, entry_addr, result.u64().uintptr(), argp.uintptr(), param.uintptr())
@@ -341,7 +349,15 @@ def Module_CallGuestInitArrayEntry(entry_addr: VAddr) -> void can[Unsafe.Segment
             trusted Unsafe.PointerCast:
                 fn <- entry_addr.cast[void&?]
             if fn != null:
-                TLS_CallGuestInitArrayEntry(guard.ref[FsGuard&], fn)
+                stack_top: VAddr = GuestExec_MainStackTop()
+                if stack_top != 0.uintptr():
+                    host_selector: HostFsSelector = TLS_CaptureHostFsSelector()
+                    guest_selector: mutable GuestFsSelector = (!host_selector).cast[GuestFsSelector]
+                    if !TLS_PrimaryTcbBase() != 0.uintptr():
+                        guest_selector <- TLS_PrepareTcbBase((!TLS_PrimaryTcbBase()).cast[void&?])
+                    _ = TLS_CallGuestInitEntryOnStackWithPreparedSegment(fn, 0u64, null, null, stack_top, guest_selector, host_selector)
+                else:
+                    TLS_CallGuestInitArrayEntry(guard.ref[FsGuard&], fn)
             ge_emergency_mark(GE_EV_MODULE_INIT_ARRAY_AFTER_CALL, entry_addr, 0.uintptr(), 0.uintptr(), 0.uintptr())
             TLS_RestoreHostSegment(move guard)
             ge_emergency_mark(GE_EV_MODULE_INIT_ARRAY_AFTER_RESTORE, entry_addr, 0.uintptr(), 0.uintptr(), 0.uintptr())
@@ -359,8 +375,9 @@ def Module_CallGuestInitArray(self: Module&, array_virtual_addr: u64, array_size
     while i < count:
         entry_addr: VAddr = MemoryManager_ReadU64(memory, base + (i.u64() * 8u64).uintptr()).uintptr()
         Module_StartOracleRecord("init-array-entry", self.name, "DT_INIT_ARRAY" if array_virtual_addr == self.dynamic_info.init_array_virtual_addr else "DT_PREINIT_ARRAY", entry_addr, i.u64(), 0)
-        can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
-            Module_CallGuestInitArrayEntry(entry_addr)
+        if entry_addr != 0.uintptr() and entry_addr != (0.uintptr() - 1.uintptr()):
+            can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
+                Module_CallGuestInitArrayEntry(entry_addr)
         i <- i + 1usize
 
 def Module_Start(self: mutable Module&, args: u64, argp: void&?, param: void&?) -> s32 can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host]:
@@ -379,8 +396,8 @@ def Module_Start(self: mutable Module&, args: u64, argp: void&?, param: void&?) 
         self.last_start_entry_addr <- self.base_virtual_addr + self.dynamic_info.init_virtual_addr.uintptr()
     else:
         self.last_start_entry_addr <- Module_GetEntryAddress(self, 0.uintptr())
-    if Module_ShouldExecuteGuestStart() and self.dynamic_info.init_virtual_addr != 0:
-        Module_StartOracleRecord("dt-init", self.name, "", self.last_start_entry_addr, 0u64, 0)
+    if Module_ShouldExecuteGuestStart() and self.last_start_entry_addr != 0.uintptr():
+        Module_StartOracleRecord("dt-init" if self.dynamic_info.init_virtual_addr != 0 else "elf-entry-fallback", self.name, "", self.last_start_entry_addr, 0u64, 0)
         can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
             result <- Module_CallGuestInitEntry(self.last_start_entry_addr, args, argp, param)
     self.last_start_init_count <- 0
@@ -1104,6 +1121,20 @@ def Module_FindDefinedSymbolAddress(self: mutable Module&, name: static u8&, out
 def Module_FindDefinedQualifiedSymbolAddress(self: Module&, nid: static u8&, library_name: static u8&, library_version: u16, module_name: static u8&, symbol_type: u8, out_virtual_address: mutable u64&) -> bool:
     out_virtual_address <- 0
     if static_strlen(nid) == 0:
+        return false
+    exports_library: mutable bool = false
+    for li in 0..<self.dynamic_info.export_libs.count:
+        lib: LibraryInfo = self.dynamic_info.export_libs[li]
+        if streq(lib.name, library_name) == 1 and Module_DynamicLibraryVersion(lib.value) == library_version:
+            exports_library <- true
+    if not exports_library:
+        return false
+    exports_module: mutable bool = false
+    for mi in 0..<self.dynamic_info.export_modules.count:
+        mod: ModuleInfo = self.dynamic_info.export_modules[mi]
+        if streq(mod.name, module_name) == 1:
+            exports_module <- true
+    if not exports_module:
         return false
     if self.dynamic_info.symbol_table_offset == 0 or self.dynamic_info.symbol_table_total_size == 0:
         return false

@@ -78,6 +78,8 @@ struct PthreadAttr:
     cpuset: mutable void&?
 
 global mutable g_default_attr: PthreadAttr = PthreadAttr(2, PTHREAD_INHERIT_SCHED, ORBIS_KERNEL_PRIO_FIFO_DEFAULT, 0, PTHREAD_SCOPE_SYSTEM, null, 0x100000u64, 0u64, 0u64, null)
+global mutable g_pthread_attr_pool: PthreadAttr[128]
+global mutable g_pthread_attr_pool_used: bool[128]
 
 def posix_sched_get_priority_max(policy: int) -> int:
     if policy == 1 or policy == 3:
@@ -106,167 +108,232 @@ def threads_orbis_from_posix(ret: int) -> int:
         return 0
     return threads_posix_to_orbis_errno(ret)
 
-def threads_attr_reset(attr: mutable PthreadAttr&) -> void:
-    _ = attr
+def threads_attr_alloc_default() -> mutable PthreadAttr&?:
+    i: mutable usize = 0usize
+    while i < 128usize:
+        if not g_pthread_attr_pool_used[i]:
+            g_pthread_attr_pool_used[i] <- true
+            g_pthread_attr_pool[i] <- g_default_attr
+            return g_pthread_attr_pool[i].ref[mutable PthreadAttr&]
+        i <- i + 1usize
+    return null
 
-def posix_pthread_attr_init(attr: mutable PthreadAttr&?) -> int:
+def threads_attr_pool_release(attr: PthreadAttr&?) -> void:
+    if attr == null:
+        return
+    i: mutable usize = 0usize
+    while i < 128usize:
+        if g_pthread_attr_pool[i].ref[PthreadAttr&].uintptr() == attr.uintptr():
+            g_pthread_attr_pool_used[i] <- false
+            g_pthread_attr_pool[i] <- g_default_attr
+            return
+        i <- i + 1usize
+
+def threads_attr_read_slot(slot: void&?&?) -> mutable PthreadAttr&?:
+    if slot == null:
+        return null
+    raw: void&? = slot[0]
+    if raw == null:
+        return null
+    return raw.cast[mutable PthreadAttr&?]
+
+def threads_attr_write_slot(slot: mutable void&?&?, attr: PthreadAttr&?) -> bool:
+    if slot == null:
+        return false
+    if attr == null:
+        slot[0] <- null
+    else:
+        slot[0] <- attr.uintptr().cast[void&?]
+    return true
+
+def posix_pthread_attr_init(attr: mutable void&?&?) -> int:
     if attr == null:
         return POSIX_EINVAL
-    attr_ref: mutable PthreadAttr& = attr.cast[mutable PthreadAttr&]
-    threads_attr_reset(attr_ref)
-    return 0
-
-def posix_pthread_attr_destroy(attr: mutable PthreadAttr&?) -> int:
-    if attr == null:
-        return POSIX_EINVAL
-    attr_ref: mutable PthreadAttr& = attr.cast[mutable PthreadAttr&]
-    threads_attr_reset(attr_ref)
-    return 0
-
-def posix_pthread_attr_getdetachstate(attr: PthreadAttr&?, detachstate: mutable int&) -> int:
-    if attr == null:
-        return POSIX_EINVAL
-    detachstate <- 0
-    return 0
-
-def posix_pthread_attr_setdetachstate(attr: mutable PthreadAttr&?, detachstate: int) -> int:
-    if attr == null or (detachstate != 0 and detachstate != 1):
+    pattr: mutable PthreadAttr&? = threads_attr_alloc_default()
+    if pattr == null:
+        return POSIX_ENOMEM
+    if not threads_attr_write_slot(attr, pattr):
+        threads_attr_pool_release(pattr)
         return POSIX_EINVAL
     return 0
 
-def posix_pthread_attr_getguardsize(attr: PthreadAttr&?, guardsize: mutable u64&) -> int:
-    if attr == null:
+def posix_pthread_attr_destroy(attr: mutable void&?&?) -> int:
+    pattr: mutable PthreadAttr&? = threads_attr_read_slot(attr)
+    if attr == null or pattr == null:
         return POSIX_EINVAL
-    guardsize <- attr.guardsize_attr
+    threads_attr_pool_release(pattr)
+    _ = threads_attr_write_slot(attr, null)
     return 0
 
-def posix_pthread_attr_setguardsize(attr: mutable PthreadAttr&?, guardsize: u64) -> int:
-    if attr == null:
+def posix_pthread_attr_getdetachstate(attr: void&?&?, detachstate: mutable int&) -> int:
+    pattr: mutable PthreadAttr&? = threads_attr_read_slot(attr)
+    if pattr == null:
         return POSIX_EINVAL
-    attr.guardsize_attr <- guardsize
+    detachstate <- 1 if (pattr.flags & PTHREAD_DETACHED) != 0 else 0
     return 0
 
-def posix_pthread_attr_getinheritsched(attr: PthreadAttr&?, sched_inherit: mutable int&) -> int:
-    if attr == null:
+def posix_pthread_attr_setdetachstate(attr: mutable void&?&?, detachstate: int) -> int:
+    pattr: mutable PthreadAttr&? = threads_attr_read_slot(attr)
+    if pattr == null or (detachstate != 0 and detachstate != 1):
         return POSIX_EINVAL
-    sched_inherit <- attr.sched_inherit
+    if detachstate != 0:
+        pattr.flags <- pattr.flags | PTHREAD_DETACHED
+    else:
+        pattr.flags <- pattr.flags & ~PTHREAD_DETACHED
     return 0
 
-def posix_pthread_attr_setinheritsched(attr: mutable PthreadAttr&?, sched_inherit: int) -> int:
-    if attr == null:
+def posix_pthread_attr_getguardsize(attr: void&?&?, guardsize: mutable u64&) -> int:
+    pattr: mutable PthreadAttr&? = threads_attr_read_slot(attr)
+    if pattr == null:
+        return POSIX_EINVAL
+    guardsize <- pattr.guardsize_attr
+    return 0
+
+def posix_pthread_attr_setguardsize(attr: mutable void&?&?, guardsize: u64) -> int:
+    pattr: mutable PthreadAttr&? = threads_attr_read_slot(attr)
+    if pattr == null:
+        return POSIX_EINVAL
+    pattr.guardsize_attr <- guardsize
+    return 0
+
+def posix_pthread_attr_getinheritsched(attr: void&?&?, sched_inherit: mutable int&) -> int:
+    pattr: mutable PthreadAttr&? = threads_attr_read_slot(attr)
+    if pattr == null:
+        return POSIX_EINVAL
+    sched_inherit <- pattr.sched_inherit
+    return 0
+
+def posix_pthread_attr_setinheritsched(attr: mutable void&?&?, sched_inherit: int) -> int:
+    pattr: mutable PthreadAttr&? = threads_attr_read_slot(attr)
+    if pattr == null:
         return POSIX_EINVAL
     if sched_inherit != PTHREAD_INHERIT_SCHED and sched_inherit != 0:
         return POSIX_ENOTSUP
-    attr.sched_inherit <- sched_inherit
+    pattr.sched_inherit <- sched_inherit
     return 0
 
-def posix_pthread_attr_getschedparam(attr: PthreadAttr&?, param: mutable SchedParam&?) -> int:
-    if attr == null or param == null:
+def posix_pthread_attr_getschedparam(attr: void&?&?, param: mutable SchedParam&?) -> int:
+    pattr: mutable PthreadAttr&? = threads_attr_read_slot(attr)
+    if pattr == null or param == null:
         return POSIX_EINVAL
-    param.sched_priority <- attr.prio
+    param.sched_priority <- pattr.prio
     return 0
 
-def posix_pthread_attr_setschedparam(attr: mutable PthreadAttr&?, param: SchedParam&?) -> int:
-    if attr == null:
+def posix_pthread_attr_setschedparam(attr: mutable void&?&?, param: SchedParam&?) -> int:
+    pattr: mutable PthreadAttr&? = threads_attr_read_slot(attr)
+    if pattr == null:
         return POSIX_EINVAL
     if param == null:
         return POSIX_ENOTSUP
-    if threads_sched_priority_valid(attr.sched_policy, param.sched_priority) == false:
+    if threads_sched_priority_valid(pattr.sched_policy, param.sched_priority) == false:
         return POSIX_ENOTSUP
-    attr.prio <- param.sched_priority
+    pattr.prio <- param.sched_priority
     return 0
 
-def posix_pthread_attr_getschedpolicy(attr: PthreadAttr&?, policy: mutable int&) -> int:
-    if attr == null:
+def posix_pthread_attr_getschedpolicy(attr: void&?&?, policy: mutable int&) -> int:
+    pattr: mutable PthreadAttr&? = threads_attr_read_slot(attr)
+    if pattr == null:
         return POSIX_EINVAL
-    policy <- attr.sched_policy
+    policy <- pattr.sched_policy
     return 0
 
-def posix_pthread_attr_setschedpolicy(attr: mutable PthreadAttr&?, policy: int) -> int:
-    if attr == null:
+def posix_pthread_attr_setschedpolicy(attr: mutable void&?&?, policy: int) -> int:
+    pattr: mutable PthreadAttr&? = threads_attr_read_slot(attr)
+    if pattr == null:
         return POSIX_EINVAL
     if policy < 1 or policy > 3:
         return POSIX_ENOTSUP
-    attr.sched_policy <- policy
+    pattr.sched_policy <- policy
     if policy == 2:
-        attr.prio <- ORBIS_KERNEL_PRIO_OTHER_DEFAULT
+        pattr.prio <- ORBIS_KERNEL_PRIO_OTHER_DEFAULT
     else:
-        attr.prio <- ORBIS_KERNEL_PRIO_FIFO_DEFAULT
+        pattr.prio <- ORBIS_KERNEL_PRIO_FIFO_DEFAULT
     return 0
 
-def posix_pthread_attr_getscope(attr: PthreadAttr&?, contentionscope: mutable int&) -> int:
-    if attr == null:
+def posix_pthread_attr_getscope(attr: void&?&?, contentionscope: mutable int&) -> int:
+    pattr: mutable PthreadAttr&? = threads_attr_read_slot(attr)
+    if pattr == null:
         return POSIX_EINVAL
-    contentionscope <- PTHREAD_SCOPE_PROCESS
+    contentionscope <- PTHREAD_SCOPE_SYSTEM if (pattr.flags & PTHREAD_SCOPE_SYSTEM) != 0 else PTHREAD_SCOPE_PROCESS
     return 0
 
-def posix_pthread_attr_setscope(attr: mutable PthreadAttr&?, contentionscope: int) -> int:
-    if attr == null:
+def posix_pthread_attr_setscope(attr: mutable void&?&?, contentionscope: int) -> int:
+    pattr: mutable PthreadAttr&? = threads_attr_read_slot(attr)
+    if pattr == null:
         return POSIX_EINVAL
-    # Match C++ parity: original condition uses `||` and always returns EINVAL.
+    # Match shadPS4's current condition: this rejects both valid constants.
     if contentionscope != PTHREAD_SCOPE_PROCESS or contentionscope != PTHREAD_SCOPE_SYSTEM:
         return POSIX_EINVAL
     return 0
 
-def posix_pthread_attr_getstack(attr: PthreadAttr&?, stackaddr: mutable void&?&, stacksize: mutable u64&) -> int:
-    if attr == null:
+def posix_pthread_attr_getstack(attr: void&?&?, stackaddr: mutable void&?&, stacksize: mutable u64&) -> int:
+    pattr: mutable PthreadAttr&? = threads_attr_read_slot(attr)
+    if pattr == null:
         return POSIX_EINVAL
-    stackaddr[0] <- attr.stackaddr_attr
-    stacksize <- attr.stacksize_attr
+    stackaddr[0] <- pattr.stackaddr_attr
+    stacksize <- pattr.stacksize_attr
     return 0
 
-def posix_pthread_attr_setstack(attr: mutable PthreadAttr&?, stackaddr: void&?, stacksize: u64) -> int:
-    if attr == null or stackaddr == null or stacksize < PTHREAD_STACK_MIN:
+def posix_pthread_attr_setstack(attr: mutable void&?&?, stackaddr: void&?, stacksize: u64) -> int:
+    pattr: mutable PthreadAttr&? = threads_attr_read_slot(attr)
+    if pattr == null or stackaddr == null or stacksize < PTHREAD_STACK_MIN:
         return POSIX_EINVAL
-    attr.stackaddr_attr <- stackaddr
-    attr.stacksize_attr <- stacksize
+    pattr.stackaddr_attr <- stackaddr
+    pattr.stacksize_attr <- stacksize
     return 0
 
-def posix_pthread_attr_getstackaddr(attr: PthreadAttr&?, stackaddr: mutable void&?&) -> int:
-    if attr == null:
+def posix_pthread_attr_getstackaddr(attr: void&?&?, stackaddr: mutable void&?&) -> int:
+    pattr: mutable PthreadAttr&? = threads_attr_read_slot(attr)
+    if pattr == null:
         return POSIX_EINVAL
-    stackaddr[0] <- attr.stackaddr_attr
+    stackaddr[0] <- pattr.stackaddr_attr
     return 0
 
-def posix_pthread_attr_setstackaddr(attr: mutable PthreadAttr&?, stackaddr: void&?) -> int:
-    if attr == null or stackaddr == null:
+def posix_pthread_attr_setstackaddr(attr: mutable void&?&?, stackaddr: void&?) -> int:
+    pattr: mutable PthreadAttr&? = threads_attr_read_slot(attr)
+    if pattr == null or stackaddr == null:
         return POSIX_EINVAL
-    attr.stackaddr_attr <- stackaddr
+    pattr.stackaddr_attr <- stackaddr
     return 0
 
-def posix_pthread_attr_getstacksize(attr: PthreadAttr&?, stacksize: mutable u64&) -> int:
-    if attr == null:
+def posix_pthread_attr_getstacksize(attr: void&?&?, stacksize: mutable u64&) -> int:
+    pattr: mutable PthreadAttr&? = threads_attr_read_slot(attr)
+    if pattr == null:
         return POSIX_EINVAL
-    stacksize <- attr.stacksize_attr
+    stacksize <- pattr.stacksize_attr
     return 0
 
-def posix_pthread_attr_setstacksize(attr: mutable PthreadAttr&?, stacksize: u64) -> int:
-    if attr == null or stacksize < PTHREAD_STACK_MIN:
+def posix_pthread_attr_setstacksize(attr: mutable void&?&?, stacksize: u64) -> int:
+    pattr: mutable PthreadAttr&? = threads_attr_read_slot(attr)
+    if pattr == null or stacksize < PTHREAD_STACK_MIN:
         return POSIX_EINVAL
-    attr.stacksize_attr <- stacksize
+    pattr.stacksize_attr <- stacksize
     return 0
 
-def posix_pthread_attr_get_np(pthread: void&?, dstattr: mutable PthreadAttr&?) -> int:
+def posix_pthread_attr_get_np(pthread: void&?, dstattr: mutable void&?&?) -> int:
     threads_bootstrap_runtime()
-    if pthread == null or dstattr == null:
+    dst: mutable PthreadAttr&? = threads_attr_read_slot(dstattr)
+    if pthread == null or dst == null:
         return POSIX_EINVAL
     id: mutable int = threads_handle_to_id(pthread)
     if threads_is_current_self_handle(pthread) == true:
         id <- g_fake_thread_id
     if threads_is_valid_live_thread_id(id) == false:
         return POSIX_ESRCH
-    dstattr <- g_default_attr
+    dst[0] <- g_default_attr
     _ = g_fake_threads_detached[id]
     return 0
 
-def posix_pthread_attr_setcreatesuspend_np(attr: mutable PthreadAttr&?) -> int:
-    if attr == null:
+def posix_pthread_attr_setcreatesuspend_np(attr: mutable void&?&?) -> int:
+    pattr: mutable PthreadAttr&? = threads_attr_read_slot(attr)
+    if pattr == null:
         return POSIX_EINVAL
-    attr.suspend <- 1
+    pattr.suspend <- 1
     return 0
 
-def posix_pthread_attr_getaffinity_np(pattr: PthreadAttr&?, cpusetsize: u64, cpusetp: mutable void&?) -> int:
+def posix_pthread_attr_getaffinity_np(attr: void&?&?, cpusetsize: u64, cpusetp: mutable void&?) -> int:
     _ = cpusetsize
+    pattr: mutable PthreadAttr&? = threads_attr_read_slot(attr)
     if pattr == null:
         return POSIX_EINVAL
     if cpusetp != null:
@@ -280,7 +347,8 @@ def posix_pthread_attr_getaffinity_np(pattr: PthreadAttr&?, cpusetsize: u64, cpu
                     mask[0] <- source[0]
     return 0
 
-def posix_pthread_attr_setaffinity_np(pattr: mutable PthreadAttr&?, cpusetsize: u64, cpusetp: void&?) -> int:
+def posix_pthread_attr_setaffinity_np(attr: mutable void&?&?, cpusetsize: u64, cpusetp: void&?) -> int:
+    pattr: mutable PthreadAttr&? = threads_attr_read_slot(attr)
     if pattr == null:
         return POSIX_EINVAL
     if cpusetsize == 0u64 or cpusetp == null:
@@ -291,81 +359,81 @@ def posix_pthread_attr_setaffinity_np(pattr: mutable PthreadAttr&?, cpusetsize: 
     pattr.cpuset <- cpusetp
     return 0
 
-def scePthreadAttrGetaffinity(attr: PthreadAttr&?, mask: mutable u64&) -> int:
+def scePthreadAttrGetaffinity(attr: void&?&?, mask: mutable u64&) -> int:
     local_mask: mutable u64 = 0u64
     ret: int = posix_pthread_attr_getaffinity_np(attr, 8u64, local_mask as mutable void&?)
     if ret == 0:
         mask <- local_mask
     return threads_orbis_from_posix(ret)
 
-def scePthreadAttrSetaffinity(attr: mutable PthreadAttr&?, mask: u64) -> int:
+def scePthreadAttrSetaffinity(attr: mutable void&?&?, mask: u64) -> int:
     local_mask: mutable u64 = mask
     return threads_orbis_from_posix(posix_pthread_attr_setaffinity_np(attr, 8u64, local_mask as void&?))
 
-def scePthreadAttrInit(attr: mutable PthreadAttr&?) -> int:
+def scePthreadAttrInit(attr: mutable void&?&?) -> int:
     return threads_orbis_from_posix(posix_pthread_attr_init(attr))
 
-def scePthreadAttrDestroy(attr: mutable PthreadAttr&?) -> int:
+def scePthreadAttrDestroy(attr: mutable void&?&?) -> int:
     return threads_orbis_from_posix(posix_pthread_attr_destroy(attr))
 
-def scePthreadAttrGetNp(thread: void&?, attr: mutable PthreadAttr&?) -> int:
+def scePthreadAttrGetNp(thread: void&?, attr: mutable void&?&?) -> int:
     return threads_orbis_from_posix(posix_pthread_attr_get_np(thread, attr))
 
-def scePthreadAttrGetdetachstate(attr: PthreadAttr&?, detachstate: mutable int&) -> int:
+def scePthreadAttrGetdetachstate(attr: void&?&?, detachstate: mutable int&) -> int:
     return threads_orbis_from_posix(posix_pthread_attr_getdetachstate(attr, detachstate))
 
-def scePthreadAttrGetguardsize(attr: PthreadAttr&?, guardsize: mutable u64&) -> int:
+def scePthreadAttrGetguardsize(attr: void&?&?, guardsize: mutable u64&) -> int:
     return threads_orbis_from_posix(posix_pthread_attr_getguardsize(attr, guardsize))
 
-def scePthreadAttrGetinheritsched(attr: PthreadAttr&?, sched_inherit: mutable int&) -> int:
+def scePthreadAttrGetinheritsched(attr: void&?&?, sched_inherit: mutable int&) -> int:
     return threads_orbis_from_posix(posix_pthread_attr_getinheritsched(attr, sched_inherit))
 
-def scePthreadAttrGetschedparam(attr: PthreadAttr&?, param: mutable SchedParam&?) -> int:
+def scePthreadAttrGetschedparam(attr: void&?&?, param: mutable SchedParam&?) -> int:
     return threads_orbis_from_posix(posix_pthread_attr_getschedparam(attr, param))
 
-def scePthreadAttrGetschedpolicy(attr: PthreadAttr&?, policy: mutable int&) -> int:
+def scePthreadAttrGetschedpolicy(attr: void&?&?, policy: mutable int&) -> int:
     return threads_orbis_from_posix(posix_pthread_attr_getschedpolicy(attr, policy))
 
-def scePthreadAttrGetscope(attr: PthreadAttr&?, contentionscope: mutable int&) -> int:
+def scePthreadAttrGetscope(attr: void&?&?, contentionscope: mutable int&) -> int:
     return threads_orbis_from_posix(posix_pthread_attr_getscope(attr, contentionscope))
 
-def scePthreadAttrGetstack(attr: PthreadAttr&?, stackaddr: mutable void&?&, stacksize: mutable u64&) -> int:
+def scePthreadAttrGetstack(attr: void&?&?, stackaddr: mutable void&?&, stacksize: mutable u64&) -> int:
     return threads_orbis_from_posix(posix_pthread_attr_getstack(attr, stackaddr, stacksize))
 
-def scePthreadAttrGetstackaddr(attr: PthreadAttr&?, stackaddr: mutable void&?&) -> int:
+def scePthreadAttrGetstackaddr(attr: void&?&?, stackaddr: mutable void&?&) -> int:
     return threads_orbis_from_posix(posix_pthread_attr_getstackaddr(attr, stackaddr))
 
-def scePthreadAttrGetstacksize(attr: PthreadAttr&?, stacksize: mutable u64&) -> int:
+def scePthreadAttrGetstacksize(attr: void&?&?, stacksize: mutable u64&) -> int:
     return threads_orbis_from_posix(posix_pthread_attr_getstacksize(attr, stacksize))
 
-def scePthreadAttrSetcreatesuspend(attr: mutable PthreadAttr&?) -> int:
+def scePthreadAttrSetcreatesuspend(attr: mutable void&?&?) -> int:
     return threads_orbis_from_posix(posix_pthread_attr_setcreatesuspend_np(attr))
 
-def scePthreadAttrSetdetachstate(attr: mutable PthreadAttr&?, detachstate: int) -> int:
+def scePthreadAttrSetdetachstate(attr: mutable void&?&?, detachstate: int) -> int:
     return threads_orbis_from_posix(posix_pthread_attr_setdetachstate(attr, detachstate))
 
-def scePthreadAttrSetguardsize(attr: mutable PthreadAttr&?, guardsize: u64) -> int:
+def scePthreadAttrSetguardsize(attr: mutable void&?&?, guardsize: u64) -> int:
     return threads_orbis_from_posix(posix_pthread_attr_setguardsize(attr, guardsize))
 
-def scePthreadAttrSetinheritsched(attr: mutable PthreadAttr&?, sched_inherit: int) -> int:
+def scePthreadAttrSetinheritsched(attr: mutable void&?&?, sched_inherit: int) -> int:
     return threads_orbis_from_posix(posix_pthread_attr_setinheritsched(attr, sched_inherit))
 
-def scePthreadAttrSetschedparam(attr: mutable PthreadAttr&?, param: SchedParam&?) -> int:
+def scePthreadAttrSetschedparam(attr: mutable void&?&?, param: SchedParam&?) -> int:
     return threads_orbis_from_posix(posix_pthread_attr_setschedparam(attr, param))
 
-def scePthreadAttrSetschedpolicy(attr: mutable PthreadAttr&?, policy: int) -> int:
+def scePthreadAttrSetschedpolicy(attr: mutable void&?&?, policy: int) -> int:
     return threads_orbis_from_posix(posix_pthread_attr_setschedpolicy(attr, policy))
 
-def scePthreadAttrSetscope(attr: mutable PthreadAttr&?, contentionscope: int) -> int:
+def scePthreadAttrSetscope(attr: mutable void&?&?, contentionscope: int) -> int:
     return threads_orbis_from_posix(posix_pthread_attr_setscope(attr, contentionscope))
 
-def scePthreadAttrSetstack(attr: mutable PthreadAttr&?, stackaddr: void&?, stacksize: u64) -> int:
+def scePthreadAttrSetstack(attr: mutable void&?&?, stackaddr: void&?, stacksize: u64) -> int:
     return threads_orbis_from_posix(posix_pthread_attr_setstack(attr, stackaddr, stacksize))
 
-def scePthreadAttrSetstackaddr(attr: mutable PthreadAttr&?, stackaddr: void&?) -> int:
+def scePthreadAttrSetstackaddr(attr: mutable void&?&?, stackaddr: void&?) -> int:
     return threads_orbis_from_posix(posix_pthread_attr_setstackaddr(attr, stackaddr))
 
-def scePthreadAttrSetstacksize(attr: mutable PthreadAttr&?, stacksize: u64) -> int:
+def scePthreadAttrSetstacksize(attr: mutable void&?&?, stacksize: u64) -> int:
     return threads_orbis_from_posix(posix_pthread_attr_setstacksize(attr, stacksize))
 
 @fixed_layout
