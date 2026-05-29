@@ -1407,6 +1407,12 @@ const GE_EV_HLE_KNOWN_TARGET: u32 = 131u32
 const GE_EV_DEBUG_RAISE_STACK: u32 = 132u32
 const GE_EV_SIGNAL_CALLEE_SAVED: u32 = 133u32
 const GE_EV_SIGNAL_GPRS: u32 = 134u32
+# Diagnostic: bytes of the faulting instruction (raw read at the fault PC) so the
+# segment prefix (0x64=fs / 0x65=gs) of a TLS-deref fault can be read off the tape.
+const GE_EV_SIGNAL_FAULT_INSN: u32 = 135u32
+# Diagnostic: segment selectors from the faulting thread state (__ss): fs(+152),
+# gs(+160), cs(+144). Distinguishes guest-fs vs host-gs faults.
+const GE_EV_SIGNAL_SEGMENTS: u32 = 136u32
 const GE_EV_MUTEX_INIT: u32 = 1001u32
 
 const GE_LONGJMP_SOURCE_DEBUG_TRAP_ABORT: u32 = 1u32
@@ -2206,6 +2212,15 @@ def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
     ge_last_guest_r9 <- ge_extract_greg(uctx, 7)
     ge_emergency_mark(GE_EV_SIGNAL_GPRS, ge_last_guest_rax, ge_last_guest_rbx, ge_last_guest_rcx, ge_last_guest_rdx)
     ge_emergency_mark(GE_EV_SIGNAL_CALLEE_SAVED, ge_extract_greg(uctx, 8), ge_extract_greg(uctx, 9), ge_extract_greg(uctx, 10), ge_extract_greg(uctx, 11))
+    # Raw bytes of the faulting instruction (works for libsystem PCs, which are not
+    # in the native-region table) + the live segment selectors, to read off whether
+    # the faulting TLS access used %fs (0x64) or %gs (0x65) and what the selectors are.
+    static if ARCH_X86_64 and PLATFORM_APPLE:
+        fault_pc: uintptr = (!ge_signal_guest_pc)
+        ss_seg: uintptr = ge_darwin_mcontext64_ss(uctx)
+        ge_emergency_mark(GE_EV_SIGNAL_FAULT_INSN, fault_pc, ge_read_context_word(fault_pc), ge_read_context_word(fault_pc + 8.uintptr()), ge_read_context_word(fault_pc + 16.uintptr()))
+        ge_emergency_mark(GE_EV_SIGNAL_FAULT_INSN, fault_pc - 16.uintptr(), ge_read_context_word(fault_pc - 16.uintptr()), ge_read_context_word(fault_pc - 8.uintptr()), ge_last_guest_rdi)
+        ge_emergency_mark(GE_EV_SIGNAL_SEGMENTS, ge_read_context_word(ss_seg + 152.uintptr()), ge_read_context_word(ss_seg + 160.uintptr()), ge_read_context_word(ss_seg + 144.uintptr()), ss_seg)
     ge_signal_sp_valid <- 1 if !ge_signal_mctx != 0.uintptr() else 0
     ge_signal_bp_valid <- ge_signal_sp_valid
     ge_signal_rdi_valid <- ge_signal_sp_valid
