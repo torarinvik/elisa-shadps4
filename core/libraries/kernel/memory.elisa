@@ -166,10 +166,13 @@ def sceKernelEnableDmemAliasing() -> int:
 def sceKernelAllocateDirectMemory(searchStart: i64, searchEnd: i64, len: u64, alignment: u64, memoryType: int, physAddrOut: void&?) -> int:
     can Unsafe.SegmentMutation, Segment.Host:
         ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d4142u64.uintptr(), searchStart.u64().uintptr(), searchEnd.u64().uintptr(), len.uintptr())
-    if physAddrOut == null:
+    # Oracle order: validate (searchStart/End<0, len, alignment, memoryType, out-ptr)
+    # then range check, then memory->Allocate, then write out. No bump cursor: the
+    # dmem free-area search inside MemoryManager_Allocate is the allocator (oracle parity).
+    if searchStart < 0 or searchEnd < 0:
         can Unsafe.SegmentMutation, Segment.Host:
-            ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d4145u64.uintptr(), ORBIS_KERNEL_ERROR_EFAULT.u64().uintptr(), physAddrOut.uintptr(), 0.uintptr())
-        return ORBIS_KERNEL_ERROR_EFAULT
+            ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d4145u64.uintptr(), ORBIS_KERNEL_ERROR_EINVAL.u64().uintptr(), searchStart.u64().uintptr(), searchEnd.u64().uintptr())
+        return ORBIS_KERNEL_ERROR_EINVAL
     if len == 0 or not KernelMemory_Is16KBAligned(len):
         can Unsafe.SegmentMutation, Segment.Host:
             ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d4145u64.uintptr(), ORBIS_KERNEL_ERROR_EINVAL.u64().uintptr(), len.uintptr(), alignment.uintptr())
@@ -178,43 +181,33 @@ def sceKernelAllocateDirectMemory(searchStart: i64, searchEnd: i64, len: u64, al
         can Unsafe.SegmentMutation, Segment.Host:
             ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d4145u64.uintptr(), ORBIS_KERNEL_ERROR_EINVAL.u64().uintptr(), len.uintptr(), alignment.uintptr())
         return ORBIS_KERNEL_ERROR_EINVAL
-    if searchEnd <= searchStart:
+    if memoryType > 10:
         can Unsafe.SegmentMutation, Segment.Host:
-            ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d4145u64.uintptr(), ORBIS_KERNEL_ERROR_EINVAL.u64().uintptr(), searchStart.u64().uintptr(), searchEnd.u64().uintptr())
+            ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d4145u64.uintptr(), ORBIS_KERNEL_ERROR_EINVAL.u64().uintptr(), memoryType.u64().uintptr(), 0.uintptr())
         return ORBIS_KERNEL_ERROR_EINVAL
-    _ = memoryType
-    align: mutable u64 = alignment
-    if align == 0:
-        align <- KERNEL_MEMORY_PAGE_SIZE
-    min_addr: mutable u64 = KERNEL_DIRECT_MEMORY_BASE
-    if searchStart > 0:
-        min_addr <- searchStart.u64()
-    alloc_start: mutable u64 = KernelMemory_AlignUp(g_kernel_direct_alloc_cursor, align)
-    if alloc_start < min_addr:
-        alloc_start <- KernelMemory_AlignUp(min_addr, align)
-    alloc_end: u64 = alloc_start + len
-    if alloc_end <= alloc_start:
-        kernel_debug_last_direct_alloc_result <- ORBIS_KERNEL_ERROR_ENOMEM
+    if physAddrOut == null:
+        can Unsafe.SegmentMutation, Segment.Host:
+            ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d4145u64.uintptr(), ORBIS_KERNEL_ERROR_EINVAL.u64().uintptr(), physAddrOut.uintptr(), 0.uintptr())
+        return ORBIS_KERNEL_ERROR_EINVAL
+    # is_in_range = searchEnd - searchStart >= len; then EAGAIN if range too small.
+    is_in_range: bool = (searchEnd - searchStart) >= len.i64()
+    if searchEnd <= searchStart or searchEnd < len.i64() or not is_in_range:
+        kernel_debug_last_direct_alloc_result <- ORBIS_KERNEL_ERROR_EAGAIN
         kernel_debug_last_direct_alloc_phys <- 0
         kernel_debug_last_direct_alloc_len <- len
         can Unsafe.SegmentMutation, Segment.Host:
-            ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d4145u64.uintptr(), ORBIS_KERNEL_ERROR_ENOMEM.u64().uintptr(), alloc_start.uintptr(), len.uintptr())
-        return ORBIS_KERNEL_ERROR_ENOMEM
-    if alloc_end > searchEnd.u64():
-        kernel_debug_last_direct_alloc_result <- ORBIS_KERNEL_ERROR_ENOMEM
-        kernel_debug_last_direct_alloc_phys <- 0
-        kernel_debug_last_direct_alloc_len <- len
-        can Unsafe.SegmentMutation, Segment.Host:
-            ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d4145u64.uintptr(), ORBIS_KERNEL_ERROR_ENOMEM.u64().uintptr(), alloc_end.uintptr(), searchEnd.u64().uintptr())
-        return ORBIS_KERNEL_ERROR_ENOMEM
-    allocated: PAddr = MemoryManager_Allocate(Memory_Instance(), alloc_start.uintptr(), searchEnd.u64().uintptr(), len, align, memoryType)
+            ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d4145u64.uintptr(), ORBIS_KERNEL_ERROR_EAGAIN.u64().uintptr(), searchStart.u64().uintptr(), searchEnd.u64().uintptr())
+        return ORBIS_KERNEL_ERROR_EAGAIN
+    # phys_addr = memory->Allocate(...); Elisa's allocator returns search_end on failure
+    # (== oracle's -1 sentinel).
+    allocated: PAddr = MemoryManager_Allocate(Memory_Instance(), searchStart.u64().uintptr(), searchEnd.u64().uintptr(), len, alignment, memoryType)
     if allocated == searchEnd.u64().uintptr():
-        kernel_debug_last_direct_alloc_result <- ORBIS_KERNEL_ERROR_ENOMEM
+        kernel_debug_last_direct_alloc_result <- ORBIS_KERNEL_ERROR_EAGAIN
         kernel_debug_last_direct_alloc_phys <- 0
         kernel_debug_last_direct_alloc_len <- len
         can Unsafe.SegmentMutation, Segment.Host:
-            ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d4145u64.uintptr(), ORBIS_KERNEL_ERROR_ENOMEM.u64().uintptr(), alloc_start.uintptr(), searchEnd.u64().uintptr())
-        return ORBIS_KERNEL_ERROR_ENOMEM
+            ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d4145u64.uintptr(), ORBIS_KERNEL_ERROR_EAGAIN.u64().uintptr(), searchStart.u64().uintptr(), searchEnd.u64().uintptr())
+        return ORBIS_KERNEL_ERROR_EAGAIN
     if not KernelMemory_WriteOutI64(physAddrOut, allocated.u64().i64()):
         kernel_debug_last_direct_alloc_result <- ORBIS_KERNEL_ERROR_EFAULT
         kernel_debug_last_direct_alloc_phys <- allocated.u64().i64()
@@ -222,12 +215,11 @@ def sceKernelAllocateDirectMemory(searchStart: i64, searchEnd: i64, len: u64, al
         can Unsafe.SegmentMutation, Segment.Host:
             ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d4145u64.uintptr(), ORBIS_KERNEL_ERROR_EFAULT.u64().uintptr(), physAddrOut.uintptr(), allocated)
         return ORBIS_KERNEL_ERROR_EFAULT
-    g_kernel_direct_alloc_cursor <- alloc_end
     kernel_debug_last_direct_alloc_result <- ORBIS_OK
     kernel_debug_last_direct_alloc_phys <- allocated.u64().i64()
     kernel_debug_last_direct_alloc_len <- len
     can Unsafe.SegmentMutation, Segment.Host:
-        ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d414fu64.uintptr(), allocated, g_kernel_direct_alloc_cursor.uintptr(), len.uintptr())
+        ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d414fu64.uintptr(), allocated, allocated, len.uintptr())
     return ORBIS_OK
 
 def HLE_sceKernelAllocateDirectMemory(searchStart: i64, searchEnd: i64, len: u64, alignment: u64, memoryType: int, physAddrOut: void&?) -> int:
@@ -339,7 +331,8 @@ def sceKernelMapNamedDirectMemory(addr: mutable void&?&, len: u64, prot: int, fl
 def sceKernelMapDirectMemory(addr: mutable void&?&, len: u64, prot: int, flags: int, phys_addr: i64, alignment: u64) -> int can[Unsafe.SegmentMutation, Segment.Host]:
     can Unsafe.SegmentMutation, Segment.Host:
         ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d4d42u64.uintptr(), addr.cast[void&].uintptr(), KernelMemory_ReadInOutPtr(addr), len.uintptr())
-    result: int = KernelMemory_MapDirect(addr, len, prot, flags, phys_addr, alignment, "anon")
+    # Oracle: `return sceKernelMapNamedDirectMemory(addr, len, prot, flags, phys_addr, alignment, "anon");`
+    result: int = sceKernelMapNamedDirectMemory(addr, len, prot, flags, phys_addr, alignment, "anon")
     kernel_debug_last_direct_map_result <- result
     kernel_debug_last_direct_map_addr <- KernelMemory_ReadInOutPtr(addr)
     kernel_debug_last_direct_map_phys <- phys_addr
