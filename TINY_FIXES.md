@@ -1,5 +1,15 @@
 # 100 Tiny Gains — Emulator Cleanup Checklist
 
+## Progress
+- ✅ **Category A (#1–53) DONE** — `f942ce8`: 3989/3998 numeric-suffix warnings
+  removed across 47 files in one verified sweep (9 load-bearing suffixes
+  preserved: u64 literals that overflow `i64`, and `id[...]`-cast feeders).
+  All 47 targets verified clean vs baseline.
+- ⬜ Category B (#54–61) — OOB cstring casts
+- ⬜ Category C (#62–71) — struct padding
+- ⬜ Category D (#72–100) — effect-grant `can` blocks
+
+
 Momentum-first list of the **easiest** things to fix. No new features — only
 lint cleanups, safety smells, and layout nits surfaced by the compiler.
 
