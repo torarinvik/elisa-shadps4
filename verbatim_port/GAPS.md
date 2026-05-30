@@ -44,7 +44,13 @@ primitive. Each compile error that isn't a syntax mapping is a gap recorded here
 - [ ] **`std::filesystem`** — path join/parent/filename/exists/is_directory/relative/
       create_directory/remove_all/directory_iterator. (Partial host helpers exist:
       `Emulator_DirName/PathEndsWith/TrimTrailingSlash`.)
-- [ ] **`fstream`/`sstream`** — text file read/write + tokenizing (`UpdatePlayTime`).
+- [x] **`fstream` read/write** — `port_read_file_text` / `port_write_file_text`
+      via `IOFile` (verified round-trip). Notes: `ofstream`(trunc) == open with
+      `FileAccessMode.Create` (`Write` maps to `r+` and needs an existing file);
+      the `io_read_string` **extern returns an unusable pointer** — read via
+      `IOFile_ReadSpan[u8]` into an owned buffer + explicit NUL instead.
+- [ ] **`sstream` tokenizing** — whitespace split + the `serial h:m:s` line parse
+      (`UpdatePlayTime` core); `port_parse_int`/`port_parse_hms` ready.
 - [ ] **`MntPoints`** — `Mount` / `GetHostPath`.
 - [ ] **`PSF`** — `param.sfo` parser (`Open`/`GetString`/`GetInteger`).
 - [ ] **`NPBindFile`** — `Load` / `GetNpCommIds` (trophies).
