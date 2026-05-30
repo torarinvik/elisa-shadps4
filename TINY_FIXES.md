@@ -5,7 +5,14 @@
   removed across 47 files in one verified sweep (9 load-bearing suffixes
   preserved: u64 literals that overflow `i64`, and `id[...]`-cast feeders).
   All 47 targets verified clean vs baseline.
-- ⬜ Category B (#54–61) — OOB cstring casts
+- ⏭️ **Category B (#54–61) SKIPPED (audited, intentional)** — all 8 are the
+  same correct pattern: build a NUL-terminated buffer in a persistent arena,
+  then `return out[0].ref[static u8&]` (a C-string contract). Already inside
+  `trusted Unsafe.*` with vouching comments. The linter flags the index-rooted
+  cast for audit; it has been audited. No tiny fix exists — clearing it needs
+  either a return-type change (ripples to all callers) or a centralizing helper
+  that only relocates the warning (8→1) while touching working FFI. Not worth
+  the risk under a "tiny safe gains" mandate. Left as-is.
 - ⬜ Category C (#62–71) — struct padding
 - ⬜ Category D (#72–100) — effect-grant `can` blocks
 
