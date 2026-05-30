@@ -68,6 +68,11 @@ Things the transliteration taught us (compile + runtime tested):
 - ✅ Seed: `verbatim_port/emulator.elisa` — `IsSafeHostPathComponent`,
   `SafeGameIdForHostPath`, `port_fmt_hex16`, `port_hash_sview`, `port_concat2`,
   `port_sview_to_cstr` transliterated, compiling, and runtime-verified.
-- ⬜ `ReadCompiledSdkVersion` — next (exercises the existing `Elf` loader).
+- ✅ `ReadCompiledSdkVersion` — transliterated against the real `Elf` loader
+  (`core/loader/elf.elisa`), compiling. No new gaps: used auto-ref
+  (`Elf_Open(elf, file)`), `for ph in elf.program_headers` (darray iteration
+  replaces `find_if`), `size_of`, and a `trusted Unsafe.PointerCast` segment
+  load into a locally-declared guest-layout `OrbisProcParam`. Note: `elf.elisa`
+  needs `static_strlen` in scope — include `common/streq.elisa` before it.
 - ⬜ `UpdatePlayTime` — next (exercises the fstream/sstream + decimal-parse gaps).
 - ⬜ `Run()` / `Restart()` / `ExecuteRestartArgs()` — pend the host subsystems above.

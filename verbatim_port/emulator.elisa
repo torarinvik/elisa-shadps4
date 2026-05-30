@@ -7,6 +7,16 @@
 # Run()/Restart() pend the host subsystems listed in GAPS.md.
 
 include "../common/streq.elisa"
+include "../core/loader/elf.elisa"
+
+# OrbisProcParam — guest binary layout (fixed-width), so a raw segment load lands
+# fields at the right offsets. (linker.elisa has a host-pointer variant we avoid
+# pulling in here.)
+struct OrbisProcParam:
+    size: mutable u64
+    magic: mutable u32
+    entry_count: mutable u32
+    sdk_version: mutable u32
 
 # Persistent arena owning strings built by these helpers (returned to callers,
 # so they must outlive the producing call). Mirrors core/emulator.elisa's
@@ -39,6 +49,24 @@ def port_hash_sview(value: sview) -> u64:
         hash <- hash ^ ch.u64()
         hash <- hash * 0x100000001b3u64
     return hash
+
+# s32 ReadCompiledSdkVersion(const std::filesystem::path& file)
+def ReadCompiledSdkVersion(file: static u8&) -> i32:
+    elf: mutable Elf = Elf_new()
+    Elf_Open(elf, file)
+    if not Elf_IsElfFile(elf):
+        return 0
+    # std::find_if(pheaders, p_type == PT_SCE_PROCPARAM)
+    for ph in elf.program_headers:
+        if ph.p_type == PT_SCE_PROCPARAM:
+            param: mutable OrbisProcParam = zeroed
+            read_size: mutable u64 = ph.p_filesz
+            if read_size > size_of(OrbisProcParam).u64():
+                read_size <- size_of(OrbisProcParam).u64()
+            trusted Unsafe.PointerCast:
+                _ = Elf_LoadSegment(elf, param.ref[mutable OrbisProcParam&].cast[uintptr], ph.p_offset, read_size.usize())
+            return param.sdk_version.i32()
+    return 0
 
 # bool IsSafeHostPathComponent(std::string_view value)
 def IsSafeHostPathComponent(value: sview) -> bool:
