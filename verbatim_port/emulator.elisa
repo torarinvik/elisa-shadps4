@@ -1,0 +1,86 @@
+# SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Verbatim transliteration of shadPS4 core/emulator.cpp (SEED).
+# Strategy: port top-to-bottom; the compiler surfaces missing primitives, which
+# are tracked in verbatim_port/GAPS.md. Self-contained functions are done here;
+# Run()/Restart() pend the host subsystems listed in GAPS.md.
+
+include "../common/streq.elisa"
+
+# Persistent arena owning strings built by these helpers (returned to callers,
+# so they must outlive the producing call). Mirrors core/emulator.elisa's
+# emulator_arena pattern.
+global mutable port_arena: Arena = zeroed
+
+def Port_ResetArena() -> void:
+    port_arena <- zeroed
+
+# --- small stdlib gaps, implemented inline (promote to common/ later) ---
+
+# GAP[fmt::format("{:016x}", n)] -> fixed-width lowercase hex of a u64.
+def port_fmt_hex16(value: u64) -> static u8&:
+    digits: static u8& = "0123456789abcdef"
+    trusted Unsafe.MutableGlobal, Unsafe.UncheckedIndex, Unsafe.PointerCast:
+        out: mutable darray[u8] = []
+        owner: mutable Arena& = port_arena.ref[mutable Arena&]
+        in owner:
+            for i in 0..<16:
+                shift: u64 = ((15 - i).u64()) * 4u64
+                nibble: u64 = (value >> shift) & 0xFu64
+                out.push(digits[nibble.i64()])
+            out.push(0)
+        return out[0].ref[static u8&]
+
+# GAP[std::hash<std::string_view>] -> FNV-1a 64-bit over the bytes (iterated).
+def port_hash_sview(value: sview) -> u64:
+    hash: mutable u64 = 0xcbf29ce484222325u64
+    for ch in value:
+        hash <- hash ^ ch.u64()
+        hash <- hash * 0x100000001b3u64
+    return hash
+
+# bool IsSafeHostPathComponent(std::string_view value)
+def IsSafeHostPathComponent(value: sview) -> bool:
+    if value.len == 0 or value.len > 64 or value == "." or value == "..":
+        return false
+    for ch in value:
+        is_ok: bool = (ch >= 'A' and ch <= 'Z') or (ch >= 'a' and ch <= 'z') or (ch >= '0' and ch <= '9') or ch == '_' or ch == '-'
+        if not is_ok:
+            return false
+    return true
+
+# std::string SafeGameIdForHostPath(std::string_view id)
+#   if (IsSafeHostPathComponent(id)) return std::string{id};
+#   return fmt::format("UNKNOWN_{:016x}", std::hash<std::string_view>{}(id));
+def SafeGameIdForHostPath(id: sview) -> static u8&:
+    if IsSafeHostPathComponent(id):
+        return port_sview_to_cstr(id)
+    hash: u64 = port_hash_sview(id)
+    return port_concat2("UNKNOWN_", port_fmt_hex16(hash))
+
+# helper: materialize an sview as a NUL-terminated C-string in the arena.
+def port_sview_to_cstr(value: sview) -> static u8&:
+    trusted Unsafe.MutableGlobal, Unsafe.UncheckedIndex, Unsafe.PointerCast:
+        out: mutable darray[u8] = []
+        owner: mutable Arena& = port_arena.ref[mutable Arena&]
+        in owner:
+            for ch in value:
+                out.push(ch)
+            out.push(0)
+        return out[0].ref[static u8&]
+
+# helper: concatenate two C-strings into a fresh arena-owned C-string.
+def port_concat2(lhs: static u8&, rhs: static u8&) -> static u8&:
+    lhs_len: usize = static_strlen(lhs)
+    rhs_len: usize = static_strlen(rhs)
+    trusted Unsafe.MutableGlobal, Unsafe.UncheckedIndex, Unsafe.PointerCast:
+        out: mutable darray[u8] = []
+        owner: mutable Arena& = port_arena.ref[mutable Arena&]
+        in owner:
+            for i in 0..<lhs_len:
+                out.push(lhs[i])
+            for j in 0..<rhs_len:
+                out.push(rhs[j])
+            out.push(0)
+        return out[0].ref[static u8&]
