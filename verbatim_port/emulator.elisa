@@ -175,6 +175,100 @@ def port_write_file_text(path: static u8&, content: static u8&) -> bool:
     IOFile_Close(f)
     return written == len
 
+# GAP[std::string_view sub-view] -> bounded sub-view (no strlen).
+def port_subview(v: sview, start: i64, length: i64) -> sview:
+    trusted Unsafe.UncheckedIndex, Unsafe.PointerCast:
+        return StringView(v.data[start].ref[mutable u8&], length)
+
+# GAP[getline loop] -> split text into '\n'-delimited line views (trailing '\n'
+# excluded; a final newline does not yield an empty trailing line).
+def port_split_lines(text: sview, arena: mutable Arena&) -> darray[sview]:
+    out: mutable darray[sview] = []
+    can Memory.Allocate, Abort.Panic:
+        in arena:
+            start: mutable i64 = 0
+            i: mutable i64 = 0
+            while i < text.len:
+                if text.data[i] == '\n':
+                    out.push(port_subview(text, start, i - start))
+                    start <- i + 1
+                i <- i + 1
+            if start < text.len:
+                out.push(port_subview(text, start, text.len - start))
+    return out
+
+# GAP[istringstream >> token] -> the nth whitespace-delimited token (0-based),
+# or an empty view if absent.
+def port_nth_token(line: sview, n: i64) -> sview:
+    idx: mutable i64 = 0
+    field: mutable i64 = 0
+    while idx < line.len:
+        # skip leading whitespace
+        while idx < line.len and (line.data[idx] == ' ' or line.data[idx] == '\t'):
+            idx <- idx + 1
+        if idx >= line.len:
+            break
+        tok_start: i64 = idx
+        while idx < line.len and line.data[idx] != ' ' and line.data[idx] != '\t':
+            idx <- idx + 1
+        if field == n:
+            return port_subview(line, tok_start, idx - tok_start)
+        field <- field + 1
+    return port_subview(line, 0, 0)
+
+# append helpers (own arena scope; intra-procedural append rule)
+def port_push_bytes(out: mutable darray[u8]&, v: sview, arena: mutable Arena&) -> void:
+    can Memory.Allocate, Abort.Panic:
+        in arena:
+            for ch in v:
+                out.push(ch)
+
+def port_push_cstr(out: mutable darray[u8]&, s: static u8&, arena: mutable Arena&) -> void:
+    n: usize = static_strlen(s)
+    can Memory.Allocate, Abort.Panic:
+        in arena:
+            trusted Unsafe.UncheckedIndex:
+                for i in 0..<n:
+                    out.push(s[i])
+
+# Pure core of Emulator::UpdatePlayTime: given the current play_time.txt contents,
+# the game serial, and seconds to add, produce the updated file contents.
+# (The host shell — start_time/now() and GetUserPath — wraps this; this is the
+# verbatim transliteration of the istringstream parse + rebuild loop.)
+def UpdatePlayTime_Core(existing: sview, serial: sview, total_seconds: i64) -> static u8&:
+    trusted Unsafe.MutableGlobal, Unsafe.UncheckedIndex, Unsafe.PointerCast:
+        owner: mutable Arena& = port_arena.ref[mutable Arena&]
+        lines: darray[sview] = port_split_lines(existing, owner)
+        accumulated: mutable i64 = 0
+        for line in lines:
+            if port_nth_token(line, 0) == serial:
+                hms: i64 = port_parse_hms(port_nth_token(line, 1))
+                if hms >= 0:
+                    accumulated <- hms
+                    break
+        accumulated <- accumulated + total_seconds
+        play: static u8& = port_fmt_hms(accumulated)
+        out: mutable darray[u8] = []
+        found: mutable bool = false
+        in owner:
+            for line in lines:
+                if port_nth_token(line, 0) == serial:
+                    port_push_bytes(out, serial, owner)
+                    out.push(' ')
+                    port_push_cstr(out, play, owner)
+                    out.push('\n')
+                    found <- true
+                else:
+                    port_push_bytes(out, line, owner)
+                    out.push('\n')
+            if not found:
+                port_push_bytes(out, serial, owner)
+                out.push(' ')
+                port_push_cstr(out, play, owner)
+                out.push('\n')
+            out.push(0)
+        return out[0].ref[static u8&]
+
 # bool IsSafeHostPathComponent(std::string_view value)
 def IsSafeHostPathComponent(value: sview) -> bool:
     if value.len == 0 or value.len > 64 or value == "." or value == "..":

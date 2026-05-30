@@ -49,8 +49,8 @@ primitive. Each compile error that isn't a syntax mapping is a gap recorded here
       `FileAccessMode.Create` (`Write` maps to `r+` and needs an existing file);
       the `io_read_string` **extern returns an unusable pointer** — read via
       `IOFile_ReadSpan[u8]` into an owned buffer + explicit NUL instead.
-- [ ] **`sstream` tokenizing** — whitespace split + the `serial h:m:s` line parse
-      (`UpdatePlayTime` core); `port_parse_int`/`port_parse_hms` ready.
+- [x] **`sstream` tokenizing** — `port_split_lines` (getline loop), `port_nth_token`
+      (whitespace `>>`), `port_subview` (bounded sub-view). Verified.
 - [ ] **`MntPoints`** — `Mount` / `GetHostPath`.
 - [ ] **`PSF`** — `param.sfo` parser (`Open`/`GetString`/`GetInteger`).
 - [ ] **`NPBindFile`** — `Load` / `GetNpCommIds` (trophies).
@@ -93,5 +93,9 @@ Things the transliteration taught us (compile + runtime tested):
   replaces `find_if`), `size_of`, and a `trusted Unsafe.PointerCast` segment
   load into a locally-declared guest-layout `OrbisProcParam`. Note: `elf.elisa`
   needs `static_strlen` in scope — include `common/streq.elisa` before it.
-- ⬜ `UpdatePlayTime` — next (exercises the fstream/sstream + decimal-parse gaps).
+- ✅ `UpdatePlayTime` core — `UpdatePlayTime_Core(existing, serial, secs) -> text`
+  transliterated + verified (update-existing / append-new / empty cases). Full
+  method still needs the host shell: `start_time`/`now()` (Clock) and
+  `GetUserPath` — wire when the `Emulator` struct lands.
+- ✅ file I/O — `port_read_file_text` / `port_write_file_text` (round-trip).
 - ⬜ `Run()` / `Restart()` / `ExecuteRestartArgs()` — pend the host subsystems above.
