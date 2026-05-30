@@ -42,6 +42,80 @@ def port_fmt_hex16(value: u64) -> static u8&:
             out.push(0)
         return out[0].ref[static u8&]
 
+# GAP[std::from_chars(..., 10)] -> parse leading decimal digits (stops at first
+# non-digit, like from_chars' partial consume).
+def port_parse_int(s: sview) -> i64:
+    value: mutable i64 = 0
+    for ch in s:
+        if ch >= '0' and ch <= '9':
+            value <- value * 10 + (ch - '0').i64()
+        else:
+            break
+    return value
+
+# parse "h:m:s" into total seconds; returns -1 if not two ':' separators.
+def port_parse_hms(time_str: sview) -> i64:
+    colons: mutable i64 = 0
+    for ch in time_str:
+        if ch == ':':
+            colons <- colons + 1
+    if colons != 2:
+        return -1
+    h: mutable i64 = 0
+    m: mutable i64 = 0
+    s: mutable i64 = 0
+    field: mutable i64 = 0
+    for ch in time_str:
+        if ch == ':':
+            field <- field + 1
+        elif ch >= '0' and ch <= '9':
+            d: i64 = (ch - '0').i64()
+            if field == 0:
+                h <- h * 10 + d
+            elif field == 1:
+                m <- m * 10 + d
+            else:
+                s <- s * 10 + d
+    return h * 3600 + m * 60 + s
+
+# GAP[fmt::format("{:d}", n)] with optional zero-pad -> push decimal digits.
+# Takes the owning arena so its own `in arena:` scope authorizes the push
+# (the darray-append-needs-active-arena check is intra-procedural).
+def port_push_dec(out: mutable darray[u8]&, value: i64, min_width: i64, arena: mutable Arena&) -> void:
+    can Memory.Allocate, Abort.Panic:
+        in arena:
+            digits: mutable i64 = 1
+            scan: mutable i64 = value
+            while scan >= 10:
+                scan <- scan / 10
+                digits <- digits + 1
+            while digits < min_width:
+                digits <- digits + 1
+            place: mutable i64 = 1
+            for _ in 1..<digits:
+                place <- place * 10
+            while place >= 1:
+                d: i64 = (value / place) % 10
+                out.push(('0'.i64() + d).u8())
+                place <- place / 10
+
+# GAP[fmt::format("{:d}:{:02d}:{:02d}", h, m, s)]
+def port_fmt_hms(total_seconds: i64) -> static u8&:
+    hours: i64 = total_seconds / 3600
+    minutes: i64 = (total_seconds % 3600) / 60
+    seconds: i64 = total_seconds % 60
+    trusted Unsafe.MutableGlobal, Unsafe.UncheckedIndex, Unsafe.PointerCast:
+        out: mutable darray[u8] = []
+        owner: mutable Arena& = port_arena.ref[mutable Arena&]
+        in owner:
+            port_push_dec(out, hours, 1, owner)
+            out.push(':')
+            port_push_dec(out, minutes, 2, owner)
+            out.push(':')
+            port_push_dec(out, seconds, 2, owner)
+            out.push(0)
+        return out[0].ref[static u8&]
+
 # GAP[std::hash<std::string_view>] -> FNV-1a 64-bit over the bytes (iterated).
 def port_hash_sview(value: sview) -> u64:
     hash: mutable u64 = 0xcbf29ce484222325u64

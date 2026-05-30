@@ -20,9 +20,22 @@ primitive. Each compile error that isn't a syntax mapping is a gap recorded here
 
 ### Small / cheap (implement inline now, promote to common/ later)
 - [x] **hex formatting** `fmt::format("{:016x}", n)` → `port_fmt_hex16` (local, in seed)
-- [x] **integer parse** `std::from_chars(b,e,v,16)` → `port_parse_hex_u32` (local, in seed)
-- [ ] **decimal parse** `from_chars(..., 10)` → `port_parse_int` (playtime)
+- [x] **decimal parse** `from_chars(..., 10)` → `port_parse_int` (verified)
+- [x] **time parse/format** → `port_parse_hms` / `port_fmt_hms` (`{:d}:{:02d}:{:02d}`, verified)
 - [ ] **general `fmt::format`** with `{}` substitution — needs a real formatter
+
+### COMPILER gaps (Elisa-core) surfaced by the port
+- ❗ **Generic `T` inference does not flow through auto-ref.** `f(x)` where
+  `f[T](out: mutable T&)` and `x` is a value that needs auto-ref fails to bind
+  `T` → `error: missing specialization binding for type parameter T`. Worked
+  around with explicit `[T]` at call sites (`IOFile_ReadObject[...]`,
+  `IOFile_WriteSpan[u8]` in `core/loader/elf.elisa`). **Proper fix:** make
+  `collectTypeBindings` peel the auto-ref when matching arg→`mutable T&`.
+  (This blocked the Elf/IOFile path and the kernel-memory-parity target.)
+- ⚠️ **darray-append-needs-active-arena is intra-procedural** — a helper that
+  pushes to a `&`-passed darray needs its own `in arena:` scope (pass the arena).
+  This is exactly the allocator-threading the region-aware-container design note
+  is meant to remove.
 
 ### Algorithm helpers (currently hand-rolled loops)
 - [ ] `std::all_of` / `find_if` / `sort` over a range
