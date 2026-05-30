@@ -454,13 +454,13 @@ def Module_LoadElfFromHostFile(self: mutable Module&, memory: mutable MemoryMana
     if not Module_IsLikelyHostFile(self.host_file):
         return false
     elf: mutable Elf = Elf_new()
-    Elf_Open(elf.ref[mutable Elf&], self.host_file)
-    if not Elf_IsOpen(elf.ref[Elf&]):
+    Elf_Open(elf, self.host_file)
+    if not Elf_IsOpen(elf):
         return false
-    if not Elf_IsElfFile(elf.ref[Elf&]):
+    if not Elf_IsElfFile(elf):
         return false
-    self.entry_virtual_addr <- Elf_GetElfEntry(elf.ref[Elf&]).uintptr()
-    loaded_dynamic: bool = Module_LoadElfSegments(self.ref[mutable Module&], elf.ref[mutable Elf&], memory)
+    self.entry_virtual_addr <- Elf_GetElfEntry(elf).uintptr()
+    loaded_dynamic: bool = Module_LoadElfSegments(self.ref[mutable Module&], elf, memory)
     if not loaded_dynamic:
         return false
     Module_LoadDynamicInfo(self.ref[mutable Module&])
@@ -486,12 +486,12 @@ def Module_LoadElfSegments(self: mutable Module&, elf: mutable Elf&, memory: mut
     Module_PrepareLoadImage(self.ref[mutable Module&], elf)
     if self.aligned_base_size > 0:
         out_addr: mutable VAddr = self.base_virtual_addr
-        if MemoryManager_MapMemory(memory, out_addr.ref[mutable VAddr&], self.base_virtual_addr, self.aligned_base_size + MODULE_TRAMPOLINE_SIZE, MemoryProt_NoAccess, MemoryMapFlags_NoFlags, VMAType_Reserved, self.name, false, 0.uintptr(), MODULE_BLOCK_ALIGN) != 0:
+        if MemoryManager_MapMemory(memory, out_addr, self.base_virtual_addr, self.aligned_base_size + MODULE_TRAMPOLINE_SIZE, MemoryProt_NoAccess, MemoryMapFlags_NoFlags, VMAType_Reserved, self.name, false, 0.uintptr(), MODULE_BLOCK_ALIGN) != 0:
             return false
         self.base_virtual_addr <- out_addr
         self.trampoline_virtual_addr <- self.base_virtual_addr + self.aligned_base_size.uintptr()
         tramp_addr: mutable VAddr = self.trampoline_virtual_addr
-        if MemoryManager_MapMemory(memory, tramp_addr.ref[mutable VAddr&], self.trampoline_virtual_addr, MODULE_TRAMPOLINE_SIZE, MemoryProt_CpuRead | MemoryProt_CpuWrite | MemoryProt_CpuExec, MemoryMapFlags_Fixed, VMAType_Code, self.name, false, 0.uintptr(), MODULE_BLOCK_ALIGN) != 0:
+        if MemoryManager_MapMemory(memory, tramp_addr, self.trampoline_virtual_addr, MODULE_TRAMPOLINE_SIZE, MemoryProt_CpuRead | MemoryProt_CpuWrite | MemoryProt_CpuExec, MemoryMapFlags_Fixed, VMAType_Code, self.name, false, 0.uintptr(), MODULE_BLOCK_ALIGN) != 0:
             return false
         RegisterPatchModule(self.base_virtual_addr.cast[void&?], self.aligned_base_size, self.trampoline_virtual_addr.cast[void&?], MODULE_TRAMPOLINE_SIZE)
     for i in 0..<elf.elf_header_value.e_phnum.usize():
@@ -513,10 +513,10 @@ def Module_LoadElfSegments(self: mutable Module&, elf: mutable Elf&, memory: mut
                 return false
         if phdr.p_type == PT_DYNAMIC and phdr.p_filesz > 0:
             dyn_owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
-            loaded_dynamic <- Elf_LoadSegmentBytes(elf, self.dynamic_segment.ref[mutable darray[u8]&], phdr.p_offset, phdr.p_filesz.usize(), dyn_owner)
+            loaded_dynamic <- Elf_LoadSegmentBytes(elf, self.dynamic_segment, phdr.p_offset, phdr.p_filesz.usize(), dyn_owner)
         if phdr.p_type == PT_SCE_DYNLIBDATA and phdr.p_filesz > 0:
             data_owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
-            _ = Elf_LoadSegmentBytes(elf, self.dynamic_data.ref[mutable darray[u8]&], phdr.p_offset, phdr.p_filesz.usize(), data_owner)
+            _ = Elf_LoadSegmentBytes(elf, self.dynamic_data, phdr.p_offset, phdr.p_filesz.usize(), data_owner)
         if phdr.p_type == PT_TLS:
             self.tls.init_image_size <- phdr.p_filesz.u32()
             self.tls.align <- phdr.p_align.u32()
@@ -562,7 +562,7 @@ def Module_MapImageSegment(self: mutable Module&, memory: mutable MemoryManager&
     map_prot: mutable MemoryProt = Module_PflagsToMemoryProt(phdr.p_flags)
     if load_writable:
         map_prot <- map_prot | MemoryProt_CpuWrite
-    if MemoryManager_MapMemory(memory, segment_addr.ref[mutable VAddr&], segment_vaddr, segment_size, map_prot, MemoryMapFlags_Fixed, vma_type, self.name, false, 0.uintptr(), phdr.p_align) != 0:
+    if MemoryManager_MapMemory(memory, segment_addr, segment_vaddr, segment_size, map_prot, MemoryMapFlags_Fixed, vma_type, self.name, false, 0.uintptr(), phdr.p_align) != 0:
         return false
     if phdr.p_type == PT_LOAD and (phdr.p_flags & PF_EXEC) != 0:
         if self.executable_segment_count == 0:
@@ -612,7 +612,7 @@ def Module_PrepareLoadImage(self: mutable Module&, elf: mutable Elf&) -> void:
     self.aligned_base_size <- Module_AlignUp(base_size, MODULE_BLOCK_ALIGN)
     if max_vaddr > min_vaddr:
         self.image_virtual_size <- max_vaddr - min_vaddr
-        Module_ResizeBytes(self.image.ref[mutable darray[u8]&], self.image_virtual_size.usize())
+        Module_ResizeBytes(self.image, self.image_virtual_size.usize())
 
 def Module_LoadImageSegment(self: mutable Module&, elf: mutable Elf&, memory: mutable MemoryManager&, phdr: elf_program_header&) -> bool:
     if self.image_virtual_size == 0:
@@ -627,13 +627,13 @@ def Module_LoadImageSegment(self: mutable Module&, elf: mutable Elf&, memory: mu
     # in a function-scoped arena that stays alive through those reads.
     seg_arena: Arena = zeroed
     segment: mutable darray[u8] = []
-    loaded: bool = Elf_LoadSegmentBytes(elf, segment.ref[mutable darray[u8]&], phdr.p_offset, phdr.p_filesz.usize(), seg_arena.ref[mutable Arena&])
+    loaded: bool = Elf_LoadSegmentBytes(elf, segment, phdr.p_offset, phdr.p_filesz.usize(), seg_arena.ref[mutable Arena&])
     if not loaded:
         return false
     for i in 0..<segment.count:
         self.image[(offset.usize() + i)] <- segment[i]
     if segment.count > 0:
-        return MemoryManager_WriteBytes(memory, self.base_virtual_addr + phdr.p_vaddr.uintptr(), segment[0].ref[u8&], segment.count.u64())
+        return MemoryManager_WriteBytes(memory, self.base_virtual_addr + phdr.p_vaddr.uintptr(), segment[0], segment.count.u64())
     return true
 
 def Module_ResizeBytes(out: mutable darray[u8]&, size: usize) -> void:
@@ -745,7 +745,7 @@ def Module_ImageOffsetForVirtualAddress(self: Module&, addr: u64, out_offset: mu
 
 def Module_WriteImageU64(self: mutable Module&, addr: u64, value: u64) -> bool:
     offset: mutable usize = 0
-    if not Module_ImageOffsetForVirtualAddress(self, addr, offset.ref[mutable usize&]):
+    if not Module_ImageOffsetForVirtualAddress(self, addr, offset):
         return false
     for i in 0..<8:
         self.image[offset + i] <- ((value >> (i.u64() * 8)) & 0xff).u8()
@@ -753,7 +753,7 @@ def Module_WriteImageU64(self: mutable Module&, addr: u64, value: u64) -> bool:
 
 def Module_ReadImageU64(self: Module&, addr: u64) -> u64:
     offset: mutable usize = 0
-    if not Module_ImageOffsetForVirtualAddress(self, addr, offset.ref[mutable usize&]):
+    if not Module_ImageOffsetForVirtualAddress(self, addr, offset):
         return 0
     value: mutable u64 = 0
     for i in 0..<8:

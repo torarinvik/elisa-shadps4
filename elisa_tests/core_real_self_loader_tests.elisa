@@ -75,11 +75,11 @@ def RealSelfLoader_FindAnyDefinedNid(module: Module&, out_nid: mutable static u8
     while i < symbol_count:
         info: mutable u8 = 0
         value: mutable u64 = 0
-        if Module_GetSymbolInfoByIndex(module, i.u32(), info.ref[mutable u8&], value.ref[mutable u64&]):
+        if Module_GetSymbolInfoByIndex(module, i.u32(), info, value):
             name: static u8& = Module_GetSymbolNameByIndex(module.ref[mutable Module&], i.u32())
             if static_strlen(name) > 0:
                 addr: mutable u64 = 0
-                if Module_FindDefinedSymbolAddress(module.ref[mutable Module&], name, addr.ref[mutable u64&]) and addr > 0:
+                if Module_FindDefinedSymbolAddress(module.ref[mutable Module&], name, addr) and addr > 0:
                     out_nid <- name
                     return true
         i <- i + 1
@@ -135,7 +135,7 @@ def real_self_loader_loads_guest_prx_through_dynamic_module_path() -> void:
         start_result: mutable int = -99
         handle: mutable s32 = 0
         can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
-            handle <- Linker_LoadAndStartGuestModule(linker, "/app0/sce_module/libc.prx", 0u64, null, start_result.ref[mutable int&])
+            handle <- Linker_LoadAndStartGuestModule(linker, "/app0/sce_module/libc.prx", 0u64, null, start_result)
         RealSelfLoader_Check(handle >= 0, "expected real libc.prx dynamic module handle")
         RealSelfLoader_Check(start_result == 0, "expected real libc.prx start result")
         RealSelfLoader_Check(linker.modules.count == 1, "expected one dynamically loaded PRX")
@@ -158,7 +158,7 @@ def real_self_loader_loads_guest_prx_through_dynamic_module_path() -> void:
         exported_nid: mutable static u8& = ""
         RealSelfLoader_Check(RealSelfLoader_FindAnyDefinedNid(module, exported_nid.ref[mutable static u8&]), "expected real PRX to expose at least one defined symbol")
         exported_addr: mutable u64 = 0u64
-        RealSelfLoader_Check(Module_FindDefinedSymbolAddress(module.ref[mutable Module&], exported_nid, exported_addr.ref[mutable u64&]), "expected PRX defined symbol address lookup")
+        RealSelfLoader_Check(Module_FindDefinedSymbolAddress(module.ref[mutable Module&], exported_nid, exported_addr), "expected PRX defined symbol address lookup")
         dlsym_addr: mutable void&? = null
         RealSelfLoader_Check(sceKernelDlsym(handle.int(), exported_nid.cast[u8&?], dlsym_addr.ref[mutable void&?].cast[void&?]) == ORBIS_OK, "expected sceKernelDlsym to resolve a real PRX export")
         RealSelfLoader_Check(dlsym_addr == exported_addr.cast[void&?], "expected dlsym address to match parsed PRX export")
@@ -239,22 +239,22 @@ def real_self_loader_import_symbol_parsing_and_resolution_kinds() -> void:
 
         resolved_addr: mutable u64 = 0
         resolved_kind: mutable u8 = IMPORT_RESOLUTION_UNRESOLVED
-        RealSelfLoader_Check(Linker_Resolve(linker, "D4yla3vx4tY", scratch_module.ref[mutable Module&], IMPORT_SYMBOL_TYPE_FUNCTION, resolved_addr.ref[mutable u64&], resolved_kind.ref[mutable u8&]), "expected HLE nid resolve")
+        RealSelfLoader_Check(Linker_Resolve(linker, "D4yla3vx4tY", scratch_module, IMPORT_SYMBOL_TYPE_FUNCTION, resolved_addr, resolved_kind), "expected HLE nid resolve")
         RealSelfLoader_Check(resolved_kind == IMPORT_RESOLUTION_NATIVE_HLE, "expected HLE kind by nid")
 
         resolved_addr <- 0
         resolved_kind <- IMPORT_RESOLUTION_UNRESOLVED
-        RealSelfLoader_Check(Linker_Resolve(linker, "D4yla3vx4tY#libkernel#libkernel", scratch_module.ref[mutable Module&], IMPORT_SYMBOL_TYPE_FUNCTION, resolved_addr.ref[mutable u64&], resolved_kind.ref[mutable u8&]), "expected HLE full-symbol resolve")
+        RealSelfLoader_Check(Linker_Resolve(linker, "D4yla3vx4tY#libkernel#libkernel", scratch_module, IMPORT_SYMBOL_TYPE_FUNCTION, resolved_addr, resolved_kind), "expected HLE full-symbol resolve")
         RealSelfLoader_Check(resolved_kind == IMPORT_RESOLUTION_NATIVE_HLE, "expected HLE kind by full symbol")
 
         resolved_addr <- 0
         resolved_kind <- IMPORT_RESOLUTION_UNRESOLVED
-        RealSelfLoader_Check(not Linker_Resolve(linker, "", scratch_module.ref[mutable Module&], IMPORT_SYMBOL_TYPE_FUNCTION, resolved_addr.ref[mutable u64&], resolved_kind.ref[mutable u8&]), "expected empty symbol unresolved")
+        RealSelfLoader_Check(not Linker_Resolve(linker, "", scratch_module, IMPORT_SYMBOL_TYPE_FUNCTION, resolved_addr, resolved_kind), "expected empty symbol unresolved")
         RealSelfLoader_Check(resolved_kind == IMPORT_RESOLUTION_MALFORMED, "expected malformed kind for empty symbol")
 
         resolved_addr <- 0
         resolved_kind <- IMPORT_RESOLUTION_UNRESOLVED
-        RealSelfLoader_Check(Linker_Resolve(linker, "ZZZUnknownNid123", scratch_module.ref[mutable Module&], IMPORT_SYMBOL_TYPE_FUNCTION, resolved_addr.ref[mutable u64&], resolved_kind.ref[mutable u8&]), "expected unknown symbol fallback resolve")
+        RealSelfLoader_Check(Linker_Resolve(linker, "ZZZUnknownNid123", scratch_module, IMPORT_SYMBOL_TYPE_FUNCTION, resolved_addr, resolved_kind), "expected unknown symbol fallback resolve")
         RealSelfLoader_Check(resolved_kind == IMPORT_RESOLUTION_AEROLIB_FALLBACK, "expected fallback kind for unknown symbol")
 
         index: s32 = Linker_LoadModuleFromHost(linker, "/app0/eboot.bin", REAL_SELF_TEST_EBOOT, false)
@@ -296,7 +296,7 @@ def real_self_loader_kernel_module_info_apis_reflect_linker_state() -> void:
         unwind: mutable OrbisModuleInfoForUnwind = zeroed
         unwind.st_size <- size_of(OrbisModuleInfoForUnwind).u64()
         RealSelfLoader_Check(sceKernelGetModuleInfoForUnwind(module.base_virtual_addr.u64(), 0, unwind.ref[mutable OrbisModuleInfoForUnwind&].cast[void&?]) == ORBIS_OK, "expected unwind module info success")
-        RealSelfLoader_Check(streq(unwind.name[0].ref[u8&], module.name) == 1, "expected unwind module name")
+        RealSelfLoader_Check(streq(unwind.name[0], module.name) == 1, "expected unwind module name")
         RealSelfLoader_Check(unwind.eh_frame_hdr_addr == module.base_virtual_addr + module.eh_frame_hdr_addr, "expected unwind eh header address")
         RealSelfLoader_Check(unwind.seg0_addr == module.base_virtual_addr, "expected unwind first segment address")
         handles: mutable s32[4] = zeroed

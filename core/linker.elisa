@@ -37,7 +37,7 @@ def Linker_PrepareMainThreadBeforeEntry() -> s32 can[Unsafe.SegmentMutation, Seg
     if alloc != 0:
         return alloc.s32()
     mapped_addr: mutable VAddr = 0.uintptr()
-    return MemoryManager_MapMemory(Memory_Instance(), mapped_addr.ref[mutable VAddr&], 0xfe0000000u64.uintptr(), 0x10000u64, 0x13u32, MemoryMapFlags_NoFlags, VMAType_Direct, "SceGnmDriver", false, phys_addr.uintptr(), 0x10000u64)
+    return MemoryManager_MapMemory(Memory_Instance(), mapped_addr, 0xfe0000000u64.uintptr(), 0x10000u64, 0x13u32, MemoryMapFlags_NoFlags, VMAType_Direct, "SceGnmDriver", false, phys_addr.uintptr(), 0x10000u64)
 
 def Linker_EnsureMainGuestStack(memory: mutable MemoryManager&) -> void:
     if not GuestExec_IsEnabled() or not GuestExec_IsSupported():
@@ -52,8 +52,8 @@ def Linker_EnsureMainGuestStack(memory: mutable MemoryManager&) -> void:
     guest_stack_size: u64 = 0x120000u64
     guard_out: mutable VAddr = 0.uintptr()
     stack_out: mutable VAddr = 0.uintptr()
-    guard_status: s32 = MemoryManager_MapMemory(memory, guard_out.ref[mutable VAddr&], guest_stack_guard, 0x4000u64, MemoryProt_NoAccess, MemoryMapFlags_Fixed, VMAType_Reserved, "main-thread-guard", false, 0.uintptr(), 0x4000u64)
-    stack_status: s32 = MemoryManager_MapMemory(memory, stack_out.ref[mutable VAddr&], guest_stack_base, guest_stack_size, MemoryProt_CpuReadWrite, MemoryMapFlags_Fixed, VMAType_Stack, "main-thread-stack", false, 0.uintptr(), 0x4000u64)
+    guard_status: s32 = MemoryManager_MapMemory(memory, guard_out, guest_stack_guard, 0x4000u64, MemoryProt_NoAccess, MemoryMapFlags_Fixed, VMAType_Reserved, "main-thread-guard", false, 0.uintptr(), 0x4000u64)
+    stack_status: s32 = MemoryManager_MapMemory(memory, stack_out, guest_stack_base, guest_stack_size, MemoryProt_CpuReadWrite, MemoryMapFlags_Fixed, VMAType_Stack, "main-thread-stack", false, 0.uintptr(), 0x4000u64)
     if guard_status == 0 and stack_status == 0:
         GuestExec_SetMainStackTop(stack_out + guest_stack_size.uintptr())
 
@@ -1105,8 +1105,8 @@ def Linker_AeroLibFallbackStub() -> u64:
 
 def Linker_FileExists(path: static u8&) -> bool:
     file: mutable IOFile = IOFile_new()
-    opened: bool = IOFile_Open(file.ref[mutable IOFile&], path, FileAccessMode.Read) == 0
-    IOFile_Close(file.ref[mutable IOFile&])
+    opened: bool = IOFile_Open(file, path, FileAccessMode.Read) == 0
+    IOFile_Close(file)
     return opened
 
 def Linker_ResolveGuestModulePath(self: Linker&, guest_path: static u8&) -> static u8&:
@@ -1404,7 +1404,7 @@ def Linker_WriteRelativeRelocationFast(module: mutable Module&, memory: mutable 
     Linker_RelocProbeNote(addr, value, 8u32, 2u32)  # 8 = R_X86_64_RELATIVE
     image_ok: mutable bool = false
     image_offset: mutable usize = 0usize
-    if Module_ImageOffsetForVirtualAddress(module, addr, image_offset.ref[mutable usize&]):
+    if Module_ImageOffsetForVirtualAddress(module, addr, image_offset):
         for i in 0..<8:
             module.image[image_offset + i] <- ((value >> (i.u64() * 8)) & 0xff).u8()
         image_ok <- true
@@ -1815,13 +1815,13 @@ def Linker_RelocateAnyImports(self: mutable Linker&, module: mutable Module&) ->
         qualified_raw: bool = Linker_IsQualifiedImportSymbol(import_symbol.raw_symbol)
         resolved: mutable bool = false
         if qualified_raw:
-            resolved <- Linker_Resolve(self.ref[mutable Linker&], import_symbol.raw_symbol, module, import_symbol.symbol_type, resolved_addr.ref[mutable u64&], resolved_kind.ref[mutable u8&])
+            resolved <- Linker_Resolve(self.ref[mutable Linker&], import_symbol.raw_symbol, module, import_symbol.symbol_type, resolved_addr, resolved_kind)
             if not resolved:
-                resolved <- Linker_Resolve(self.ref[mutable Linker&], import_symbol.nid, module, import_symbol.symbol_type, resolved_addr.ref[mutable u64&], resolved_kind.ref[mutable u8&])
+                resolved <- Linker_Resolve(self.ref[mutable Linker&], import_symbol.nid, module, import_symbol.symbol_type, resolved_addr, resolved_kind)
         else:
-            resolved <- Linker_Resolve(self.ref[mutable Linker&], import_symbol.nid, module, import_symbol.symbol_type, resolved_addr.ref[mutable u64&], resolved_kind.ref[mutable u8&])
+            resolved <- Linker_Resolve(self.ref[mutable Linker&], import_symbol.nid, module, import_symbol.symbol_type, resolved_addr, resolved_kind)
             if not resolved:
-                resolved <- Linker_Resolve(self.ref[mutable Linker&], import_symbol.raw_symbol, module, import_symbol.symbol_type, resolved_addr.ref[mutable u64&], resolved_kind.ref[mutable u8&])
+                resolved <- Linker_Resolve(self.ref[mutable Linker&], import_symbol.raw_symbol, module, import_symbol.symbol_type, resolved_addr, resolved_kind)
         module.import_symbols[i].resolved <- resolved
         module.import_symbols[i].resolved_virtual_addr <- resolved_addr
         module.import_symbols[i].resolution_kind <- resolved_kind
@@ -1862,7 +1862,7 @@ def Linker_ApplyRelocationEntry(self: mutable Linker&, module: mutable Module&, 
         if rel_type == R_X86_64_GLOB_DAT or rel_type == R_X86_64_JUMP_SLOT:
             addend <- 0
         symbol: mutable elf_symbol = zeroed
-        symbol_found: bool = Module_GetSymbolByIndex(module, symbol_index, symbol.ref[mutable elf_symbol&])
+        symbol_found: bool = Module_GetSymbolByIndex(module, symbol_index, symbol)
         if symbol_found:
             symbol_bind: u8 = ElfSymbol_GetBind(symbol)
             if symbol_bind == STB_LOCAL or ((symbol_bind == STB_GLOBAL or symbol_bind == STB_WEAK) and symbol.st_shndx != ELF_SHN_UNDEF and symbol.st_value != 0):
@@ -1879,7 +1879,7 @@ def Linker_ApplyRelocationEntry(self: mutable Linker&, module: mutable Module&, 
         expected_symbol_type: mutable u8 = IMPORT_SYMBOL_TYPE_UNKNOWN
         if rel_type == R_X86_64_JUMP_SLOT:
             expected_symbol_type <- IMPORT_SYMBOL_TYPE_FUNCTION
-        resolved: mutable bool = Linker_Resolve(self.ref[mutable Linker&], symbol_name, module, expected_symbol_type, resolved_addr.ref[mutable u64&], rel_kind.ref[mutable u8&])
+        resolved: mutable bool = Linker_Resolve(self.ref[mutable Linker&], symbol_name, module, expected_symbol_type, resolved_addr, rel_kind)
         if not resolved:
             import_index: s32 = Module_FindImportByName(module, symbol_name)
             if import_index >= 0 and module.import_symbols[import_index.usize()].resolved:
@@ -1966,7 +1966,7 @@ def Linker_ApplyRelocationTable(self: mutable Linker&, module: mutable Module&, 
             if rel_type_for_fast_path == R_X86_64_RELATIVE and linker_defer_native_relocation_writes:
                 rel_virtual_addr: u64 = module.base_virtual_addr.u64() + rel.rel_offset
                 value: u64 = module.base_virtual_addr.u64() + rel.rel_addend.u64()
-                if Linker_WriteRelativeRelocationFast(module.ref[mutable Module&], memory, rel_virtual_addr, value, cached_relative_backing_index.ref[mutable s32&]):
+                if Linker_WriteRelativeRelocationFast(module.ref[mutable Module&], memory, rel_virtual_addr, value, cached_relative_backing_index):
                     module.applied_relocation_count <- module.applied_relocation_count + 1
                     applied <- true
                     linker_last_relocation_retryable <- false
@@ -2037,7 +2037,7 @@ def Linker_RelocateAllImports(self: mutable Linker&) -> void:
     Linker_ResetFallbackSlots()
     Linker_ResetResolutionFingerprint()
     for i in 0..<self.modules.count:
-        Linker_RelocateAnyImports(self.ref[mutable Linker&], self.modules[i].ref[mutable Module&])
+        Linker_RelocateAnyImports(self.ref[mutable Linker&], self.modules[i])
     self.relocated_all_imports <- true
 
 def Linker_RecountImportResolution(self: mutable Linker&) -> void:
@@ -2219,7 +2219,7 @@ def Linker_LoadModuleFromHost(self: mutable Linker&, guest_name: static u8&, hos
     module: Module = Module_New(guest_name, module_name, base, is_dynamic)
     Module_SetHostFile(module.ref[mutable Module&], host_name)
     memory: mutable MemoryManager& = Memory_Instance()
-    Module_LoadModuleToMemory(module.ref[mutable Module&], memory, self.max_tls_index.ref[mutable u32&])
+    Module_LoadModuleToMemory(module.ref[mutable Module&], memory, self.max_tls_index)
     if not module.is_valid:
         return -1
     if not is_dynamic:
@@ -2373,11 +2373,11 @@ def Linker_Resolve(self: mutable Linker&, name: static u8&, module: mutable Modu
                 GuestExec_RecordLastHle(module.name, sym.name)
                 return true
             for candidate_index in 0..<self.modules.count:
-                if Module_FindDefinedQualifiedSymbolAddress(self.modules[candidate_index].ref[Module&], parsed_nid, library_value.name, Module_DynamicLibraryVersion(library_value.value), module_value.name, symbol_type, out_virtual_address.ref[mutable u64&]):
+                if Module_FindDefinedQualifiedSymbolAddress(self.modules[candidate_index], parsed_nid, library_value.name, Module_DynamicLibraryVersion(library_value.value), module_value.name, symbol_type, out_virtual_address):
                     out_resolution_kind <- IMPORT_RESOLUTION_PRX_EXPORT
                     return true
     for module_index in 0..<self.modules.count:
-        if Module_FindDefinedSymbolAddress(self.modules[module_index].ref[mutable Module&], lookup_nid, out_virtual_address.ref[mutable u64&]):
+        if Module_FindDefinedSymbolAddress(self.modules[module_index], lookup_nid, out_virtual_address):
             out_resolution_kind <- IMPORT_RESOLUTION_PRX_EXPORT
             return true
     fallback_index: s32 = SymbolsResolver_FindHleSymbolByNidOnlyTyped(self.hle_symbols, lookup_nid, symbol_type)
@@ -2389,7 +2389,7 @@ def Linker_Resolve(self: mutable Linker&, name: static u8&, module: mutable Modu
         return true
     if lookup_nid != name:
         for module_index in 0..<self.modules.count:
-            if Module_FindDefinedSymbolAddress(self.modules[module_index].ref[mutable Module&], name, out_virtual_address.ref[mutable u64&]):
+            if Module_FindDefinedSymbolAddress(self.modules[module_index], name, out_virtual_address):
                 out_resolution_kind <- IMPORT_RESOLUTION_PRX_EXPORT
                 return true
     out_virtual_address <- GuestExec_AeroLibFallbackStubAddress().u64()

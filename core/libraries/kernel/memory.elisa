@@ -107,7 +107,7 @@ def KernelMemory_MapDirect(addr: mutable void&?&, len: u64, prot: int, flags: in
     mapped: mutable VAddr = 0.uintptr()
     result: s32 = MemoryManager_MapMemory(
         Memory_Instance(),
-        mapped.ref[mutable VAddr&],
+        mapped,
         KernelMemory_ReadInOutPtr(addr),
         len,
         prot.u32(),
@@ -132,7 +132,7 @@ def KernelMemory_MapFlexible(addr_in_out: mutable void&?&, len: u64, prot: int, 
     mapped: mutable VAddr = 0.uintptr()
     result: s32 = MemoryManager_MapMemory(
         Memory_Instance(),
-        mapped.ref[mutable VAddr&],
+        mapped,
         KernelMemory_ReadInOutPtr(addr_in_out),
         len,
         prot.u32(),
@@ -160,13 +160,13 @@ def KernelMemory_PosixMmapImpl(addr: void&?, len: u64, prot: int, flags: int, fd
     mapped: mutable VAddr = 0.uintptr()
     result: mutable s32 = 0
     if (map_flags & MemoryMapFlags_Anon) != 0u32:
-        result <- MemoryManager_MapMemory(Memory_Instance(), mapped.ref[mutable VAddr&], aligned_addr, aligned_size, prot.u32(), map_flags, VMAType_Flexible, "anon", false, 0.uintptr(), 0)
+        result <- MemoryManager_MapMemory(Memory_Instance(), mapped, aligned_addr, aligned_size, prot.u32(), map_flags, VMAType_Flexible, "anon", false, 0.uintptr(), 0)
     elif (map_flags & MemoryMapFlags_Stack) != 0u32:
-        result <- MemoryManager_MapMemory(Memory_Instance(), mapped.ref[mutable VAddr&], aligned_addr, aligned_size, prot.u32(), map_flags, VMAType_Stack, "anon", false, 0.uintptr(), 0)
+        result <- MemoryManager_MapMemory(Memory_Instance(), mapped, aligned_addr, aligned_size, prot.u32(), map_flags, VMAType_Stack, "anon", false, 0.uintptr(), 0)
     elif (map_flags & MemoryMapFlags_Void) != 0u32:
-        result <- MemoryManager_MapMemory(Memory_Instance(), mapped.ref[mutable VAddr&], aligned_addr, aligned_size, MemoryProt_NoAccess, map_flags, VMAType_Reserved, "anon", false, 0.uintptr(), 0)
+        result <- MemoryManager_MapMemory(Memory_Instance(), mapped, aligned_addr, aligned_size, MemoryProt_NoAccess, map_flags, VMAType_Reserved, "anon", false, 0.uintptr(), 0)
     else:
-        result <- MemoryManager_MapFile(Memory_Instance(), mapped.ref[mutable VAddr&], aligned_addr, aligned_size, prot.u32(), map_flags, fd.s32(), phys_addr)
+        result <- MemoryManager_MapFile(Memory_Instance(), mapped, aligned_addr, aligned_size, prot.u32(), map_flags, fd.s32(), phys_addr)
     if result != 0:
         return KERNEL_MEMORY_MMAP_FAILED.cast[void&?]
     return mapped.cast[void&?]
@@ -256,7 +256,7 @@ def sceKernelAvailableDirectMemorySize(searchStart: u64, searchEnd: u64, alignme
         return ORBIS_KERNEL_ERROR_EINVAL
     phys_addr: mutable PAddr = 0.uintptr()
     size: mutable u64 = 0u64
-    result: int = MemoryManager_DirectQueryAvailable(Memory_Instance(), searchStart.uintptr(), searchEnd.uintptr(), alignment, phys_addr.ref[mutable PAddr&], size.ref[mutable u64&])
+    result: int = MemoryManager_DirectQueryAvailable(Memory_Instance(), searchStart.uintptr(), searchEnd.uintptr(), alignment, phys_addr, size)
     if size == 0u64:
         return ORBIS_KERNEL_ERROR_ENOMEM
     out_phys[0] <- phys_addr.u64().i64()
@@ -389,7 +389,7 @@ def sceKernelQueryMemoryProtection(addr: void&?, start: mutable void&?&, end: mu
     start_addr: mutable VAddr = 0.uintptr()
     end_addr: mutable VAddr = 0.uintptr()
     out_prot: mutable u32 = 0u32
-    result: s32 = MemoryManager_QueryProtection(Memory_Instance(), addr.cast[VAddr], start_addr.ref[mutable VAddr&], end_addr.ref[mutable VAddr&], out_prot.ref[mutable u32&])
+    result: s32 = MemoryManager_QueryProtection(Memory_Instance(), addr.cast[VAddr], start_addr, end_addr, out_prot)
     if result != 0:
         return result
     start <- start_addr.cast[void&?]
@@ -529,7 +529,7 @@ def KernelMemory_BootstrapApplicationHeapDirectArena() -> void can[Unsafe.Segmen
     mapped_addr: mutable void&? = null
     map_result: mutable int = 0
     can Unsafe.SegmentMutation, Segment.Host:
-        map_result <- sceKernelMapDirectMemory(mapped_addr.ref[mutable void&?&], heap_direct_size, 0x33, 0, phys_addr, 0x200000u64)
+        map_result <- sceKernelMapDirectMemory(mapped_addr, heap_direct_size, 0x33, 0, phys_addr, 0x200000u64)
     can Unsafe.SegmentMutation, Segment.Host:
         ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, GuestExec_RuntimeHleGuestReturnAddr(), 0x48454150.uintptr(), phys_addr.u64().uintptr(), mapped_addr.uintptr())
         ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, GuestExec_RuntimeHleGuestReturnAddr(), 0x48454151.uintptr(), map_result.u64().uintptr(), direct_size.uintptr())
@@ -576,14 +576,14 @@ def sceKernelBatchMap2(entries: void&?, numEntries: int, numEntriesOut: void&?, 
             break
         processed <- processed + 1
         if entry.operation == ORBIS_KERNEL_MAP_OP_MAP_DIRECT:
-            result <- sceKernelMapNamedDirectMemory(entry.start.ref[mutable void&?&], entry.length, entry.protection.int(), flags, entry.offset.i64(), 0u64, "anon")
+            result <- sceKernelMapNamedDirectMemory(entry.start, entry.length, entry.protection.int(), flags, entry.offset.i64(), 0u64, "anon")
         elif entry.operation == ORBIS_KERNEL_MAP_OP_UNMAP:
             result <- sceKernelMunmap(entry.start, entry.length)
         elif entry.operation == ORBIS_KERNEL_MAP_OP_PROTECT:
             result <- sceKernelMprotect(entry.start, entry.length, entry.protection.int())
         elif entry.operation == ORBIS_KERNEL_MAP_OP_MAP_FLEXIBLE:
             can Unsafe.SegmentMutation, Segment.Host:
-                result <- sceKernelMapNamedFlexibleMemory(entry.start.ref[mutable void&?&], entry.length, entry.protection.int(), flags, "anon")
+                result <- sceKernelMapNamedFlexibleMemory(entry.start, entry.length, entry.protection.int(), flags, "anon")
         elif entry.operation == ORBIS_KERNEL_MAP_OP_TYPE_PROTECT:
             result <- sceKernelMtypeprotect(entry.start, entry.length, entry.type.int(), entry.protection.int())
         else:
