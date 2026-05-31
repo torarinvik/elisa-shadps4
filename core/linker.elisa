@@ -1149,47 +1149,46 @@ def Linker_DependencyGuestPath(name: static u8&) -> static u8&:
         return Linker_PathJoin("/app0/sce_module", Linker_Concat2(name, ".prx"))
 
 def Linker_LoadGuestDependency(self: mutable Linker&, dependency_name: static u8&) -> s32 can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host, Memory.Allocate, Abort.Panic]:
-    can Memory.Allocate, Abort.Panic:
+    # One effect-grant block wraps the whole body: all six effects are already in the
+    # signature, and keeping every local in a single scope avoids `can:`-block scoping
+    # dropping `guest_path`/`mod_ref`/`idx` (and preserves the null-narrowing of mod_ref).
+    can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host, Memory.Allocate, Abort.Panic:
         guest_path: static u8& = Linker_DependencyGuestPath(dependency_name)
         if static_strlen(guest_path) == 0:
             return -1
         host_path: static u8& = Linker_ResolveGuestModulePath(self.ref[Linker&], guest_path)
         if static_strlen(host_path) == 0:
             return -1
-    existing: mutable u32 = Linker_FindByFileOrHost(self.ref[Linker&], guest_path)
-    if existing != 0xFFFFFFFF.u32():
-        return existing.s32()
-    existing <- Linker_FindByFileOrHost(self.ref[Linker&], host_path)
-    if existing != 0xFFFFFFFF.u32():
-        return existing.s32()
-    if not Linker_FileExists(host_path):
-        return -1
-    can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host, Memory.Allocate, Abort.Panic:
+        existing: mutable u32 = Linker_FindByFileOrHost(self.ref[Linker&], guest_path)
+        if existing != 0xFFFFFFFF.u32():
+            return existing.s32()
+        existing <- Linker_FindByFileOrHost(self.ref[Linker&], host_path)
+        if existing != 0xFFFFFFFF.u32():
+            return existing.s32()
+        if not Linker_FileExists(host_path):
+            return -1
         idx: s32 = Linker_LoadModuleFromHost(self.ref[mutable Linker&], guest_path, host_path, true)
         if idx < 0:
             return idx
         mod_ref: mutable Module&? = Linker_GetModule(self.ref[mutable Linker&], idx)
         if mod_ref == null:
             return -1
-    can Memory.Allocate, Abort.Panic:
         Linker_RelocateAnyImports(self.ref[mutable Linker&], mod_ref)
-    if mod_ref.tls.image_size != 0:
-        Linker_AdvanceGenerationCounter(self.ref[mutable Linker&])
-    # In deferred-start mode the dependency inits are NOT run here. Capture their
-    # init-array function-pointer VALUES from the MemoryManager backing right now --
-    # the exact point (post per-module relocation, pre-darray-realloc) where the
-    # original Module_Start reads them successfully (0x...600 etc.). They are gone
-    # from every layer by execution time, so this transient window is the only place
-    # to read them. Run later via the init trampoline. Otherwise start now (shadPS4
-    # parity: LoadAndStartModule passes the module's proc param to Start).
-    if not linker_defer_dependency_start:
-        can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host, Memory.Allocate:
+        if mod_ref.tls.image_size != 0:
+            Linker_AdvanceGenerationCounter(self.ref[mutable Linker&])
+        # In deferred-start mode the dependency inits are NOT run here. Capture their
+        # init-array function-pointer VALUES from the MemoryManager backing right now --
+        # the exact point (post per-module relocation, pre-darray-realloc) where the
+        # original Module_Start reads them successfully (0x...600 etc.). They are gone
+        # from every layer by execution time, so this transient window is the only place
+        # to read them. Run later via the init trampoline. Otherwise start now (shadPS4
+        # parity: LoadAndStartModule passes the module's proc param to Start).
+        if not linker_defer_dependency_start:
             _ = Module_Start(mod_ref, 0, null, Module_GetProcParam(mod_ref).cast[void&?])
-    else:
-        can Memory.Allocate:
+        else:
             Linker_CaptureInitValuesNow(mod_ref, mod_ref.dynamic_info.preinit_array_virtual_addr, mod_ref.dynamic_info.preinit_array_size)
             Linker_CaptureInitValuesNow(mod_ref, mod_ref.dynamic_info.init_array_virtual_addr, mod_ref.dynamic_info.init_array_size)
-    return idx
+        return idx
 
 def Linker_PreloadLibkernelGameModules(self: mutable Linker&) -> void can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host]:
     # shadPS4's sceSysmodulePreloadModuleForLibkernel loads these app-local
@@ -1829,7 +1828,7 @@ def Linker_RelocateAnyImports(self: mutable Linker&, module: mutable Module&) ->
         resolved_kind: mutable u8 = IMPORT_RESOLUTION_UNRESOLVED
         import_symbol: ImportSymbolRecord = module.import_symbols[i]
         ge_emergency_mark(GE_EV_RELOC_MODULE_IMPORT_BEGIN, module.base_virtual_addr, i.uintptr(), import_symbol.nid.uintptr(), import_symbol.raw_symbol.uintptr())
-        qualified_raw: bool = false
+        qualified_raw: mutable bool = false
         resolved: mutable bool = false
         can Memory.Allocate, Abort.Panic:
             qualified_raw <- Linker_IsQualifiedImportSymbol(import_symbol.raw_symbol)
@@ -1888,7 +1887,7 @@ def Linker_ApplyRelocationEntry(self: mutable Linker&, module: mutable Module&, 
             symbol_bind: u8 = ElfSymbol_GetBind(symbol)
             if symbol_bind == STB_LOCAL or ((symbol_bind == STB_GLOBAL or symbol_bind == STB_WEAK) and symbol.st_shndx != ELF_SHN_UNDEF and symbol.st_value != 0):
                 value: u64 = module.base_virtual_addr.u64() + symbol.st_value + addend.u64()
-                symbol_name_val: static u8& = ""
+                symbol_name_val: mutable static u8& = ""
                 can Memory.Allocate, Abort.Panic:
                     symbol_name_val <- Module_GetSymbolNameByIndex(module.ref[mutable Module&], symbol_index)
                 Linker_NoteRelocatedPointerValue(value, rel_virtual_addr, rel_type, symbol_name_val, module.name)
@@ -1898,7 +1897,7 @@ def Linker_ApplyRelocationEntry(self: mutable Linker&, module: mutable Module&, 
                         return true
                 Linker_RecordFailedRelocationDetail(self.ref[mutable Linker&], 2, IMPORT_RESOLUTION_PRX_EXPORT, value)
                 return false
-        symbol_name: static u8& = ""
+        symbol_name: mutable static u8& = ""
         can Memory.Allocate, Abort.Panic:
             symbol_name <- Module_GetSymbolNameByIndex(module.ref[mutable Module&], symbol_index)
         resolved_addr: mutable u64 = 0
@@ -2281,7 +2280,7 @@ def Linker_LoadAndStartModule(self: mutable Linker&, path: static u8&, args: u64
         if p_res != null:
             p_res <- 0
         return existing.s32()
-    idx: s32 = 0
+    idx: mutable s32 = 0
     can Memory.Allocate, Abort.Panic:
         idx <- Linker_LoadModule(self.ref[mutable Linker&], path, true)
     if idx < 0:
@@ -2319,7 +2318,7 @@ def Linker_LoadAndStartModule(self: mutable Linker&, path: static u8&, args: u64
     return idx
 
 def Linker_LoadAndStartGuestModule(self: mutable Linker&, guest_path: static u8&, args: u64, argp: void&?, p_res: mutable int&?) -> s32 can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host, Memory.Allocate, Abort.Panic]:
-    host_path: static u8& = ""
+    host_path: mutable static u8& = ""
     can Memory.Allocate, Abort.Panic:
         host_path <- Linker_ResolveGuestModulePath(self.ref[Linker&], guest_path)
     if static_strlen(host_path) == 0:
@@ -2337,7 +2336,7 @@ def Linker_LoadAndStartGuestModule(self: mutable Linker&, guest_path: static u8&
         if p_res != null:
             p_res <- 0
         return existing.s32()
-    idx: s32 = 0
+    idx: mutable s32 = 0
     can Memory.Allocate, Abort.Panic:
         idx <- Linker_LoadModuleFromHost(self.ref[mutable Linker&], guest_path, host_path, true)
     if idx < 0:
@@ -2462,9 +2461,9 @@ def Linker_Execute(self: mutable Linker&, args: darray[static u8&]) -> s32 can[U
     self.static_tls_size <- self.modules[0].tls.image_size.usize()
     self.modules[0].tls.offset <- self.modules[0].tls.image_size
     memory: mutable MemoryManager& = Memory_Instance()
-    flexible_size: u64 = 0
-    use_extended_mem1: bool = false
-    use_extended_mem2: bool = false
+    flexible_size: mutable u64 = 0
+    use_extended_mem1: mutable bool = false
+    use_extended_mem2: mutable bool = false
     can Memory.Allocate:
         flexible_size <- Linker_GetFlexibleMemorySize(self)
         use_extended_mem1 <- Linker_GetUseExtendedMemory1(self)
@@ -2518,7 +2517,7 @@ def Linker_Execute(self: mutable Linker&, args: darray[static u8&]) -> s32 can[U
     result: s32 = 0
     if GuestExec_IsEnabled():
         ge_emergency_mark(GE_EV_MAIN_ENTRY_SYNC_BEGIN, self.last_entry_addr, args.count.uintptr(), 0.uintptr(), 0.uintptr())
-        sync_result: bool = false
+        sync_result: mutable bool = false
         can Memory.Allocate:
             sync_result <- MemoryManager_SyncNativeBackingToGuestExec(memory)
         if not sync_result:
