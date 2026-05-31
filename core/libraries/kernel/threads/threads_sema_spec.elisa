@@ -45,248 +45,268 @@ def threads_posix_to_orbis_errno(e: int) -> int:
 
 # @port core/libraries/kernel/threads/semaphore.cpp::sceKernelCreateSema sha256=bb204ce21f7a6ca0 oracle@a3773841
 def sceKernelCreateSema(sem: mutable int&, p_name: static u8&?, attr: u32, init_count: int, max_count: int, p_opt_param: void&?) -> int:
-    _ = p_opt_param
-    if p_name == null or attr > 2 or init_count < 0 or max_count <= 0 or init_count > max_count:
-        return ORBIS_KERNEL_ERROR_EINVAL
-    i: mutable int = 0
-    while i < 64:
-        if g_orbis_sems[i].used == false:
-            create_res: mutable int = 0
-            native: void&? = elisa_kernel_sem_create(init_count, max_count, create_res)
-            if native == null:
-                return threads_posix_to_orbis_errno(create_res)
-            g_orbis_sems[i].used <- true
-            g_orbis_sems[i].token_count <- init_count
-            g_orbis_sems[i].max_count <- max_count
-            g_orbis_sems[i].init_count <- init_count
-            g_orbis_sems[i].native_handle <- native
-            sem <- i
-            return ORBIS_OK
-        i <- i + 1
-    return ORBIS_KERNEL_ERROR_ENOMEM
+    can Memory.Allocate:
+        _ = p_opt_param
+        if p_name == null or attr > 2 or init_count < 0 or max_count <= 0 or init_count > max_count:
+            return ORBIS_KERNEL_ERROR_EINVAL
+        i: mutable int = 0
+        while i < 64:
+            if g_orbis_sems[i].used == false:
+                create_res: mutable int = 0
+                native: void&? = elisa_kernel_sem_create(init_count, max_count, create_res)
+                if native == null:
+                    return threads_posix_to_orbis_errno(create_res)
+                g_orbis_sems[i].used <- true
+                g_orbis_sems[i].token_count <- init_count
+                g_orbis_sems[i].max_count <- max_count
+                g_orbis_sems[i].init_count <- init_count
+                g_orbis_sems[i].native_handle <- native
+                sem <- i
+                return ORBIS_OK
+            i <- i + 1
+        return ORBIS_KERNEL_ERROR_ENOMEM
 
 # @port core/libraries/kernel/threads/semaphore.cpp::sceKernelWaitSema sha256=d372af31e7dd7c90 oracle@a3773841
 def sceKernelWaitSema(sem: int, need_count: int, p_timeout: mutable u32&?) -> int:
-    if sem < 0 or sem >= 64 or g_orbis_sems[sem].used == false:
-        return ORBIS_KERNEL_ERROR_ESRCH
-    if need_count < 0:
-        return ORBIS_KERNEL_ERROR_EINVAL
-    if g_orbis_sems[sem].token_count < need_count:
-        if p_timeout == null:
+    can Memory.Release, Sync.Lock, Sync.Unlock, Sync.Wait:
+        if sem < 0 or sem >= 64 or g_orbis_sems[sem].used == false:
+            return ORBIS_KERNEL_ERROR_ESRCH
+        if need_count < 0:
+            return ORBIS_KERNEL_ERROR_EINVAL
+        if g_orbis_sems[sem].token_count < need_count:
+            if p_timeout == null:
+                g_orbis_sem_waiters[sem] <- g_orbis_sem_waiters[sem] + 1
+                r_wait: int = elisa_kernel_sem_wait(g_orbis_sems[sem].native_handle, need_count)
+                g_orbis_sem_waiters[sem] <- g_orbis_sem_waiters[sem] - 1
+                if r_wait != 0:
+                    return threads_posix_to_orbis_errno(r_wait)
+                g_orbis_sems[sem].token_count <- g_orbis_sems[sem].token_count - need_count
+                return ORBIS_OK
             g_orbis_sem_waiters[sem] <- g_orbis_sem_waiters[sem] + 1
-            r_wait: int = elisa_kernel_sem_wait(g_orbis_sems[sem].native_handle, need_count)
+            r_timeout: int = elisa_kernel_sem_timedwait(g_orbis_sems[sem].native_handle, need_count, p_timeout[0].cast[u64])
             g_orbis_sem_waiters[sem] <- g_orbis_sem_waiters[sem] - 1
-            if r_wait != 0:
-                return threads_posix_to_orbis_errno(r_wait)
-            g_orbis_sems[sem].token_count <- g_orbis_sems[sem].token_count - need_count
-            return ORBIS_OK
-        g_orbis_sem_waiters[sem] <- g_orbis_sem_waiters[sem] + 1
-        r_timeout: int = elisa_kernel_sem_timedwait(g_orbis_sems[sem].native_handle, need_count, p_timeout[0].cast[u64])
-        g_orbis_sem_waiters[sem] <- g_orbis_sem_waiters[sem] - 1
-        if r_timeout != 0:
-            p_timeout <- 0
-            return threads_posix_to_orbis_errno(r_timeout)
-    else:
-        r_poll: int = elisa_kernel_sem_trywait(g_orbis_sems[sem].native_handle, need_count)
-        if r_poll != 0:
-            return threads_posix_to_orbis_errno(r_poll)
-    g_orbis_sems[sem].token_count <- g_orbis_sems[sem].token_count - need_count
-    return ORBIS_OK
+            if r_timeout != 0:
+                p_timeout <- 0
+                return threads_posix_to_orbis_errno(r_timeout)
+        else:
+            r_poll: int = elisa_kernel_sem_trywait(g_orbis_sems[sem].native_handle, need_count)
+            if r_poll != 0:
+                return threads_posix_to_orbis_errno(r_poll)
+        g_orbis_sems[sem].token_count <- g_orbis_sems[sem].token_count - need_count
+        return ORBIS_OK
 
 # @port core/libraries/kernel/threads/semaphore.cpp::sceKernelSignalSema sha256=bd9f6b520aaa9d59 oracle@a3773841
 def sceKernelSignalSema(sem: int, signal_count: int) -> int:
-    if sem < 0 or sem >= 64 or g_orbis_sems[sem].used == false:
-        return ORBIS_KERNEL_ERROR_ESRCH
-    if g_orbis_sems[sem].token_count + signal_count > g_orbis_sems[sem].max_count:
-        return ORBIS_KERNEL_ERROR_EINVAL
-    if signal_count > 0:
-        r: int = elisa_kernel_sem_post(g_orbis_sems[sem].native_handle, signal_count)
-        if r != 0:
-            return threads_posix_to_orbis_errno(r)
-    g_orbis_sems[sem].token_count <- g_orbis_sems[sem].token_count + signal_count
-    if signal_count < 0:
-        _ = elisa_kernel_sem_set(g_orbis_sems[sem].native_handle, g_orbis_sems[sem].token_count)
-    return ORBIS_OK
+    can Sync.Lock, Sync.Notify, Sync.Unlock:
+        if sem < 0 or sem >= 64 or g_orbis_sems[sem].used == false:
+            return ORBIS_KERNEL_ERROR_ESRCH
+        if g_orbis_sems[sem].token_count + signal_count > g_orbis_sems[sem].max_count:
+            return ORBIS_KERNEL_ERROR_EINVAL
+        if signal_count > 0:
+            r: int = elisa_kernel_sem_post(g_orbis_sems[sem].native_handle, signal_count)
+            if r != 0:
+                return threads_posix_to_orbis_errno(r)
+        g_orbis_sems[sem].token_count <- g_orbis_sems[sem].token_count + signal_count
+        if signal_count < 0:
+            _ = elisa_kernel_sem_set(g_orbis_sems[sem].native_handle, g_orbis_sems[sem].token_count)
+        return ORBIS_OK
 
 # @port core/libraries/kernel/threads/semaphore.cpp::sceKernelPollSema sha256=9f449fcd31dde6b2 oracle@a3773841
 def sceKernelPollSema(sem: int, need_count: int) -> int:
-    if sem < 0 or sem >= 64 or g_orbis_sems[sem].used == false:
-        return ORBIS_KERNEL_ERROR_ESRCH
-    if g_orbis_sems[sem].token_count < need_count:
-        return ORBIS_KERNEL_ERROR_EBUSY
-    r: int = elisa_kernel_sem_trywait(g_orbis_sems[sem].native_handle, need_count)
-    if r != 0:
-        return threads_posix_to_orbis_errno(r)
-    g_orbis_sems[sem].token_count <- g_orbis_sems[sem].token_count - need_count
-    return ORBIS_OK
+    can Sync.Lock, Sync.Unlock:
+        if sem < 0 or sem >= 64 or g_orbis_sems[sem].used == false:
+            return ORBIS_KERNEL_ERROR_ESRCH
+        if g_orbis_sems[sem].token_count < need_count:
+            return ORBIS_KERNEL_ERROR_EBUSY
+        r: int = elisa_kernel_sem_trywait(g_orbis_sems[sem].native_handle, need_count)
+        if r != 0:
+            return threads_posix_to_orbis_errno(r)
+        g_orbis_sems[sem].token_count <- g_orbis_sems[sem].token_count - need_count
+        return ORBIS_OK
 
 # @port core/libraries/kernel/threads/semaphore.cpp::sceKernelCancelSema sha256=fe39b202b0b7bf05 oracle@a3773841
 def sceKernelCancelSema(sem: int, set_count: int, p_num_wait_threads: mutable int&?) -> int:
-    if sem < 0 or sem >= 64 or g_orbis_sems[sem].used == false:
-        return ORBIS_KERNEL_ERROR_ESRCH
-    if p_num_wait_threads != null:
-        p_num_wait_threads <- g_orbis_sem_waiters[sem]
-    set_value: mutable int = set_count
-    if set_count < 0:
-        set_value <- g_orbis_sems[sem].init_count
-    g_orbis_sems[sem].token_count <- set_value
-    r_cancel: int = elisa_kernel_sem_cancel(g_orbis_sems[sem].native_handle, set_value, p_num_wait_threads)
-    if r_cancel != 0:
-        return threads_posix_to_orbis_errno(r_cancel)
-    return ORBIS_OK
+    can Sync.Lock, Sync.Notify, Sync.Unlock:
+        if sem < 0 or sem >= 64 or g_orbis_sems[sem].used == false:
+            return ORBIS_KERNEL_ERROR_ESRCH
+        if p_num_wait_threads != null:
+            p_num_wait_threads <- g_orbis_sem_waiters[sem]
+        set_value: mutable int = set_count
+        if set_count < 0:
+            set_value <- g_orbis_sems[sem].init_count
+        g_orbis_sems[sem].token_count <- set_value
+        r_cancel: int = elisa_kernel_sem_cancel(g_orbis_sems[sem].native_handle, set_value, p_num_wait_threads)
+        if r_cancel != 0:
+            return threads_posix_to_orbis_errno(r_cancel)
+        return ORBIS_OK
 
 # @port core/libraries/kernel/threads/semaphore.cpp::sceKernelDeleteSema sha256=f517f31583e554d9 oracle@a3773841
 def sceKernelDeleteSema(sem: int) -> int:
-    if sem < 0 or sem >= 64 or g_orbis_sems[sem].used == false:
-        return ORBIS_KERNEL_ERROR_ESRCH
-    if g_orbis_sems[sem].native_handle != null:
-        r_delete: int = elisa_kernel_sem_delete(g_orbis_sems[sem].native_handle, null)
-        if r_delete != 0:
-            return threads_posix_to_orbis_errno(r_delete)
-    g_orbis_sems[sem].used <- false
-    g_orbis_sems[sem].token_count <- 0
-    g_orbis_sems[sem].max_count <- 0
-    g_orbis_sems[sem].init_count <- 0
-    g_orbis_sems[sem].native_handle <- null
-    g_orbis_sem_waiters[sem] <- 0
-    return ORBIS_OK
+    can Memory.Release, Sync.Lock, Sync.Notify, Sync.Unlock:
+        if sem < 0 or sem >= 64 or g_orbis_sems[sem].used == false:
+            return ORBIS_KERNEL_ERROR_ESRCH
+        if g_orbis_sems[sem].native_handle != null:
+            r_delete: int = elisa_kernel_sem_delete(g_orbis_sems[sem].native_handle, null)
+            if r_delete != 0:
+                return threads_posix_to_orbis_errno(r_delete)
+        g_orbis_sems[sem].used <- false
+        g_orbis_sems[sem].token_count <- 0
+        g_orbis_sems[sem].max_count <- 0
+        g_orbis_sems[sem].init_count <- 0
+        g_orbis_sems[sem].native_handle <- null
+        g_orbis_sem_waiters[sem] <- 0
+        return ORBIS_OK
 
 # @port core/libraries/kernel/threads/semaphore.cpp::posix_sem_init sha256=ff399a8fd627f593 oracle@a3773841
 def posix_sem_init(sem: mutable PthreadSem&?, pshared: int, value: u32) -> int:
-    _ = pshared
-    max_value: u32 = ORBIS_KERNEL_SEM_VALUE_MAX.u32()
-    if value > max_value:
-        return -1
-    if sem == null:
+    can Memory.Allocate:
+        _ = pshared
+        max_value: u32 = ORBIS_KERNEL_SEM_VALUE_MAX.u32()
+        if value > max_value:
+            return -1
+        if sem == null:
+            return 0
+        create_res: mutable int = 0
+        native: void&? = elisa_kernel_sem_create(value.cast[int], ORBIS_KERNEL_SEM_VALUE_MAX, create_res)
+        if native == null:
+            return -1
+        sem.value <- value.cast[int]
+        sem.native_handle <- native
         return 0
-    create_res: mutable int = 0
-    native: void&? = elisa_kernel_sem_create(value.cast[int], ORBIS_KERNEL_SEM_VALUE_MAX, create_res)
-    if native == null:
-        return -1
-    sem.value <- value.cast[int]
-    sem.native_handle <- native
-    return 0
 
 # @port core/libraries/kernel/threads/semaphore.cpp::posix_sem_destroy sha256=8c297838b90a58e8 oracle@a3773841
 def posix_sem_destroy(sem: mutable PthreadSem&?) -> int:
-    if sem == null:
-        return -1
-    if sem.native_handle != null:
-        _ = elisa_kernel_sem_destroy(sem.native_handle)
-    sem.value <- 0
-    sem.native_handle <- null
-    return 0
+    can Memory.Release:
+        if sem == null:
+            return -1
+        if sem.native_handle != null:
+            _ = elisa_kernel_sem_destroy(sem.native_handle)
+        sem.value <- 0
+        sem.native_handle <- null
+        return 0
 
 # @port core/libraries/kernel/threads/semaphore.cpp::posix_sem_wait sha256=0debad4d26f1c9a0 oracle@a3773841
 def posix_sem_wait(sem: mutable PthreadSem&?) -> int:
-    if sem == null:
-        return -1
-    r: int = elisa_kernel_sem_wait(sem.native_handle, 1)
-    if r != 0:
-        return -1
-    sem.value <- sem.value - 1
-    return 0
+    can Memory.Release, Sync.Lock, Sync.Unlock, Sync.Wait:
+        if sem == null:
+            return -1
+        r: int = elisa_kernel_sem_wait(sem.native_handle, 1)
+        if r != 0:
+            return -1
+        sem.value <- sem.value - 1
+        return 0
 
 # @port core/libraries/kernel/threads/semaphore.cpp::posix_sem_trywait sha256=7a3e65e4f8e5f7a6 oracle@a3773841
 def posix_sem_trywait(sem: mutable PthreadSem&?) -> int:
-    if sem == null:
-        return -1
-    r: int = elisa_kernel_sem_trywait(sem.native_handle, 1)
-    if r != 0:
-        return -1
-    sem.value <- sem.value - 1
-    return 0
+    can Sync.Lock, Sync.Unlock:
+        if sem == null:
+            return -1
+        r: int = elisa_kernel_sem_trywait(sem.native_handle, 1)
+        if r != 0:
+            return -1
+        sem.value <- sem.value - 1
+        return 0
 
 # @port core/libraries/kernel/threads/semaphore.cpp::posix_sem_timedwait sha256=2bd211a1e572066b oracle@a3773841
 def posix_sem_timedwait(sem: mutable PthreadSem&?, t: void&?) -> int:
-    _ = t
-    if sem == null:
-        return -1
-    r: int = elisa_kernel_sem_timedwait(sem.native_handle, 1, 0)
-    if r != 0:
-        return -1
-    sem.value <- sem.value - 1
-    return 0
+    can Memory.Release, Sync.Lock, Sync.Unlock:
+        _ = t
+        if sem == null:
+            return -1
+        r: int = elisa_kernel_sem_timedwait(sem.native_handle, 1, 0)
+        if r != 0:
+            return -1
+        sem.value <- sem.value - 1
+        return 0
 
 # @port core/libraries/kernel/threads/semaphore.cpp::posix_sem_post sha256=cc8afbef4886379f oracle@a3773841
 def posix_sem_post(sem: mutable PthreadSem&?) -> int:
-    if sem == null:
-        return -1
-    r: int = elisa_kernel_sem_post(sem.native_handle, 1)
-    if r != 0:
-        return -1
-    sem.value <- sem.value + 1
-    return 0
+    can Sync.Lock, Sync.Notify, Sync.Unlock:
+        if sem == null:
+            return -1
+        r: int = elisa_kernel_sem_post(sem.native_handle, 1)
+        if r != 0:
+            return -1
+        sem.value <- sem.value + 1
+        return 0
 
 # @port core/libraries/kernel/threads/semaphore.cpp::posix_sem_getvalue sha256=a4282fb423cad3d7 oracle@a3773841
 def posix_sem_getvalue(sem: PthreadSem&?, sval: mutable int&?) -> int:
-    if sem == null:
-        return -1
-    if sem.native_handle != null:
-        _ = elisa_kernel_sem_getvalue(sem.native_handle, sval)
+    can Sync.Lock, Sync.Unlock:
+        if sem == null:
+            return -1
+        if sem.native_handle != null:
+            _ = elisa_kernel_sem_getvalue(sem.native_handle, sval)
+            return 0
+        if sval != null:
+            sval <- sem.value
         return 0
-    if sval != null:
-        sval <- sem.value
-    return 0
 
 # @port core/libraries/kernel/threads/semaphore.cpp::scePthreadSemInit sha256=c0c5adee0a3400b7 oracle@a3773841
 def scePthreadSemInit(sem: mutable PthreadSem&?, flag: int, value: u32, name: static u8&?) -> int:
-    _ = name
-    if flag != 0:
-        return ORBIS_KERNEL_ERROR_EINVAL
-    if posix_sem_init(sem, 0, value) != 0:
-        return ORBIS_KERNEL_ERROR_EINVAL
-    return ORBIS_OK
+    can Memory.Allocate:
+        _ = name
+        if flag != 0:
+            return ORBIS_KERNEL_ERROR_EINVAL
+        if posix_sem_init(sem, 0, value) != 0:
+            return ORBIS_KERNEL_ERROR_EINVAL
+        return ORBIS_OK
 
 # @port core/libraries/kernel/threads/semaphore.cpp::scePthreadSemDestroy sha256=e0171ccad7d50af6 oracle@a3773841
 def scePthreadSemDestroy(sem: mutable PthreadSem&?) -> int:
-    if posix_sem_destroy(sem) != 0:
-        return ORBIS_KERNEL_ERROR_EINVAL
-    return ORBIS_OK
+    can Memory.Release:
+        if posix_sem_destroy(sem) != 0:
+            return ORBIS_KERNEL_ERROR_EINVAL
+        return ORBIS_OK
 
 # @port core/libraries/kernel/threads/semaphore.cpp::scePthreadSemWait sha256=0bf2cdc36c5f53f4 oracle@a3773841
 def scePthreadSemWait(sem: mutable PthreadSem&?) -> int:
-    r: int = posix_sem_wait(sem)
-    if r != 0:
-        if sem == null:
-            return ORBIS_KERNEL_ERROR_EINVAL
-        return threads_posix_to_orbis_errno(POSIX_EAGAIN)
-    return ORBIS_OK
+    can Memory.Release, Sync.Lock, Sync.Unlock, Sync.Wait:
+        r: int = posix_sem_wait(sem)
+        if r != 0:
+            if sem == null:
+                return ORBIS_KERNEL_ERROR_EINVAL
+            return threads_posix_to_orbis_errno(POSIX_EAGAIN)
+        return ORBIS_OK
 
 # @port core/libraries/kernel/threads/semaphore.cpp::scePthreadSemTrywait sha256=75fe8b581b7c6c1e oracle@a3773841
 def scePthreadSemTrywait(sem: mutable PthreadSem&?) -> int:
-    r: int = posix_sem_trywait(sem)
-    if r != 0:
-        if sem == null:
-            return ORBIS_KERNEL_ERROR_EINVAL
-        return threads_posix_to_orbis_errno(POSIX_EAGAIN)
-    return ORBIS_OK
+    can Sync.Lock, Sync.Unlock:
+        r: int = posix_sem_trywait(sem)
+        if r != 0:
+            if sem == null:
+                return ORBIS_KERNEL_ERROR_EINVAL
+            return threads_posix_to_orbis_errno(POSIX_EAGAIN)
+        return ORBIS_OK
 
 # @port core/libraries/kernel/threads/semaphore.cpp::scePthreadSemTimedwait sha256=91cf3cf8ed11ca23 oracle@a3773841
 def scePthreadSemTimedwait(sem: mutable PthreadSem&?, usec: u32) -> int:
-    _ = usec
-    r: int = posix_sem_timedwait(sem, null)
-    if r != 0:
-        if sem == null:
-            return ORBIS_KERNEL_ERROR_EINVAL
-        return threads_posix_to_orbis_errno(POSIX_ETIMEDOUT)
-    return ORBIS_OK
+    can Memory.Release, Sync.Lock, Sync.Unlock:
+        _ = usec
+        r: int = posix_sem_timedwait(sem, null)
+        if r != 0:
+            if sem == null:
+                return ORBIS_KERNEL_ERROR_EINVAL
+            return threads_posix_to_orbis_errno(POSIX_ETIMEDOUT)
+        return ORBIS_OK
 
 # @port core/libraries/kernel/threads/semaphore.cpp::scePthreadSemPost sha256=f8a3e8ef65bcb6cd oracle@a3773841
 def scePthreadSemPost(sem: mutable PthreadSem&?) -> int:
-    r: int = posix_sem_post(sem)
-    if r != 0:
-        if sem == null:
-            return ORBIS_KERNEL_ERROR_EINVAL
-        return threads_posix_to_orbis_errno(POSIX_EOVERFLOW)
-    return ORBIS_OK
+    can Sync.Lock, Sync.Notify, Sync.Unlock:
+        r: int = posix_sem_post(sem)
+        if r != 0:
+            if sem == null:
+                return ORBIS_KERNEL_ERROR_EINVAL
+            return threads_posix_to_orbis_errno(POSIX_EOVERFLOW)
+        return ORBIS_OK
 
 # @port core/libraries/kernel/threads/semaphore.cpp::scePthreadSemGetvalue sha256=ac135127d59d69ee oracle@a3773841
 def scePthreadSemGetvalue(sem: PthreadSem&?, sval: mutable int&?) -> int:
-    r: int = posix_sem_getvalue(sem, sval)
-    if r != 0:
-        return ORBIS_KERNEL_ERROR_EINVAL
-    return ORBIS_OK
+    can Sync.Lock, Sync.Unlock:
+        r: int = posix_sem_getvalue(sem, sval)
+        if r != 0:
+            return ORBIS_KERNEL_ERROR_EINVAL
+        return ORBIS_OK
 
 # @port core/libraries/kernel/threads/pthread_spec.cpp::posix_pthread_key_create sha256=2a879adced48e97c oracle@a3773841
 def posix_pthread_key_create(key: mutable int&, destructor: void&?) -> int:

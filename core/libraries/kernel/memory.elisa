@@ -71,8 +71,9 @@ def KernelMemory_WriteOutI64(out_ptr: void&?, value: i64) -> bool:
     # Guest out-pointers must update both the native execution mapping and the
     # AddressSpace backing. Internal loader calls pass host-stack pointers, so
     # fall back to a plain store when the address is not guest-backed.
-    if MemoryManager_WriteU64(Memory_Instance(), out_ptr.uintptr(), value.u64()):
-        return true
+    can Memory.Allocate:
+        if MemoryManager_WriteU64(Memory_Instance(), out_ptr.uintptr(), value.u64()):
+            return true
     raw: mutable i64&? = out_ptr.cast[mutable i64&?]
     if raw == null:
         return false
@@ -176,7 +177,7 @@ def sceKernelEnableDmemAliasing() -> int:
     return ORBIS_OK
 
 # @port core/libraries/kernel/memory.cpp::sceKernelAllocateDirectMemory sha256=84407e107a9a4243 oracle@a3773841
-def sceKernelAllocateDirectMemory(searchStart: i64, searchEnd: i64, len: u64, alignment: u64, memoryType: int, physAddrOut: void&?) -> int:
+def sceKernelAllocateDirectMemory(searchStart: i64, searchEnd: i64, len: u64, alignment: u64, memoryType: int, physAddrOut: void&?) -> int can[Memory.Allocate, Unsafe.SegmentMutation, Segment.Host]:
     can Unsafe.SegmentMutation, Segment.Host:
         ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d4142u64.uintptr(), searchStart.u64().uintptr(), searchEnd.u64().uintptr(), len.uintptr())
     # Oracle order: validate (searchStart/End<0, len, alignment, memoryType, out-ptr)
@@ -221,13 +222,14 @@ def sceKernelAllocateDirectMemory(searchStart: i64, searchEnd: i64, len: u64, al
         can Unsafe.SegmentMutation, Segment.Host:
             ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d4145u64.uintptr(), ORBIS_KERNEL_ERROR_EAGAIN.u64().uintptr(), searchStart.u64().uintptr(), searchEnd.u64().uintptr())
         return ORBIS_KERNEL_ERROR_EAGAIN
-    if not KernelMemory_WriteOutI64(physAddrOut, allocated.u64().i64()):
-        kernel_debug_last_direct_alloc_result <- ORBIS_KERNEL_ERROR_EFAULT
-        kernel_debug_last_direct_alloc_phys <- allocated.u64().i64()
-        kernel_debug_last_direct_alloc_len <- len
-        can Unsafe.SegmentMutation, Segment.Host:
-            ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d4145u64.uintptr(), ORBIS_KERNEL_ERROR_EFAULT.u64().uintptr(), physAddrOut.uintptr(), allocated)
-        return ORBIS_KERNEL_ERROR_EFAULT
+    can Memory.Allocate:
+        if not KernelMemory_WriteOutI64(physAddrOut, allocated.u64().i64()):
+            kernel_debug_last_direct_alloc_result <- ORBIS_KERNEL_ERROR_EFAULT
+            kernel_debug_last_direct_alloc_phys <- allocated.u64().i64()
+            kernel_debug_last_direct_alloc_len <- len
+            can Unsafe.SegmentMutation, Segment.Host:
+                ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d4145u64.uintptr(), ORBIS_KERNEL_ERROR_EFAULT.u64().uintptr(), physAddrOut.uintptr(), allocated)
+            return ORBIS_KERNEL_ERROR_EFAULT
     kernel_debug_last_direct_alloc_result <- ORBIS_OK
     kernel_debug_last_direct_alloc_phys <- allocated.u64().i64()
     kernel_debug_last_direct_alloc_len <- len
@@ -235,16 +237,16 @@ def sceKernelAllocateDirectMemory(searchStart: i64, searchEnd: i64, len: u64, al
         ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x444d414fu64.uintptr(), allocated, allocated, len.uintptr())
     return ORBIS_OK
 
-def HLE_sceKernelAllocateDirectMemory(searchStart: i64, searchEnd: i64, len: u64, alignment: u64, memoryType: int, physAddrOut: void&?) -> int:
+def HLE_sceKernelAllocateDirectMemory(searchStart: i64, searchEnd: i64, len: u64, alignment: u64, memoryType: int, physAddrOut: void&?) -> int can[Memory.Allocate, Unsafe.SegmentMutation, Segment.Host]:
     result: mutable int = 0
-    can Unsafe.SegmentMutation, Segment.Host:
+    can Memory.Allocate, Unsafe.SegmentMutation, Segment.Host:
         result <- sceKernelAllocateDirectMemory(searchStart, searchEnd, len, alignment, memoryType, physAddrOut)
     return result
 
 # @port core/libraries/kernel/memory.cpp::sceKernelAllocateMainDirectMemory sha256=90156c70f6b85676 oracle@a3773841
-def sceKernelAllocateMainDirectMemory(len: u64, alignment: u64, memoryType: int, physAddrOut: void&?) -> int can[Unsafe.SegmentMutation, Segment.Host]:
+def sceKernelAllocateMainDirectMemory(len: u64, alignment: u64, memoryType: int, physAddrOut: void&?) -> int can[Memory.Allocate, Unsafe.SegmentMutation, Segment.Host]:
     result: mutable int = 0
-    can Unsafe.SegmentMutation, Segment.Host:
+    can Memory.Allocate, Unsafe.SegmentMutation, Segment.Host:
         result <- sceKernelAllocateDirectMemory(KERNEL_DIRECT_MEMORY_BASE.i64(), (KERNEL_DIRECT_MEMORY_BASE + MemoryManager_GetTotalDirectSize(Memory_Instance())).i64(), len, alignment, memoryType, physAddrOut)
     return result
 
@@ -483,15 +485,15 @@ def sceKernelMunmap(addr: void&?, len: u64) -> int:
     return MemoryManager_UnmapMemory(Memory_Instance(), addr.cast[VAddr], len)
 
 # @port core/libraries/kernel/memory.cpp::sceKernelMapNamedFlexibleMemory sha256=c5af623f64d41a1d oracle@a3773841
-def sceKernelMapNamedFlexibleMemory(addr_in_out: mutable void&?&, len: u64, prot: int, flags: int, name: u8&?) -> int can[Unsafe.SegmentMutation, Segment.Host]:
-    can Unsafe.SegmentMutation, Segment.Host:
+def sceKernelMapNamedFlexibleMemory(addr_in_out: mutable void&?&, len: u64, prot: int, flags: int, name: u8&?) -> int can[Memory.Allocate, Unsafe.SegmentMutation, Segment.Host]:
+    can Memory.Allocate, Unsafe.SegmentMutation, Segment.Host:
         GuestExec_RecordRuntimeHle("libkernel", "sceKernelMapNamedFlexibleMemory_enter", addr_in_out.ref[mutable void&?&].uintptr(), len.uintptr(), prot.uintptr(), flags.uintptr())
     if name == null:
-        can Unsafe.SegmentMutation, Segment.Host:
+        can Memory.Allocate, Unsafe.SegmentMutation, Segment.Host:
             GuestExec_RecordRuntimeHle("libkernel", "sceKernelMapNamedFlexibleMemory_fault", addr_in_out.ref[mutable void&?&].uintptr(), len.uintptr(), prot.uintptr(), ORBIS_KERNEL_ERROR_EFAULT.u64().uintptr())
         return ORBIS_KERNEL_ERROR_EFAULT
     result: int = KernelMemory_MapFlexible(addr_in_out, len, prot, flags, "anon")
-    can Unsafe.SegmentMutation, Segment.Host:
+    can Memory.Allocate, Unsafe.SegmentMutation, Segment.Host:
         GuestExec_RecordRuntimeHle("libkernel", "sceKernelMapNamedFlexibleMemory", addr_in_out.uintptr(), len.uintptr(), prot.uintptr(), result.u64().uintptr())
     return result
 
@@ -508,7 +510,7 @@ global mutable kernel_debug_heap_api_func: uintptr = 0.uintptr()
 global mutable kernel_debug_heap_api_return_addr: uintptr = 0.uintptr()
 global mutable kernel_application_heap_bootstrap_done: bool = false
 
-def KernelMemory_BootstrapApplicationHeapDirectArena() -> void can[Unsafe.SegmentMutation, Segment.Host]:
+def KernelMemory_BootstrapApplicationHeapDirectArena() -> void can[Memory.Allocate, Unsafe.SegmentMutation, Segment.Host]:
     if kernel_application_heap_bootstrap_done:
         return
     kernel_application_heap_bootstrap_done <- true
@@ -520,7 +522,7 @@ def KernelMemory_BootstrapApplicationHeapDirectArena() -> void can[Unsafe.Segmen
         return
     phys_addr: mutable i64 = 0
     alloc: mutable int = 0
-    can Unsafe.SegmentMutation, Segment.Host:
+    can Memory.Allocate, Unsafe.SegmentMutation, Segment.Host:
         alloc <- sceKernelAllocateDirectMemory(0, direct_size.i64(), heap_direct_size, 0x200000, 0, phys_addr.ref[mutable i64&].cast[void&?])
     if alloc != ORBIS_OK:
         can Unsafe.SegmentMutation, Segment.Host:
@@ -535,12 +537,12 @@ def KernelMemory_BootstrapApplicationHeapDirectArena() -> void can[Unsafe.Segmen
         ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, GuestExec_RuntimeHleGuestReturnAddr(), 0x48454151.uintptr(), map_result.u64().uintptr(), direct_size.uintptr())
 
 # @port core/libraries/kernel/memory.cpp::_sceKernelRtldSetApplicationHeapAPI sha256=4818629ae88e6a7c oracle@a3773841
-def _sceKernelRtldSetApplicationHeapAPI(func: void&?) -> void can[Unsafe.SegmentMutation, Segment.Host]:
+def _sceKernelRtldSetApplicationHeapAPI(func: void&?) -> void can[Memory.Allocate, Unsafe.SegmentMutation, Segment.Host]:
     kernel_debug_heap_api_func <- func.uintptr()
     kernel_debug_heap_api_return_addr <- GuestExec_RuntimeHleGuestReturnAddr()
     Linker_SetHeapAPI(func)
     GuestExec_RecordFirstBoundary(GUEST_EXEC_BOUNDARY_REASON_NATIVE_HLE)
-    can Unsafe.SegmentMutation, Segment.Host:
+    can Memory.Allocate, Unsafe.SegmentMutation, Segment.Host:
         GuestExec_RecordRuntimeHle("libkernel", "_sceKernelRtldSetApplicationHeapAPI", func.uintptr(), 0.uintptr(), 0.uintptr(), 0.uintptr())
     return
 
@@ -551,12 +553,12 @@ def Kernel_DebugHeapApiReturnAddr() -> uintptr:
     return kernel_debug_heap_api_return_addr
 
 # @port core/libraries/kernel/memory.cpp::sceKernelBatchMap sha256=c5e87c438dd77fad oracle@a3773841
-def sceKernelBatchMap(entries: void&?, numEntries: int, numEntriesOut: void&?) -> int can[Unsafe.SegmentMutation, Segment.Host]:
-    can Unsafe.SegmentMutation, Segment.Host:
+def sceKernelBatchMap(entries: void&?, numEntries: int, numEntriesOut: void&?) -> int can[Memory.Allocate, Unsafe.SegmentMutation, Segment.Host]:
+    can Memory.Allocate, Unsafe.SegmentMutation, Segment.Host:
         return sceKernelBatchMap2(entries, numEntries, numEntriesOut, ORBIS_KERNEL_MAP_FIXED_FLAG)
 
 # @port core/libraries/kernel/memory.cpp::sceKernelBatchMap2 sha256=771df20012ddc9e0 oracle@a3773841
-def sceKernelBatchMap2(entries: void&?, numEntries: int, numEntriesOut: void&?, flags: int) -> int can[Unsafe.SegmentMutation, Segment.Host]:
+def sceKernelBatchMap2(entries: void&?, numEntries: int, numEntriesOut: void&?, flags: int) -> int can[Memory.Allocate, Unsafe.SegmentMutation, Segment.Host]:
     processed: mutable s32 = 0
     result: mutable int = ORBIS_OK
     out: mutable s32&? = numEntriesOut.cast[mutable s32&?]
@@ -582,7 +584,7 @@ def sceKernelBatchMap2(entries: void&?, numEntries: int, numEntriesOut: void&?, 
         elif entry.operation == ORBIS_KERNEL_MAP_OP_PROTECT:
             result <- sceKernelMprotect(entry.start, entry.length, entry.protection.int())
         elif entry.operation == ORBIS_KERNEL_MAP_OP_MAP_FLEXIBLE:
-            can Unsafe.SegmentMutation, Segment.Host:
+            can Memory.Allocate, Unsafe.SegmentMutation, Segment.Host:
                 result <- sceKernelMapNamedFlexibleMemory(entry.start, entry.length, entry.protection.int(), flags, "anon")
         elif entry.operation == ORBIS_KERNEL_MAP_OP_TYPE_PROTECT:
             result <- sceKernelMtypeprotect(entry.start, entry.length, entry.type.int(), entry.protection.int())

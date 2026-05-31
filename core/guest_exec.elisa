@@ -794,7 +794,7 @@ def ge_assert_guest_fs_owner(site: cstr) -> void can[Unsafe.SegmentMutation, Seg
     can Unsafe.SegmentMutation, Segment.Host:
         ge_observe_fs_owner_state(site, GE_FS_OWNER_GUEST)
 
-def ge_debug_guard_mapped_guest_pointer(site: cstr, target: uintptr, size: u64, nearest_base: uintptr, nearest_end: uintptr, nearest_prot: u32, sequence: u64) -> bool can[Unsafe.SegmentMutation, Segment.Host]:
+def ge_debug_guard_mapped_guest_pointer(site: cstr, target: uintptr, size: u64, nearest_base: uintptr, nearest_end: uintptr, nearest_prot: u32, sequence: u64) -> bool can[Memory.Allocate, Unsafe.SegmentMutation, Segment.Host]:
     if target == 0.uintptr():
         return true
     ge_debug_trace_boundary(site, target, nearest_base, nearest_end)
@@ -816,7 +816,8 @@ def ge_debug_guard_mapped_guest_pointer(site: cstr, target: uintptr, size: u64, 
     ge_debug_trap_nearest_mapping_prot <- nearest_prot
     tcb_base: uintptr = !TLS_PrimaryTcbBase()
     ge_debug_trap_tcb_base <- tcb_base
-    ge_debug_trap_tcb_self <- ge_read_context_word(tcb_base)
+    can Memory.Allocate:
+        ge_debug_trap_tcb_self <- ge_read_context_word(tcb_base)
     ge_debug_trap_install_fs0 <- TLS_DebugLastFs0()
     ge_last_status <- GE_DEBUG_TRAP_GUEST_PTR_UNMAPPED_STATUS
     can Unsafe.SegmentMutation, Segment.Host:
@@ -915,28 +916,31 @@ def ge_debug_guard_guest_frame_for_tests(sequence: u64) -> bool can[Unsafe.Segme
 
 @reentrant_safe
 def ge_read_native_word(address: uintptr) -> uintptr:
-    if address == 0.uintptr():
-        return 0.uintptr()
-    index: s32 = ge_find_native_region(address, 8)
-    if index < 0 or index.u32() >= GE_NATIVE_REGION_CAP:
-        return 0.uintptr()
-    if (ge_native_regions[index.usize()].prot & 1) == 0:
-        return 0.uintptr()
-    out: mutable u64 = 0
-    _ = ge_memcpy(out.ref[void&], ge_addr_to_ptr(address), 8)
-    return out.uintptr()
+    can Memory.Allocate:
+        if address == 0.uintptr():
+            return 0.uintptr()
+        index: s32 = ge_find_native_region(address, 8)
+        if index < 0 or index.u32() >= GE_NATIVE_REGION_CAP:
+            return 0.uintptr()
+        if (ge_native_regions[index.usize()].prot & 1) == 0:
+            return 0.uintptr()
+        out: mutable u64 = 0
+        _ = ge_memcpy(out.ref[void&], ge_addr_to_ptr(address), 8)
+        return out.uintptr()
 
 @reentrant_safe
 def ge_read_native_u8(address: uintptr) -> u8:
-    return (ge_read_native_word(address).u64() & 0xff).u8()
+    can Memory.Allocate:
+        return (ge_read_native_word(address).u64() & 0xff).u8()
 
 @reentrant_safe
 def ge_read_native_u32(address: uintptr) -> u32:
-    b0: u32 = ge_read_native_u8(address).u32()
-    b1: u32 = ge_read_native_u8(address + 1.uintptr()).u32()
-    b2: u32 = ge_read_native_u8(address + 2.uintptr()).u32()
-    b3: u32 = ge_read_native_u8(address + 3.uintptr()).u32()
-    return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+    can Memory.Allocate:
+        b0: u32 = ge_read_native_u8(address).u32()
+        b1: u32 = ge_read_native_u8(address + 1.uintptr()).u32()
+        b2: u32 = ge_read_native_u8(address + 2.uintptr()).u32()
+        b3: u32 = ge_read_native_u8(address + 3.uintptr()).u32()
+        return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
 
 @reentrant_safe
 def ge_sign_extend_u32_to_u64(v: u32) -> u64:
@@ -1078,24 +1082,26 @@ def c_GuestExec_AllocateRegion(size: u64, prot: u32) -> uintptr:
         return result
 
 def c_GuestExec_WriteBytes(address: uintptr, data: void&?, size: u64) -> s32:
-    if address == 0.uintptr() or (data == null and size != 0):
-        return -1
-    if size != 0:
-        if ge_make_writable_cached(address, size) != 0:
+    can Memory.Allocate:
+        if address == 0.uintptr() or (data == null and size != 0):
             return -1
-        _ = ge_memcpy(ge_addr_to_ptr(address), data, size.usize())
-        ge_flush_instruction_cache(address, size)
-    return 0
+        if size != 0:
+            if ge_make_writable_cached(address, size) != 0:
+                return -1
+            _ = ge_memcpy(ge_addr_to_ptr(address), data, size.usize())
+            ge_flush_instruction_cache(address, size)
+        return 0
 
 def c_GuestExec_WriteU64(address: uintptr, value: u64) -> s32:
-    if address == 0.uintptr():
-        return -1
-    if ge_make_writable_cached(address, 8) != 0:
-        return -1
-    v: mutable u64 = value
-    _ = ge_memcpy(ge_addr_to_ptr(address), v.ref[void&], 8)
-    ge_flush_instruction_cache(address, 8)
-    return 0
+    can Memory.Allocate:
+        if address == 0.uintptr():
+            return -1
+        if ge_make_writable_cached(address, 8) != 0:
+            return -1
+        v: mutable u64 = value
+        _ = ge_memcpy(ge_addr_to_ptr(address), v.ref[void&], 8)
+        ge_flush_instruction_cache(address, 8)
+        return 0
 
 def ge_write_u16_le(out: mutable u8&, offset: usize, value: u16) -> void:
     out[offset] <- (value & 0xff).u8()
@@ -1179,11 +1185,13 @@ def c_GuestExec_AddressNativeProt(address: uintptr) -> u32:
     return ge_native_prot_at(address, 8)
 
 def c_GuestExec_ReadNativeU64(address: uintptr) -> uintptr:
-    return ge_read_native_word(address)
+    can Memory.Allocate:
+        return ge_read_native_word(address)
 
 @c_abi(c)
 def c_GuestExec_ReadContextU64(address: uintptr) -> uintptr:
-    return ge_read_context_word(address)
+    can Memory.Allocate:
+        return ge_read_context_word(address)
 
 def c_GuestExec_PublishExecutableCount() -> u64:
     return ge_publish_executable_count
@@ -1570,13 +1578,14 @@ def GuestExec_ReemitWriteStream() -> void:
         chunk_index <- chunk_index + 1
 
 def GuestExec_RecordDebugRaise(err_code: int, unk: i64) -> void:
-    GuestExec_ReemitWriteStream()
-    GuestExec_ReemitLastWriteBuffer()
-    ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 1.uintptr(), ge_known_kernel_file_write_target.uintptr(), ge_known_posix_write_target.uintptr(), ge_known_sce_kernel_write_target.uintptr())
-    sp: uintptr = !ge_runtime_hle_guest_rsp
-    ge_emergency_mark(GE_EV_DEBUG_RAISE_STACK, sp, ge_read_native_word(sp), ge_read_native_word(sp + 8.uintptr()), ge_read_native_word(sp + 16.uintptr()))
-    ge_emergency_mark(GE_EV_DEBUG_RAISE_STACK, sp + 24.uintptr(), ge_read_native_word(sp + 24.uintptr()), ge_read_native_word(sp + 32.uintptr()), ge_read_native_word(sp + 40.uintptr()))
-    ge_emergency_mark(GE_EV_DEBUG_RAISE, err_code.u64().uintptr(), unk.u64().uintptr(), !ge_runtime_hle_guest_return_addr, !ge_runtime_hle_guest_rsp)
+    can Memory.Allocate:
+        GuestExec_ReemitWriteStream()
+        GuestExec_ReemitLastWriteBuffer()
+        ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 1.uintptr(), ge_known_kernel_file_write_target.uintptr(), ge_known_posix_write_target.uintptr(), ge_known_sce_kernel_write_target.uintptr())
+        sp: uintptr = !ge_runtime_hle_guest_rsp
+        ge_emergency_mark(GE_EV_DEBUG_RAISE_STACK, sp, ge_read_native_word(sp), ge_read_native_word(sp + 8.uintptr()), ge_read_native_word(sp + 16.uintptr()))
+        ge_emergency_mark(GE_EV_DEBUG_RAISE_STACK, sp + 24.uintptr(), ge_read_native_word(sp + 24.uintptr()), ge_read_native_word(sp + 32.uintptr()), ge_read_native_word(sp + 40.uintptr()))
+        ge_emergency_mark(GE_EV_DEBUG_RAISE, err_code.u64().uintptr(), unk.u64().uintptr(), !ge_runtime_hle_guest_return_addr, !ge_runtime_hle_guest_rsp)
 
 def ge_symbol_is_kernel_write(symbol: static u8&?) -> bool:
     if symbol == null:
@@ -1665,24 +1674,27 @@ def ge_set_native_phase(phase: s32) -> void:
 # Raw read of a uintptr at an arbitrary host address (signal/stack context).
 @reentrant_safe
 def ge_read_context_word(address: uintptr) -> uintptr:
-    if address == 0.uintptr():
-        return 0.uintptr()
-    out: mutable u64 = 0u64
-    _ = ge_memcpy(out.ref[void&], ge_addr_to_ptr(address), 8usize)
-    return out.uintptr()
+    can Memory.Allocate:
+        if address == 0.uintptr():
+            return 0.uintptr()
+        out: mutable u64 = 0u64
+        _ = ge_memcpy(out.ref[void&], ge_addr_to_ptr(address), 8usize)
+        return out.uintptr()
 
 @reentrant_safe
 def ge_write_context_word(address: uintptr, value: uintptr) -> void:
-    if address == 0.uintptr():
-        return
-    v: mutable u64 = value.u64()
-    _ = ge_memcpy(ge_addr_to_ptr(address), v.ref[void&], 8)
+    can Memory.Allocate:
+        if address == 0.uintptr():
+            return
+        v: mutable u64 = value.u64()
+        _ = ge_memcpy(ge_addr_to_ptr(address), v.ref[void&], 8)
 
 @reentrant_safe
 def ge_uctx_word(uctx: void&?, offset: u64) -> uintptr:
-    if uctx == null:
-        return 0.uintptr()
-    return ge_read_context_word(uctx.uintptr() + offset.uintptr())
+    can Memory.Allocate:
+        if uctx == null:
+            return 0.uintptr()
+        return ge_read_context_word(uctx.uintptr() + offset.uintptr())
 
 @reentrant_safe
 def ge_extract_mctx(uctx: void&?) -> MachineContextPtr:
@@ -1702,10 +1714,11 @@ const GE_DARWIN_MCONTEXT64_SS_OFFSET: uintptr = 16.uintptr()
 
 @reentrant_safe
 def ge_darwin_mcontext64_ss(uctx: void&?) -> uintptr:
-    mctx: uintptr = ge_uctx_word(uctx, 48)
-    if mctx == 0.uintptr():
-        return 0.uintptr()
-    return mctx + GE_DARWIN_MCONTEXT64_SS_OFFSET
+    can Memory.Allocate:
+        mctx: uintptr = ge_uctx_word(uctx, 48)
+        if mctx == 0.uintptr():
+            return 0.uintptr()
+        return mctx + GE_DARWIN_MCONTEXT64_SS_OFFSET
 
 @reentrant_safe
 def ge_extract_pc(uctx: void&?) -> GuestPC:
@@ -1823,16 +1836,19 @@ def ge_xmm_addr_from_mctx(mctx: uintptr, idx: u8) -> uintptr:
 
 @reentrant_safe
 def ge_read_xmm_low(mctx: uintptr, idx: u8) -> u64:
-    return ge_read_context_word(ge_xmm_addr_from_mctx(mctx, idx)).u64()
+    can Memory.Allocate:
+        return ge_read_context_word(ge_xmm_addr_from_mctx(mctx, idx)).u64()
 
 @reentrant_safe
 def ge_read_xmm_high(mctx: uintptr, idx: u8) -> u64:
-    return ge_read_context_word(ge_xmm_addr_from_mctx(mctx, idx) + 8.uintptr()).u64()
+    can Memory.Allocate:
+        return ge_read_context_word(ge_xmm_addr_from_mctx(mctx, idx) + 8.uintptr()).u64()
 
 @reentrant_safe
 def ge_write_xmm_low_zero_high(mctx: uintptr, idx: u8, value: u64) -> void:
-    ge_write_context_word(ge_xmm_addr_from_mctx(mctx, idx), value.uintptr())
-    ge_write_context_word(ge_xmm_addr_from_mctx(mctx, idx) + 8.uintptr(), 0.uintptr())
+    can Memory.Allocate:
+        ge_write_context_word(ge_xmm_addr_from_mctx(mctx, idx), value.uintptr())
+        ge_write_context_word(ge_xmm_addr_from_mctx(mctx, idx) + 8.uintptr(), 0.uintptr())
 
 @reentrant_safe
 def ge_sse4a_mask(length_raw: u64) -> u64:
@@ -1913,14 +1929,15 @@ def ge_try_handle_sse4a_sigill(uctx: void&?) -> bool:
 # si_addr lives at a per-OS offset inside siginfo_t (macOS 24, Linux 16).
 @reentrant_safe
 def ge_siginfo_fault_addr(info: void&?) -> GuestFaultAddress:
-    if info == null:
-        return 0.uintptr().cast[GuestFaultAddress]
-    static if PLATFORM_APPLE:
-        return ge_read_context_word(info.uintptr() + 24.uintptr()).cast[GuestFaultAddress]
-    static elif PLATFORM_LINUX:
-        return ge_read_context_word(info.uintptr() + 16.uintptr()).cast[GuestFaultAddress]
-    static else:
-        return 0.uintptr().cast[GuestFaultAddress]
+    can Memory.Allocate:
+        if info == null:
+            return 0.uintptr().cast[GuestFaultAddress]
+        static if PLATFORM_APPLE:
+            return ge_read_context_word(info.uintptr() + 24.uintptr()).cast[GuestFaultAddress]
+        static elif PLATFORM_LINUX:
+            return ge_read_context_word(info.uintptr() + 16.uintptr()).cast[GuestFaultAddress]
+        static else:
+            return 0.uintptr().cast[GuestFaultAddress]
 
 # dladdr a code address into symbol + image name; store into the stack-context
 # or pc-context globals.
@@ -2144,7 +2161,7 @@ def ge_pw_set_tf(uctx: void&?, on: bool) -> void:
 # Handle a fault under the page watchpoint. Returns true if the fault was a
 # watchpoint event the handler consumed (caller must then return immediately).
 @reentrant_safe
-def ge_pw_handle(sig: int, info: void&?, uctx: void&?) -> bool can[Unsafe.SegmentMutation, Segment.Host]:
+def ge_pw_handle(sig: int, info: void&?, uctx: void&?) -> bool can[Memory.Allocate, Unsafe.SegmentMutation, Segment.Host]:
     if not ge_pw_armed:
         return false
     if sig == GE_SIG_TRAP and ge_pw_stepping:
@@ -2152,14 +2169,16 @@ def ge_pw_handle(sig: int, info: void&?, uctx: void&?) -> bool can[Unsafe.Segmen
         # targeted the watched slot, record the value that was just stored so the
         # timeline shows real-return vs corrupting-value writes.
         if ge_pw_pending_value_record:
-            ge_emergency_mark(GE_EV_WATCH_HIT, ge_pw_watch_addr, ge_read_context_word(ge_pw_watch_addr), ge_pw_hit_count.uintptr(), 0xA10E.uintptr())
+            can Memory.Allocate:
+                ge_emergency_mark(GE_EV_WATCH_HIT, ge_pw_watch_addr, ge_read_context_word(ge_pw_watch_addr), ge_pw_hit_count.uintptr(), 0xA10E.uintptr())
             ge_pw_pending_value_record <- false
         _ = ge_mprotect(ge_pw_page_base, 0x1000, ge_pw_arm_prot)
         ge_pw_set_tf(uctx, false)
         ge_pw_stepping <- false
         return true
     if sig == GE_SIG_SEGV or sig == ge_sig_bus():
-        fault: uintptr = (!ge_siginfo_fault_addr(info))
+        can Memory.Allocate:
+            fault: uintptr = (!ge_siginfo_fault_addr(info))
         if fault.u64() >= ge_pw_page_base.u64() and fault.u64() < (ge_pw_page_base.u64() + 0x1000):
             if fault.u64() >= ge_pw_watch_addr.u64() and fault.u64() < (ge_pw_watch_addr.u64() + 8):
                 ge_pw_hit_count <- ge_pw_hit_count + 1
@@ -2177,197 +2196,197 @@ def ge_pw_handle(sig: int, info: void&?, uctx: void&?) -> bool can[Unsafe.Segmen
 @segment_establishing
 @reentrant_safe
 def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
-    # Instruction-precise page watchpoint: consume watchpoint write faults and
-    # single-step traps first, before any breadcrumb/FS work, so watched writes
-    # are not treated as fatal and do not flood the emergency tape.
-    can Unsafe.SegmentMutation, Segment.Host:
+    can Memory.Allocate, Unsafe.SegmentMutation, Segment.Host:
+        # Instruction-precise page watchpoint: consume watchpoint write faults and
+        # single-step traps first, before any breadcrumb/FS work, so watched writes
+        # are not treated as fatal and do not flood the emergency tape.
         if ge_pw_handle(sig, info, uctx):
             return
-    ge_raw_breadcrumb("GE:SIGNAL_ENTRY_RAW\n", 20)
-    ge_emergency_mark(GE_EV_SIGNAL_ENTRY_RAW, sig.u64().uintptr(), info.uintptr(), uctx.uintptr(), 0.uintptr())
-    static if PLATFORM_APPLE and ARCH_X86_64:
-        can Unsafe.SegmentMutation, Segment.Host:
-            TLS_RestoreHostFsSelector()
-        ge_raw_breadcrumb("GE:SIGNAL_AFTER_RESTORE\n", 24usize)
-        ge_emergency_mark(GE_EV_SIGNAL_AFTER_RESTORE, sig.u64().uintptr(), info.uintptr(), uctx.uintptr(), 0.uintptr())
-        ge_shadow_fs_transition("signal-handler-host-fs-restored", GE_FS_OWNER_HOST)
-        ge_raw_breadcrumb("GE:SIGNAL_AFTER_SHADOW\n", 23usize)
-        ge_emergency_mark(GE_EV_SIGNAL_AFTER_SHADOW, sig.u64().uintptr(), info.uintptr(), uctx.uintptr(), 0.uintptr())
-        can Unsafe.SegmentMutation, Segment.Host:
-            ge_assert_host_fs_owner("signal-handler-after-host-fs-restore")
-        ge_raw_breadcrumb("GE:SIGNAL_AFTER_ASSERT\n", 23usize)
-        ge_emergency_mark(GE_EV_SIGNAL_AFTER_ASSERT, sig.u64().uintptr(), info.uintptr(), uctx.uintptr(), 0.uintptr())
-    ge_set_native_phase(GE_PHASE_SIGNAL_HANDLER_ENTERED)
-    ge_last_status <- (0 - sig).s32()
-    ge_last_signal <- sig.s32()
-    if sig == GE_SIG_ILL and ge_try_handle_sse4a_sigill(uctx):
-        return
-    fault_thread: uintptr = !ge_pthread_self()
-    ge_signal_uctx <- (uctx.uintptr().cast[SignalContextPtr] if uctx != null else 0.uintptr().cast[SignalContextPtr])
-    ge_signal_mctx <- ge_extract_mctx(uctx)
-    ge_last_fault_address <- ge_siginfo_fault_addr(info)
-    ge_signal_fault_addr_valid <- 1 if info != null else 0
-    ge_signal_guest_pc <- ge_extract_pc(uctx)
-    ge_signal_pc_valid <- 1 if !ge_signal_guest_pc != 0.uintptr() else 0
-    ge_fallback_guest_pc <- 0.uintptr().cast[GuestPC]
-    ge_last_pc_was_fallback <- 0
-    ge_last_pc_source <- (GE_PC_SOURCE_SIGNAL_UCONTEXT if ge_signal_pc_valid != 0 else GE_PC_SOURCE_NONE)
-    ge_last_guest_pc <- ge_signal_guest_pc
-    ge_last_guest_sp <- ge_extract_sp(uctx)
-    ge_last_guest_bp <- ge_extract_bp(uctx)
-    ge_last_guest_rdi <- ge_extract_greg(uctx, 0)
-    ge_last_guest_rsi <- ge_extract_greg(uctx, 1)
-    ge_last_guest_rax <- ge_extract_greg(uctx, 2)
-    ge_last_guest_rbx <- ge_extract_greg(uctx, 3)
-    ge_last_guest_rdx <- ge_extract_greg(uctx, 4)
-    ge_last_guest_rcx <- ge_extract_greg(uctx, 5)
-    ge_last_guest_r8 <- ge_extract_greg(uctx, 6)
-    ge_last_guest_r9 <- ge_extract_greg(uctx, 7)
-    ge_emergency_mark(GE_EV_SIGNAL_GPRS, ge_last_guest_rax, ge_last_guest_rbx, ge_last_guest_rcx, ge_last_guest_rdx)
-    ge_emergency_mark(GE_EV_SIGNAL_CALLEE_SAVED, ge_extract_greg(uctx, 8), ge_extract_greg(uctx, 9), ge_extract_greg(uctx, 10), ge_extract_greg(uctx, 11))
-    # Raw bytes of the faulting instruction (works for libsystem PCs, which are not
-    # in the native-region table) + the live segment selectors, to read off whether
-    # the faulting TLS access used %fs (0x64) or %gs (0x65) and what the selectors are.
-    static if ARCH_X86_64 and PLATFORM_APPLE:
-        fault_pc: uintptr = (!ge_signal_guest_pc)
-        ss_seg: uintptr = ge_darwin_mcontext64_ss(uctx)
-        ge_emergency_mark(GE_EV_SIGNAL_FAULT_INSN, fault_pc, ge_read_context_word(fault_pc), ge_read_context_word(fault_pc + 8.uintptr()), ge_read_context_word(fault_pc + 16.uintptr()))
-        ge_emergency_mark(GE_EV_SIGNAL_FAULT_INSN, fault_pc - 16.uintptr(), ge_read_context_word(fault_pc - 16.uintptr()), ge_read_context_word(fault_pc - 8.uintptr()), ge_last_guest_rdi)
-        # Wider preceding window (pc-48 .. pc-16) to find the instruction that loaded
-        # the null zone into rdi (e.g. a %gs-relative per-thread default-zone read).
-        ge_emergency_mark(GE_EV_SIGNAL_FAULT_INSN, fault_pc - 48.uintptr(), ge_read_context_word(fault_pc - 48.uintptr()), ge_read_context_word(fault_pc - 40.uintptr()), ge_read_context_word(fault_pc - 32.uintptr()))
-        ge_emergency_mark(GE_EV_SIGNAL_FAULT_INSN, fault_pc - 24.uintptr(), ge_read_context_word(fault_pc - 24.uintptr()), ge_read_context_word(fault_pc - 16.uintptr()), ge_read_context_word(fault_pc - 8.uintptr()))
-        # If fault_pc-16 is `mov rax,[rip+disp32]` (opcode 48 8b 05), resolve the
-        # global it loaded and read its value to confirm the null source.
-        pre_word: u64 = ge_read_context_word(fault_pc - 16.uintptr()).u64()
-        if (pre_word & 0xffffffu64) == 0x058b48u64:
-            disp32: u64 = (pre_word >> 24u64) & 0xffffffffu64
-            disp_se: mutable u64 = disp32
-            if (disp32 & 0x80000000u64) != 0u64:
-                disp_se <- disp32 | 0xffffffff00000000u64
-            global_addr: uintptr = (fault_pc - 16.uintptr() + 7.uintptr()) + disp_se.uintptr()
-            ge_emergency_mark(GE_EV_SIGNAL_FAULT_GLOBAL, global_addr, ge_read_context_word(global_addr), pre_word.uintptr(), disp32.uintptr())
-        ge_emergency_mark(GE_EV_SIGNAL_SEGMENTS, ge_read_context_word(ss_seg + 152.uintptr()), ge_read_context_word(ss_seg + 160.uintptr()), ge_read_context_word(ss_seg + 144.uintptr()), ss_seg)
-    ge_signal_sp_valid <- 1 if !ge_signal_mctx != 0.uintptr() else 0
-    ge_signal_bp_valid <- ge_signal_sp_valid
-    ge_signal_rdi_valid <- ge_signal_sp_valid
-    ge_signal_rsi_valid <- ge_signal_sp_valid
-    ge_signal_native_region_index <- ge_find_native_region(!ge_last_guest_pc, 8)
-    ge_pc_native_prot <- ge_native_prot_at(!ge_last_guest_pc, 8)
-    ge_fault_word0 <- ge_read_native_word(!ge_last_guest_pc)
-    ge_fault_word1 <- ge_read_native_word(!ge_last_guest_pc + 8.uintptr())
-    ge_signal_stack_word0 <- ge_read_context_word(!ge_last_guest_sp)
-    ge_signal_stack_word1 <- ge_read_context_word(!ge_last_guest_sp + 8.uintptr())
-    ge_signal_stack_word_m1 <- 0.uintptr()
-    if (!ge_last_guest_sp).u64() >= 8:
-        ge_signal_stack_word_m1 <- ge_read_context_word(!ge_last_guest_sp - 8.uintptr())
-    ge_fault_transfer_class <- 0
-    if !ge_last_guest_pc != 0.uintptr() and (!ge_last_guest_pc).u64() < 4096 and ge_pc_native_prot == 0xffffffff:
-        ge_fault_transfer_class <- 1
-        if !ge_last_guest_pc == ge_signal_stack_word_m1:
-            ge_fault_transfer_class <- 2
-        elif !ge_last_guest_pc == ge_signal_stack_word0:
-            ge_fault_transfer_class <- 3
-        elif !ge_last_guest_pc == ge_signal_stack_word1:
-            ge_fault_transfer_class <- 4
-    # Symbolization uses dladdr and is not async-signal-safe. The handler records
-    # raw PCs/stack words only; host code can symbolize them after the jump/exit.
-    ge_signal_stack_symbol0 <- ""
-    ge_signal_stack_image0 <- ""
-    ge_signal_pc_symbol <- ""
-    ge_signal_pc_image <- ""
-    fr: ElisaGuestExecForkReport&? = ge_fork_report
-    if fr != null:
-        fr.status <- ge_last_status
-        fr.signal <- sig.s32()
-        fr.fault_thread <- fault_thread
-        fr.guard_thread <- ge_guard_target_thread
-        fr.fault_address <- !ge_last_fault_address
-        fr.guest_pc <- !ge_last_guest_pc
-        fr.guest_sp <- !ge_last_guest_sp
-        fr.guest_bp <- !ge_last_guest_bp
-        fr.guest_rdi <- ge_last_guest_rdi
-        fr.guest_rsi <- ge_last_guest_rsi
-        fr.guest_rdx <- ge_last_guest_rdx
-        fr.guest_rcx <- ge_last_guest_rcx
-        fr.guest_r8 <- ge_last_guest_r8
-        fr.guest_r9 <- ge_last_guest_r9
-        fr.guest_rax <- ge_last_guest_rax
-        fr.guest_rbx <- ge_last_guest_rbx
-        fr.fault_word0 <- ge_fault_word0
-        fr.fault_word1 <- ge_fault_word1
-        fr.signal_stack_word0 <- ge_signal_stack_word0
-        fr.signal_stack_word1 <- ge_signal_stack_word1
-        fr.signal_stack_word_m1 <- ge_signal_stack_word_m1
-        fr.fault_transfer_class <- ge_fault_transfer_class
-        fr.signal_stack_symbol0 <- ge_signal_stack_symbol0
-        fr.signal_stack_image0 <- ge_signal_stack_image0
-        fr.signal_pc_symbol <- ge_signal_pc_symbol
-        fr.signal_pc_image <- ge_signal_pc_image
-        fr.signal_guest_pc <- !ge_signal_guest_pc
-        fr.fallback_guest_pc <- !ge_fallback_guest_pc
-        fr.signal_pc_valid <- ge_signal_pc_valid
-        fr.signal_sp_valid <- ge_signal_sp_valid
-        fr.signal_bp_valid <- ge_signal_bp_valid
-        fr.signal_rdi_valid <- ge_signal_rdi_valid
-        fr.signal_rsi_valid <- ge_signal_rsi_valid
-        fr.signal_uctx <- !ge_signal_uctx
-        fr.signal_mctx <- !ge_signal_mctx
-        fr.signal_fault_addr_valid <- ge_signal_fault_addr_valid
-        fr.signal_native_region_index <- ge_signal_native_region_index
-        fr.pc_source <- ge_last_pc_source
-        fr.pc_was_fallback <- ge_last_pc_was_fallback
-        fr.pc_native_prot <- ge_pc_native_prot
-        if fr.execution_stage < 6:
-            fr.execution_stage <- 6
-    ge_emergency_mark(GE_EV_SIGNAL_FIRED, sig.u64().uintptr(), (!ge_last_guest_pc), (!ge_last_guest_sp), (!ge_last_fault_address))
-    ge_emergency_mark(GE_EV_SIGNAL_STACK_WORDS, ge_signal_stack_word_m1, ge_signal_stack_word0, ge_signal_stack_word1, ge_fault_transfer_class.uintptr())
-    # Crash backtrace window: dump 32 stack slots at/above the faulting SP into
-    # the tape so a post-run symbolizer can recover the guest call chain. Reads
-    # only upward (older, mapped frames) to avoid faulting past the stack top.
-    if !ge_last_guest_sp != 0.uintptr():
-        # Stop at the stack page top so the window never reads into the unmapped
-        # guard page above it (which would fault recursively inside the handler).
-        bt_page_end: u64 = ((!ge_last_guest_sp).u64() | 0xfff) + 1
-        bt_i: mutable u64 = 0
-        while bt_i < 32:
-            bt_addr: uintptr = !ge_last_guest_sp + (bt_i * 8).uintptr()
-            if bt_addr.u64() + 8 > bt_page_end:
-                bt_i <- 32
-            else:
-                bt_word: uintptr = ge_read_context_word(bt_addr)
-                ge_emergency_mark(GE_EV_STACK_DUMP, bt_i.uintptr(), bt_addr, bt_word, 0.uintptr())
-                bt_target: uintptr = ge_find_hle_thunk_target_from_stack_value(bt_word)
-                if bt_target != 0.uintptr():
-                    ge_emergency_mark(GE_EV_SIGNAL_CALL_TARGET, bt_word, bt_target, bt_i.uintptr(), ge_native_prot_at(bt_target, 8).u64().uintptr())
-                bt_i <- bt_i + 1
-    return_call_start: mutable uintptr = 0.uintptr()
-    return_direct_target: mutable uintptr = 0.uintptr()
-    return_callsite_window: mutable uintptr = 0.uintptr()
-    if ge_signal_stack_word0.u64() >= 8:
-        return_callsite_window <- ge_read_native_word(ge_signal_stack_word0 - 8.uintptr())
-        if ge_signal_stack_word0.u64() >= 5 and ge_read_native_u8(ge_signal_stack_word0 - 5.uintptr()) == 0xe8.u8():
-            return_call_start <- ge_signal_stack_word0 - 5.uintptr()
-            rel32: u32 = ge_read_native_u32(ge_signal_stack_word0 - 4.uintptr())
-            return_direct_target <- ge_signal_stack_word0 + ge_sign_extend_u32_to_u64(rel32).uintptr()
-    ge_emergency_mark(GE_EV_SIGNAL_RETURN_CALLSITE, ge_signal_stack_word0, return_call_start, return_direct_target, return_callsite_window)
-    ge_emergency_mark(GE_EV_SIGNAL_CALL_TARGET, return_direct_target, ge_read_native_word(return_direct_target), ge_read_native_word(return_direct_target + 8.uintptr()), ge_native_prot_at(return_direct_target, 8).u64().uintptr())
-    if ge_guard_active != 0:
-        if ge_guard_target_thread == 0.uintptr() or fault_thread == ge_guard_target_thread:
-            ge_mark_guard_longjmp(ge_last_status, GE_LONGJMP_SOURCE_SIGNAL, !ge_last_guest_pc)
-            ge_siglongjmp(ge_jmp_buf[0].ref[void&], 1)
-        ge_cross_thread_signal_count <- ge_cross_thread_signal_count + 1
-        ge_cross_thread_signal_guard_thread <- ge_guard_target_thread
-        ge_cross_thread_signal_fault_thread <- fault_thread
-        ge_cross_thread_signal_number <- sig.s32()
+        ge_raw_breadcrumb("GE:SIGNAL_ENTRY_RAW\n", 20)
+        ge_emergency_mark(GE_EV_SIGNAL_ENTRY_RAW, sig.u64().uintptr(), info.uintptr(), uctx.uintptr(), 0.uintptr())
+        static if PLATFORM_APPLE and ARCH_X86_64:
+            can Unsafe.SegmentMutation, Segment.Host:
+                TLS_RestoreHostFsSelector()
+            ge_raw_breadcrumb("GE:SIGNAL_AFTER_RESTORE\n", 24usize)
+            ge_emergency_mark(GE_EV_SIGNAL_AFTER_RESTORE, sig.u64().uintptr(), info.uintptr(), uctx.uintptr(), 0.uintptr())
+            ge_shadow_fs_transition("signal-handler-host-fs-restored", GE_FS_OWNER_HOST)
+            ge_raw_breadcrumb("GE:SIGNAL_AFTER_SHADOW\n", 23usize)
+            ge_emergency_mark(GE_EV_SIGNAL_AFTER_SHADOW, sig.u64().uintptr(), info.uintptr(), uctx.uintptr(), 0.uintptr())
+            can Unsafe.SegmentMutation, Segment.Host:
+                ge_assert_host_fs_owner("signal-handler-after-host-fs-restore")
+            ge_raw_breadcrumb("GE:SIGNAL_AFTER_ASSERT\n", 23usize)
+            ge_emergency_mark(GE_EV_SIGNAL_AFTER_ASSERT, sig.u64().uintptr(), info.uintptr(), uctx.uintptr(), 0.uintptr())
+        ge_set_native_phase(GE_PHASE_SIGNAL_HANDLER_ENTERED)
+        ge_last_status <- (0 - sig).s32()
+        ge_last_signal <- sig.s32()
+        if sig == GE_SIG_ILL and ge_try_handle_sse4a_sigill(uctx):
+            return
+        fault_thread: uintptr = !ge_pthread_self()
+        ge_signal_uctx <- (uctx.uintptr().cast[SignalContextPtr] if uctx != null else 0.uintptr().cast[SignalContextPtr])
+        ge_signal_mctx <- ge_extract_mctx(uctx)
+        ge_last_fault_address <- ge_siginfo_fault_addr(info)
+        ge_signal_fault_addr_valid <- 1 if info != null else 0
+        ge_signal_guest_pc <- ge_extract_pc(uctx)
+        ge_signal_pc_valid <- 1 if !ge_signal_guest_pc != 0.uintptr() else 0
+        ge_fallback_guest_pc <- 0.uintptr().cast[GuestPC]
+        ge_last_pc_was_fallback <- 0
+        ge_last_pc_source <- (GE_PC_SOURCE_SIGNAL_UCONTEXT if ge_signal_pc_valid != 0 else GE_PC_SOURCE_NONE)
+        ge_last_guest_pc <- ge_signal_guest_pc
+        ge_last_guest_sp <- ge_extract_sp(uctx)
+        ge_last_guest_bp <- ge_extract_bp(uctx)
+        ge_last_guest_rdi <- ge_extract_greg(uctx, 0)
+        ge_last_guest_rsi <- ge_extract_greg(uctx, 1)
+        ge_last_guest_rax <- ge_extract_greg(uctx, 2)
+        ge_last_guest_rbx <- ge_extract_greg(uctx, 3)
+        ge_last_guest_rdx <- ge_extract_greg(uctx, 4)
+        ge_last_guest_rcx <- ge_extract_greg(uctx, 5)
+        ge_last_guest_r8 <- ge_extract_greg(uctx, 6)
+        ge_last_guest_r9 <- ge_extract_greg(uctx, 7)
+        ge_emergency_mark(GE_EV_SIGNAL_GPRS, ge_last_guest_rax, ge_last_guest_rbx, ge_last_guest_rcx, ge_last_guest_rdx)
+        ge_emergency_mark(GE_EV_SIGNAL_CALLEE_SAVED, ge_extract_greg(uctx, 8), ge_extract_greg(uctx, 9), ge_extract_greg(uctx, 10), ge_extract_greg(uctx, 11))
+        # Raw bytes of the faulting instruction (works for libsystem PCs, which are not
+        # in the native-region table) + the live segment selectors, to read off whether
+        # the faulting TLS access used %fs (0x64) or %gs (0x65) and what the selectors are.
+        static if ARCH_X86_64 and PLATFORM_APPLE:
+            fault_pc: uintptr = (!ge_signal_guest_pc)
+            ss_seg: uintptr = ge_darwin_mcontext64_ss(uctx)
+            ge_emergency_mark(GE_EV_SIGNAL_FAULT_INSN, fault_pc, ge_read_context_word(fault_pc), ge_read_context_word(fault_pc + 8.uintptr()), ge_read_context_word(fault_pc + 16.uintptr()))
+            ge_emergency_mark(GE_EV_SIGNAL_FAULT_INSN, fault_pc - 16.uintptr(), ge_read_context_word(fault_pc - 16.uintptr()), ge_read_context_word(fault_pc - 8.uintptr()), ge_last_guest_rdi)
+            # Wider preceding window (pc-48 .. pc-16) to find the instruction that loaded
+            # the null zone into rdi (e.g. a %gs-relative per-thread default-zone read).
+            ge_emergency_mark(GE_EV_SIGNAL_FAULT_INSN, fault_pc - 48.uintptr(), ge_read_context_word(fault_pc - 48.uintptr()), ge_read_context_word(fault_pc - 40.uintptr()), ge_read_context_word(fault_pc - 32.uintptr()))
+            ge_emergency_mark(GE_EV_SIGNAL_FAULT_INSN, fault_pc - 24.uintptr(), ge_read_context_word(fault_pc - 24.uintptr()), ge_read_context_word(fault_pc - 16.uintptr()), ge_read_context_word(fault_pc - 8.uintptr()))
+            # If fault_pc-16 is `mov rax,[rip+disp32]` (opcode 48 8b 05), resolve the
+            # global it loaded and read its value to confirm the null source.
+            pre_word: u64 = ge_read_context_word(fault_pc - 16.uintptr()).u64()
+            if (pre_word & 0xffffffu64) == 0x058b48u64:
+                disp32: u64 = (pre_word >> 24u64) & 0xffffffffu64
+                disp_se: mutable u64 = disp32
+                if (disp32 & 0x80000000u64) != 0u64:
+                    disp_se <- disp32 | 0xffffffff00000000u64
+                global_addr: uintptr = (fault_pc - 16.uintptr() + 7.uintptr()) + disp_se.uintptr()
+                ge_emergency_mark(GE_EV_SIGNAL_FAULT_GLOBAL, global_addr, ge_read_context_word(global_addr), pre_word.uintptr(), disp32.uintptr())
+            ge_emergency_mark(GE_EV_SIGNAL_SEGMENTS, ge_read_context_word(ss_seg + 152.uintptr()), ge_read_context_word(ss_seg + 160.uintptr()), ge_read_context_word(ss_seg + 144.uintptr()), ss_seg)
+        ge_signal_sp_valid <- 1 if !ge_signal_mctx != 0.uintptr() else 0
+        ge_signal_bp_valid <- ge_signal_sp_valid
+        ge_signal_rdi_valid <- ge_signal_sp_valid
+        ge_signal_rsi_valid <- ge_signal_sp_valid
+        ge_signal_native_region_index <- ge_find_native_region(!ge_last_guest_pc, 8)
+        ge_pc_native_prot <- ge_native_prot_at(!ge_last_guest_pc, 8)
+        ge_fault_word0 <- ge_read_native_word(!ge_last_guest_pc)
+        ge_fault_word1 <- ge_read_native_word(!ge_last_guest_pc + 8.uintptr())
+        ge_signal_stack_word0 <- ge_read_context_word(!ge_last_guest_sp)
+        ge_signal_stack_word1 <- ge_read_context_word(!ge_last_guest_sp + 8.uintptr())
+        ge_signal_stack_word_m1 <- 0.uintptr()
+        if (!ge_last_guest_sp).u64() >= 8:
+            ge_signal_stack_word_m1 <- ge_read_context_word(!ge_last_guest_sp - 8.uintptr())
+        ge_fault_transfer_class <- 0
+        if !ge_last_guest_pc != 0.uintptr() and (!ge_last_guest_pc).u64() < 4096 and ge_pc_native_prot == 0xffffffff:
+            ge_fault_transfer_class <- 1
+            if !ge_last_guest_pc == ge_signal_stack_word_m1:
+                ge_fault_transfer_class <- 2
+            elif !ge_last_guest_pc == ge_signal_stack_word0:
+                ge_fault_transfer_class <- 3
+            elif !ge_last_guest_pc == ge_signal_stack_word1:
+                ge_fault_transfer_class <- 4
+        # Symbolization uses dladdr and is not async-signal-safe. The handler records
+        # raw PCs/stack words only; host code can symbolize them after the jump/exit.
+        ge_signal_stack_symbol0 <- ""
+        ge_signal_stack_image0 <- ""
+        ge_signal_pc_symbol <- ""
+        ge_signal_pc_image <- ""
+        fr: ElisaGuestExecForkReport&? = ge_fork_report
         if fr != null:
-            fr.cross_thread_signal_count <- ge_cross_thread_signal_count
-            fr.cross_thread_signal_guard_thread <- ge_guard_target_thread
-            fr.cross_thread_signal_fault_thread <- fault_thread
-            fr.cross_thread_signal_number <- sig.s32()
-        if sig > 0 and sig < 128:
-            ge_exit_now(128 + sig)
-        ge_exit_now(1)
+            fr.status <- ge_last_status
+            fr.signal <- sig.s32()
+            fr.fault_thread <- fault_thread
+            fr.guard_thread <- ge_guard_target_thread
+            fr.fault_address <- !ge_last_fault_address
+            fr.guest_pc <- !ge_last_guest_pc
+            fr.guest_sp <- !ge_last_guest_sp
+            fr.guest_bp <- !ge_last_guest_bp
+            fr.guest_rdi <- ge_last_guest_rdi
+            fr.guest_rsi <- ge_last_guest_rsi
+            fr.guest_rdx <- ge_last_guest_rdx
+            fr.guest_rcx <- ge_last_guest_rcx
+            fr.guest_r8 <- ge_last_guest_r8
+            fr.guest_r9 <- ge_last_guest_r9
+            fr.guest_rax <- ge_last_guest_rax
+            fr.guest_rbx <- ge_last_guest_rbx
+            fr.fault_word0 <- ge_fault_word0
+            fr.fault_word1 <- ge_fault_word1
+            fr.signal_stack_word0 <- ge_signal_stack_word0
+            fr.signal_stack_word1 <- ge_signal_stack_word1
+            fr.signal_stack_word_m1 <- ge_signal_stack_word_m1
+            fr.fault_transfer_class <- ge_fault_transfer_class
+            fr.signal_stack_symbol0 <- ge_signal_stack_symbol0
+            fr.signal_stack_image0 <- ge_signal_stack_image0
+            fr.signal_pc_symbol <- ge_signal_pc_symbol
+            fr.signal_pc_image <- ge_signal_pc_image
+            fr.signal_guest_pc <- !ge_signal_guest_pc
+            fr.fallback_guest_pc <- !ge_fallback_guest_pc
+            fr.signal_pc_valid <- ge_signal_pc_valid
+            fr.signal_sp_valid <- ge_signal_sp_valid
+            fr.signal_bp_valid <- ge_signal_bp_valid
+            fr.signal_rdi_valid <- ge_signal_rdi_valid
+            fr.signal_rsi_valid <- ge_signal_rsi_valid
+            fr.signal_uctx <- !ge_signal_uctx
+            fr.signal_mctx <- !ge_signal_mctx
+            fr.signal_fault_addr_valid <- ge_signal_fault_addr_valid
+            fr.signal_native_region_index <- ge_signal_native_region_index
+            fr.pc_source <- ge_last_pc_source
+            fr.pc_was_fallback <- ge_last_pc_was_fallback
+            fr.pc_native_prot <- ge_pc_native_prot
+            if fr.execution_stage < 6:
+                fr.execution_stage <- 6
+        ge_emergency_mark(GE_EV_SIGNAL_FIRED, sig.u64().uintptr(), (!ge_last_guest_pc), (!ge_last_guest_sp), (!ge_last_fault_address))
+        ge_emergency_mark(GE_EV_SIGNAL_STACK_WORDS, ge_signal_stack_word_m1, ge_signal_stack_word0, ge_signal_stack_word1, ge_fault_transfer_class.uintptr())
+        # Crash backtrace window: dump 32 stack slots at/above the faulting SP into
+        # the tape so a post-run symbolizer can recover the guest call chain. Reads
+        # only upward (older, mapped frames) to avoid faulting past the stack top.
+        if !ge_last_guest_sp != 0.uintptr():
+            # Stop at the stack page top so the window never reads into the unmapped
+            # guard page above it (which would fault recursively inside the handler).
+            bt_page_end: u64 = ((!ge_last_guest_sp).u64() | 0xfff) + 1
+            bt_i: mutable u64 = 0
+            while bt_i < 32:
+                bt_addr: uintptr = !ge_last_guest_sp + (bt_i * 8).uintptr()
+                if bt_addr.u64() + 8 > bt_page_end:
+                    bt_i <- 32
+                else:
+                    bt_word: uintptr = ge_read_context_word(bt_addr)
+                    ge_emergency_mark(GE_EV_STACK_DUMP, bt_i.uintptr(), bt_addr, bt_word, 0.uintptr())
+                    bt_target: uintptr = ge_find_hle_thunk_target_from_stack_value(bt_word)
+                    if bt_target != 0.uintptr():
+                        ge_emergency_mark(GE_EV_SIGNAL_CALL_TARGET, bt_word, bt_target, bt_i.uintptr(), ge_native_prot_at(bt_target, 8).u64().uintptr())
+                    bt_i <- bt_i + 1
+        return_call_start: mutable uintptr = 0.uintptr()
+        return_direct_target: mutable uintptr = 0.uintptr()
+        return_callsite_window: mutable uintptr = 0.uintptr()
+        if ge_signal_stack_word0.u64() >= 8:
+            return_callsite_window <- ge_read_native_word(ge_signal_stack_word0 - 8.uintptr())
+            if ge_signal_stack_word0.u64() >= 5 and ge_read_native_u8(ge_signal_stack_word0 - 5.uintptr()) == 0xe8.u8():
+                return_call_start <- ge_signal_stack_word0 - 5.uintptr()
+                rel32: u32 = ge_read_native_u32(ge_signal_stack_word0 - 4.uintptr())
+                return_direct_target <- ge_signal_stack_word0 + ge_sign_extend_u32_to_u64(rel32).uintptr()
+        ge_emergency_mark(GE_EV_SIGNAL_RETURN_CALLSITE, ge_signal_stack_word0, return_call_start, return_direct_target, return_callsite_window)
+        ge_emergency_mark(GE_EV_SIGNAL_CALL_TARGET, return_direct_target, ge_read_native_word(return_direct_target), ge_read_native_word(return_direct_target + 8.uintptr()), ge_native_prot_at(return_direct_target, 8).u64().uintptr())
+        if ge_guard_active != 0:
+            if ge_guard_target_thread == 0.uintptr() or fault_thread == ge_guard_target_thread:
+                ge_mark_guard_longjmp(ge_last_status, GE_LONGJMP_SOURCE_SIGNAL, !ge_last_guest_pc)
+                ge_siglongjmp(ge_jmp_buf[0].ref[void&], 1)
+            ge_cross_thread_signal_count <- ge_cross_thread_signal_count + 1
+            ge_cross_thread_signal_guard_thread <- ge_guard_target_thread
+            ge_cross_thread_signal_fault_thread <- fault_thread
+            ge_cross_thread_signal_number <- sig.s32()
+            if fr != null:
+                fr.cross_thread_signal_count <- ge_cross_thread_signal_count
+                fr.cross_thread_signal_guard_thread <- ge_guard_target_thread
+                fr.cross_thread_signal_fault_thread <- fault_thread
+                fr.cross_thread_signal_number <- sig.s32()
+            if sig > 0 and sig < 128:
+                ge_exit_now(128 + sig)
+            ge_exit_now(1)
 
 # ---- Orchestration plumbing (atomic core, part 2a; inert until swap) ----
 @link_name(sigsetjmp)
@@ -2433,26 +2452,28 @@ def ge_map_shared_anon_flags() -> int:
         return 0x0001 | 0x20
 
 def ge_reset_fork_report() -> void:
-    if ge_fork_report != null:
-        _ = ge_memset(ge_addr_to_ptr(ge_fork_report_addr), 0, 4096)
+    can Memory.Allocate:
+        if ge_fork_report != null:
+            _ = ge_memset(ge_addr_to_ptr(ge_fork_report_addr), 0, 4096)
 
 def ge_ensure_fork_report() -> s32:
-    static if PLATFORM_WINDOWS:
-        return 0
-    static else:
-        if ge_fork_report != null:
+    can Memory.Allocate:
+        static if PLATFORM_WINDOWS:
+            return 0
+        static else:
+            if ge_fork_report != null:
+                ge_reset_fork_report()
+                return 0
+            mapped: uintptr = mmap(0.uintptr(), 4096, 3, ge_map_shared_anon_flags(), -1, 0)
+            if mapped == ge_map_failed():
+                ge_fork_report <- null
+                ge_fork_report_addr <- 0.uintptr()
+                return -1
+            ge_fork_report_addr <- mapped
+            trusted Unsafe.PointerCast:
+                ge_fork_report <- mapped.cast[ElisaGuestExecForkReport&?]
             ge_reset_fork_report()
             return 0
-        mapped: uintptr = mmap(0.uintptr(), 4096, 3, ge_map_shared_anon_flags(), -1, 0)
-        if mapped == ge_map_failed():
-            ge_fork_report <- null
-            ge_fork_report_addr <- 0.uintptr()
-            return -1
-        ge_fork_report_addr <- mapped
-        trusted Unsafe.PointerCast:
-            ge_fork_report <- mapped.cast[ElisaGuestExecForkReport&?]
-        ge_reset_fork_report()
-        return 0
 
 @c_abi(c)
 def ge_default_exit(code: int) -> void:
@@ -2701,7 +2722,7 @@ def ge_absorb_fork_report() -> void:
         if fr.fs_state_last_hle_symbol != null:
             ge_fs_state_last_hle_symbol <- fr.fs_state_last_hle_symbol
 
-def ge_run_child_main_entry(params: mutable GuestEntryParams&) -> void can[Unsafe.SegmentMutation, Segment.Host, Segment.Guest]:
+def ge_run_child_main_entry(params: mutable GuestEntryParams&) -> void can[Memory.Allocate, Unsafe.SegmentMutation, Segment.Host, Segment.Guest]:
     ge_set_native_phase(GE_PHASE_CHILD_BRANCH_ENTERED)
     ge_install_guards()
     ge_guard_active <- 1
@@ -2714,8 +2735,9 @@ def ge_run_child_main_entry(params: mutable GuestEntryParams&) -> void can[Unsaf
         ge_expected_stack_word1 <- params.argv[0].uintptr()
         ge_entry_stack_word0 <- ge_expected_stack_word0
         ge_entry_stack_word1 <- ge_expected_stack_word1
-        ge_entry_native_word0 <- ge_read_native_word(params.entry_addr)
-        ge_entry_native_word1 <- ge_read_native_word(params.entry_addr + 8.uintptr())
+        can Memory.Allocate:
+            ge_entry_native_word0 <- ge_read_native_word(params.entry_addr)
+            ge_entry_native_word1 <- ge_read_native_word(params.entry_addr + 8.uintptr())
         ge_entry_native_prot <- ge_native_prot_at(params.entry_addr, 8)
         fr.expected_entry_params <- ge_expected_entry_params
         fr.expected_stack_word0 <- ge_expected_stack_word0
@@ -2996,7 +3018,7 @@ def ge_non_synthetic_main_report_boundary(params: GuestEntryParams&?, exit_func:
 @c_abi(c)
 def ge_synthetic_hle_boundary_probe() -> u64:
     GuestExec_RecordFirstBoundary(GUEST_EXEC_BOUNDARY_REASON_NATIVE_HLE)
-    can Unsafe.SegmentMutation, Segment.Host:
+    can Memory.Allocate, Unsafe.SegmentMutation, Segment.Host:
         GuestExec_RecordRuntimeHle("synthetic", "synthetic_hle_boundary_probe", 0.uintptr(), 0.uintptr(), 0.uintptr(), 0xB10C.u64().uintptr())
     return 0xB10C
 
@@ -3012,52 +3034,55 @@ def ge_is_synthetic_main_entry(entry_addr: uintptr) -> bool:
 # carry addends. Returning 0 here leaves tiny addend-only addresses in guest
 # memory, which turns unresolved imports into bogus low pointers.
 def ge_read_byte(addr: uintptr) -> u8:
-    out: mutable u8 = 0
-    _ = ge_memcpy(out.ref[void&], ge_addr_to_ptr(addr), 1)
-    return out
+    can Memory.Allocate:
+        out: mutable u8 = 0
+        _ = ge_memcpy(out.ref[void&], ge_addr_to_ptr(addr), 1)
+        return out
 
 def ge_read_disp32(addr: uintptr) -> s32:
-    out: mutable u32 = 0
-    _ = ge_memcpy(out.ref[void&], ge_addr_to_ptr(addr), 4)
-    return out.s32()
+    can Memory.Allocate:
+        out: mutable u32 = 0
+        _ = ge_memcpy(out.ref[void&], ge_addr_to_ptr(addr), 4)
+        return out.s32()
 
 @c_abi(c)
 def ge_aerolib_fallback_record(caller_pc: uintptr) -> u64:
-    fr: ElisaGuestExecForkReport&? = ge_fork_report
-    if fr != null:
-        fr.aerolib_fallback_invocations <- fr.aerolib_fallback_invocations + 1
-        if fr.aerolib_fallback_caller_pc == 0.uintptr() and caller_pc != 0.uintptr():
-            fr.aerolib_fallback_caller_pc <- caller_pc
-            raw: mutable u64 = 0
-            i: mutable int = 1
-            while i <= 8:
-                raw <- (raw << 8) | ge_read_byte(caller_pc - i.uintptr()).u64()
-                i <- i + 1
-            fr.aerolib_fallback_callsite_bytes <- raw
-            slot_va: mutable uintptr = 0.uintptr()
-            b6: u8 = ge_read_byte(caller_pc - 6.uintptr())
-            b5: u8 = ge_read_byte(caller_pc - 5.uintptr())
-            if b6 == 0xFF and b5 == 0x15:
-                disp: s32 = ge_read_disp32(caller_pc - 4.uintptr())
-                slot_va <- (caller_pc.i64() + disp.i64()).uintptr()
-            elif b5 == 0xE8:
-                rel: s32 = ge_read_disp32(caller_pc - 4.uintptr())
-                plt: uintptr = (caller_pc.i64() + rel.i64()).uintptr()
-                fr.aerolib_fallback_plt_va <- plt
-                pltraw: mutable u64 = 0
-                j: mutable int = 7
-                while j >= 0:
-                    pltraw <- (pltraw << 8) | ge_read_byte(plt + j.uintptr()).u64()
-                    j <- j - 1
-                fr.aerolib_fallback_plt_bytes <- pltraw
-                q0: u8 = ge_read_byte(plt)
-                q1: u8 = ge_read_byte(plt + 1.uintptr())
-                if q0 == 0xFF and q1 == 0x25:
-                    disp2: s32 = ge_read_disp32(plt + 2.uintptr())
-                    slot_va <- (plt.i64() + 6 + disp2.i64()).uintptr()
-            fr.aerolib_fallback_slot_va <- slot_va
-    ge_report_first_boundary(2)
-    return 0
+    can Memory.Allocate:
+        fr: ElisaGuestExecForkReport&? = ge_fork_report
+        if fr != null:
+            fr.aerolib_fallback_invocations <- fr.aerolib_fallback_invocations + 1
+            if fr.aerolib_fallback_caller_pc == 0.uintptr() and caller_pc != 0.uintptr():
+                fr.aerolib_fallback_caller_pc <- caller_pc
+                raw: mutable u64 = 0
+                i: mutable int = 1
+                while i <= 8:
+                    raw <- (raw << 8) | ge_read_byte(caller_pc - i.uintptr()).u64()
+                    i <- i + 1
+                fr.aerolib_fallback_callsite_bytes <- raw
+                slot_va: mutable uintptr = 0.uintptr()
+                b6: u8 = ge_read_byte(caller_pc - 6.uintptr())
+                b5: u8 = ge_read_byte(caller_pc - 5.uintptr())
+                if b6 == 0xFF and b5 == 0x15:
+                    disp: s32 = ge_read_disp32(caller_pc - 4.uintptr())
+                    slot_va <- (caller_pc.i64() + disp.i64()).uintptr()
+                elif b5 == 0xE8:
+                    rel: s32 = ge_read_disp32(caller_pc - 4.uintptr())
+                    plt: uintptr = (caller_pc.i64() + rel.i64()).uintptr()
+                    fr.aerolib_fallback_plt_va <- plt
+                    pltraw: mutable u64 = 0
+                    j: mutable int = 7
+                    while j >= 0:
+                        pltraw <- (pltraw << 8) | ge_read_byte(plt + j.uintptr()).u64()
+                        j <- j - 1
+                    fr.aerolib_fallback_plt_bytes <- pltraw
+                    q0: u8 = ge_read_byte(plt)
+                    q1: u8 = ge_read_byte(plt + 1.uintptr())
+                    if q0 == 0xFF and q1 == 0x25:
+                        disp2: s32 = ge_read_disp32(plt + 2.uintptr())
+                        slot_va <- (plt.i64() + 6 + disp2.i64()).uintptr()
+                fr.aerolib_fallback_slot_va <- slot_va
+        ge_report_first_boundary(2)
+        return 0
 
 def ge_aerolib_fallback_stub_address() -> uintptr:
     static if ARCH_X86_64:
@@ -3249,24 +3274,25 @@ def ge_run_main_entry(params: mutable GuestEntryParams&, exit_func: void&?) -> v
         _ = exit_func
 
 def ge_prepare_main_entry_snapshot(params: mutable GuestEntryParams&) -> void:
-    ge_expected_entry_params <- params.ref[void&].uintptr()
-    ge_expected_stack_word0 <- params.argc.u32().uintptr()
-    ge_expected_stack_word1 <- params.argv[0].uintptr()
-    ge_entry_stack_word0 <- ge_expected_stack_word0
-    ge_entry_stack_word1 <- ge_expected_stack_word1
-    ge_entry_native_word0 <- ge_read_native_word(params.entry_addr)
-    ge_entry_native_word1 <- ge_read_native_word(params.entry_addr + 8.uintptr())
-    ge_entry_native_prot <- ge_native_prot_at(params.entry_addr, 8)
-    fr: ElisaGuestExecForkReport&? = ge_fork_report
-    if fr != null:
-        fr.expected_entry_params <- ge_expected_entry_params
-        fr.expected_stack_word0 <- ge_expected_stack_word0
-        fr.expected_stack_word1 <- ge_expected_stack_word1
-        fr.entry_stack_word0 <- ge_entry_stack_word0
-        fr.entry_stack_word1 <- ge_entry_stack_word1
-        fr.entry_native_word0 <- ge_entry_native_word0
-        fr.entry_native_word1 <- ge_entry_native_word1
-        fr.entry_native_prot <- ge_entry_native_prot
+    can Memory.Allocate:
+        ge_expected_entry_params <- params.ref[void&].uintptr()
+        ge_expected_stack_word0 <- params.argc.u32().uintptr()
+        ge_expected_stack_word1 <- params.argv[0].uintptr()
+        ge_entry_stack_word0 <- ge_expected_stack_word0
+        ge_entry_stack_word1 <- ge_expected_stack_word1
+        ge_entry_native_word0 <- ge_read_native_word(params.entry_addr)
+        ge_entry_native_word1 <- ge_read_native_word(params.entry_addr + 8.uintptr())
+        ge_entry_native_prot <- ge_native_prot_at(params.entry_addr, 8)
+        fr: ElisaGuestExecForkReport&? = ge_fork_report
+        if fr != null:
+            fr.expected_entry_params <- ge_expected_entry_params
+            fr.expected_stack_word0 <- ge_expected_stack_word0
+            fr.expected_stack_word1 <- ge_expected_stack_word1
+            fr.entry_stack_word0 <- ge_entry_stack_word0
+            fr.entry_stack_word1 <- ge_entry_stack_word1
+            fr.entry_native_word0 <- ge_entry_native_word0
+            fr.entry_native_word1 <- ge_entry_native_word1
+            fr.entry_native_prot <- ge_entry_native_prot
 
 def ge_run_main_entry_guarded_in_process(params: mutable GuestEntryParams&, timeout_ms: u32) -> s32 can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Host, Segment.Guest]:
     ge_set_native_phase(GE_PHASE_FUNCTION_ENTRY)
@@ -4201,18 +4227,19 @@ def GuestExec_SetValueWatch(addr: uintptr, value: u64) -> void:
 def GuestExec_ValueWatchHitSeq() -> u64:
     return ge_watch_hit_seq
 
-def ge_watch_poll(site: u64) -> void can[Unsafe.SegmentMutation, Segment.Host]:
+def ge_watch_poll(site: u64) -> void can[Memory.Allocate, Unsafe.SegmentMutation, Segment.Host]:
     if not ge_watch_enabled or ge_watch_hit_seq != 0 or ge_watch_addr == 0.uintptr():
         return
     if ge_native_prot_at(ge_watch_addr, 8) == 0xffffffff:
         return
-    if ge_read_context_word(ge_watch_addr).u64() == ge_watch_value:
-        ge_watch_hit_seq <- ge_runtime_hle_sequence + 1
-        ge_emergency_mark(GE_EV_WATCH_HIT, ge_watch_addr, ge_watch_value.uintptr(), site.uintptr(), ge_watch_hit_seq.uintptr())
+    can Memory.Allocate:
+        if ge_read_context_word(ge_watch_addr).u64() == ge_watch_value:
+            ge_watch_hit_seq <- ge_runtime_hle_sequence + 1
+            ge_emergency_mark(GE_EV_WATCH_HIT, ge_watch_addr, ge_watch_value.uintptr(), site.uintptr(), ge_watch_hit_seq.uintptr())
 
 # --- Runtime-HLE recording (ported; recorder + getters move together) ---
-def c_GuestExec_RecordRuntimeHle(module: static u8&?, symbol: static u8&?, arg0: uintptr, arg1: uintptr, arg2: uintptr, ret: uintptr) -> void can[Unsafe.SegmentMutation, Segment.Host]:
-    can Unsafe.SegmentMutation, Segment.Host:
+def c_GuestExec_RecordRuntimeHle(module: static u8&?, symbol: static u8&?, arg0: uintptr, arg1: uintptr, arg2: uintptr, ret: uintptr) -> void can[Memory.Allocate, Unsafe.SegmentMutation, Segment.Host]:
+    can Memory.Allocate, Unsafe.SegmentMutation, Segment.Host:
         ge_watch_poll(ge_runtime_hle_sequence)
     ge_current_return_pc <- !ge_runtime_hle_guest_return_addr
     ge_current_guest_pc <- !ge_runtime_hle_guest_return_addr
@@ -4220,7 +4247,7 @@ def c_GuestExec_RecordRuntimeHle(module: static u8&?, symbol: static u8&?, arg0:
     ge_emergency_mark(GE_EV_HLE_RSP, !ge_runtime_hle_guest_rsp, !ge_runtime_hle_guest_return_addr, ge_runtime_hle_sequence.uintptr(), 0.uintptr())
     ge_emergency_mark(GE_EV_HLE_ENTER, ge_current_hle_id.u64().uintptr(), arg0, arg1, arg2)
     ge_shadow_fs_transition("runtime-hle-thunk-transition-to-host", GE_FS_OWNER_HOST)
-    can Unsafe.SegmentMutation, Segment.Host:
+    can Memory.Allocate, Unsafe.SegmentMutation, Segment.Host:
         ge_observe_fs_owner("runtime-hle-entry", false)
     ge_runtime_hle_sequence <- ge_runtime_hle_sequence + 1
     ge_runtime_hle_module <- module if module != null else ""
@@ -4243,7 +4270,8 @@ def c_GuestExec_RecordRuntimeHle(module: static u8&?, symbol: static u8&?, arg0:
     ge_debug_trace_boundary("guest-exec-hle-args", arg0, arg1, arg2)
     ge_debug_trace_boundary("guest-exec-hle-ret", ret, ge_runtime_hle_sequence.uintptr(), !ge_runtime_hle_guest_return_addr)
     ge_runtime_hle_arg0_native_prot <- ge_native_prot_at(arg0, 8)
-    ge_runtime_hle_arg0_word0 <- ge_read_native_word(arg0)
+    can Memory.Allocate:
+        ge_runtime_hle_arg0_word0 <- ge_read_native_word(arg0)
     if ge_runtime_hle_first_bad_arg0_sequence == 0 and arg0 != 0.uintptr() and arg0 < 4096.uintptr() and ge_runtime_hle_arg0_native_prot == 0xffffffff:
         ge_runtime_hle_first_bad_arg0_sequence <- ge_runtime_hle_sequence
         ge_runtime_hle_first_bad_arg0_module <- ge_runtime_hle_module
@@ -4300,26 +4328,30 @@ def c_GuestExec_RecordRuntimeHle(module: static u8&?, symbol: static u8&?, arg0:
     ge_runtime_hle_recorder_stack_word1 <- 0.uintptr()
     static if ARCH_X86_64:
         sp: uintptr = !ElisaGuestExec_CurrentStackPointerAsm()
-        ge_runtime_hle_recorder_stack_word0 <- ge_read_context_word(sp)
-        ge_runtime_hle_recorder_stack_word1 <- ge_read_context_word(sp + 8.uintptr())
+        can Memory.Allocate:
+            ge_runtime_hle_recorder_stack_word0 <- ge_read_context_word(sp)
+            ge_runtime_hle_recorder_stack_word1 <- ge_read_context_word(sp + 8.uintptr())
     fr: ElisaGuestExecForkReport&? = ge_fork_report
     if fr != null:
         if !ge_runtime_hle_guest_rsp != 0.uintptr():
-            ge_runtime_hle_guest_stack_word0 <- ge_read_context_word(!ge_runtime_hle_guest_rsp)
-            ge_runtime_hle_guest_stack_word1 <- ge_read_context_word(!ge_runtime_hle_guest_rsp + 8.uintptr())
-            ge_runtime_hle_guest_stack_word2 <- ge_read_context_word(!ge_runtime_hle_guest_rsp + 16.uintptr())
-            ge_runtime_hle_guest_stack_word3 <- ge_read_context_word(!ge_runtime_hle_guest_rsp + 24.uintptr())
+            can Memory.Allocate:
+                ge_runtime_hle_guest_stack_word0 <- ge_read_context_word(!ge_runtime_hle_guest_rsp)
+                ge_runtime_hle_guest_stack_word1 <- ge_read_context_word(!ge_runtime_hle_guest_rsp + 8.uintptr())
+                ge_runtime_hle_guest_stack_word2 <- ge_read_context_word(!ge_runtime_hle_guest_rsp + 16.uintptr())
+                ge_runtime_hle_guest_stack_word3 <- ge_read_context_word(!ge_runtime_hle_guest_rsp + 24.uintptr())
         if !ge_runtime_hle_guest_rbp != 0.uintptr():
-            ge_runtime_hle_guest_frame_word0 <- ge_read_context_word(!ge_runtime_hle_guest_rbp)
-            ge_runtime_hle_guest_frame_word1 <- ge_read_context_word(!ge_runtime_hle_guest_rbp + 8.uintptr())
-            ge_runtime_hle_guest_frame_word2 <- ge_read_context_word(!ge_runtime_hle_guest_rbp + 16.uintptr())
-            ge_runtime_hle_guest_frame_word3 <- ge_read_context_word(!ge_runtime_hle_guest_rbp + 24.uintptr())
+            can Memory.Allocate:
+                ge_runtime_hle_guest_frame_word0 <- ge_read_context_word(!ge_runtime_hle_guest_rbp)
+                ge_runtime_hle_guest_frame_word1 <- ge_read_context_word(!ge_runtime_hle_guest_rbp + 8.uintptr())
+                ge_runtime_hle_guest_frame_word2 <- ge_read_context_word(!ge_runtime_hle_guest_rbp + 16.uintptr())
+                ge_runtime_hle_guest_frame_word3 <- ge_read_context_word(!ge_runtime_hle_guest_rbp + 24.uintptr())
             caller_frame: uintptr = ge_runtime_hle_guest_frame_word0
             if caller_frame != 0.uintptr():
-                ge_runtime_hle_caller_frame_word0 <- ge_read_context_word(caller_frame)
-                ge_runtime_hle_caller_frame_word1 <- ge_read_context_word(caller_frame + 8.uintptr())
-                ge_runtime_hle_caller_frame_word2 <- ge_read_context_word(caller_frame + 16.uintptr())
-                ge_runtime_hle_caller_frame_word3 <- ge_read_context_word(caller_frame + 24.uintptr())
+                can Memory.Allocate:
+                    ge_runtime_hle_caller_frame_word0 <- ge_read_context_word(caller_frame)
+                    ge_runtime_hle_caller_frame_word1 <- ge_read_context_word(caller_frame + 8.uintptr())
+                    ge_runtime_hle_caller_frame_word2 <- ge_read_context_word(caller_frame + 16.uintptr())
+                    ge_runtime_hle_caller_frame_word3 <- ge_read_context_word(caller_frame + 24.uintptr())
         fr.runtime_hle_module <- ge_runtime_hle_module
         fr.runtime_hle_symbol <- ge_runtime_hle_symbol
         fr.runtime_hle_arg0 <- arg0
@@ -4859,18 +4891,20 @@ def GuestExec_AllocateRegion(size: u64, prot: u32) -> VAddr:
     return c_GuestExec_AllocateRegion(size, prot)
 
 def GuestExec_WriteBytes(address: VAddr, data: void&?, size: u64) -> bool:
-    if not GuestExec_IsEnabled():
-        return false
-    if not GuestExec_IsSupported():
-        return false
-    return c_GuestExec_WriteBytes(address, data, size) == 0
+    can Memory.Allocate:
+        if not GuestExec_IsEnabled():
+            return false
+        if not GuestExec_IsSupported():
+            return false
+        return c_GuestExec_WriteBytes(address, data, size) == 0
 
 def GuestExec_WriteU64(address: VAddr, value: u64) -> bool:
-    if not GuestExec_IsEnabled():
-        return false
-    if not GuestExec_IsSupported():
-        return false
-    return c_GuestExec_WriteU64(address, value) == 0
+    can Memory.Allocate:
+        if not GuestExec_IsEnabled():
+            return false
+        if not GuestExec_IsSupported():
+            return false
+        return c_GuestExec_WriteU64(address, value) == 0
 
 def GuestExec_PublishExecutableCode(address: VAddr, size: u64) -> bool can[Unsafe.ExecutableCodePublish]:
     if not GuestExec_IsEnabled():
@@ -4891,14 +4925,16 @@ def GuestExec_AddressNativeProt(address: VAddr) -> u32:
     return c_GuestExec_AddressNativeProt(address)
 
 def GuestExec_ReadNativeU64(address: VAddr) -> VAddr:
-    if not GuestExec_IsEnabled() or not GuestExec_IsSupported():
-        return 0.uintptr()
-    return c_GuestExec_ReadNativeU64(address)
+    can Memory.Allocate:
+        if not GuestExec_IsEnabled() or not GuestExec_IsSupported():
+            return 0.uintptr()
+        return c_GuestExec_ReadNativeU64(address)
 
 def GuestExec_ReadContextU64(address: VAddr) -> VAddr:
-    if not GuestExec_IsEnabled() or not GuestExec_IsSupported():
-        return 0.uintptr()
-    return c_GuestExec_ReadContextU64(address)
+    can Memory.Allocate:
+        if not GuestExec_IsEnabled() or not GuestExec_IsSupported():
+            return 0.uintptr()
+        return c_GuestExec_ReadContextU64(address)
 
 def GuestExec_PublishExecutableCount() -> u64:
     return c_GuestExec_PublishExecutableCount()
@@ -5068,8 +5104,8 @@ def GuestExec_DebugGuardGuestPointer(target: GuestVAddr[void], sequence: u64) ->
     can Unsafe.SegmentMutation, Segment.Host:
         return ge_debug_guard_guest_pointer(target.cast[uintptr], sequence)
 
-def GuestExec_DebugGuardMappedGuestPointer(site: cstr, target: GuestVAddr[void], size: u64, nearest_base: VAddr, nearest_end: VAddr, nearest_prot: u32, sequence: u64) -> bool can[Unsafe.SegmentMutation, Segment.Host]:
-    can Unsafe.SegmentMutation, Segment.Host:
+def GuestExec_DebugGuardMappedGuestPointer(site: cstr, target: GuestVAddr[void], size: u64, nearest_base: VAddr, nearest_end: VAddr, nearest_prot: u32, sequence: u64) -> bool can[Memory.Allocate, Unsafe.SegmentMutation, Segment.Host]:
+    can Memory.Allocate, Unsafe.SegmentMutation, Segment.Host:
         return ge_debug_guard_mapped_guest_pointer(site, target.cast[uintptr], size, nearest_base, nearest_end, nearest_prot, sequence)
 
 def GuestExec_DebugGuardGuestReturnContinuation(sequence: u64) -> bool can[Unsafe.SegmentMutation, Segment.Host]:
@@ -5779,8 +5815,8 @@ def GuestExec_RecordLastHle(module: static u8&, symbol: static u8&) -> void:
     guest_exec_last_hle_module <- module
     guest_exec_last_hle_symbol <- symbol
 
-def GuestExec_RecordRuntimeHle(module: static u8&, symbol: static u8&, arg0: VAddr, arg1: VAddr, arg2: VAddr, ret: VAddr) -> void can[Unsafe.SegmentMutation, Segment.Host]:
-    can Unsafe.SegmentMutation, Segment.Host:
+def GuestExec_RecordRuntimeHle(module: static u8&, symbol: static u8&, arg0: VAddr, arg1: VAddr, arg2: VAddr, ret: VAddr) -> void can[Memory.Allocate, Unsafe.SegmentMutation, Segment.Host]:
+    can Memory.Allocate, Unsafe.SegmentMutation, Segment.Host:
         c_GuestExec_RecordRuntimeHle(module, symbol, arg0, arg1, arg2, ret)
 
 def GuestExec_RuntimeHleModule() -> static u8&:
@@ -6038,25 +6074,32 @@ def GuestExec_ClassifyFirstBoundary() -> s32:
     return GUEST_EXEC_BOUNDARY_EXITED_BEFORE_BOUNDARY
 
 def GuestExec_EmitCusaArtifactStage() -> void:
-    ElisaGuestExec_EmitCusaArtifactStage()
+    can Console.Write:
+        ElisaGuestExec_EmitCusaArtifactStage()
 
 def GuestExec_EmitCusaArtifactSummary(module_count: u64, total_imports: u64, unresolved_imports: u64, relocated_imports: u64, native_hle_resolved: u64, prx_export_resolved: u64, aerolib_fallback_resolved: u64, hle_symbols: u64, entry: u64, main_entry: u64, guarded_status: s32, last_signal: s32, fault_address: u64) -> void:
-    ElisaGuestExec_EmitCusaArtifactSummary(module_count, total_imports, unresolved_imports, relocated_imports, native_hle_resolved, prx_export_resolved, aerolib_fallback_resolved, hle_symbols, entry, main_entry, guarded_status, last_signal, fault_address, GuestExec_LastGuestPC().u64(), GuestExec_ClassifyFirstBoundary(), GuestExec_FirstBoundaryReason(), GuestExec_ExecutionStage())
+    can Console.Format, Console.Write:
+        ElisaGuestExec_EmitCusaArtifactSummary(module_count, total_imports, unresolved_imports, relocated_imports, native_hle_resolved, prx_export_resolved, aerolib_fallback_resolved, hle_symbols, entry, main_entry, guarded_status, last_signal, fault_address, GuestExec_LastGuestPC().u64(), GuestExec_ClassifyFirstBoundary(), GuestExec_FirstBoundaryReason(), GuestExec_ExecutionStage())
 
 def GuestExec_EmitCusaArtifactModule(module: static u8&?, host: static u8&?, shared: s32, relocations: u64, imports: u64, resolved: u64, native_hle: u64, prx_export: u64, aerolib_fallback: u64, malformed: u64, unresolved: u64) -> void:
-    ElisaGuestExec_EmitCusaArtifactModule(module, host, shared, relocations, imports, resolved, native_hle, prx_export, aerolib_fallback, malformed, unresolved)
+    can Console.Format, Console.Write:
+        ElisaGuestExec_EmitCusaArtifactModule(module, host, shared, relocations, imports, resolved, native_hle, prx_export, aerolib_fallback, malformed, unresolved)
 
 def GuestExec_EmitCusaArtifactImport(source: static u8&?, nid: static u8&?, library: static u8&?, module: static u8&?, subsystem: static u8&?, resolution: u64) -> void:
-    ElisaGuestExec_EmitCusaArtifactImport(source, nid, library, module, subsystem, resolution)
+    can Console.Format, Console.Write:
+        ElisaGuestExec_EmitCusaArtifactImport(source, nid, library, module, subsystem, resolution)
 
 def GuestExec_EmitCusaArtifactLastHle(module: static u8&?, symbol: static u8&?) -> void:
-    ElisaGuestExec_EmitCusaArtifactLastHle(module, symbol)
+    can Console.Format, Console.Write:
+        ElisaGuestExec_EmitCusaArtifactLastHle(module, symbol)
 
 def GuestExec_EmitCusaArtifactStringKV(key: static u8&?, value: static u8&?) -> void:
-    ElisaGuestExec_EmitCusaArtifactStringKV(key, value)
+    can Console.Format, Console.Write:
+        ElisaGuestExec_EmitCusaArtifactStringKV(key, value)
 
 def GuestExec_EmitCusaArtifactKV(key: static u8&?, value: u64) -> void:
-    ElisaGuestExec_EmitCusaArtifactKV(key, value)
+    can Console.Format, Console.Write:
+        ElisaGuestExec_EmitCusaArtifactKV(key, value)
 
 def GuestExec_CusaPutFormatted(line: mutable u8&, size: usize, written: int) -> void:
     if written > 0 and written.usize() < size:

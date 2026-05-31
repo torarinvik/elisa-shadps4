@@ -574,29 +574,30 @@ def posix_pthread_yield() -> int:
 
 # @port core/libraries/kernel/threads/pthread.cpp::posix_pthread_detach sha256=565a6d5db11aaebc oracle@a3773841
 def posix_pthread_detach(pthread: void&?) -> int:
-    threads_bootstrap_runtime()
-    if pthread == null:
-        return POSIX_EINVAL
-    id: mutable int = threads_handle_to_id(pthread)
-    if threads_is_current_self_handle(pthread) == true:
-        id <- g_fake_thread_id
-    if threads_is_valid_live_thread_id(id) == false:
-        return POSIX_ESRCH
-    if g_fake_threads_detached[id] == true or g_fake_threads_has_joiner[id] == true:
-        return POSIX_EINVAL
-    if g_fake_threads_exited[id] == true:
-        g_fake_threads_alive[id] <- false
-        g_fake_threads_running[id] <- false
-    host_handle: void&? = threads_handle_for_id(id)
-    if g_fake_threads_host_backed[id] == true:
-        host_res: int = elisa_kernel_thread_detach(host_handle)
-        if host_res != 0:
-            return host_res
-    else:
-        if host_handle != null:
-            _ = kt_pthread_detach(host_handle.uintptr())
-    g_fake_threads_detached[id] <- true
-    return 0
+    can Memory.Release, Sync.Lock, Sync.Unlock, Thread.Detach:
+        threads_bootstrap_runtime()
+        if pthread == null:
+            return POSIX_EINVAL
+        id: mutable int = threads_handle_to_id(pthread)
+        if threads_is_current_self_handle(pthread) == true:
+            id <- g_fake_thread_id
+        if threads_is_valid_live_thread_id(id) == false:
+            return POSIX_ESRCH
+        if g_fake_threads_detached[id] == true or g_fake_threads_has_joiner[id] == true:
+            return POSIX_EINVAL
+        if g_fake_threads_exited[id] == true:
+            g_fake_threads_alive[id] <- false
+            g_fake_threads_running[id] <- false
+        host_handle: void&? = threads_handle_for_id(id)
+        if g_fake_threads_host_backed[id] == true:
+            host_res: int = elisa_kernel_thread_detach(host_handle)
+            if host_res != 0:
+                return host_res
+        else:
+            if host_handle != null:
+                _ = kt_pthread_detach(host_handle.uintptr())
+        g_fake_threads_detached[id] <- true
+        return 0
 
 # @port core/libraries/kernel/threads/pthread.cpp::posix_pthread_exit sha256=f2880d9c7ae4da3d oracle@a3773841
 def posix_pthread_exit(status: void&?) -> void:
@@ -619,70 +620,31 @@ def posix_pthread_exit(status: void&?) -> void:
 
 # @port core/libraries/kernel/threads/pthread.cpp::posix_pthread_join sha256=3cac9408cb36a690 oracle@a3773841
 def posix_pthread_join(pthread: void&?, thread_return: mutable void&?&) -> int:
-    threads_bootstrap_runtime()
-    _ = thread_return
-    if pthread == null:
-        return POSIX_EINVAL
-    id: mutable int = threads_handle_to_id(pthread)
-    if threads_is_current_self_handle(pthread) == true:
-        id <- g_fake_thread_id
-    if id == g_fake_thread_id:
-        return POSIX_EDEADLK
-    if threads_is_valid_live_thread_id(id) == false:
-        return POSIX_ESRCH
-    if g_fake_threads_detached[id] == true:
-        return POSIX_EINVAL
-    if g_fake_threads_has_joiner[id] == true:
-        return POSIX_ENOTSUP
-    if g_fake_threads_running[id] == true and g_fake_threads_exited[id] == false and g_fake_threads_host_backed[id] == false:
-        return POSIX_ETIMEDOUT
-    host_ret: mutable void&? = null
-    if g_fake_threads_host_backed[id] == true:
-        host_res: int = elisa_kernel_thread_join(threads_handle_for_id(id), host_ret)
-        if host_res != 0:
-            return host_res
-        g_fake_threads_retval[id] <- host_ret
-    g_fake_threads_has_joiner[id] <- true
-    if thread_return != null:
-        thread_return[0] <- g_fake_threads_retval[id]
-    g_fake_threads_alive[id] <- false
-    g_fake_threads_running[id] <- false
-    g_fake_threads_detached[id] <- true
-    g_fake_threads_has_joiner[id] <- false
-    g_fake_threads_exited[id] <- false
-    g_fake_threads_retval[id] <- null
-    g_fake_threads_host_handle[id] <- null
-    g_fake_threads_host_backed[id] <- false
-    return 0
-
-# @port core/libraries/kernel/threads/pthread.cpp::posix_pthread_timedjoin_np sha256=c1c7e2e01dc3cc8e oracle@a3773841
-def posix_pthread_timedjoin_np(pthread: void&?, thread_return: mutable void&?&, abstime: void&?) -> int:
-    if pthread == null:
-        return POSIX_EINVAL
-    if threads_is_current_self_handle(pthread) == true or threads_handle_to_id(pthread) == g_fake_thread_id:
-        return POSIX_EDEADLK
-    if abstime == null:
-        return POSIX_EINVAL
-    ts: OrbisKernelTimespec&? = abstime.cast[OrbisKernelTimespec&?]
-    if ts == null or ts.tv_sec < 0 or ts.tv_nsec < 0 or ts.tv_nsec >= 1000000000:
-        return POSIX_EINVAL
-    id: mutable int = threads_handle_to_id(pthread)
-    if threads_is_current_self_handle(pthread) == true:
-        id <- g_fake_thread_id
-    if threads_is_valid_live_thread_id(id) == false:
-        return POSIX_ESRCH
-    if g_fake_threads_detached[id] == true:
-        return POSIX_EINVAL
-    if g_fake_threads_has_joiner[id] == true:
-        return POSIX_ENOTSUP
-    if g_fake_threads_host_backed[id] == true:
-        host_ret: mutable void&? = null
-        host_res: int = elisa_kernel_thread_timedjoin(threads_handle_for_id(id), host_ret, ts.tv_sec, ts.tv_nsec)
-        if host_res == POSIX_ETIMEDOUT:
+    can Memory.Release, Sync.Lock, Sync.Unlock, Thread.Join:
+        threads_bootstrap_runtime()
+        _ = thread_return
+        if pthread == null:
+            return POSIX_EINVAL
+        id: mutable int = threads_handle_to_id(pthread)
+        if threads_is_current_self_handle(pthread) == true:
+            id <- g_fake_thread_id
+        if id == g_fake_thread_id:
+            return POSIX_EDEADLK
+        if threads_is_valid_live_thread_id(id) == false:
+            return POSIX_ESRCH
+        if g_fake_threads_detached[id] == true:
+            return POSIX_EINVAL
+        if g_fake_threads_has_joiner[id] == true:
+            return POSIX_ENOTSUP
+        if g_fake_threads_running[id] == true and g_fake_threads_exited[id] == false and g_fake_threads_host_backed[id] == false:
             return POSIX_ETIMEDOUT
-        if host_res != 0:
-            return host_res
-        g_fake_threads_retval[id] <- host_ret
+        host_ret: mutable void&? = null
+        if g_fake_threads_host_backed[id] == true:
+            host_res: int = elisa_kernel_thread_join(threads_handle_for_id(id), host_ret)
+            if host_res != 0:
+                return host_res
+            g_fake_threads_retval[id] <- host_ret
+        g_fake_threads_has_joiner[id] <- true
         if thread_return != null:
             thread_return[0] <- g_fake_threads_retval[id]
         g_fake_threads_alive[id] <- false
@@ -694,58 +656,101 @@ def posix_pthread_timedjoin_np(pthread: void&?, thread_return: mutable void&?&, 
         g_fake_threads_host_handle[id] <- null
         g_fake_threads_host_backed[id] <- false
         return 0
-    if g_fake_threads_exited[id] == false:
-        return POSIX_ETIMEDOUT
-    return posix_pthread_join(pthread, thread_return)
+
+# @port core/libraries/kernel/threads/pthread.cpp::posix_pthread_timedjoin_np sha256=c1c7e2e01dc3cc8e oracle@a3773841
+def posix_pthread_timedjoin_np(pthread: void&?, thread_return: mutable void&?&, abstime: void&?) -> int:
+    can Memory.Release, Sync.Lock, Sync.Unlock, Thread.Join:
+        if pthread == null:
+            return POSIX_EINVAL
+        if threads_is_current_self_handle(pthread) == true or threads_handle_to_id(pthread) == g_fake_thread_id:
+            return POSIX_EDEADLK
+        if abstime == null:
+            return POSIX_EINVAL
+        ts: OrbisKernelTimespec&? = abstime.cast[OrbisKernelTimespec&?]
+        if ts == null or ts.tv_sec < 0 or ts.tv_nsec < 0 or ts.tv_nsec >= 1000000000:
+            return POSIX_EINVAL
+        id: mutable int = threads_handle_to_id(pthread)
+        if threads_is_current_self_handle(pthread) == true:
+            id <- g_fake_thread_id
+        if threads_is_valid_live_thread_id(id) == false:
+            return POSIX_ESRCH
+        if g_fake_threads_detached[id] == true:
+            return POSIX_EINVAL
+        if g_fake_threads_has_joiner[id] == true:
+            return POSIX_ENOTSUP
+        if g_fake_threads_host_backed[id] == true:
+            host_ret: mutable void&? = null
+            host_res: int = elisa_kernel_thread_timedjoin(threads_handle_for_id(id), host_ret, ts.tv_sec, ts.tv_nsec)
+            if host_res == POSIX_ETIMEDOUT:
+                return POSIX_ETIMEDOUT
+            if host_res != 0:
+                return host_res
+            g_fake_threads_retval[id] <- host_ret
+            if thread_return != null:
+                thread_return[0] <- g_fake_threads_retval[id]
+            g_fake_threads_alive[id] <- false
+            g_fake_threads_running[id] <- false
+            g_fake_threads_detached[id] <- true
+            g_fake_threads_has_joiner[id] <- false
+            g_fake_threads_exited[id] <- false
+            g_fake_threads_retval[id] <- null
+            g_fake_threads_host_handle[id] <- null
+            g_fake_threads_host_backed[id] <- false
+            return 0
+        if g_fake_threads_exited[id] == false:
+            return POSIX_ETIMEDOUT
+        return posix_pthread_join(pthread, thread_return)
 
 # @port core/libraries/kernel/threads/pthread.cpp::posix_pthread_create sha256=986247c91ea1155d oracle@a3773841
 def posix_pthread_create(thread: mutable void&?&, attr: void&?, start_routine: void&?, arg: void&?) -> int:
-    threads_bootstrap_runtime()
-    if thread == null:
-        return POSIX_EINVAL
-    if g_fake_next_thread_id >= FAKE_THREADS_MAX:
-        return POSIX_EAGAIN
-    id: int = g_fake_next_thread_id
-    g_fake_next_thread_id <- g_fake_next_thread_id + 1
-    g_fake_threads_alive[id] <- true
-    g_fake_threads_running[id] <- true
-    g_fake_threads_detached[id] <- false
-    g_fake_threads_has_joiner[id] <- false
-    g_fake_threads_retval[id] <- null
-    g_fake_threads_host_handle[id] <- null
-    g_fake_threads_host_backed[id] <- false
-    g_fake_threads_exited[id] <- false
-    _ = attr
-    if start_routine != null:
-        create_res: mutable int = 0
-        host_thread: void&? = elisa_kernel_guest_thread_create(start_routine, arg, create_res)
-        if create_res != 0:
-            g_fake_threads_alive[id] <- false
+    can Memory.Allocate, Memory.Release, Sync.Lock, Sync.Unlock, Thread.Detach, Thread.Spawn:
+        threads_bootstrap_runtime()
+        if thread == null:
+            return POSIX_EINVAL
+        if g_fake_next_thread_id >= FAKE_THREADS_MAX:
+            return POSIX_EAGAIN
+        id: int = g_fake_next_thread_id
+        g_fake_next_thread_id <- g_fake_next_thread_id + 1
+        g_fake_threads_alive[id] <- true
+        g_fake_threads_running[id] <- true
+        g_fake_threads_detached[id] <- false
+        g_fake_threads_has_joiner[id] <- false
+        g_fake_threads_retval[id] <- null
+        g_fake_threads_host_handle[id] <- null
+        g_fake_threads_host_backed[id] <- false
+        g_fake_threads_exited[id] <- false
+        _ = attr
+        if start_routine != null:
+            create_res: mutable int = 0
+            host_thread: void&? = elisa_kernel_guest_thread_create(start_routine, arg, create_res)
+            if create_res != 0:
+                g_fake_threads_alive[id] <- false
+                g_fake_threads_running[id] <- false
+                g_fake_threads_detached[id] <- false
+                g_fake_threads_exited[id] <- false
+                return create_res
+            g_fake_threads_host_handle[id] <- host_thread
+            g_fake_threads_host_backed[id] <- true
+            thread[0] <- host_thread
+            if g_fake_threads_detached[id] == true:
+                _ = elisa_kernel_thread_detach(host_thread)
+            return 0
+        if g_fake_threads_autocomplete == true:
+            g_fake_threads_retval[id] <- arg
             g_fake_threads_running[id] <- false
-            g_fake_threads_detached[id] <- false
-            g_fake_threads_exited[id] <- false
-            return create_res
-        g_fake_threads_host_handle[id] <- host_thread
-        g_fake_threads_host_backed[id] <- true
-        thread[0] <- host_thread
-        if g_fake_threads_detached[id] == true:
-            _ = elisa_kernel_thread_detach(host_thread)
+            g_fake_threads_exited[id] <- true
+        thread[0] <- id.cast[void&?]
         return 0
-    if g_fake_threads_autocomplete == true:
-        g_fake_threads_retval[id] <- arg
-        g_fake_threads_running[id] <- false
-        g_fake_threads_exited[id] <- true
-    thread[0] <- id.cast[void&?]
-    return 0
 
 # @port core/libraries/kernel/threads/pthread.cpp::posix_pthread_create_name_np sha256=f9919786d75c130d oracle@a3773841
 def posix_pthread_create_name_np(thread: mutable void&?&, attr: void&?, start_routine: void&?, arg: void&?, name: static u8&?) -> int:
-    r: int = posix_pthread_create(thread, attr, start_routine, arg)
-    if r != 0:
-        return r
-    if name != null and thread != null and thread[0] != null:
-        _ = posix_pthread_rename_np(thread[0], name)
-    return 0
+    can Memory.Allocate, Memory.Release, Sync.Lock, Sync.Unlock, Thread.Detach, Thread.Spawn:
+        r: int = posix_pthread_create(thread, attr, start_routine, arg)
+        if r != 0:
+            return r
+        if name != null and thread != null and thread[0] != null:
+            _ = posix_pthread_rename_np(thread[0], name)
+        return 0
 
 # @port core/libraries/kernel/threads/pthread.cpp::posix_pthread_setcancelstate sha256=abe444c69f27bc3a oracle@a3773841
 def posix_pthread_setcancelstate(state: int, oldstate: mutable int&?) -> int:
@@ -966,13 +971,16 @@ def scePthreadRenameNp(thread: void&?, name: static u8&?) -> int:
     return threads_orbis_from_posix(posix_pthread_rename_np(thread, name))
 
 def scePthreadCreateNameNp(thread: mutable void&?&, attr: void&?, start_routine: void&?, arg: void&?, name: static u8&?) -> int:
-    return threads_orbis_from_posix(posix_pthread_create_name_np(thread, attr, start_routine, arg, name))
+    can Memory.Allocate, Memory.Release, Sync.Lock, Sync.Unlock, Thread.Detach, Thread.Spawn:
+        return threads_orbis_from_posix(posix_pthread_create_name_np(thread, attr, start_routine, arg, name))
 
 def scePthreadDetach(thread: void&?) -> int:
-    return threads_orbis_from_posix(posix_pthread_detach(thread))
+    can Memory.Release, Sync.Lock, Sync.Unlock, Thread.Detach:
+        return threads_orbis_from_posix(posix_pthread_detach(thread))
 
 def scePthreadJoin(thread: void&?, thread_return: mutable void&?&) -> int:
-    return threads_orbis_from_posix(posix_pthread_join(thread, thread_return))
+    can Memory.Release, Sync.Lock, Sync.Unlock, Thread.Join:
+        return threads_orbis_from_posix(posix_pthread_join(thread, thread_return))
 
 def scePthreadGetschedparam(thread: void&?, policy: mutable int&, param: mutable SchedParam&) -> int:
     return threads_orbis_from_posix(posix_pthread_getschedparam(thread, policy, param))

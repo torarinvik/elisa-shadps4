@@ -25,25 +25,91 @@ primitive. Each compile error that isn't a syntax mapping is a gap recorded here
 - [ ] **general `fmt::format`** with `{}` substitution — needs a real formatter
 
 ### COMPILER gaps (Elisa-core) surfaced by the port
-- ❗ **Generic `T` inference does not flow through auto-ref.** `f(x)` where
-  `f[T](out: mutable T&)` and `x` is a value that needs auto-ref fails to bind
-  `T` → `error: missing specialization binding for type parameter T`. Worked
-  around with explicit `[T]` at call sites (`IOFile_ReadObject[...]`,
-  `IOFile_WriteSpan[u8]` in `core/loader/elf.elisa`). **Proper fix:** make
-  `collectTypeBindings` peel the auto-ref when matching arg→`mutable T&`.
-  (This blocked the Elf/IOFile path and the kernel-memory-parity target.)
-- ⚠️ **darray-append-needs-active-arena is intra-procedural** — a helper that
-  pushes to a `&`-passed darray needs its own `in arena:` scope (pass the arena).
-  This is exactly the allocator-threading the region-aware-container design note
-  is meant to remove.
+> **Freshness pass 2026-05-31** (re-verified each item below against the current
+> `elisacore`): the two open compiler gaps here are now **RESOLVED** — `init_to[T](x)`
+> auto-ref binding and `push()` directly inside a `region r(...):` scope both compile
+> clean. The explicit-`[T]` and arena-threading workarounds in the port can be unwound.
+> One genuinely-new gap was found (region-param helper **calls** — see below).
+- ✅ **Generic `T` inference through auto-ref — RESOLVED.** `f[T](out: mutable T&)`
+  called as `f(x)` with `x` a value (incl. a struct value, and with leading non-`T`
+  params) now binds `T` and compiles. The explicit-`[T]` workarounds at
+  `IOFile_ReadObject[...]` / `IOFile_WriteSpan[u8]` in `core/loader/elf.elisa` are no
+  longer needed (re-verify the exact call shapes when unwinding). If a residual shape
+  still fails, the proper fix remains: `collectTypeBindings` peels the auto-ref when
+  matching arg→`mutable T&`.
+- ✅ **darray-append-needs-active-arena is intra-procedural** — RESOLVED by the
+  region-parameterized-containers work. A helper `def f[region r](out: mutable
+  darray[T] @r)` can now `out.push(x)` / dict-insert through the `@r` param with
+  no `in arena:` scope of its own; the compiler threads the caller's region arena
+  as a hidden Arena& param. (Region-containers priorities 1–3: darray push, dict
+  insert/get_or_insert, nested-region escape, allocator interface.)
+- ✅ **mutable / by-reference iteration EXISTS** (not a gap). `for(auto& x : v)`
+  transliterates to `for mutable ref x in v:` (mutates elements / passes them to
+  `mutable T&` params) or `for ref x in v:` (efficient read, no copy). Plain
+  `for x in v:` is a by-value copy. See docs/17-iterators-and-for-in-mini-spec.md.
+  Adopted in core/linker.elisa Linker_Resolve.
+- ✅ **Direct `container.push()` inside a `region r(...):` scope — RESOLVED.** The
+  candidate follow-up landed: `push()`/`extend()` directly inside a `region r(...):`
+  scope now compiles (the grow sources the active region's arena). No need to wrap in
+  `in <arena>:` or thread a region param for the common in-scope case.
+- ❗ **NEW: region-param helper *calls* do not thread the arena.** A helper
+  `def f[T, region r](out: mutable darray[T] @r, ...)` that does `out.push(x)` (even
+  inside a `for`/`while`) **compiles as a definition**, but **calling** it from a region
+  scope — `f(b, a.view())` or `b.f(a.view())`, even inside `in scratch:` — fails with
+  `darray push requires an active in <arena>: scope`. So generic reusable container
+  helpers over `@r` (e.g. a hand-written `append`/`map`/`filter`) are blocked at the
+  call site. The region-container tests only *analyze* such signatures (escape-check);
+  none execute a region-param push at a call site, so this slipped through.
+  **Root cause (investigated 2026-05-31, fix attempted + reverted — 3 layers, not a
+  one-liner):** the ABI threading itself is correct — each region param's hidden `Arena&`
+  *is* lowered and registered in the backend's `s.regions` (verified: `s.regions=[r(ptr=
+  true)]`), and the push emit already tries `regionArenaOwner(region)` first. The blocker
+  is that the **region NAME never reaches the backend**:
+  (1) in the helper body, `s.exprType(receiver)` runs through `preferBackendLiveIdentType`,
+      whose live binding type for a `darray[T] @r` param has `@r` stripped → `darrayType.
+      Region==""` → `regionArenaOwner("")` bails. (Fixable with a semantic-type fallback;
+      that alone clears the "push requires arena" error.)
+  (2) the call site (`resolveRegionArenaArgs`) reads the *argument's* region the same
+      stripped way → can't pick the arena to pass → passes a null `Arena&` → "Operand is
+      null".
+  (3) the deeper one: even the *semantic* type of a container **local** doesn't carry its
+      region — a darray local's region lives in the analyzer's `regionRefState` flow-state,
+      not on `DArrayType.Region` — so there is no region name on the type to recover at the
+      call arg at all. A real fix must either propagate the region onto the container type
+      through to codegen, or thread `regionRefState` into the backend. High-risk arena/ABI
+      area; deserves its own focused change, not a session-side patch.
+  **Workaround today (use this):** pass the arena explicitly
+  (`def f[T](out, a: mutable Arena&, items): in a: …`) like `cxx_vector_push`, or use the
+  builtin `push`/`extend` directly inside the region/`in <arena>:` scope.
 
-### Algorithm helpers (currently hand-rolled loops)
-- [ ] `std::all_of` / `find_if` / `sort` over a range
+### Algorithm helpers (now in Elisa-core collections.elisa, as `@method` on `darray[T]`)
+- [x] **Predicate scans** (pure `func(T) -> bool`): `v.any_of(p)`, `v.all_of(p)`,
+  `v.count_if(p)`, `v.find_if(p) -> T?`. Read-only.
+- [x] **Comparator ordering** (strict-weak `func(T,T) -> bool less`): `v.sort(less)`
+  (in-place O(n log n) heapsort), `v.reverse()`, `v.is_sorted(less)`,
+  `v.min_element(less) -> T?`, `v.max_element(less) -> T?`.
+- [x] **Binary search** over a `less`-sorted range: `v.lower_bound(target, less) -> usize`,
+  `v.binary_search(target, less) -> bool`.
+- [x] `fold`/`accumulate` — `da.fold(init, f)` (left fold; accumulator type inferred from
+  `init`). Unblocked by a compiler fix (collectTypeBindings: a concrete arg type now
+  overrides a placeholder type-param binding), which also sharpens inference for any type
+  param appearing only in value positions.
+- [ ] `transform`/`map` to a NEW darray — needs the arena (region); use an explicit-arena
+  helper (region-param call threading is the deferred compiler gap above).
+- [ ] `find`/`contains` BY VALUE — needs `==` on a generic `T`; Elisa has no generic
+  equality (no operator overloading). Use `find_if`/`any_of` with an equality predicate.
 
 ### Host subsystems (large — build incrementally)
-- [ ] **`std::filesystem`** — path join/parent/filename/exists/is_directory/relative/
-      create_directory/remove_all/directory_iterator. (Partial host helpers exist:
-      `Emulator_DirName/PathEndsWith/TrimTrailingSlash`.)
+- [~] **`std::filesystem`** — split into the pure string half (DONE) and the OS half (TODO):
+      - [x] **path decomposition** — Elisa-core `Fs::` module (elisacore_runtime_strings.elisa):
+        `Fs::filename` / `Fs::parent` / `Fs::extension` / `Fs::stem` over a path `sview`,
+        returning sub-views (allocation-free), std::filesystem::path semantics. Plus
+        `sview_find_last_byte` (rfind).
+      - [ ] **path join** — needs an arena (builds a new string); add an explicit-arena
+        `Fs::join(a, base, leaf) -> dstr`.
+      - [ ] **OS queries** — `exists` / `is_directory` / `relative` / `create_directory` /
+        `remove_all` / `directory_iterator`: host FFI (stat/mkdir/opendir/readdir), belongs
+        with the host layer, not the string module.
 - [x] **`fstream` read/write** — `port_read_file_text` / `port_write_file_text`
       via `IOFile` (verified round-trip). Notes: `ofstream`(trunc) == open with
       `FileAccessMode.Create` (`Write` maps to `r+` and needs an existing file);
@@ -55,7 +121,8 @@ primitive. Each compile error that isn't a syntax mapping is a gap recorded here
 - [ ] **`PSF`** — `param.sfo` parser (`Open`/`GetString`/`GetInteger`).
 - [ ] **`NPBindFile`** — `Load` / `GetNpCommIds` (trophies).
 - [ ] **`Frontend::WindowSDL`** — window create / `IsOpen` / `WaitEvent` / `InitTimers`.
-- [ ] **`std::hash<string_view>`** — for `SafeGameIdForHostPath` fallback id.
+- [x] **`std::hash<string_view>`** — Elisa-core `hash_sview(value) -> u64` (FNV-1a 64-bit).
+      The port's local `port_hash_sview` can now drop to this.
 - [ ] **process restart** — `execvp` (POSIX) for `ExecuteRestartArgs`.
 - [ ] **playtime thread** — `std::jthread` + `StoppableTimedWait`.
 
@@ -73,7 +140,10 @@ Things the transliteration taught us (compile + runtime tested):
   active `in <arena>:` scope. Any function returning a built string must own/
   thread an arena (seed uses a module-global `port_arena`, mirroring
   `core/emulator.elisa`'s `emulator_arena`).
-- ⚠️ **No `dstr.append`** — concatenate via a `push` loop or a `concat` helper.
+- ✅ **`dstr`/`darray` append-many EXISTS — RESOLVED** (was "No `dstr.append`"). Use the
+  builtin `dst.extend(src)` where `src` is a darray/`dview`/array of the same element
+  type (verified for `darray[i64]` and `dstr` concatenation). `s.append(t)` → `s.extend(t)`.
+  Threads the arena like `push` (needs an active region/`in <arena>:` scope).
 - ⚠️ **`clone[dstr](x)`** needs an active arena scope AND `x` to be a view
   (`sview`/`dview`), not a `static u8&`.
 - ❗ **`static u8&` ("C-string") `==` literal is a POINTER compare**, not content.

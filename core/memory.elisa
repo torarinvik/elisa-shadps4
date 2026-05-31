@@ -288,20 +288,23 @@ def MemoryManager_SetPrtArea(self: mutable MemoryManager&, id: u32, address: VAd
     self.prt_areas[id.usize()] <- PrtArea(address, address + size.uintptr(), true)
 
 def MemoryManager_CopySparseMemory(self: MemoryManager&, source: VAddr, dest: mutable u8&, size: u64) -> void:
-    i: mutable u64 = 0
-    while i < size:
-        dest[i.usize()] <- MemoryManager_ReadU8(self, source + i.uintptr())
-        i <- i + 1
+    can Memory.Allocate:
+        i: mutable u64 = 0
+        while i < size:
+            dest[i.usize()] <- MemoryManager_ReadU8(self, source + i.uintptr())
+            i <- i + 1
 
 def MemoryManager_TryWriteBacking(self: mutable MemoryManager&, address: void&?, data: void&?, size: u64) -> bool:
-    if address == null:
-        return false
-    if data == null:
-        return size == 0
-    return MemoryManager_WriteBytes(self, address.cast[VAddr], data.cast[u8&], size)
+    can Memory.Allocate:
+        if address == null:
+            return false
+        if data == null:
+            return size == 0
+        return MemoryManager_WriteBytes(self, address.cast[VAddr], data.cast[u8&], size)
 
 def MemoryManager_TryWriteGuestMemory(self: mutable MemoryManager&, address: void&?, data: void&?, size: u64) -> bool:
-    return MemoryManager_TryWriteBacking(self, address, data, size)
+    can Memory.Allocate:
+        return MemoryManager_TryWriteBacking(self, address, data, size)
 
 def MemoryManager_SetupMemoryRegions(self: mutable MemoryManager&, flexible_size: u64, use_extended_mem1: bool, use_extended_mem2: bool) -> void:
     _ = use_extended_mem1
@@ -665,57 +668,61 @@ def MemoryManager_FindBackingIndex(self: MemoryManager&, addr: VAddr, size: u64)
     return -1
 
 def MemoryManager_WriteU8(self: mutable MemoryManager&, addr: VAddr, value: u8) -> bool:
-    index: s32 = MemoryManager_FindBackingIndex(self, addr, 1)
-    if index < 0:
-        return false
-    if GuestExec_IsEnabled() and GuestExec_IsSupported():
-        if not GuestExec_WriteBytes(addr, value.ref[u8&].cast[void&?], 1):
+    can Memory.Allocate:
+        index: s32 = MemoryManager_FindBackingIndex(self, addr, 1)
+        if index < 0:
             return false
-        if not MemoryManager_RestoreNativeProtectionAfterWrite(self, addr, 1.u64()):
-            return false
-    offset: usize = (addr - self.mapped_bytes[index.usize()].base).usize()
-    self.mapped_bytes[index.usize()].bytes[offset] <- value
-    return true
+        if GuestExec_IsEnabled() and GuestExec_IsSupported():
+            if not GuestExec_WriteBytes(addr, value.ref[u8&].cast[void&?], 1):
+                return false
+            if not MemoryManager_RestoreNativeProtectionAfterWrite(self, addr, 1.u64()):
+                return false
+        offset: usize = (addr - self.mapped_bytes[index.usize()].base).usize()
+        self.mapped_bytes[index.usize()].bytes[offset] <- value
+        return true
 
 def MemoryManager_ReadU8(self: MemoryManager&, addr: VAddr) -> u8:
-    index: s32 = MemoryManager_FindBackingIndex(self, addr, 1)
-    if index < 0:
-        return 0
-    # Single-view: read the native MAP_FIXED mapping when guest-exec is active (see
-    # MemoryManager_ReadU64). The low byte of the native 8-read at addr is the byte
-    # at addr; the region is mapped (backing-index check) so the read is in-bounds.
-    if GuestExec_IsEnabled() and GuestExec_IsSupported():
-        return (GuestExec_ReadNativeU64(addr).u64() & 0xff).u8()
-    offset: usize = (addr - self.mapped_bytes[index.usize()].base).usize()
-    return self.mapped_bytes[index.usize()].bytes[offset]
+    can Memory.Allocate:
+        index: s32 = MemoryManager_FindBackingIndex(self, addr, 1)
+        if index < 0:
+            return 0
+        # Single-view: read the native MAP_FIXED mapping when guest-exec is active (see
+        # MemoryManager_ReadU64). The low byte of the native 8-read at addr is the byte
+        # at addr; the region is mapped (backing-index check) so the read is in-bounds.
+        if GuestExec_IsEnabled() and GuestExec_IsSupported():
+            return (GuestExec_ReadNativeU64(addr).u64() & 0xff).u8()
+        offset: usize = (addr - self.mapped_bytes[index.usize()].base).usize()
+        return self.mapped_bytes[index.usize()].bytes[offset]
 
 def MemoryManager_WriteBytes(self: mutable MemoryManager&, addr: VAddr, data: u8&, size: u64) -> bool:
-    index: s32 = MemoryManager_FindBackingIndex(self, addr, size)
-    if index < 0:
-        return false
-    if GuestExec_IsEnabled() and GuestExec_IsSupported():
-        if not GuestExec_WriteBytes(addr, data.cast[void&?], size):
+    can Memory.Allocate:
+        index: s32 = MemoryManager_FindBackingIndex(self, addr, size)
+        if index < 0:
             return false
-        if not MemoryManager_RestoreNativeProtectionAfterWrite(self, addr, size):
-            return false
-    base_offset: usize = (addr - self.mapped_bytes[index.usize()].base).usize()
-    for i in 0..<size.usize():
-        self.mapped_bytes[index.usize()].bytes[base_offset + i] <- data[i]
-    return true
+        if GuestExec_IsEnabled() and GuestExec_IsSupported():
+            if not GuestExec_WriteBytes(addr, data.cast[void&?], size):
+                return false
+            if not MemoryManager_RestoreNativeProtectionAfterWrite(self, addr, size):
+                return false
+        base_offset: usize = (addr - self.mapped_bytes[index.usize()].base).usize()
+        for i in 0..<size.usize():
+            self.mapped_bytes[index.usize()].bytes[base_offset + i] <- data[i]
+        return true
 
 def MemoryManager_WriteU64(self: mutable MemoryManager&, addr: VAddr, value: u64) -> bool:
-    index: s32 = MemoryManager_FindBackingIndex(self, addr, 8)
-    if index < 0:
-        return false
-    if GuestExec_IsEnabled() and GuestExec_IsSupported():
-        if not GuestExec_WriteU64(addr, value):
+    can Memory.Allocate:
+        index: s32 = MemoryManager_FindBackingIndex(self, addr, 8)
+        if index < 0:
             return false
-        if not MemoryManager_RestoreNativeProtectionAfterWrite(self, addr, 8.u64()):
-            return false
-    base_offset: usize = (addr - self.mapped_bytes[index.usize()].base).usize()
-    for i in 0..<8:
-        self.mapped_bytes[index.usize()].bytes[base_offset + i] <- ((value >> (i.u64() * 8)) & 0xff).u8()
-    return true
+        if GuestExec_IsEnabled() and GuestExec_IsSupported():
+            if not GuestExec_WriteU64(addr, value):
+                return false
+            if not MemoryManager_RestoreNativeProtectionAfterWrite(self, addr, 8.u64()):
+                return false
+        base_offset: usize = (addr - self.mapped_bytes[index.usize()].base).usize()
+        for i in 0..<8:
+            self.mapped_bytes[index.usize()].bytes[base_offset + i] <- ((value >> (i.u64() * 8)) & 0xff).u8()
+        return true
 
 def MemoryManager_WriteU64BackingOnly(self: mutable MemoryManager&, addr: VAddr, value: u64) -> bool:
     index: s32 = MemoryManager_FindBackingIndex(self, addr, 8)
@@ -727,32 +734,34 @@ def MemoryManager_WriteU64BackingOnly(self: mutable MemoryManager&, addr: VAddr,
     return true
 
 def MemoryManager_ReadU64(self: MemoryManager&, addr: VAddr) -> u64:
-    index: s32 = MemoryManager_FindBackingIndex(self, addr, 8)
-    if index < 0:
-        return 0
-    # Single-view: when guest-exec is active, the native MAP_FIXED mapping at the
-    # guest VA is the single source of truth (the same memory the guest executes
-    # against, like shadPS4). The host-side backing buffer is legacy and can diverge
-    # from native (deferred/partial writes, re-protection), which is the root of the
-    # layer-mismatch bug class. The backing-index check above confirms the region is
-    # mapped, so the native read is in-bounds.
-    if GuestExec_IsEnabled() and GuestExec_IsSupported():
-        return GuestExec_ReadNativeU64(addr).u64()
-    base_offset: usize = (addr - self.mapped_bytes[index.usize()].base).usize()
-    value: mutable u64 = 0
-    for i in 0..<8:
-        value <- value | (self.mapped_bytes[index.usize()].bytes[base_offset + i].u64() << (i.u64() * 8))
-    return value
+    can Memory.Allocate:
+        index: s32 = MemoryManager_FindBackingIndex(self, addr, 8)
+        if index < 0:
+            return 0
+        # Single-view: when guest-exec is active, the native MAP_FIXED mapping at the
+        # guest VA is the single source of truth (the same memory the guest executes
+        # against, like shadPS4). The host-side backing buffer is legacy and can diverge
+        # from native (deferred/partial writes, re-protection), which is the root of the
+        # layer-mismatch bug class. The backing-index check above confirms the region is
+        # mapped, so the native read is in-bounds.
+        if GuestExec_IsEnabled() and GuestExec_IsSupported():
+            return GuestExec_ReadNativeU64(addr).u64()
+        base_offset: usize = (addr - self.mapped_bytes[index.usize()].base).usize()
+        value: mutable u64 = 0
+        for i in 0..<8:
+            value <- value | (self.mapped_bytes[index.usize()].bytes[base_offset + i].u64() << (i.u64() * 8))
+        return value
 
 def MemoryManager_SyncNativeBackingToGuestExec(self: mutable MemoryManager&) -> bool:
-    if not GuestExec_IsEnabled() or not GuestExec_IsSupported():
+    can Memory.Allocate:
+        if not GuestExec_IsEnabled() or not GuestExec_IsSupported():
+            return true
+        for i in 0..<self.mapped_bytes.count:
+            entry: MappedMemoryBytes = self.mapped_bytes[i]
+            if entry.size == 0 or entry.bytes.count == 0:
+                continue
+            if not GuestExec_WriteBytes(entry.base, entry.bytes[0].ref[u8&].cast[void&?], entry.size):
+                return false
+            if not MemoryManager_RestoreNativeProtectionAfterWrite(self, entry.base, entry.size):
+                return false
         return true
-    for i in 0..<self.mapped_bytes.count:
-        entry: MappedMemoryBytes = self.mapped_bytes[i]
-        if entry.size == 0 or entry.bytes.count == 0:
-            continue
-        if not GuestExec_WriteBytes(entry.base, entry.bytes[0].ref[u8&].cast[void&?], entry.size):
-            return false
-        if not MemoryManager_RestoreNativeProtectionAfterWrite(self, entry.base, entry.size):
-            return false
-    return true

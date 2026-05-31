@@ -94,42 +94,44 @@ def threads_run_cleanup_handlers() -> void:
 
 # @port core/libraries/kernel/threads/event_flag.cpp::sceKernelCreateEventFlag sha256=1e406a477e0e35ac oracle@a3773841
 def sceKernelCreateEventFlag(ef: mutable int&, p_name: static u8&?, attr: u32, init_pattern: u64, p_opt_param: void&?) -> int:
-    if p_name == null or p_opt_param != null:
-        return ORBIS_KERNEL_ERROR_EINVAL
-    if attr > 0x22:
-        return ORBIS_KERNEL_ERROR_EINVAL
-    if threads_static_name_len_at_least(p_name, 32) == true:
-        return ORBIS_KERNEL_ERROR_ENAMETOOLONG
-    i: mutable int = 0
-    while i < 64:
-        if g_event_flags[i].used == false:
-            create_res: mutable int = 0
-            native: void&? = elisa_kernel_event_create(init_pattern, create_res)
-            if native == null:
-                return ORBIS_KERNEL_ERROR_UNKNOWN + create_res
-            g_event_flags[i].used <- true
-            g_event_flags[i].bits <- init_pattern
-            g_event_flags[i].attr <- attr
-            g_event_flags[i].native_handle <- native
-            ef <- i
-            return ORBIS_OK
-        i <- i + 1
-    return ORBIS_KERNEL_ERROR_ENOMEM
+    can Memory.Allocate:
+        if p_name == null or p_opt_param != null:
+            return ORBIS_KERNEL_ERROR_EINVAL
+        if attr > 0x22:
+            return ORBIS_KERNEL_ERROR_EINVAL
+        if threads_static_name_len_at_least(p_name, 32) == true:
+            return ORBIS_KERNEL_ERROR_ENAMETOOLONG
+        i: mutable int = 0
+        while i < 64:
+            if g_event_flags[i].used == false:
+                create_res: mutable int = 0
+                native: void&? = elisa_kernel_event_create(init_pattern, create_res)
+                if native == null:
+                    return ORBIS_KERNEL_ERROR_UNKNOWN + create_res
+                g_event_flags[i].used <- true
+                g_event_flags[i].bits <- init_pattern
+                g_event_flags[i].attr <- attr
+                g_event_flags[i].native_handle <- native
+                ef <- i
+                return ORBIS_OK
+            i <- i + 1
+        return ORBIS_KERNEL_ERROR_ENOMEM
 
 # @port core/libraries/kernel/threads/event_flag.cpp::sceKernelDeleteEventFlag sha256=ef030390b14d3e6b oracle@a3773841
 def sceKernelDeleteEventFlag(ef: int) -> int:
-    if ef < 0 or ef >= 64 or g_event_flags[ef].used == false:
-        return ORBIS_KERNEL_ERROR_ESRCH
-    waiters: mutable int = 0
-    if g_event_flags[ef].native_handle != null:
-        r: int = elisa_kernel_event_delete(g_event_flags[ef].native_handle, waiters)
-        if r != 0:
-            return ORBIS_KERNEL_ERROR_UNKNOWN + r
-    g_event_flags[ef].used <- false
-    g_event_flags[ef].bits <- 0
-    g_event_flags[ef].native_handle <- null
-    g_event_waiters[ef] <- 0
-    return ORBIS_OK
+    can Memory.Release, Sync.Lock, Sync.Notify, Sync.Unlock:
+        if ef < 0 or ef >= 64 or g_event_flags[ef].used == false:
+            return ORBIS_KERNEL_ERROR_ESRCH
+        waiters: mutable int = 0
+        if g_event_flags[ef].native_handle != null:
+            r: int = elisa_kernel_event_delete(g_event_flags[ef].native_handle, waiters)
+            if r != 0:
+                return ORBIS_KERNEL_ERROR_UNKNOWN + r
+        g_event_flags[ef].used <- false
+        g_event_flags[ef].bits <- 0
+        g_event_flags[ef].native_handle <- null
+        g_event_waiters[ef] <- 0
+        return ORBIS_OK
 
 # @port core/libraries/kernel/threads/event_flag.cpp::sceKernelOpenEventFlag sha256=f0f934fd6b7ca840 oracle@a3773841
 def sceKernelOpenEventFlag() -> int:
@@ -141,88 +143,93 @@ def sceKernelCloseEventFlag() -> int:
 
 # @port core/libraries/kernel/threads/event_flag.cpp::sceKernelClearEventFlag sha256=d9f0f3a8d22f69b8 oracle@a3773841
 def sceKernelClearEventFlag(ef: int, bit_pattern: u64) -> int:
-    if ef < 0 or ef >= 64 or g_event_flags[ef].used == false:
-        return ORBIS_KERNEL_ERROR_ESRCH
-    _ = elisa_kernel_event_clear(g_event_flags[ef].native_handle, bit_pattern)
-    g_event_flags[ef].bits <- g_event_flags[ef].bits & bit_pattern
-    return ORBIS_OK
+    can Sync.Lock, Sync.Unlock:
+        if ef < 0 or ef >= 64 or g_event_flags[ef].used == false:
+            return ORBIS_KERNEL_ERROR_ESRCH
+        _ = elisa_kernel_event_clear(g_event_flags[ef].native_handle, bit_pattern)
+        g_event_flags[ef].bits <- g_event_flags[ef].bits & bit_pattern
+        return ORBIS_OK
 
 # @port core/libraries/kernel/threads/event_flag.cpp::sceKernelCancelEventFlag sha256=c7aad3af9aacd631 oracle@a3773841
 def sceKernelCancelEventFlag(ef: int, set_pattern: u64, p_num_wait_threads: mutable int&?) -> int:
-    if ef < 0 or ef >= 64 or g_event_flags[ef].used == false:
-        return ORBIS_KERNEL_ERROR_ESRCH
-    _ = elisa_kernel_event_cancel(g_event_flags[ef].native_handle, set_pattern, p_num_wait_threads)
-    g_event_flags[ef].bits <- set_pattern
-    return ORBIS_OK
+    can Sync.Lock, Sync.Notify, Sync.Unlock:
+        if ef < 0 or ef >= 64 or g_event_flags[ef].used == false:
+            return ORBIS_KERNEL_ERROR_ESRCH
+        _ = elisa_kernel_event_cancel(g_event_flags[ef].native_handle, set_pattern, p_num_wait_threads)
+        g_event_flags[ef].bits <- set_pattern
+        return ORBIS_OK
 
 # @port core/libraries/kernel/threads/event_flag.cpp::sceKernelSetEventFlag sha256=b46ac5743862e59c oracle@a3773841
 def sceKernelSetEventFlag(ef: int, bit_pattern: u64) -> int:
-    if ef < 0 or ef >= 64 or g_event_flags[ef].used == false:
-        return ORBIS_KERNEL_ERROR_ESRCH
-    _ = elisa_kernel_event_set(g_event_flags[ef].native_handle, bit_pattern)
-    g_event_flags[ef].bits <- g_event_flags[ef].bits | bit_pattern
-    return ORBIS_OK
+    can Sync.Lock, Sync.Notify, Sync.Unlock:
+        if ef < 0 or ef >= 64 or g_event_flags[ef].used == false:
+            return ORBIS_KERNEL_ERROR_ESRCH
+        _ = elisa_kernel_event_set(g_event_flags[ef].native_handle, bit_pattern)
+        g_event_flags[ef].bits <- g_event_flags[ef].bits | bit_pattern
+        return ORBIS_OK
 
 # @port core/libraries/kernel/threads/event_flag.cpp::sceKernelPollEventFlag sha256=add3f2d1ad8d1d92 oracle@a3773841
 def sceKernelPollEventFlag(ef: int, bit_pattern: u64, wait_mode: u32, p_result_pat: mutable u64&?) -> int:
-    if ef < 0 or ef >= 64 or g_event_flags[ef].used == false:
-        return ORBIS_KERNEL_ERROR_ESRCH
-    if bit_pattern == 0:
-        return ORBIS_KERNEL_ERROR_EINVAL
-    bits: u64 = g_event_flags[ef].bits
-    wait_mode_low: u32 = wait_mode & 0x0f
-    if wait_mode_low != 0x01 and wait_mode_low != 0x02:
-        return ORBIS_KERNEL_ERROR_EINVAL
-    clear_mode_bits: u32 = wait_mode & 0xf0
-    if clear_mode_bits != 0x00 and clear_mode_bits != 0x10 and clear_mode_bits != 0x20:
-        return ORBIS_KERNEL_ERROR_EINVAL
+    can Sync.Lock, Sync.Unlock:
+        if ef < 0 or ef >= 64 or g_event_flags[ef].used == false:
+            return ORBIS_KERNEL_ERROR_ESRCH
+        if bit_pattern == 0:
+            return ORBIS_KERNEL_ERROR_EINVAL
+        bits: u64 = g_event_flags[ef].bits
+        wait_mode_low: u32 = wait_mode & 0x0f
+        if wait_mode_low != 0x01 and wait_mode_low != 0x02:
+            return ORBIS_KERNEL_ERROR_EINVAL
+        clear_mode_bits: u32 = wait_mode & 0xf0
+        if clear_mode_bits != 0x00 and clear_mode_bits != 0x10 and clear_mode_bits != 0x20:
+            return ORBIS_KERNEL_ERROR_EINVAL
 
-    and_mode: bool = wait_mode_low == 0x01
-    ok: mutable bool = false
-    if and_mode == true:
-        ok <- (bits & bit_pattern) == bit_pattern
-    else:
-        ok <- (bits & bit_pattern) != 0
-    native_r: mutable int = elisa_kernel_event_poll(g_event_flags[ef].native_handle, bit_pattern, wait_mode, p_result_pat)
-    if native_r == POSIX_EAGAIN:
-        native_r <- POSIX_EBUSY
-    if native_r != 0 and native_r != POSIX_EBUSY:
-        return ORBIS_KERNEL_ERROR_UNKNOWN + native_r
-    if p_result_pat != null and native_r == POSIX_EBUSY:
-        p_result_pat <- bits
-    if ok == false:
-        return ORBIS_KERNEL_ERROR_EBUSY
-    if clear_mode_bits == 0x10:
-        g_event_flags[ef].bits <- 0
-    if clear_mode_bits == 0x20:
-        g_event_flags[ef].bits <- g_event_flags[ef].bits & ~bit_pattern
-    return ORBIS_OK
+        and_mode: bool = wait_mode_low == 0x01
+        ok: mutable bool = false
+        if and_mode == true:
+            ok <- (bits & bit_pattern) == bit_pattern
+        else:
+            ok <- (bits & bit_pattern) != 0
+        native_r: mutable int = elisa_kernel_event_poll(g_event_flags[ef].native_handle, bit_pattern, wait_mode, p_result_pat)
+        if native_r == POSIX_EAGAIN:
+            native_r <- POSIX_EBUSY
+        if native_r != 0 and native_r != POSIX_EBUSY:
+            return ORBIS_KERNEL_ERROR_UNKNOWN + native_r
+        if p_result_pat != null and native_r == POSIX_EBUSY:
+            p_result_pat <- bits
+        if ok == false:
+            return ORBIS_KERNEL_ERROR_EBUSY
+        if clear_mode_bits == 0x10:
+            g_event_flags[ef].bits <- 0
+        if clear_mode_bits == 0x20:
+            g_event_flags[ef].bits <- g_event_flags[ef].bits & ~bit_pattern
+        return ORBIS_OK
 
 # @port core/libraries/kernel/threads/event_flag.cpp::sceKernelWaitEventFlag sha256=8212fdb955a4769c oracle@a3773841
 def sceKernelWaitEventFlag(ef: int, bit_pattern: u64, wait_mode: u32, p_result_pat: mutable u64&?, p_timeout: mutable u32&?) -> int:
-    r: int = sceKernelPollEventFlag(ef, bit_pattern, wait_mode, p_result_pat)
-    if r == ORBIS_KERNEL_ERROR_EBUSY:
-        # Match C++ single-thread event flag behavior: only one waiter allowed.
-        if (g_event_flags[ef].attr & 0x30) == 0x10 and g_event_waiters[ef] > 0:
-            return ORBIS_KERNEL_ERROR_EPERM
-        wait_usec: mutable u64 = 0 - 1
-        if p_timeout != null:
-            wait_usec <- p_timeout[0].cast[u64]
-        g_event_waiters[ef] <- g_event_waiters[ef] + 1
-        native_r: int = elisa_kernel_event_wait(g_event_flags[ef].native_handle, bit_pattern, wait_mode, p_result_pat, wait_usec)
-        g_event_waiters[ef] <- g_event_waiters[ef] - 1
-        if native_r == 0:
-            return ORBIS_OK
-        if p_timeout != null:
-            p_timeout <- 0
-        if native_r == POSIX_ECANCELED:
-            return ORBIS_KERNEL_ERROR_ECANCELED
-        if native_r == POSIX_EACCES:
-            return ORBIS_KERNEL_ERROR_EACCES
-        if native_r != POSIX_ETIMEDOUT:
-            return ORBIS_KERNEL_ERROR_UNKNOWN + native_r
-        return ORBIS_KERNEL_ERROR_ETIMEDOUT
-    return r
+    can Sync.Lock, Sync.Unlock, Sync.Wait, Memory.Release:
+        r: int = sceKernelPollEventFlag(ef, bit_pattern, wait_mode, p_result_pat)
+        if r == ORBIS_KERNEL_ERROR_EBUSY:
+            # Match C++ single-thread event flag behavior: only one waiter allowed.
+            if (g_event_flags[ef].attr & 0x30) == 0x10 and g_event_waiters[ef] > 0:
+                return ORBIS_KERNEL_ERROR_EPERM
+            wait_usec: mutable u64 = 0 - 1
+            if p_timeout != null:
+                wait_usec <- p_timeout[0].cast[u64]
+            g_event_waiters[ef] <- g_event_waiters[ef] + 1
+            native_r: int = elisa_kernel_event_wait(g_event_flags[ef].native_handle, bit_pattern, wait_mode, p_result_pat, wait_usec)
+            g_event_waiters[ef] <- g_event_waiters[ef] - 1
+            if native_r == 0:
+                return ORBIS_OK
+            if p_timeout != null:
+                p_timeout <- 0
+            if native_r == POSIX_ECANCELED:
+                return ORBIS_KERNEL_ERROR_ECANCELED
+            if native_r == POSIX_EACCES:
+                return ORBIS_KERNEL_ERROR_EACCES
+            if native_r != POSIX_ETIMEDOUT:
+                return ORBIS_KERNEL_ERROR_UNKNOWN + native_r
+            return ORBIS_KERNEL_ERROR_ETIMEDOUT
+        return r
 
 # @port core/libraries/kernel/threads/exception.cpp::posix_sigaction sha256=ec94603aae9909a7 oracle@a3773841
 def posix_sigaction(sig: int, act: void&?, oact: void&?) -> int:
@@ -290,7 +297,7 @@ def sceKernelRaiseException(thread: void&?, signum: int) -> int:
 def sceKernelDebugRaiseException(err_code: int, unk: i64) -> int can[Unsafe.SegmentMutation, Segment.Host]:
     if unk != 0:
         return ORBIS_KERNEL_ERROR_EINVAL
-    can Unsafe.SegmentMutation, Segment.Host:
+    can Unsafe.SegmentMutation, Segment.Host, Memory.Allocate:
         GuestExec_RecordDebugRaise(err_code, unk)
         GuestExec_RecordRuntimeHle("libkernel", "sceKernelDebugRaiseException", err_code.u64().uintptr(), unk.u64().uintptr(), 0.uintptr(), ORBIS_OK.uintptr())
         GuestExec_AbortGuestFatalHle(err_code.u64().uintptr())
@@ -300,7 +307,7 @@ def sceKernelDebugRaiseException(err_code: int, unk: i64) -> int can[Unsafe.Segm
 def sceKernelDebugRaiseExceptionOnReleaseMode(err_code: int, unk: i64) -> int can[Unsafe.SegmentMutation, Segment.Host]:
     if unk != 0:
         return ORBIS_KERNEL_ERROR_EINVAL
-    can Unsafe.SegmentMutation, Segment.Host:
+    can Unsafe.SegmentMutation, Segment.Host, Memory.Allocate:
         GuestExec_RecordDebugRaise(err_code, unk)
         GuestExec_RecordRuntimeHle("libkernel", "sceKernelDebugRaiseExceptionOnReleaseMode", err_code.u64().uintptr(), unk.u64().uintptr(), 0.uintptr(), ORBIS_OK.uintptr())
         GuestExec_AbortGuestFatalHle(err_code.u64().uintptr())
