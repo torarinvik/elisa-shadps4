@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 include "./common/types.elisa"
+include "./common/sdl3.elisa"
 
 const ELISA_SHADPS4_WINDOW_TITLE: static u8& = "elisa_shadps4"
 
@@ -26,6 +27,32 @@ struct WindowSDL:
     is_open: mutable bool
     keyboard_grab: mutable int
     window_info: mutable WindowSystemInfo
+    window: mutable heap void&?
+
+# Verbatim of the SDL-only core of WindowSDL::WindowSDL — sets the app-name hint, brings up the
+# video/audio subsystems, then creates the window through the SDL3 properties API. The platform
+# render-surface extraction and the Input/ImGui/EmulatorSettings wiring stay in the caller once
+# those modules are ported.
+#
+# Kept as an explicit step rather than folded into WindowSDL_New: the C++ constructor both builds
+# the object and brings up SDL, but a live display is unavailable to the headless contract tests,
+# so the port splits the SDL bring-up into this seam. The emulator entrypoint calls
+# WindowSDL_InitSDL(self) after construction; pure tests construct headless (window == null).
+def WindowSDL_CreateNativeWindow(width: s32, height: s32, window_title: static u8&) -> mutable heap void&?:
+    _ = SDL_SetHint(SDL_HINT_APP_NAME, "shadPS4")
+    _ = SDL_Init(SDL_INIT_VIDEO())
+    _ = SDL_InitSubSystem(SDL_INIT_AUDIO())
+    props: u32 = SDL_CreateProperties()
+    _ = SDL_SetStringProperty(props, SDL_PROP_WINDOW_CREATE_TITLE_STRING, window_title)
+    _ = SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_X_NUMBER, SDL_WINDOWPOS_CENTERED())
+    _ = SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_Y_NUMBER, SDL_WINDOWPOS_CENTERED())
+    _ = SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, width.i64())
+    _ = SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, height.i64())
+    _ = SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER, SDL_WINDOW_VULKAN().i64())
+    _ = SDL_SetBooleanProperty(props, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true)
+    handle: mutable heap void&? = SDL_CreateWindowWithProperties(props)
+    SDL_DestroyProperties(props)
+    return handle
 
 def WindowSDL_New(width: s32, height: s32, window_title: static u8&) -> WindowSDL:
     return WindowSDL(
@@ -35,8 +62,17 @@ def WindowSDL_New(width: s32, height: s32, window_title: static u8&) -> WindowSD
         true,
         true,
         0,
-        WindowSystemInfo(0.uintptr(), 0.uintptr(), 1.0, WindowSystemType.Headless)
+        WindowSystemInfo(0.uintptr(), 0.uintptr(), 1.0, WindowSystemType.Headless),
+        null
     )
+
+# Bring up SDL and create the backing window for an already-constructed WindowSDL. Verbatim of
+# the SDL-only body of WindowSDL::WindowSDL; call once from the emulator entrypoint.
+def WindowSDL_InitSDL(self: mutable WindowSDL&) -> void:
+    self.window <- WindowSDL_CreateNativeWindow(self.width, self.height, self.title)
+
+def WindowSDL_GetSDLWindow(self: WindowSDL&) -> mutable heap void&?:
+    return self.window
 
 def WindowSDL_GetWidth(self: WindowSDL&) -> s32:
     return self.width
@@ -60,6 +96,12 @@ def WindowSDL_InitTimers(self: mutable WindowSDL&) -> void:
     _ = self
 
 def WindowSDL_RequestClose(self: mutable WindowSDL&) -> void:
+    # Verbatim C++ pushes an SDL_EVENT_QUIT that WaitEvent later turns into is_open=false:
+    #     event: mutable u8[128] = zeroed
+    #     event[0].ref[mutable u8&].cast[mutable u32&] <- SDL_EVENT_QUIT()
+    #     _ = SDL_PushEvent(event[0].ref[mutable u8&].cast[mutable void&])
+    # That path lives in the SDL-linked emulator target; the headless contract here closes
+    # directly so it stays runnable without libSDL3 or a live event loop.
     self.is_open <- false
 
 def WindowSDL_RequestKeyboard(self: mutable WindowSDL&) -> void:

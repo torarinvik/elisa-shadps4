@@ -1,0 +1,123 @@
+# SDL3 C-ABI bindings (linked via `-lSDL3` in project.json). These are the surface the
+# Frontend::WindowSDL transliteration calls. SDL3, NOT SDL2 — note the differences:
+#   * SDL_Init / SDL_PollEvent / SDL_WaitEvent return `bool` (SDL2 returned int).
+#   * SDL_CreateWindow takes (title, w, h, flags) with flags as Uint64 (no x/y).
+#   * SDL_GetWindowSizeInPixels replaces SDL2's SDL_GL_GetDrawableSize.
+#
+# Opaque types: an SDL_Window* is a `heap void&?` we never dereference; an SDL_Event* is a
+# caller-owned buffer of at least SDL_EVENT_SIZE() bytes whose first u32 is the event `type`.
+# Effects are intentionally omitted (matching the libc mmap/munmap externs) until an SDL/host
+# effect family is defined; callers gate side effects at their own boundary.
+
+# ---- init / teardown ----
+extern SDL_Init(flags: u32) -> bool
+extern SDL_InitSubSystem(flags: u32) -> bool
+extern SDL_QuitSubSystem(flags: u32)
+extern SDL_Quit()
+extern SDL_GetError() -> static u8&
+extern SDL_SetHint(name: static u8&, value: static u8&) -> bool
+extern SDL_GetCurrentVideoDriver() -> static u8&
+
+# ---- window ----
+extern SDL_CreateWindow(title: static u8&, w: i32, h: i32, flags: u64) -> mutable heap void&?
+extern SDL_DestroyWindow(window: heap void&)
+extern SDL_ShowWindow(window: heap void&) -> bool
+extern SDL_HideWindow(window: heap void&) -> bool
+extern SDL_GetWindowSizeInPixels(window: heap void&, w: mutable i32&, h: mutable i32&) -> bool
+extern SDL_SetWindowFullscreen(window: heap void&, fullscreen: bool) -> bool
+extern SDL_SetWindowTitle(window: heap void&, title: static u8&) -> bool
+
+# ---- events ----
+# `event` points at a >= SDL_EVENT_SIZE() byte buffer; the call fills it and returns whether
+# an event was available. Read the first u32 of the buffer for the event type.
+extern SDL_PollEvent(event: mutable void&) -> bool
+extern SDL_WaitEvent(event: mutable void&) -> bool
+extern SDL_PushEvent(event: mutable void&) -> bool
+extern SDL_PumpEvents()
+
+# ---- timers (InitTimers) ----
+extern SDL_AddTimer(interval_ms: u32, callback: void&, userdata: mutable heap void&?) -> u32
+extern SDL_RemoveTimer(id: u32) -> bool
+extern SDL_GetTicks() -> u64
+
+# ---- constants (SDL3 header values) ----
+# SDL_InitFlags
+def SDL_INIT_AUDIO() -> u32:
+    return 0x00000010
+def SDL_INIT_VIDEO() -> u32:
+    return 0x00000020
+def SDL_INIT_GAMEPAD() -> u32:
+    return 0x00002000
+def SDL_INIT_EVENTS() -> u32:
+    return 0x00004000
+
+# SDL_WindowFlags (Uint64)
+def SDL_WINDOW_FULLSCREEN() -> u64:
+    return 0x0000000000000001
+def SDL_WINDOW_HIDDEN() -> u64:
+    return 0x0000000000000008
+def SDL_WINDOW_RESIZABLE() -> u64:
+    return 0x0000000000000020
+def SDL_WINDOW_VULKAN() -> u64:
+    return 0x0000000010000000
+
+# SDL_EventType (the values WindowSDL dispatches on)
+def SDL_EVENT_QUIT() -> u32:
+    return 0x100
+def SDL_EVENT_WINDOW_RESIZED() -> u32:
+    return 0x204
+def SDL_EVENT_WINDOW_CLOSE_REQUESTED() -> u32:
+    return 0x206
+def SDL_EVENT_KEY_DOWN() -> u32:
+    return 0x300
+def SDL_EVENT_KEY_UP() -> u32:
+    return 0x301
+
+# SDL_Event is a union; in SDL3 it is 128 bytes. Allocate a buffer of this size to poll into.
+def SDL_EVENT_SIZE() -> usize:
+    return 128
+
+# ---- properties API (SDL_CreateWindowWithProperties path) ----
+# SDL_PropertiesID is a Uint32 handle into SDL's property store.
+extern SDL_CreateProperties() -> u32
+extern SDL_DestroyProperties(props: u32)
+extern SDL_SetStringProperty(props: u32, name: static u8&, value: static u8&) -> bool
+extern SDL_SetNumberProperty(props: u32, name: static u8&, value: i64) -> bool
+extern SDL_SetBooleanProperty(props: u32, name: static u8&, value: bool) -> bool
+extern SDL_GetNumberProperty(props: u32, name: static u8&, default_value: i64) -> i64
+extern SDL_GetPointerProperty(props: u32, name: static u8&, default_value: mutable heap void&?) -> mutable heap void&?
+extern SDL_CreateWindowWithProperties(props: u32) -> mutable heap void&?
+extern SDL_GetWindowProperties(window: heap void&) -> u32
+
+# ---- additional window controls used by the constructor / WaitEvent ----
+extern SDL_SetWindowMinimumSize(window: heap void&, min_w: i32, min_h: i32) -> bool
+extern SDL_SyncWindow(window: heap void&) -> bool
+extern SDL_GetWindowFlags(window: heap void&) -> u64
+extern SDL_SetWindowRelativeMouseMode(window: heap void&, enabled: bool) -> bool
+extern SDL_StartTextInput(window: heap void&) -> bool
+extern SDL_StopTextInput(window: heap void&) -> bool
+
+# SDL_WINDOWPOS_CENTERED — centre on the primary display.
+def SDL_WINDOWPOS_CENTERED() -> i64:
+    return 0x2FFF0000
+
+# Property name keys (SDL3 #define string values).
+const SDL_PROP_WINDOW_CREATE_TITLE_STRING: static u8& = "SDL.window.create.title"
+const SDL_PROP_WINDOW_CREATE_X_NUMBER: static u8& = "SDL.window.create.x"
+const SDL_PROP_WINDOW_CREATE_Y_NUMBER: static u8& = "SDL.window.create.y"
+const SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER: static u8& = "SDL.window.create.width"
+const SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER: static u8& = "SDL.window.create.height"
+const SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN: static u8& = "SDL.window.create.resizable"
+const SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER: static u8& = "flags"
+const SDL_HINT_APP_NAME: static u8& = "SDL_APP_NAME"
+const SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS: static u8& = "SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS"
+
+# Additional SDL_EventType values dispatched in WaitEvent.
+def SDL_EVENT_WINDOW_MINIMIZED() -> u32:
+    return 0x209
+def SDL_EVENT_WINDOW_MAXIMIZED() -> u32:
+    return 0x20A
+def SDL_EVENT_WINDOW_RESTORED() -> u32:
+    return 0x20B
+def SDL_EVENT_WINDOW_EXPOSED() -> u32:
+    return 0x203
