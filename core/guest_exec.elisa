@@ -123,8 +123,12 @@ extern mmap(addr: uintptr, length: usize, prot: int, flags: int, fd: int, offset
 extern ge_mprotect(addr: uintptr, length: usize, prot: int) -> int
 @link_name(munmap)
 extern ge_munmap(addr: uintptr, length: usize) -> int
+# Unique name + @link_name: a bare `extern memcpy` call resolves to the compiler builtin
+# memcpy (not @reentrant_safe), so the @reentrant_safe annotation here was ignored and
+# ge_memcpy could not stay @reentrant_safe. Linking the C symbol under a distinct name fixes it.
 @reentrant_safe
-extern memcpy(dest: mutable void&, src: void&, n: usize) -> mutable void&
+@link_name(memcpy)
+extern ge_raw_memcpy(dest: mutable void&, src: void&, n: usize) -> mutable void&
 @link_name(sysconf)
 extern ge_sysconf(name: int) -> i64
 @link_name(sys_icache_invalidate)
@@ -135,7 +139,7 @@ def ge_memcpy(dst: void&?, src: void&?, n: usize) -> void&?:
     if dst == null or src == null:
         return dst
     can Memory.Allocate:
-        _ = memcpy(dst.cast[mutable void&], src.cast[void&], n)
+        _ = ge_raw_memcpy(dst.cast[mutable void&], src.cast[void&], n)
     return dst
 
 const GE_NATIVE_REGION_CAP: u32 = 8192
@@ -5483,8 +5487,11 @@ def GuestExec_DebugTraceLoadReferenceEvent(index: usize, kind: int, a: uintptr, 
     debug_trace_snapshot_c[index] <- c
     return true
 
-def GuestExec_DebugTraceCommitReference(count: usize) -> void:
-    n: mutable usize = count
+# NB: the parameter is named `event_count`, not `count` — `count` collides with the std
+# generic `count[T](...)` free function, and the bare reference resolves to that overload set
+# (non-numeric) instead of the parameter, which breaks the `> DEBUG_TRACE_TAPE_CAP` compare.
+def GuestExec_DebugTraceCommitReference(event_count: usize) -> void:
+    n: mutable usize = event_count
     if n > DEBUG_TRACE_TAPE_CAP:
         n <- DEBUG_TRACE_TAPE_CAP
     debug_trace_snapshot_count <- n
