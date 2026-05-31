@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Verbatim of WindowSDL's event pump (sdl_window.cpp: WaitEvent / OnResize / input handlers).
+# Kept OUT of sdl_window.elisa on purpose: this body couples the window to ImGui, the input
+# subsystem and the SDL event API, so including it would drag the whole emulator graph into the
+# headless `WindowSDL` contract test. Only the SDL-linked emulator target includes this file;
+# sdl_window.elisa stays light (struct + headless accessors + the WindowSDL_InitSDL seam).
+#
+# The C++ externals here are already bridged Elisa-side: ImGui::Core::ProcessEvent / OnResize map
+# to ImGuiCore_ProcessEvent / ImGuiCore_OnResize (which forward to the SDL imgui backend bridge),
+# so no new C-ABI shim is needed for the ImGui side of the pump.
+
+include "./sdl_window.elisa"
+include "./common/sdl3.elisa"
+include "./imgui/renderer/imgui_core.elisa"
+
+# OnResize() — verbatim: query the live drawable size from SDL, then notify ImGui.
+def WindowSDL_OnResize(self: mutable WindowSDL&) -> void:
+    if self.window != null:
+        _ = SDL_GetWindowSizeInPixels(self.window.cast[heap void&], self.width.ref[mutable i32&], self.height.ref[mutable i32&])
+    ImGuiCore_OnResize()
+
+# Input handlers are WindowSDL methods in C++ (OnKeyboardMouseInput / OnGamepadEvent). They read
+# the SDL event payload and drive the Input subsystem; forward-stubbed until input/* is wired into
+# this target. The dispatch structure below is already verbatim so filling these is local work.
+def WindowSDL_OnKeyboardMouseInput(self: mutable WindowSDL&, event: void&?) -> void:
+    _ = self
+    _ = event
+
+def WindowSDL_OnGamepadEvent(self: mutable WindowSDL&, event: void&?) -> void:
+    _ = self
+    _ = event
+
+# WaitEvent() — verbatim dispatch. Standard SDL event groups are handled live; the shadPS4 custom
+# user-events (TOGGLE_FULLSCREEN/TOGGLE_PAUSE/RDOC_CAPTURE/virtual-user/...) are registered at
+# runtime in shadPS4 and routed once their event codes and the DebugState/Overlay/UserManagement
+# bindings land in this target.
+def WindowSDL_WaitEvent(self: mutable WindowSDL&) -> void:
+    event: mutable SdlEvent = zeroed
+    if not SDL_WaitEvent(event.ref[mutable u8&].cast[mutable void&]):
+        return
+    if ImGuiCore_ProcessEvent(event.ref[mutable u8&].cast[void&?]):
+        return
+    kind: u32 = event.kind
+    if kind == SDL_EVENT_WINDOW_RESIZED() or kind == SDL_EVENT_WINDOW_MAXIMIZED() or kind == SDL_EVENT_WINDOW_RESTORED():
+        WindowSDL_OnResize(self)
+    else if kind == SDL_EVENT_WINDOW_MINIMIZED() or kind == SDL_EVENT_WINDOW_EXPOSED():
+        self.is_shown <- kind == SDL_EVENT_WINDOW_EXPOSED()
+        WindowSDL_OnResize(self)
+    else if kind == SDL_EVENT_MOUSE_BUTTON_DOWN() or kind == SDL_EVENT_MOUSE_BUTTON_UP() or kind == SDL_EVENT_MOUSE_WHEEL() or kind == SDL_EVENT_KEY_DOWN() or kind == SDL_EVENT_KEY_UP():
+        WindowSDL_OnKeyboardMouseInput(self, event.ref[mutable u8&].cast[void&?])
+    else if kind == SDL_EVENT_GAMEPAD_BUTTON_DOWN() or kind == SDL_EVENT_GAMEPAD_BUTTON_UP() or kind == SDL_EVENT_GAMEPAD_AXIS_MOTION():
+        WindowSDL_OnGamepadEvent(self, event.ref[mutable u8&].cast[void&?])
+    else if kind == SDL_EVENT_QUIT():
+        self.is_open <- false
