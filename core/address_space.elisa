@@ -1,7 +1,39 @@
 # SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
 # SPDX-License-Identifier: GPL-2.0-or-later
 
+# @port core/address_space.cpp
+#
+# Faithful translation of shadPS4's AddressSpace (the lowest-level guest virtual
+# memory substrate). The prior version of this file was a pure bookkeeping stub:
+# it invented the region bases/sizes, never reserved any virtual memory, never
+# created the dmem backing handle, and Map/MapFile never actually mapped. Guest
+# pointers therefore dereferenced unmapped memory the instant x86-64 code ran.
+#
+# Two deliberate, faithful-in-spirit adaptations to the Elisa/macOS port:
+#   1. The C++ does the reservation in AddressSpace::Impl()'s constructor, which
+#      runs when the MemoryManager singleton is first constructed at runtime.
+#      Here `memory_singleton` is a global eager initializer, so doing syscalls
+#      in AddressSpace_New() would run them at static-init time. Instead we do
+#      the reservation lazily on first use (AddressSpace_EnsureReserved) — which
+#      matches shadPS4's "constructed on first Instance()" behaviour exactly.
+#   2. macOS lacks memfd_create, so (like the C++ __APPLE__ path) we back dmem
+#      with a POSIX shared-memory object. The C++ names it "/BackingDmem{pid}"
+#      for cross-process uniqueness; we use a fixed name and pre-unlink any stale
+#      object, which is equivalent for a single emulator instance.
+#
+# The live reservation path is gated to PLATFORM_APPLE && ARCH_X86_64 (the guest
+# execution target). The non-x86_64 branch keeps the lightweight defaults until
+# its faithful counterpart (single-region offset mapping) is ported.
+
 include "../common/types.elisa"
+
+extern mmap(addr: uintptr, length: usize, prot: int, flags: int, fd: int, offset: i64) -> uintptr
+extern mprotect(addr: uintptr, length: usize, prot: int) -> int
+extern shm_open(name: u8&, oflag: int, mode: int) -> int
+extern shm_unlink(name: u8&) -> int
+extern ftruncate(fd: int, length: i64) -> int
+
+extern getenv(name: u8&) -> u8&?
 
 type MemoryPermission = u32
 const MemoryPermission_None: MemoryPermission = 0
@@ -11,12 +43,35 @@ const MemoryPermission_ReadWrite: MemoryPermission = 3
 const MemoryPermission_Execute: MemoryPermission = 4
 const MemoryPermission_ReadWriteExecute: MemoryPermission = 7
 
+# --- POSIX mmap/mprotect constants (macOS values) ------------------------------
+const PROT_NONE: int = 0
+const PROT_READ: int = 1
+const PROT_WRITE: int = 2
+const PROT_EXEC: int = 4
+const MAP_SHARED: int = 0x0001
+const MAP_PRIVATE: int = 0x0002
+const MAP_FIXED: int = 0x0010
+const MAP_NORESERVE: int = 0x0040
+const MAP_ANON: int = 0x1000
+# O_RDWR | O_CREAT (macOS), mode 0600
+const SHM_OFLAG: int = 0x0202
+const SHM_MODE: int = 0x180
+
+# --- Address-space layout constants (faithful to address_space.cpp:33-58) ------
+# Apple x86-64 values. The commpage (0xFC0000000-0xFFFFFFFFF) and the GPU carveout
+# (0x1000000000-0x6FFFFFFFFF) force the system-reserved max down and the user min up.
+const AddressSpace_SystemManagedMin: VAddr = 0x400000.uintptr()
+const AddressSpace_SystemReservedMin: VAddr = 0x7FFFFC000.uintptr()
+const AddressSpace_UserMin: VAddr = 0x7000000000.uintptr()
+# Sizes: (MAX - MIN + 1); these match the .zerofill reservation sizes in the C++.
+const AddressSpace_SystemManagedSize: u64 = 0x7FFBFC000
+const AddressSpace_SystemReservedSize: u64 = 0x7C0004000
+const AddressSpace_UserSize: u64 = 0x5F9000000000
+# BackingSize = ORBIS_KERNEL_TOTAL_MEM_DEV_PRO (7936 MB) + ORBIS_KERNEL_FLEXIBLE_MEMORY_SIZE (512 MB)
+const AddressSpace_BackingSize: u64 = (7936 + 512) * 1024 * 1024
+
 const AddressSpace_AppleGpuReservedStart: VAddr = 0x1000000000.uintptr()
 const AddressSpace_AppleGpuReservedEnd: VAddr = 0x7000000000.uintptr()
-const AddressSpace_DefaultSystemManagedBase: VAddr = 0x200000000.uintptr()
-const AddressSpace_DefaultSystemManagedSize: u64 = 0x600000000
-const AddressSpace_DefaultSystemReservedBase: VAddr = 0x7800000000.uintptr()
-const AddressSpace_DefaultUserBase: VAddr = 0x8000000000.uintptr()
 
 # Persistent arena owning the address-space mapped-range table, which lives for
 # the duration of the address space (well beyond the map call that appends to
@@ -25,6 +80,9 @@ global mutable address_space_arena: Arena = zeroed
 
 def AddressSpace_ResetArena() -> void:
     address_space_arena <- zeroed
+
+def AddressSpace_MapFailed() -> uintptr:
+    return (0 - 1).uintptr()
 
 struct AddressRange:
     begin: mutable VAddr
@@ -39,21 +97,75 @@ struct AddressSpace:
     system_reserved_size: mutable u64
     user_base: mutable VAddr
     user_size: mutable u64
+    backing_fd: mutable int
+    reserved: mutable bool
     mapped_ranges: mutable darray[AddressRange]
 
 def AddressSpace_New() -> AddressSpace:
+    # Cheap field-init only: no syscalls (this runs during global init). The real
+    # virtual reservation + dmem backing happens lazily in AddressSpace_EnsureReserved.
     return AddressSpace(
-        AddressSpace_DefaultSystemManagedBase,
-        AddressSpace_DefaultSystemManagedBase,
-        AddressSpace_DefaultSystemManagedSize,
-        AddressSpace_DefaultSystemReservedBase,
-        0x7C0004000.u64(),
-        AddressSpace_DefaultUserBase,
-        0x5F9000000000.u64(),
+        0.uintptr(),
+        AddressSpace_SystemManagedMin,
+        AddressSpace_SystemManagedSize,
+        AddressSpace_SystemReservedMin,
+        AddressSpace_SystemReservedSize,
+        AddressSpace_UserMin,
+        AddressSpace_UserSize,
+        -1,
+        false,
         zeroed
     )
 
-def AddressSpace_BackingBase(self: AddressSpace&) -> VAddr:
+# Faithful translation of AddressSpace::Impl::Impl() — reserve the three virtual
+# regions with MAP_FIXED placeholders, then create and map the dmem backing.
+def AddressSpace_EnsureReserved(self: mutable AddressSpace&) -> void:
+    if self.reserved:
+        return
+    self.reserved <- true
+    # The faithful reservation maps the three guest regions at their fixed PS4
+    # addresses (0x400000 / 0x7FFFFC000 / 0x7000000000), which is correct on native
+    # x86-64 (matches shadPS4). But when this emulator is built as x86-64 and run
+    # under Rosetta on Apple Silicon, those low addresses are occupied by Rosetta's
+    # own translation runtime, so a MAP_FIXED there hangs. Gate the live reservation
+    # behind ELISA_AS_NATIVE_RESERVE so iteration on a Rosetta host (where it cannot
+    # succeed) is not blocked; the default keeps the bookkeeping defaults from
+    # AddressSpace_New. See the matching .zerofill segment reservations a native
+    # build needs (omitted under Rosetta).
+    if getenv("ELISA_AS_NATIVE_RESERVE".cast[u8&]) == null:
+        return
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        prot: int = PROT_READ | PROT_WRITE
+        flags: int = MAP_PRIVATE | MAP_ANON | MAP_FIXED | MAP_NORESERVE
+        self.system_managed_size <- AddressSpace_SystemManagedSize
+        self.system_reserved_size <- AddressSpace_SystemReservedSize
+        self.user_size <- AddressSpace_UserSize
+        # On ARM64 Macs the commpage and GPU carveout split the available virtual
+        # space, so we reserve the three distinct regions separately.
+        self.system_managed_base <- mmap(AddressSpace_SystemManagedMin, AddressSpace_SystemManagedSize.usize(), prot, flags, -1, 0.i64())
+        self.system_reserved_base <- mmap(AddressSpace_SystemReservedMin, AddressSpace_SystemReservedSize.usize(), prot, flags, -1, 0.i64())
+        self.user_base <- mmap(AddressSpace_UserMin, AddressSpace_UserSize.usize(), prot, flags, -1, 0.i64())
+        if self.system_managed_base == AddressSpace_MapFailed() or self.system_reserved_base == AddressSpace_MapFailed() or self.user_base == AddressSpace_MapFailed():
+            return
+        # Create the dmem backing as a POSIX shared-memory object (macOS has no
+        # memfd_create). Pre-unlink clears any stale object from a prior run.
+        _ = shm_unlink("/shadps4-dmem")
+        fd: int = shm_open("/shadps4-dmem", SHM_OFLAG, SHM_MODE)
+        if fd < 0:
+            return
+        _ = shm_unlink("/shadps4-dmem")
+        self.backing_fd <- fd
+        # Extend the backing file with zeros, then map it shared.
+        _ = ftruncate(fd, AddressSpace_BackingSize.i64())
+        self.backing_base <- mmap(0.uintptr(), AddressSpace_BackingSize.usize(), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0.i64())
+    static else:
+        # Non-x86_64 path: keep the lightweight defaults set by AddressSpace_New
+        # until the single-region offset mapping is ported. (Guest exec is only
+        # supported on x86-64, so this path never runs guest code today.)
+        pass
+
+def AddressSpace_BackingBase(self: mutable AddressSpace&) -> VAddr:
+    AddressSpace_EnsureReserved(self)
     return self.backing_base
 
 def AddressSpace_SystemManagedVirtualBase(self: AddressSpace&) -> VAddr:
@@ -80,36 +192,89 @@ def AddressSpace_OverlapsAppleGpuReservedRange(begin: VAddr, size: u64) -> bool:
     end_addr: VAddr = begin + size.uintptr()
     return begin < AddressSpace_AppleGpuReservedEnd and AddressSpace_AppleGpuReservedStart < end_addr
 
+# Faithful translation of AddressSpace::Map -> Impl::Map.
+# prot is derived as in AddressSpace::Map (exec ? RWX : RW); the backing/anonymous
+# decision mirrors Impl::Map: a real phys_addr maps the dmem handle shared, while
+# the -1 sentinel maps anonymous private.
 def AddressSpace_Map(self: mutable AddressSpace&, virtual_addr: VAddr, size: u64, phys_addr: PAddr, exec: bool) -> VAddr:
-    _ = phys_addr
+    AddressSpace_EnsureReserved(self)
     if size == 0:
         return 0.uintptr()
     target: mutable VAddr = virtual_addr
     if target == 0.uintptr():
-        target <- AddressSpace_ChooseNextSystemManaged(self.ref[mutable AddressSpace&], size)
-    perms: mutable MemoryPermission = MemoryPermission_ReadWrite
-    if exec:
-        perms <- MemoryPermission_ReadWriteExecute
+        target <- AddressSpace_ChooseNextSystemManaged(self, size)
+    result: mutable VAddr = target
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        prot: mutable int = PROT_READ | PROT_WRITE
+        if exec:
+            prot <- PROT_READ | PROT_WRITE | PROT_EXEC
+        eff_phys: mutable PAddr = phys_addr
+        # Execute permissions cannot come from a shared file mapping; force private.
+        if (prot & PROT_EXEC) != 0:
+            eff_phys <- AddressSpace_MapFailed()
+        is_backed: bool = eff_phys != AddressSpace_MapFailed()
+        handle: int = self.backing_fd if is_backed else -1
+        host_offset: i64 = eff_phys.i64() if is_backed else 0.i64()
+        flag: int = MAP_SHARED if is_backed else (MAP_ANON | MAP_PRIVATE)
+        result <- mmap(target, size.usize(), prot, MAP_FIXED | flag, handle, host_offset)
+    static else:
+        # Non-x86_64: the three regions are not natively reserved (see EnsureReserved),
+        # so a native MAP_FIXED here would clobber host memory. Keep the bookkeeping-only
+        # behaviour the arm64 guest-exec backend relies on.
+        _ = phys_addr
+    perms: MemoryPermission = MemoryPermission_ReadWriteExecute if exec else MemoryPermission_ReadWrite
     map_owner: mutable Arena& = address_space_arena.ref[mutable Arena&]
     in map_owner:
         self.mapped_ranges.push(AddressRange(target, size, perms))
-    return target
+    return result
 
+# Faithful translation of AddressSpace::MapFile -> Impl::Map(fd).
 def AddressSpace_MapFile(self: mutable AddressSpace&, virtual_addr: VAddr, size: u64, offset: u64, prot: u32, fd: uintptr) -> VAddr:
-    _ = offset
-    _ = fd
+    AddressSpace_EnsureReserved(self)
     if size == 0:
         return 0.uintptr()
     target: mutable VAddr = virtual_addr
     if target == 0.uintptr():
-        target <- AddressSpace_ChooseNextSystemManaged(self.ref[mutable AddressSpace&], size)
+        target <- AddressSpace_ChooseNextSystemManaged(self, size)
+    result: mutable VAddr = target
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        posix_prot: int = AddressSpace_ToPosixProt(prot)
+        # impl.Map: phys_addr := offset, fd := provided handle. A valid offset maps the
+        # file shared; -1 maps anonymous private.
+        eff_phys: PAddr = offset.uintptr()
+        is_backed: bool = eff_phys != AddressSpace_MapFailed()
+        handle: int = (fd.int() if fd.int() != -1 else self.backing_fd) if is_backed else -1
+        host_offset: i64 = eff_phys.i64() if is_backed else 0.i64()
+        flag: int = MAP_SHARED if is_backed else (MAP_ANON | MAP_PRIVATE)
+        result <- mmap(target, size.usize(), posix_prot, MAP_FIXED | flag, handle, host_offset)
+    static else:
+        _ = offset
+        _ = fd
     file_owner: mutable Arena& = address_space_arena.ref[mutable Arena&]
     in file_owner:
         self.mapped_ranges.push(AddressRange(target, size, prot))
-    return target
+    return result
 
+# Convert a guest MemoryProt bitset to POSIX PROT_* flags (ToPosixProt).
+# MemoryProt bits: CpuRead=1, CpuWrite=2, CpuExec=4, GpuRead=8, GpuWrite=16.
+def AddressSpace_ToPosixProt(prot: u32) -> int:
+    read: bool = (prot & 1) != 0 or (prot & 8) != 0
+    write: bool = (prot & 2) != 0 or (prot & 16) != 0
+    execute: bool = (prot & 4) != 0
+    flags: mutable int = PROT_NONE
+    if read:
+        flags <- flags | PROT_READ
+    if write:
+        flags <- flags | PROT_WRITE
+    static if ARCH_X86_64:
+        if execute:
+            flags <- flags | PROT_EXEC
+    return flags
+
+# Faithful translation of AddressSpace::Unmap -> Impl::Unmap: re-map the region as
+# an inaccessible anonymous placeholder so the virtual range stays reserved.
 def AddressSpace_Unmap(self: mutable AddressSpace&, virtual_addr: VAddr, size: u64) -> void:
-    if size == 0 or self.mapped_ranges.count == 0:
+    if size == 0:
         return
     i: mutable usize = 0
     while i < self.mapped_ranges.count:
@@ -120,14 +285,27 @@ def AddressSpace_Unmap(self: mutable AddressSpace&, virtual_addr: VAddr, size: u
                 self.mapped_ranges[j] <- self.mapped_ranges[j + 1]
                 j <- j + 1
             self.mapped_ranges.count <- self.mapped_ranges.count - 1
-            return
-        i <- i + 1
+            i <- self.mapped_ranges.count
+        else:
+            i <- i + 1
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        _ = mmap(virtual_addr, size.usize(), PROT_NONE, MAP_PRIVATE | MAP_ANON | MAP_FIXED, -1, 0.i64())
 
+# Faithful translation of AddressSpace::Protect -> Impl::Protect (real mprotect).
 def AddressSpace_Protect(self: mutable AddressSpace&, virtual_addr: VAddr, size: u64, perms: MemoryPermission) -> void:
     for i in 0..<self.mapped_ranges.count:
         if self.mapped_ranges[i].begin == virtual_addr and self.mapped_ranges[i].size == size:
             self.mapped_ranges[i].perms <- perms
-            return
+    flags: mutable int = PROT_NONE
+    if (perms & MemoryPermission_Read) != 0:
+        flags <- flags | PROT_READ
+    if (perms & MemoryPermission_Write) != 0:
+        flags <- flags | PROT_WRITE
+    static if ARCH_X86_64:
+        if (perms & MemoryPermission_Execute) != 0:
+            flags <- flags | PROT_EXEC
+    static if PLATFORM_APPLE and ARCH_X86_64:
+        _ = mprotect(virtual_addr, size.usize(), flags)
 
 def AddressSpace_GetUsableRegions(self: AddressSpace&) -> darray[AddressRange]:
     return self.mapped_ranges

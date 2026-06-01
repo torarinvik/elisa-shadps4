@@ -480,13 +480,12 @@ def MemoryManager_Free(self: mutable MemoryManager&, phys_addr: PAddr, size: u64
 
 def MemoryManager_MapMemory(self: mutable MemoryManager&, out_addr: mutable VAddr&, virtual_addr: VAddr, size: u64, prot: MemoryProt, flags: MemoryMapFlags, vma_type: VMAType, name: static u8&, validate_dmem: bool, phys_addr: PAddr, alignment: u64) -> s32:
     _ = validate_dmem
-    _ = phys_addr
     _ = alignment
     if (flags & MemoryMapFlags_NoOverwrite) != 0 and MemoryManager_OverlapsMappedArea(self, virtual_addr, size, false):
         out_addr <- 0.uintptr()
         return -1
     effective_prot: MemoryProt = MemoryProt_NormalizeCpu(prot)
-    txn: MapTxn = MemoryManager_MapBegin(self.ref[mutable MemoryManager&], virtual_addr, size, effective_prot)
+    txn: MapTxn = MemoryManager_MapBegin(self.ref[mutable MemoryManager&], virtual_addr, size, effective_prot, vma_type, phys_addr)
     mapped: VAddr = txn.mapped
     out_addr <- mapped
     if mapped == 0.uintptr():
@@ -500,8 +499,14 @@ def MemoryManager_MapMemory(self: mutable MemoryManager&, out_addr: mutable VAdd
 
 # Records the AddressSpace mapping and hands back an affine MapTxn that the
 # caller must consume via MemoryManager_MapCommit or MemoryManager_MapRollback.
-def MemoryManager_MapBegin(self: mutable MemoryManager&, virtual_addr: VAddr, size: u64, effective_prot: MemoryProt) -> MapTxn:
-    mapped: VAddr = AddressSpace_Map(self.address_space, virtual_addr, size, 0.uintptr(), (effective_prot & MemoryProt_CpuExec) != 0)
+def MemoryManager_MapBegin(self: mutable MemoryManager&, virtual_addr: VAddr, size: u64, effective_prot: MemoryProt, vma_type: VMAType, phys_addr: PAddr) -> MapTxn:
+    # Match memory.cpp's impl.Map(mapped_addr, size, phys_addr, is_exec): a Direct
+    # mapping is dmem-backed at phys_addr; every other vma_type (Stack/Code/Flexible/
+    # Reserved/...) is anonymous-private, which AddressSpace_Map encodes as the -1
+    # sentinel. The previous hardcoded 0 made every anonymous region alias dmem
+    # offset 0 once AddressSpace began performing real native mappings.
+    eff_phys: PAddr = phys_addr if vma_type == VMAType_Direct else AddressSpace_MapFailed()
+    mapped: VAddr = AddressSpace_Map(self.address_space, virtual_addr, size, eff_phys, (effective_prot & MemoryProt_CpuExec) != 0)
     return MapTxn(mapped, size)
 
 # Consumes the transaction and finalizes the mapping (vma record + backing).
