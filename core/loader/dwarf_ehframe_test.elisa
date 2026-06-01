@@ -1,0 +1,65 @@
+include "../../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../../common/types.elisa"
+include "./dwarf.elisa"
+
+# Decode a captured .eh_frame_hdr from a stable byte buffer (the load-time-safe path,
+# faithful to shadPS4 getEncodedP/DecodeEHHdr). 20-byte header:
+#   [0] version            = 1
+#   [1] eh_frame_ptr_enc   = 0x1B  (DW_EH_PE_pcrel | DW_EH_PE_sdata4)
+#   [2] fde_count_enc      = 0x03  (DW_EH_PE_udata4)
+#   [3] table_enc          = 0x3B  (DW_EH_PE_datarel | DW_EH_PE_sdata4)
+#   [4..8]  eh_frame_ptr sdata4 = FC FE FF FF = -0x104
+#   [8..12] fde_count udata4    = 01 00 00 00 = 1
+#   [12..20] one search-table entry (contents irrelevant here)
+# With virt_base(buf[0]) = 0x11000, the eh_frame_ptr field sits at virt 0x11004, so
+# eh_frame_ptr = -0x104 + 0x11004 = 0x10F00 and the module-relative
+# eh_frame_addr = 0x10F00 - base(0x10000) = 0xF00 = 3840.
+
+def build_hdr(a: mutable Arena&) -> darray[u8]:
+    in a:
+        buf: mutable darray[u8] = []
+        buf.push(1u8)
+        buf.push(0x1Bu8)
+        buf.push(3u8)
+        buf.push(0x3Bu8)
+        buf.push(0xFCu8)
+        buf.push(0xFEu8)
+        buf.push(0xFFu8)
+        buf.push(0xFFu8)
+        buf.push(1u8)
+        buf.push(0u8)
+        buf.push(0u8)
+        buf.push(0u8)
+        buf.push(0u8)
+        buf.push(0u8)
+        buf.push(0u8)
+        buf.push(0u8)
+        buf.push(0u8)
+        buf.push(0u8)
+        buf.push(0u8)
+        buf.push(0u8)
+        return buf
+
+@test
+def decode_eh_frame_hdr_from_image() -> void:
+    can Abort.Panic, Memory.Allocate:
+        a: Arena = zeroed
+        buf: darray[u8] = build_hdr(a.ref[mutable Arena&])
+        info: mutable EHHeaderInfo = zeroed
+        ok: bool = DecodeEHHdrFromImage(buf, 0u64.usize(), buf.count, 0x11000u64.uintptr(), info.ref[mutable EHHeaderInfo&])
+        assert ok
+        assert info.eh_frame_ptr == 0x10F00u64.uintptr()
+        assert info.table_enc == 0x3Bu8
+        assert info.fde_count == 1u64.usize()
+        eh_frame_addr: uintptr = info.eh_frame_ptr - 0x10000u64.uintptr()
+        assert eh_frame_addr.u64() == 3840u64
+
+@test
+def decode_rejects_bad_version() -> void:
+    can Abort.Panic, Memory.Allocate:
+        a: Arena = zeroed
+        buf: darray[u8] = build_hdr(a.ref[mutable Arena&])
+        buf[0] <- 2u8
+        info: mutable EHHeaderInfo = zeroed
+        ok: bool = DecodeEHHdrFromImage(buf, 0u64.usize(), buf.count, 0x11000u64.uintptr(), info.ref[mutable EHHeaderInfo&])
+        assert not ok

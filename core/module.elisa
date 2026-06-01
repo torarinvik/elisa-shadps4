@@ -7,6 +7,7 @@ include "../fixtures/boot/tiny_eboot_elf.elisa"
 include "./cpu_patches.elisa"
 include "./emulator_settings.elisa"
 include "./loader/elf.elisa"
+include "./loader/dwarf.elisa"
 include "./memory.elisa"
 include "./guest_exec.elisa"
 include "./tls.elisa"
@@ -531,12 +532,42 @@ def Module_LoadElfSegments(self: mutable Module&, elf: mutable Elf&, memory: mut
             if phdr.p_type == PT_GNU_EH_FRAME:
                 self.eh_frame_hdr_addr <- phdr.p_vaddr.uintptr()
                 self.eh_frame_hdr_size <- phdr.p_memsz.u32()
+        # Decode .eh_frame_hdr to recover eh_frame_addr/eh_frame_size once every PT_LOAD
+        # segment has been copied into self.image. shadPS4 does this inline against guest
+        # memory; that backing is not stable mid-load here, so we decode from self.image
+        # (the loaded-segment byte copy) while keeping shadPS4's virtual-address math.
+        Module_DecodeEhFrame(self.ref[mutable Module&])
         for i in 0..<elf.elf_header_value.e_phnum.usize():
             phdr: elf_program_header& = Elf_GetProgramHeader(elf, i)
             if (phdr.p_type == PT_LOAD or phdr.p_type == PT_SCE_RELRO) and phdr.p_memsz > 0:
                 if not Module_ProtectImageSegment(self.ref[mutable Module&], memory, phdr):
                     return false
         return loaded_dynamic
+
+def Module_DecodeEhFrame(self: mutable Module&) -> void:
+    if self.eh_frame_hdr_addr == 0u64.uintptr():
+        return
+    if self.eh_frame_hdr_size == 0u32:
+        return
+    hdr_mod: u64 = self.eh_frame_hdr_addr.u64()
+    if hdr_mod < self.image_virtual_base:
+        return
+    img_off: usize = (hdr_mod - self.image_virtual_base).usize()
+    hdr_size: usize = self.eh_frame_hdr_size.u64().usize()
+    if (img_off + hdr_size) > self.image.count:
+        return
+    virt_base: VAddr = self.base_virtual_addr + self.image_virtual_base.uintptr()
+    info: mutable EHHeaderInfo = zeroed
+    if not DecodeEHHdrFromImage(self.image, img_off, hdr_size, virt_base, info.ref[mutable EHHeaderInfo&]):
+        return
+    # eh_frame_addr is stored module-relative (GetModuleInfoForUnwind re-adds the base),
+    # matching shadPS4: eh_frame_addr = hdr_info.eh_frame_ptr - base_virtual_addr.
+    eh_addr: VAddr = info.eh_frame_ptr - self.base_virtual_addr
+    self.eh_frame_addr <- eh_addr
+    if self.eh_frame_hdr_addr > eh_addr:
+        self.eh_frame_size <- (self.eh_frame_hdr_addr - eh_addr).u64().u32()
+    else:
+        self.eh_frame_size <- (self.aligned_base_size - self.eh_frame_hdr_addr.u64()).u32()
 
 def Module_AlignUp(value: u64, alignment: u64) -> u64:
     if alignment == 0:

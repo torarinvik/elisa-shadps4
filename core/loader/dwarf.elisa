@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (C) 2001-2026 Free Software Foundation, Inc.
 # SPDX-License-Identifier: GPL-2.0-or-later
 
-include "../../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+# Note: the runtime and common/types (which defines s16/s32) are provided by the
+# including module/project build, matching the other core loader files (e.g. elf.elisa).
+# Do not include the runtime here or it double-declares in the full link graph.
 
 const DW_EH_PE_ptr: u8 = 0x00u8
 const DW_EH_PE_uleb128: u8 = 0x01u8
@@ -23,10 +25,10 @@ const DW_EH_PE_indirect: u8 = 0x80u8
 const DW_EH_PE_omit: u8 = 0xFFu8
 
 struct EHHeaderInfo:
-    eh_frame_ptr: uintptr
-    fde_count: usize
-    table: uintptr
-    table_enc: u8
+    eh_frame_ptr: mutable uintptr
+    fde_count: mutable usize
+    table: mutable uintptr
+    table_enc: mutable u8
 
 def Dwarf_SignExtend16(v: u16) -> u64:
     s: s16 = v.cast[s16]
@@ -37,16 +39,20 @@ def Dwarf_SignExtend32(v: u32) -> u64:
     return s.i64().u64()
 
 def Dwarf_ReadU8(addr: uintptr) -> u8:
-    return addr.cast[u8&].value()
+    r: u8& = addr.cast[u8&]
+    return r
 
 def Dwarf_ReadU16(addr: uintptr) -> u16:
-    return addr.cast[u16&].value()
+    r: u16& = addr.cast[u16&]
+    return r
 
 def Dwarf_ReadU32(addr: uintptr) -> u32:
-    return addr.cast[u32&].value()
+    r: u32& = addr.cast[u32&]
+    return r
 
 def Dwarf_ReadU64(addr: uintptr) -> u64:
-    return addr.cast[u64&].value()
+    r: u64& = addr.cast[u64&]
+    return r
 
 def Dwarf_ReadULEB128(addr: mutable uintptr&) -> u64:
     result: mutable u64 = 0u64
@@ -108,9 +114,12 @@ def Dwarf_ReadEncoded(addr: mutable uintptr&, encoding: u8, datarel_base: uintpt
         assert false
         return 0u64.uintptr()
 
+    # Relative base applied in the uintptr domain for two's-complement wraparound
+    # (see Dwarf_ReadEncodedBuf): a checked u64 add would abort on a negative offset.
+    out_ptr: mutable uintptr = result.uintptr()
     rel: u8 = encoding & 0x70u8
     if rel == DW_EH_PE_pcrel:
-        result <- result + start_addr.u64()
+        out_ptr <- out_ptr + start_addr
     elif rel == DW_EH_PE_textrel:
         assert false
         return 0u64.uintptr()
@@ -118,7 +127,7 @@ def Dwarf_ReadEncoded(addr: mutable uintptr&, encoding: u8, datarel_base: uintpt
         if datarel_base == 0u64.uintptr():
             assert false
             return 0u64.uintptr()
-        result <- result + datarel_base.u64()
+        out_ptr <- out_ptr + datarel_base
     elif rel == DW_EH_PE_funcrel:
         assert false
         return 0u64.uintptr()
@@ -129,10 +138,104 @@ def Dwarf_ReadEncoded(addr: mutable uintptr&, encoding: u8, datarel_base: uintpt
         assert false
         return 0u64.uintptr()
 
-    out_ptr: mutable uintptr = result.uintptr()
     if (encoding & DW_EH_PE_indirect) != 0u8:
         out_ptr <- Dwarf_ReadU64(out_ptr).uintptr()
     return out_ptr
+
+# --- Buffer-backed decode -------------------------------------------------
+# shadPS4 decodes the .eh_frame_hdr by dereferencing guest memory in place. During
+# module load that backing is not yet stable, so instead we decode from the module's
+# loaded-image byte buffer while preserving the runtime virtual address arithmetic:
+# `virt_base` is the guest VAddr corresponding to buf[0], so pcrel/datarel resolve to
+# the same guest addresses shadPS4 computes. Faithful to getEncodedP/DecodeEHHdr.
+
+def Dwarf_BufU16(buf: darray[u8]&, off: usize) -> u16:
+    return buf[off].u16() | (buf[off + 1].u16() << 8u32)
+
+def Dwarf_BufU32(buf: darray[u8]&, off: usize) -> u32:
+    return buf[off].u32() | (buf[off + 1].u32() << 8u32) | (buf[off + 2].u32() << 16u32) | (buf[off + 3].u32() << 24u32)
+
+def Dwarf_BufU64(buf: darray[u8]&, off: usize) -> u64:
+    return Dwarf_BufU32(buf, off).u64() | (Dwarf_BufU32(buf, off + 4u64.usize()).u64() << 32u32)
+
+def Dwarf_ReadEncodedBuf(buf: darray[u8]&, off: mutable usize&, virt_base: uintptr, encoding: u8, datarel_base: uintptr) -> uintptr:
+    # Bind the reference param to a local before any conversion method: calling a
+    # method (e.g. .u64()) directly on a `mutable T&` parameter receiver miscompiles
+    # (the load-through-reference is skipped); see Elisa backend ref-receiver bug.
+    cur: usize = off
+    start_virt: uintptr = virt_base + cur.u64().uintptr()
+    result: mutable u64 = 0u64
+    kind: u8 = encoding & 0x0Fu8
+    if kind == DW_EH_PE_ptr:
+        result <- Dwarf_BufU64(buf, off)
+        off <- off + 8u64.usize()
+    elif kind == DW_EH_PE_udata2:
+        result <- Dwarf_BufU16(buf, off).u64()
+        off <- off + 2u64.usize()
+    elif kind == DW_EH_PE_udata4:
+        result <- Dwarf_BufU32(buf, off).u64()
+        off <- off + 4u64.usize()
+    elif kind == DW_EH_PE_udata8:
+        result <- Dwarf_BufU64(buf, off)
+        off <- off + 8u64.usize()
+    elif kind == DW_EH_PE_sdata2:
+        result <- Dwarf_SignExtend16(Dwarf_BufU16(buf, off))
+        off <- off + 2u64.usize()
+    elif kind == DW_EH_PE_sdata4:
+        result <- Dwarf_SignExtend32(Dwarf_BufU32(buf, off))
+        off <- off + 4u64.usize()
+    elif kind == DW_EH_PE_sdata8:
+        result <- Dwarf_BufU64(buf, off)
+        off <- off + 8u64.usize()
+    else:
+        assert false
+        return 0u64.uintptr()
+
+    # Apply the relative base in the uintptr domain so two's-complement wraparound
+    # matches shadPS4 (a sign-extended negative sdata4 added to a base wraps; the
+    # checked u64 add would abort instead).
+    out: mutable uintptr = result.uintptr()
+    rel: u8 = encoding & 0x70u8
+    if rel == DW_EH_PE_pcrel:
+        out <- out + start_virt
+    elif rel == DW_EH_PE_datarel:
+        if datarel_base == 0u64.uintptr():
+            assert false
+            return 0u64.uintptr()
+        out <- out + datarel_base
+    elif rel != DW_EH_PE_absptr:
+        # textrel / funcrel / aligned / indirect from a buffer are unsupported here.
+        assert false
+        return 0u64.uintptr()
+    return out
+
+def DecodeEHHdrFromImage(buf: darray[u8]&, hdr_off: usize, hdr_size: usize, virt_base: uintptr, ehHdrInfo: mutable EHHeaderInfo&) -> bool:
+    if hdr_size < 4u64.usize():
+        return false
+    off: mutable usize = hdr_off
+    version: u8 = buf[off]
+    off <- off + 1u64.usize()
+    if version != 1u8:
+        return false
+    eh_frame_ptr_enc: u8 = buf[off]
+    off <- off + 1u64.usize()
+    fde_count_enc: u8 = buf[off]
+    off <- off + 1u64.usize()
+    ehHdrInfo.table_enc <- buf[off]
+    off <- off + 1u64.usize()
+
+    hdr_virt: uintptr = virt_base + hdr_off.u64().uintptr()
+    ehHdrInfo.eh_frame_ptr <- Dwarf_ReadEncodedBuf(buf, off, virt_base, eh_frame_ptr_enc, hdr_virt)
+    if ehHdrInfo.eh_frame_ptr == 0u64.uintptr():
+        return false
+
+    if fde_count_enc == DW_EH_PE_omit:
+        ehHdrInfo.fde_count <- 0
+    else:
+        count_ptr: uintptr = Dwarf_ReadEncodedBuf(buf, off, virt_base, fde_count_enc, hdr_virt)
+        ehHdrInfo.fde_count <- count_ptr.u64().usize()
+    ehHdrInfo.table <- virt_base + off.u64().uintptr()
+    return true
 
 def DecodeEHHdr(ehHdrStart: uintptr, ehHdrEnd: uintptr, ehHdrInfo: mutable EHHeaderInfo&) -> bool:
     if ehHdrEnd <= ehHdrStart:
