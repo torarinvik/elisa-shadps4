@@ -47,6 +47,7 @@ struct OrbisKernelModuleSegmentInfo:
 struct OrbisKernelModuleInfo:
     st_size: mutable u64
     name: mutable static u8&
+    segments: mutable OrbisKernelModuleSegmentInfo[4]
     num_segments: mutable u32
 
 struct OrbisKernelModuleInfoEx:
@@ -65,6 +66,7 @@ struct OrbisKernelModuleInfoEx:
     eh_frame_addr: mutable VAddr
     eh_frame_hdr_size: mutable u32
     eh_frame_size: mutable u32
+    segments: mutable OrbisKernelModuleSegmentInfo[4]
     segment_count: mutable u32
 
 struct ModuleInfo:
@@ -163,7 +165,7 @@ def DynamicModuleInfo_New() -> DynamicModuleInfo:
     return DynamicModuleInfo(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, zeroed, zeroed, zeroed, zeroed, "")
 
 def Module_New(file: static u8&, name: static u8&, base_virtual_addr: VAddr, is_shared_lib: bool) -> Module:
-    info: OrbisKernelModuleInfo = OrbisKernelModuleInfo(0x160.u64(), name, 0)
+    info: OrbisKernelModuleInfo = OrbisKernelModuleInfo(0x160.u64(), name, zeroed, 0)
     tls: ThreadLocalImage = ThreadLocalImage(0, 0, 0, 0, 0.uintptr(), 0)
     return Module(
         file,
@@ -608,8 +610,17 @@ def Module_MapImageSegment(self: mutable Module&, memory: mutable MemoryManager&
         prot_intent: MemoryProt = Module_PflagsToMemoryProt(phdr.p_flags)
         if vma_type != VMAType_Code or (prot_intent & MemoryProt_CpuExec) == 0:
             self.executable_segment_permission_mismatch_count <- self.executable_segment_permission_mismatch_count + 1
+    # Record per-segment info verbatim (shadPS4 add_segment_info), capped at 4 like
+    # SCE_DBG_MAX_SEGMENTS. prot stores the raw ELF p_flags, address/size the mapped
+    # (aligned) range — matching module.cpp so sceKernelGetModuleInfo[ForUnwind] can
+    # report seg0 per module rather than a whole-module substitute.
+    if self.info.num_segments < 4u32:
+        idx: usize = self.info.num_segments.usize()
+        self.info.segments[idx].address <- segment_vaddr
+        self.info.segments[idx].size <- segment_size.u32()
+        self.info.segments[idx].prot <- phdr.p_flags.s32()
+        self.info.num_segments <- self.info.num_segments + 1u32
     self.mapped_segment_count <- self.mapped_segment_count + 1
-    self.info.num_segments <- self.mapped_segment_count
     return true
 
 def Module_ProtectImageSegment(self: mutable Module&, memory: mutable MemoryManager&, phdr: elf_program_header&) -> bool:
@@ -1298,24 +1309,29 @@ def Module_FindByName(self: Module&, symbol_name: static u8&) -> uintptr:
     return self.base_virtual_addr
 
 def Module_GetModuleInfoEx(self: Module&) -> OrbisKernelModuleInfoEx:
-    return OrbisKernelModuleInfoEx(
-        0x1A8.u64(),
-        self.name,
-        0,
-        self.tls.modid,
-        self.tls.image_virtual_addr,
-        self.tls.init_image_size,
-        self.tls.image_size,
-        self.tls.offset,
-        self.tls.align,
-        self.base_virtual_addr + self.dynamic_info.init_virtual_addr.uintptr(),
-        self.base_virtual_addr + self.dynamic_info.fini_virtual_addr.uintptr(),
-        self.base_virtual_addr + self.eh_frame_hdr_addr,
-        self.base_virtual_addr + self.eh_frame_addr,
-        self.eh_frame_hdr_size,
-        self.eh_frame_size,
-        self.info.num_segments
-    )
+    out: mutable OrbisKernelModuleInfoEx = zeroed
+    out.st_size <- 0x1A8.u64()
+    out.name <- self.name
+    out.id <- 0
+    out.tls_index <- self.tls.modid
+    out.tls_init_addr <- self.tls.image_virtual_addr
+    out.tls_init_size <- self.tls.init_image_size
+    out.tls_size <- self.tls.image_size
+    out.tls_offset <- self.tls.offset
+    out.tls_align <- self.tls.align
+    out.init_proc_addr <- self.base_virtual_addr + self.dynamic_info.init_virtual_addr.uintptr()
+    out.fini_proc_addr <- self.base_virtual_addr + self.dynamic_info.fini_virtual_addr.uintptr()
+    out.eh_frame_hdr_addr <- self.base_virtual_addr + self.eh_frame_hdr_addr
+    out.eh_frame_addr <- self.base_virtual_addr + self.eh_frame_addr
+    out.eh_frame_hdr_size <- self.eh_frame_hdr_size
+    out.eh_frame_size <- self.eh_frame_size
+    # Copy the per-segment table verbatim (shadPS4: .segments = info.segments).
+    for i in 0..<4u64.usize():
+        out.segments[i].address <- self.info.segments[i].address
+        out.segments[i].size <- self.info.segments[i].size
+        out.segments[i].prot <- self.info.segments[i].prot
+    out.segment_count <- self.info.num_segments
+    return out
 
 def Module_FindModule(self: Module&, id: static u8&) -> ModuleInfo?:
     for i in 0..<self.dynamic_info.import_modules.count:
