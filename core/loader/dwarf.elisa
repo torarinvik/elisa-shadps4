@@ -152,7 +152,16 @@ def Dwarf_BufU32(buf: darray[u8]&, off: usize) -> u32:
 def Dwarf_BufU64(buf: darray[u8]&, off: usize) -> u64:
     return Dwarf_BufU32(buf, off).u64() | (Dwarf_BufU32(buf, off + 4u64.usize()).u64() << 32u32)
 
-def Dwarf_ReadEncodedBuf(buf: darray[u8]&, off: mutable usize&, virt_base: uintptr, encoding: u8, datarel_base: uintptr) -> uintptr:
+# Distinct .eh_frame_hdr decode failures. Previously all collapsed to a `0` /
+# `false` sentinel; as a value-carrying error union the caller learns exactly why a
+# header failed to decode (and can still treat any failure as "no unwind info").
+error DwarfError:
+    HeaderTooSmall
+    BadVersion(version: u8)
+    UnsupportedEncoding(encoding: u8)
+    MissingDatarelBase
+
+def Dwarf_ReadEncodedBuf(buf: darray[u8]&, off: mutable usize&, virt_base: uintptr, encoding: u8, datarel_base: uintptr) -> uintptr error[DwarfError]:
     start_virt: uintptr = virt_base + off.u64().uintptr()
     result: mutable u64 = 0u64
     kind: u8 = encoding & 0x0Fu8
@@ -178,7 +187,7 @@ def Dwarf_ReadEncodedBuf(buf: darray[u8]&, off: mutable usize&, virt_base: uintp
         result <- Dwarf_BufU64(buf, off)
         off <- off + 8u64.usize()
     else:
-        return 0u64.uintptr()
+        raise DwarfError.UnsupportedEncoding(encoding)
 
     # Apply the relative base in the uintptr domain so two's-complement wraparound
     # matches shadPS4 (a sign-extended negative sdata4 added to a base wraps; the
@@ -189,21 +198,21 @@ def Dwarf_ReadEncodedBuf(buf: darray[u8]&, off: mutable usize&, virt_base: uintp
         out <- out + start_virt
     elif rel == DW_EH_PE_datarel:
         if datarel_base == 0u64.uintptr():
-            return 0u64.uintptr()
+            raise DwarfError.MissingDatarelBase
         out <- out + datarel_base
     elif rel != DW_EH_PE_absptr:
         # textrel / funcrel / aligned / indirect from a buffer are unsupported here.
-        return 0u64.uintptr()
+        raise DwarfError.UnsupportedEncoding(encoding)
     return out
 
-def DecodeEHHdrFromImage(buf: darray[u8]&, hdr_off: usize, hdr_size: usize, virt_base: uintptr, ehHdrInfo: mutable EHHeaderInfo&) -> bool:
+def DecodeEHHdrFromImage(buf: darray[u8]&, hdr_off: usize, hdr_size: usize, virt_base: uintptr, ehHdrInfo: mutable EHHeaderInfo&) -> void error[DwarfError]:
     if hdr_size < 4u64.usize():
-        return false
+        raise DwarfError.HeaderTooSmall
     off: mutable usize = hdr_off
     version: u8 = buf[off]
     off <- off + 1u64.usize()
     if version != 1u8:
-        return false
+        raise DwarfError.BadVersion(version)
     eh_frame_ptr_enc: u8 = buf[off]
     off <- off + 1u64.usize()
     fde_count_enc: u8 = buf[off]
@@ -212,17 +221,17 @@ def DecodeEHHdrFromImage(buf: darray[u8]&, hdr_off: usize, hdr_size: usize, virt
     off <- off + 1u64.usize()
 
     hdr_virt: uintptr = virt_base + hdr_off.u64().uintptr()
-    ehHdrInfo.eh_frame_ptr <- Dwarf_ReadEncodedBuf(buf, off, virt_base, eh_frame_ptr_enc, hdr_virt)
-    if ehHdrInfo.eh_frame_ptr == 0u64.uintptr():
-        return false
+    # `try` propagates a decode failure (unsupported encoding / missing datarel base)
+    # straight up; the pointer is only stored on success.
+    ehHdrInfo.eh_frame_ptr <- try Dwarf_ReadEncodedBuf(buf, off, virt_base, eh_frame_ptr_enc, hdr_virt)
 
     if fde_count_enc == DW_EH_PE_omit:
         ehHdrInfo.fde_count <- 0
     else:
-        count_ptr: uintptr = Dwarf_ReadEncodedBuf(buf, off, virt_base, fde_count_enc, hdr_virt)
+        count_ptr: uintptr = try Dwarf_ReadEncodedBuf(buf, off, virt_base, fde_count_enc, hdr_virt)
         ehHdrInfo.fde_count <- count_ptr.u64().usize()
     ehHdrInfo.table <- virt_base + off.u64().uintptr()
-    return true
+    return
 
 def DecodeEHHdr(ehHdrStart: uintptr, ehHdrEnd: uintptr, ehHdrInfo: mutable EHHeaderInfo&) -> bool:
     if ehHdrEnd <= ehHdrStart:
