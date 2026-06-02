@@ -465,6 +465,80 @@ def ge_native_prot_at(address: uintptr, size: u64) -> u32:
         return ge_native_regions[index.usize()].prot
     return 0xffffffff
 
+# Per-dump cap on emitted region ENTRY events. The emergency tape is a 256-entry
+# ring shared with all other diagnostics, and the table can hold thousands of active
+# regions, so a full dump would wrap the ring and evict the META header. Instead we
+# emit the few regions most relevant to the query (the one containing the lookup, plus
+# the nearest regions on either side) followed by a bounded forward sample, then a
+# TRUNC event recording how many active regions were not emitted (no silent cap).
+const GE_NATIVE_REGION_DUMP_CAP: u32 = 24
+
+@reentrant_safe
+def ge_emit_native_region_entry(index: u32) -> void:
+    r: GeNativeRegion = ge_native_regions[index.usize()]
+    d: u64 = (r.active.u64() << 32) | index.u64()
+    ge_emergency_mark(GE_EV_NATIVE_REGION_ENTRY, r.base, r.size.uintptr(), r.prot.u64().uintptr(), d.uintptr())
+
+# ge_dump_native_regions records the live native-region table to the emergency tape
+# (decoded by tools/cusa_triage.py) plus a stderr breadcrumb. Call it at a fault or
+# from a guard when a region lookup unexpectedly misses (e.g. ge_find_native_region
+# returning -1 for an address that should be mapped), to see the actual table vs the
+# queried address. lookup_addr/lookup_size describe the query that motivated the dump
+# (pass 0/0 for an unconditional snapshot). The META event is emitted both first and
+# last so it survives even if the entry stream wraps the ring.
+@reentrant_safe
+def ge_dump_native_regions(lookup_addr: uintptr, lookup_size: u64) -> void:
+    found: s32 = ge_find_native_region(lookup_addr, lookup_size) if lookup_addr != 0.uintptr() else -1
+    found_index: u64 = found.u32().u64() if found >= 0 else 0xffffffff
+    # Single pass: count active regions and find the active region nearest below and
+    # nearest above the lookup address (by base), so the dump brackets the query.
+    active: mutable u32 = 0
+    below_idx: mutable s32 = -1
+    below_base: mutable u64 = 0
+    above_idx: mutable s32 = -1
+    above_base: mutable u64 = 0xFFFFFFFFFFFFFFFF
+    lookup_u: u64 = lookup_addr.u64()
+    i: mutable u32 = 0
+    while i < ge_native_region_count and i < GE_NATIVE_REGION_CAP:
+        r: GeNativeRegion = ge_native_regions[i.usize()]
+        if r.active != 0:
+            active <- active + 1
+            b: u64 = r.base.u64()
+            if b <= lookup_u and b >= below_base:
+                below_base <- b
+                below_idx <- i.s32()
+            if b > lookup_u and b <= above_base:
+                above_base <- b
+                above_idx <- i.s32()
+        i <- i + 1
+    _ = ge_raw_write(2, "GE_NATIVE_REGIONS dump\n".cast[void&], 23)
+    ge_emergency_mark(GE_EV_NATIVE_REGION_META, active.u64().uintptr(), lookup_addr, lookup_size.uintptr(), found_index.uintptr())
+    emitted: mutable u32 = 0
+    # The region actually containing the lookup (if the table claims one).
+    if found >= 0 and found.u32() < GE_NATIVE_REGION_CAP:
+        ge_emit_native_region_entry(found.u32())
+        emitted <- emitted + 1
+    if below_idx >= 0 and below_idx.s32() != found:
+        ge_emit_native_region_entry(below_idx.u32())
+        emitted <- emitted + 1
+    if above_idx >= 0 and above_idx.s32() != found:
+        ge_emit_native_region_entry(above_idx.u32())
+        emitted <- emitted + 1
+    # Bounded forward sample for general context, skipping any already emitted above.
+    i <- 0
+    while i < ge_native_region_count and i < GE_NATIVE_REGION_CAP:
+        r: GeNativeRegion = ge_native_regions[i.usize()]
+        if r.active != 0 and i.s32() != found and i.s32() != below_idx and i.s32() != above_idx:
+            if emitted >= GE_NATIVE_REGION_DUMP_CAP:
+                ge_emergency_mark(GE_EV_NATIVE_REGION_TRUNC, emitted.u64().uintptr(), active.u64().uintptr(), 0.uintptr(), 0.uintptr())
+                ge_emergency_mark(GE_EV_NATIVE_REGION_META, active.u64().uintptr(), lookup_addr, lookup_size.uintptr(), found_index.uintptr())
+                return
+            ge_emit_native_region_entry(i)
+            emitted <- emitted + 1
+        i <- i + 1
+    # Re-emit META last so latest(META) always resolves even without truncation.
+    ge_emergency_mark(GE_EV_NATIVE_REGION_META, active.u64().uintptr(), lookup_addr, lookup_size.uintptr(), found_index.uintptr())
+
 @reentrant_safe
 def ge_find_hle_thunk_target_from_stack_value(value: uintptr) -> uintptr:
     if value == 0.uintptr():
@@ -1430,6 +1504,22 @@ const GE_EV_SIGNAL_SEGMENTS: u32 = 136
 # null that drove the fault came from a genuinely-null/zeroed global (and its address,
 # to classify shadowed-by-guest-mapping vs uninitialized).
 const GE_EV_SIGNAL_FAULT_GLOBAL: u32 = 137
+# Native-region table dump (ge_dump_native_regions). META carries the query context:
+#   a = active_region_count, b = lookup_addr, c = lookup_size, d = found_index (0xffffffff = none).
+# ENTRY carries one region: a = base, b = size, c = prot, d = (active<<32)|table_index.
+# TRUNC is emitted instead of further ENTRYs when the per-dump entry cap is hit:
+#   a = emitted_count, b = total_active, c = 0, d = 0  (no silent truncation).
+const GE_EV_NATIVE_REGION_META: u32 = 138
+const GE_EV_NATIVE_REGION_ENTRY: u32 = 139
+const GE_EV_NATIVE_REGION_TRUNC: u32 = 140
+# libc_internal malloc HLE result: a=size, b=heap_cursor, c=heap_limit, d=result_ptr
+# (d==0 => malloc returned NULL). Lets the tape show whether/why the guest-heap arena
+# handed back null (arena not reserved, exhausted, or oversized request).
+const GE_EV_LIBC_MALLOC: u32 = 141
+# Page watchpoint armed: a=watched_addr, b=page_base, c=arm_prot (1=PROT_READ traps
+# writes, 0=PROT_NONE traps reads+writes), d=0. Lets triage distinguish "armed but
+# never written (uninitialized slot)" from "no watch was set".
+const GE_EV_WATCH_ARM: u32 = 142
 const GE_EV_MUTEX_INIT: u32 = 1001
 
 const GE_LONGJMP_SOURCE_DEBUG_TRAP_ABORT: u32 = 1
@@ -1480,6 +1570,10 @@ def ge_emergency_mark(kind: u32, a: uintptr, b: uintptr, c: uintptr, d: uintptr)
     ge_emergency_events[i].b <- b
     ge_emergency_events[i].c <- c
     ge_emergency_events[i].d <- d
+
+@reentrant_safe
+def GuestExec_EmergencyMark(kind: u32, a: uintptr, b: uintptr, c: uintptr, d: uintptr) -> void:
+    ge_emergency_mark(kind, a, b, c, d)
 
 @reentrant_safe
 def ge_mark_guard_longjmp(status: s32, source: u32, value: uintptr) -> void:
@@ -2142,6 +2236,9 @@ def GuestExec_SetPageWatch(addr: uintptr) -> void can[Unsafe.SegmentMutation, Se
         mp: int = ge_mprotect(ge_pw_page_base, 0x1000, ge_pw_arm_prot)
         if mp == 0:
             ge_raw_breadcrumb("GE:PW_ARM_OK\n", 13)
+            # Record the arm so triage can report "armed, N writes observed" — crucially
+            # distinguishing "never written (uninitialized)" from "watch was never set".
+            ge_emergency_mark(GE_EV_WATCH_ARM, ge_pw_watch_addr, ge_pw_page_base, ge_pw_arm_prot.u64().uintptr(), 0.uintptr())
         else:
             ge_raw_breadcrumb("GE:PW_ARM_FAIL\n", 15)
 
@@ -2278,6 +2375,14 @@ def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
         ge_signal_rsi_valid <- ge_signal_sp_valid
         ge_signal_native_region_index <- ge_find_native_region(!ge_last_guest_pc, 8)
         ge_pc_native_prot <- ge_native_prot_at(!ge_last_guest_pc, 8)
+        # Snapshot the native-region table to the tape, keyed by the faulting PC, so a
+        # near-null / unmapped-deref fault can be diagnosed against the actual regions.
+        ge_dump_native_regions(!ge_last_guest_pc, 8)
+        # Re-emit page-watch status at fault time so it survives the ring wrap: the
+        # arm event from setup is long gone by now. d = writes observed; 0 writes on an
+        # armed slot => the slot was never initialized.
+        if ge_pw_watch_addr != 0.uintptr():
+            ge_emergency_mark(GE_EV_WATCH_ARM, ge_pw_watch_addr, ge_pw_page_base, ge_pw_arm_prot.u64().uintptr(), ge_pw_hit_count.uintptr())
         ge_fault_word0 <- ge_read_native_word(!ge_last_guest_pc)
         ge_fault_word1 <- ge_read_native_word(!ge_last_guest_pc + 8.uintptr())
         ge_signal_stack_word0 <- ge_read_context_word(!ge_last_guest_sp)
