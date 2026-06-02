@@ -34,6 +34,8 @@ EVENT_NAMES = {
     22: "TEST_AFTER_GUARD",
     23: "PC_SAMPLE",
     24: "GUARD_LONGJMP",
+    124: "WATCH_HIT",
+    142: "WATCH_ARM",
     110: "SSE4A_SIGILL_ENTER",
     111: "SSE4A_EXTRQ_HANDLED",
     112: "SSE4A_INSERTQ_HANDLED",
@@ -41,6 +43,10 @@ EVENT_NAMES = {
     120: "ORACLE_BOUNDARY_CONT",
     121: "ORACLE_BOUNDARY_STACK",
     122: "ORACLE_BOUNDARY_META",
+    138: "NATIVE_REGION_META",
+    139: "NATIVE_REGION_ENTRY",
+    140: "NATIVE_REGION_TRUNC",
+    141: "LIBC_MALLOC_NULL",
     1001: "MUTEX_INIT",
 }
 
@@ -141,6 +147,325 @@ def print_event(event: Event) -> None:
         f"  #{event.seq:04d} {event.name:<24} phase={event.phase:<4} "
         f"a=0x{event.a:x} b=0x{event.b:x} c=0x{event.c:x} d=0x{event.d:x}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Symbolization: classify a guest/host address against the region table and the
+# HLE thunk targets recorded on the tape, so raw hex becomes "region[k]+off (RW)"
+# or "HLE thunk <nid> (<name>)" without leaving the triage output.
+# ---------------------------------------------------------------------------
+
+# Cache for best-effort NID -> human name resolution (greps the in-repo NID DBs).
+_NID_NAME_CACHE: dict[str, str] = {}
+
+
+def _nid_db_paths() -> list[Path]:
+    here = Path(__file__).resolve().parent.parent  # elisa-shad-ps4-from-scratch/
+    return [
+        here / "core" / "aerolib" / "aerolib_nids.elisa",
+        here / "core" / "libraries" / "kernel" / "kernel_nids.elisa",
+    ]
+
+
+def resolve_nid_name(nid: str) -> str:
+    if not nid or nid in _NID_NAME_CACHE:
+        return _NID_NAME_CACHE.get(nid, "")
+    name = ""
+    needle = '"' + nid + '"'
+    for path in _nid_db_paths():
+        if not path.exists():
+            continue
+        try:
+            for line in path.read_text(errors="replace").splitlines():
+                if needle in line:
+                    # NidEntry("<nid>", "<name>") / KernelNidEntry("<nid>", "<lib>", "<lib>", "<name>", ...)
+                    parts = re.findall(r'"([^"]*)"', line)
+                    if parts and parts[0] == nid and len(parts) >= 2:
+                        name = parts[-1] if "Kernel" in line else parts[1]
+                        # KernelNidEntry: name is the 4th string; NidEntry: 2nd.
+                        if "KernelNidEntry" in line and len(parts) >= 4:
+                            name = parts[3]
+                        break
+            if name:
+                break
+        except OSError:
+            continue
+    _NID_NAME_CACHE[nid] = name
+    return name
+
+
+def _decode_nid_words(b: int, c: int) -> str:
+    raw = struct.pack("<Q", b & 0xFFFFFFFFFFFFFFFF) + struct.pack("<Q", c & 0xFFFFFFFFFFFFFFFF)
+    return raw.split(b"\x00")[0].decode("ascii", "replace")
+
+
+def build_hle_targets(events: list[Event]) -> dict[int, str]:
+    """Map HLE thunk target address -> NID string from RING_SYMBOL/RING_TARGET pairs."""
+    nid_by_id: dict[int, str] = {}
+    targets: dict[int, str] = {}
+    for e in events:
+        if e.kind == 129:  # HLE_RING_SYMBOL: a=id, b/c=nid bytes
+            nid_by_id[e.a] = _decode_nid_words(e.b, e.c)
+        elif e.kind == 130:  # HLE_RING_TARGET: a=id, b=target
+            nid = nid_by_id.get(e.a, "")
+            if e.b:
+                targets[e.b] = nid
+    return targets
+
+
+def build_regions(events: list[Event]) -> list[tuple[int, int, int, int]]:
+    """Return [(base, size, prot, table_index)] from the most recent region dump."""
+    meta = latest(events, 138)
+    if not meta:
+        return []
+    window = 40
+    out = []
+    for e in events:
+        if e.kind == 139 and meta.seq - window <= e.seq < meta.seq:
+            out.append((e.a, e.b, e.c, e.d & 0xFFFFFFFF))
+    out.sort(key=lambda r: r[0])
+    return out
+
+
+_PROT_BITS = {0: "---", 1: "r--", 3: "rw-", 5: "r-x", 7: "rwx"}
+
+
+def is_poison_addr(value: int) -> bool:
+    """Recognize the ELISA_POISON_UNINIT fill (0xBE bytes). A pointer read from poisoned
+    malloc memory is 0xBEBEBEBEBEBEBEBE; dereferencing it faults at 0xBEBE..+offset, whose
+    top 5 bytes stay 0xBE for any offset < 0x1000000."""
+    return (value >> 24) == 0xBEBEBEBEBE
+
+
+def symbolize(addr: int, regions, hle_targets: dict[int, str]) -> str:
+    if addr == 0:
+        return "NULL"
+    if is_poison_addr(addr):
+        return "POISONED uninitialized memory (0xBE fill — read before init)"
+    if addr in hle_targets:
+        nid = hle_targets[addr]
+        name = resolve_nid_name(nid)
+        return f"HLE thunk {nid}" + (f" ({name})" if name else "")
+    # Regions can overlap (e.g. a PROT_NONE reservation under a committed RW range);
+    # pick the smallest containing region as the most specific backing.
+    containing = [r for r in regions if r[0] <= addr < r[0] + r[1]]
+    if containing:
+        base, size, prot, idx = min(containing, key=lambda r: r[1])
+        protname = _PROT_BITS.get(prot, f"0x{prot:x}")
+        extra = ""
+        if len(containing) > 1:
+            extra = f" (+{len(containing) - 1} overlapping)"
+        return f"region[{idx}]+0x{addr - base:x} ({protname}){extra}"
+    # Coarse address-space classification when no region matches.
+    if addr < 0x10000:
+        return "near-null/unmapped"
+    if 0x700000000000 <= addr < 0x800000000000:
+        return "host/thunk space (unmapped in table)"
+    return "unmapped"
+
+
+# ---------------------------------------------------------------------------
+# Fault explainer: reconstruct the bytes around the fault PC from the FAULT_INSN
+# events, disassemble them, annotate the faulting instruction with live register
+# values, and do one level of backward dataflow to find where the bad pointer
+# was loaded from. This is the manual GPRS+capstone+dataflow trail, automated.
+# ---------------------------------------------------------------------------
+
+_REG64 = {
+    "rax": "rax", "eax": "rax", "ax": "rax", "al": "rax",
+    "rbx": "rbx", "ebx": "rbx", "bx": "rbx", "bl": "rbx",
+    "rcx": "rcx", "ecx": "rcx", "cx": "rcx", "cl": "rcx",
+    "rdx": "rdx", "edx": "rdx", "dx": "rdx", "dl": "rdx",
+    "rdi": "rdi", "edi": "rdi",
+    "rsi": "rsi", "esi": "rsi",
+}
+
+
+def _norm_reg(name: str) -> str:
+    return _REG64.get(name.strip(), name.strip())
+
+
+def _mem_operand(op_str: str):
+    """Parse a `[base + disp]` / `[rip + disp]` memory operand. Returns (base, disp) or None."""
+    m = re.search(r"\[([^\]]+)\]", op_str)
+    if not m:
+        return None
+    inner = m.group(1).replace(" ", "")
+    mm = re.match(r"^([a-z0-9]+)(?:([+\-])(0x[0-9a-f]+|\d+))?$", inner)
+    if not mm:
+        return None
+    base = mm.group(1)
+    disp = 0
+    if mm.group(3):
+        disp = int(mm.group(3), 0)
+        if mm.group(2) == "-":
+            disp = -disp
+    return base, disp
+
+
+def watch_section(events: list[Event], regions, hle_targets) -> list[str]:
+    """Decode memory-watchpoint hits (GE_EV_WATCH_HIT, kind 124).
+
+    Three recorded shapes:
+      * page-watch write fault: a=watched_addr, b=writer_pc, c=hit#, d=sp
+      * page-watch stored value (post single-step): a=addr, b=value, c=hit#, d=0xA10E
+      * polling value-watch:     a=addr, b=value, c=poll_site, d=hit_seq
+    """
+    hits = [e for e in events if e.kind == 124]
+    arms = [e for e in events if e.kind == 142]
+    if not hits and not arms:
+        return []
+    out = ["", "Memory watchpoint", "-----------------"]
+    # The fault-time re-emit carries d = total writes observed (survives ring wrap); the
+    # setup-time arm has d=0. Prefer the max d across arm events as the write count.
+    arm_writes = max((e.d for e in arms), default=0) if arms else 0
+    for e in arms[:1] + (arms[-1:] if len(arms) > 1 else []):
+        mode = "PROT_NONE (reads+writes)" if e.c == 0 else "PROT_READ (writes)"
+        out.append(
+            f"  armed at 0x{e.a:x} [{symbolize(e.a, regions, hle_targets)}] page=0x{e.b:x} "
+            f"trap={mode} writes_observed={e.d}"
+        )
+    saw_write = arm_writes > 0
+    for e in hits:
+        if e.d == 0xA10E:
+            out.append(
+                f"  store: [0x{e.a:x} {symbolize(e.a, regions, hle_targets)}] <- 0x{e.b:x} (write #{e.c})"
+            )
+            saw_write = True
+        elif e.c != 0 and 0x10000 <= e.b:  # writer PC present
+            out.append(
+                f"  write #{e.c} to 0x{e.a:x} by PC 0x{e.b:x} [{symbolize(e.b, regions, hle_targets)}] sp=0x{e.d:x}"
+            )
+            saw_write = True
+        else:
+            out.append(
+                f"  value-watch: [0x{e.a:x} {symbolize(e.a, regions, hle_targets)}] == 0x{e.b:x} "
+                f"at poll_site={e.c} seq={e.d}"
+            )
+    if arms and not saw_write:
+        out.append(
+            "  No WRITE to the watched slot was recorded before the run ended → the slot is "
+            "likely never initialized (missing relocation / init_array / HLE write)."
+        )
+    return out
+
+
+def explain_fault(events: list[Event], regions, hle_targets) -> list[str]:
+    sig = latest(events, 11)
+    if not sig:
+        return []
+    fault_pc, fault_addr, sp = sig.b, sig.d, sig.c
+    out = [
+        "",
+        "Fault explainer",
+        "---------------",
+        f"signal={sig.a} pc=0x{fault_pc:x} [{symbolize(fault_pc, regions, hle_targets)}] "
+        f"fault_addr=0x{fault_addr:x} [{symbolize(fault_addr, regions, hle_targets)}] sp=0x{sp:x}",
+    ]
+    regs: dict[str, int] = {}
+    gprs = latest(events, 134)
+    if gprs:
+        regs.update({"rax": gprs.a, "rbx": gprs.b, "rcx": gprs.c, "rdx": gprs.d})
+    # rdi is carried in the pc-16 FAULT_INSN event's `d` slot.
+    for e in events:
+        if e.kind == 135 and e.a == (fault_pc - 16) & 0xFFFFFFFFFFFFFFFF:
+            regs["rdi"] = e.d
+    if regs:
+        out.append("  regs: " + " ".join(f"{k}=0x{v:x}" for k, v in sorted(regs.items())))
+
+    # Reconstruct a byte window from the FAULT_INSN events (kind 135).
+    word_at: dict[int, int] = {}
+    for e in events:
+        if e.kind != 135:
+            continue
+        word_at[e.a] = e.b
+        word_at[e.a + 8] = e.c
+        if e.a != (fault_pc - 16) & 0xFFFFFFFFFFFFFFFF:  # that slot holds rdi, not a code word
+            word_at[e.a + 16] = e.d
+    if not word_at:
+        return out
+
+    try:
+        from capstone import Cs, CS_ARCH_X86, CS_MODE_64
+    except Exception:
+        out.append("  (install `capstone` for disassembly + dataflow: pip install capstone)")
+        return out
+
+    # The recorded word addresses are at fault_pc-48/-24/-16/pc (not 8-aligned to each
+    # other in general), so build contiguous runs from the actual keys and pick the run
+    # that brackets fault_pc.
+    addrs = sorted(word_at)
+    runs: list[list[int]] = []
+    for ad in addrs:
+        if runs and ad == runs[-1][-1] + 8:
+            runs[-1].append(ad)
+        else:
+            runs.append([ad])
+    run = next((r for r in runs if r[0] <= fault_pc < r[-1] + 8), None)
+    if not run:
+        out.append("  (fault PC not covered by recorded instruction words)")
+        return out
+    base = run[0]
+    buf = bytearray()
+    for ad in run:
+        buf += struct.pack("<Q", word_at[ad] & 0xFFFFFFFFFFFFFFFF)
+
+    md = Cs(CS_ARCH_X86, CS_MODE_64)
+    # x86 is not self-synchronizing; try start offsets until an instruction lands on fault_pc.
+    chosen = None
+    for start_off in range(0, min(len(buf), 48)):
+        insns = list(md.disasm(bytes(buf[start_off:]), base + start_off))
+        if any(i.address == fault_pc for i in insns):
+            chosen = insns
+            break
+    if not chosen:
+        out.append("  (could not align disassembly to fault PC)")
+        return out
+
+    fault_idx = next(i for i, ins in enumerate(chosen) if ins.address == fault_pc)
+    for ins in chosen[max(0, fault_idx - 4): fault_idx + 1]:
+        mark = "  >>" if ins.address == fault_pc else "    "
+        out.append(f"{mark} 0x{ins.address:x}: {ins.mnemonic} {ins.op_str}")
+
+    fault_ins = chosen[fault_idx]
+    mem = _mem_operand(fault_ins.op_str)
+    if not mem:
+        return out
+    base_reg, disp = mem
+    base_reg = _norm_reg(base_reg)
+    out.append(
+        f"  faulting access: [{base_reg}{'+' if disp >= 0 else '-'}0x{abs(disp):x}] "
+        f"-> 0x{fault_addr:x}"
+    )
+    if base_reg in regs and regs[base_reg] < 0x10000:
+        out.append(f"  ROOT: base register {base_reg}=0x{regs[base_reg]:x} is null/near-null.")
+        # One level of backward dataflow: find the last def of base_reg before the fault.
+        for ins in reversed(chosen[:fault_idx]):
+            dst = ins.op_str.split(",")[0].strip()
+            if _norm_reg(dst) != base_reg:
+                continue
+            out.append(f"  defined by: 0x{ins.address:x}: {ins.mnemonic} {ins.op_str}")
+            src = _mem_operand(ins.op_str)
+            if ins.mnemonic.startswith("mov") and src:
+                sbase, sdisp = src
+                if sbase == "rip":
+                    eff = ins.address + ins.size + sdisp
+                    out.append(
+                        f"  => {base_reg} loaded from global 0x{eff:x} "
+                        f"[{symbolize(eff, regions, hle_targets)}] which held NULL."
+                    )
+                elif _norm_reg(sbase) in regs:
+                    eff = (regs[_norm_reg(sbase)] + sdisp) & 0xFFFFFFFFFFFFFFFF
+                    out.append(
+                        f"  => {base_reg} loaded from [{_norm_reg(sbase)}+0x{sdisp:x}]=0x{eff:x} "
+                        f"[{symbolize(eff, regions, hle_targets)}] which held NULL."
+                    )
+                out.append(
+                    "  Next: find who initializes that slot (relocation / init_array / HLE). "
+                    "If it is never written, that is the bug."
+                )
+            break
+    return out
 
 
 def main() -> int:
@@ -249,6 +574,47 @@ def main() -> int:
             f"rsp=0x{oracle_stack.a:x} w0=0x{oracle_stack.b:x} "
             f"w1=0x{oracle_stack.c:x} w2=0x{oracle_stack.d:x}"
         )
+
+    region_meta = latest(events, 138)
+    if region_meta:
+        found = region_meta.d
+        found_text = "none" if found == 0xFFFFFFFF else str(found)
+        print(
+            "native_regions="
+            f"active={region_meta.a} lookup=0x{region_meta.b:x} "
+            f"lookup_size={region_meta.c} found_index={found_text}"
+        )
+        # The META is re-emitted last (newest) so it survives a ring wrap; the dump's
+        # ENTRY events therefore sit just below it in seq. Gather entries in a small
+        # window ending at the META (the per-dump entry cap is 24, plus a few extras).
+        window = 40
+        region_entries = [
+            e
+            for e in events
+            if e.kind == 139 and region_meta.seq - window <= e.seq < region_meta.seq
+        ]
+        region_entries.sort(key=lambda e: e.a)
+        for e in region_entries:
+            table_index = e.d & 0xFFFFFFFF
+            active = (e.d >> 32) & 0xFFFFFFFF
+            end = e.a + e.b
+            contains = "  <-- contains lookup" if e.a <= region_meta.b < end else ""
+            print(
+                f"  region[{table_index}] 0x{e.a:x}..0x{end:x} "
+                f"size=0x{e.b:x} prot=0x{e.c:x} active={active}{contains}"
+            )
+        region_trunc = latest(events, 140)
+        if region_trunc and region_meta.seq - window <= region_trunc.seq < region_meta.seq:
+            print(
+                f"  (region dump truncated: emitted {region_trunc.a} of {region_trunc.b} active)"
+            )
+
+    regions = build_regions(events)
+    hle_targets = build_hle_targets(events)
+    for line in explain_fault(events, regions, hle_targets):
+        print(line)
+    for line in watch_section(events, regions, hle_targets):
+        print(line)
 
     print("\nDiagnosis")
     print("---------")
