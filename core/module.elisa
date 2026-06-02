@@ -460,11 +460,11 @@ def Module_LoadElfFromHostFile(self: mutable Module&, memory: mutable MemoryMana
         if not Module_IsLikelyHostFile(self.host_file):
             return false
         elf: mutable Elf = Elf_new()
-        Elf_Open(elf, self.host_file)
-        if not Elf_IsOpen(elf):
-            return false
-        if not Elf_IsElfFile(elf):
-            return false
+        catch Elf_Open(elf, self.host_file):
+            n:
+                true
+            error e:
+                return false
         self.entry_virtual_addr <- Elf_GetElfEntry(elf).uintptr()
         loaded_dynamic: bool = Module_LoadElfSegments(self.ref[mutable Module&], elf, memory)
         if not loaded_dynamic:
@@ -520,10 +520,19 @@ def Module_LoadElfSegments(self: mutable Module&, elf: mutable Elf&, memory: mut
                     return false
             if phdr.p_type == PT_DYNAMIC and phdr.p_filesz > 0:
                 dyn_owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
-                loaded_dynamic <- Elf_LoadSegmentBytes(elf, self.dynamic_segment, phdr.p_offset, phdr.p_filesz.usize(), dyn_owner)
+                catch Elf_LoadSegmentBytes(elf, self.dynamic_segment, phdr.p_offset, phdr.p_filesz.usize(), dyn_owner):
+                    n:
+                        true
+                    error e:
+                        return false
+                loaded_dynamic <- true
             if phdr.p_type == PT_SCE_DYNLIBDATA and phdr.p_filesz > 0:
                 data_owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
-                _ = Elf_LoadSegmentBytes(elf, self.dynamic_data, phdr.p_offset, phdr.p_filesz.usize(), data_owner)
+                catch Elf_LoadSegmentBytes(elf, self.dynamic_data, phdr.p_offset, phdr.p_filesz.usize(), data_owner):
+                    n:
+                        true
+                    error e:
+                        true
             if phdr.p_type == PT_TLS:
                 self.tls.init_image_size <- phdr.p_filesz.u32()
                 self.tls.align <- phdr.p_align.u32()
@@ -674,9 +683,11 @@ def Module_LoadImageSegment(self: mutable Module&, elf: mutable Elf&, memory: mu
         # in a function-scoped arena that stays alive through those reads.
         seg_arena: Arena = zeroed
         segment: mutable darray[u8] = []
-        loaded: bool = Elf_LoadSegmentBytes(elf, segment, phdr.p_offset, phdr.p_filesz.usize(), seg_arena.ref[mutable Arena&])
-        if not loaded:
-            return false
+        catch Elf_LoadSegmentBytes(elf, segment, phdr.p_offset, phdr.p_filesz.usize(), seg_arena.ref[mutable Arena&]):
+            n:
+                true
+            error e:
+                return false
         for i in 0..<segment.count:
             self.image[(offset.usize() + i)] <- segment[i]
         if segment.count > 0:
