@@ -160,6 +160,9 @@ struct Module:
     import_symbols: mutable darray[ImportSymbolRecord]
     is_shared_lib: mutable bool
     is_valid: mutable bool
+    # Guest virtual address of the segment whose load/map/protect failed, captured
+    # from the failing ModuleError payload at the load entry point (0 = none).
+    last_failed_load_vaddr: mutable VAddr
 
 def DynamicModuleInfo_New() -> DynamicModuleInfo:
     return DynamicModuleInfo(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, zeroed, zeroed, zeroed, zeroed, "")
@@ -202,7 +205,8 @@ def Module_New(file: static u8&, name: static u8&, base_virtual_addr: VAddr, is_
         0,
         zeroed,
         is_shared_lib,
-        base_virtual_addr != 0.uintptr()
+        base_virtual_addr != 0.uintptr(),
+        0.uintptr()
     )
 
 def Module_SetHostFile(self: mutable Module&, host_file: static u8&) -> void:
@@ -445,35 +449,54 @@ def Module_LoadModuleToMemory(self: mutable Module&, memory: mutable MemoryManag
     can Memory.Allocate, Abort.Panic:
         max_tls_index <- max_tls_index + 1
         self.tls.modid <- max_tls_index
-        host_like: bool = Module_IsLikelyHostFile(self.host_file)
-        if Module_LoadElfFromHostFile(self.ref[mutable Module&], memory):
-            return
-        if host_like:
-            self.is_valid <- false
-            return
+        # The host-file loader either succeeds (ok), reports "not a host file"
+        # (NotHostFile/EmptyPath -> fall through to the boot-ELF fallback), or fails
+        # mid-load on a real error (MapFailed/ProtectFailed/… -> the module is invalid).
+        catch Module_LoadElfFromHostFile(self.ref[mutable Module&], memory):
+            n:
+                return
+            LoaderError.NotHostFile:
+                true
+            LoaderError.EmptyPath:
+                true
+            LoaderError.MapFailed(vaddr):
+                self.last_failed_load_vaddr <- vaddr
+                self.is_valid <- false
+                return
+            LoaderError.SegmentWriteFailed(vaddr):
+                self.last_failed_load_vaddr <- vaddr
+                self.is_valid <- false
+                return
+            LoaderError.ProtectFailed(vaddr):
+                self.last_failed_load_vaddr <- vaddr
+                self.is_valid <- false
+                return
+            LoaderError.PublishFailed(vaddr):
+                self.last_failed_load_vaddr <- vaddr
+                self.is_valid <- false
+                return
+            error e:
+                self.is_valid <- false
+                return
         Module_LoadBootElfDynamicImports(self.ref[mutable Module&])
 
-def Module_LoadElfFromHostFile(self: mutable Module&, memory: mutable MemoryManager&) -> bool:
+def Module_LoadElfFromHostFile(self: mutable Module&, memory: mutable MemoryManager&) -> void error[LoaderError]:
     can Memory.Allocate, Abort.Panic:
         if static_strlen(self.host_file) == 0:
-            return false
+            raise LoaderError.EmptyPath
         if not Module_IsLikelyHostFile(self.host_file):
-            return false
+            raise LoaderError.NotHostFile
         elf: mutable Elf = Elf_new()
-        catch Elf_Open(elf, self.host_file):
-            n:
-                true
-            error e:
-                return false
+        # `try` propagates ElfError (a subset of this function's error[ModuleError,
+        # ElfError]) straight up to the caller — no manual status threading.
+        try Elf_Open(elf, self.host_file)
         self.entry_virtual_addr <- Elf_GetElfEntry(elf).uintptr()
-        loaded_dynamic: bool = Module_LoadElfSegments(self.ref[mutable Module&], elf, memory)
-        if not loaded_dynamic:
-            return false
+        try Module_LoadElfSegments(self.ref[mutable Module&], elf, memory)
         Module_LoadDynamicInfo(self.ref[mutable Module&])
         Module_LoadSymbols(self.ref[mutable Module&])
         if static_strlen(self.dynamic_info.filename) == 0:
             self.dynamic_info.filename <- self.host_file
-        return true
+        return
 
 def Module_IsLikelyHostFile(path: static u8&) -> bool:
     len: usize = static_strlen(path)
@@ -487,51 +510,48 @@ def Module_IsLikelyHostFile(path: static u8&) -> bool:
         return true
     return false
 
-def Module_LoadElfSegments(self: mutable Module&, elf: mutable Elf&, memory: mutable MemoryManager&) -> bool:
+def Module_LoadElfSegments(self: mutable Module&, elf: mutable Elf&, memory: mutable MemoryManager&) -> void error[LoaderError]:
     can Memory.Allocate:
         loaded_dynamic: mutable bool = false
         Module_PrepareLoadImage(self.ref[mutable Module&], elf)
         if self.aligned_base_size > 0:
             out_addr: mutable VAddr = self.base_virtual_addr
             if MemoryManager_MapMemory(memory, out_addr, self.base_virtual_addr, self.aligned_base_size + MODULE_TRAMPOLINE_SIZE, MemoryProt_NoAccess, MemoryMapFlags_NoFlags, VMAType_Reserved, self.name, false, 0.uintptr(), MODULE_BLOCK_ALIGN) != 0:
-                return false
+                raise LoaderError.MapFailed(self.base_virtual_addr.u64())
             self.base_virtual_addr <- out_addr
             self.trampoline_virtual_addr <- self.base_virtual_addr + self.aligned_base_size.uintptr()
             tramp_addr: mutable VAddr = self.trampoline_virtual_addr
             if MemoryManager_MapMemory(memory, tramp_addr, self.trampoline_virtual_addr, MODULE_TRAMPOLINE_SIZE, MemoryProt_CpuRead | MemoryProt_CpuWrite | MemoryProt_CpuExec, MemoryMapFlags_Fixed, VMAType_Code, self.name, false, 0.uintptr(), MODULE_BLOCK_ALIGN) != 0:
-                return false
+                raise LoaderError.MapFailed(self.trampoline_virtual_addr.u64())
             RegisterPatchModule(self.base_virtual_addr.cast[void&?], self.aligned_base_size, self.trampoline_virtual_addr.cast[void&?], MODULE_TRAMPOLINE_SIZE)
         for i in 0..<elf.elf_header_value.e_phnum.usize():
             phdr: elf_program_header& = Elf_GetProgramHeader(elf, i)
             if phdr.p_type == PT_LOAD and phdr.p_memsz > 0:
-                if not Module_MapImageSegment(self.ref[mutable Module&], memory, phdr, true):
-                    return false
-                if not Module_LoadImageSegment(self.ref[mutable Module&], elf, memory, phdr):
-                    return false
+                try Module_MapImageSegment(self.ref[mutable Module&], memory, phdr, true)
+                try Module_LoadImageSegment(self.ref[mutable Module&], elf, memory, phdr)
             if phdr.p_type == PT_SCE_RELRO and phdr.p_memsz > 0:
                 # RELRO carries initialized file data (e.g. the sceLibcParam header:
                 # Size/version constants alongside relocated pointers). Map it writable
                 # and copy the file bytes like PT_LOAD; the protect pass below restores
                 # read-only. Without the copy, non-relocated constants stay zero and the
                 # guest's libc skips application-heap setup.
-                if not Module_MapImageSegment(self.ref[mutable Module&], memory, phdr, true):
-                    return false
-                if phdr.p_filesz > 0 and not Module_LoadImageSegment(self.ref[mutable Module&], elf, memory, phdr):
-                    return false
+                try Module_MapImageSegment(self.ref[mutable Module&], memory, phdr, true)
+                if phdr.p_filesz > 0:
+                    try Module_LoadImageSegment(self.ref[mutable Module&], elf, memory, phdr)
             if phdr.p_type == PT_DYNAMIC and phdr.p_filesz > 0:
                 dyn_owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
-                catch Elf_LoadSegmentBytes(elf, self.dynamic_segment, phdr.p_offset, phdr.p_filesz.usize(), dyn_owner):
-                    n:
-                        true
-                    error e:
-                        return false
+                # Fatal: the dynamic segment drives relocation/imports. `try` widens
+                # ElfError into this function's combined error set.
+                try Elf_LoadSegmentBytes(elf, self.dynamic_segment, phdr.p_offset, phdr.p_filesz.usize(), dyn_owner)
                 loaded_dynamic <- true
             if phdr.p_type == PT_SCE_DYNLIBDATA and phdr.p_filesz > 0:
                 data_owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
-                catch Elf_LoadSegmentBytes(elf, self.dynamic_data, phdr.p_offset, phdr.p_filesz.usize(), data_owner):
-                    n:
+                # Best-effort: a missing dynlibdata table is tolerated. `match ... as`
+                # consumes the error union with an explicit ok/else split.
+                match Elf_LoadSegmentBytes(elf, self.dynamic_data, phdr.p_offset, phdr.p_filesz.usize(), data_owner) as ok:
+                    ok:
                         true
-                    error e:
+                    else:
                         true
             if phdr.p_type == PT_TLS:
                 self.tls.init_image_size <- phdr.p_filesz.u32()
@@ -551,9 +571,10 @@ def Module_LoadElfSegments(self: mutable Module&, elf: mutable Elf&, memory: mut
         for i in 0..<elf.elf_header_value.e_phnum.usize():
             phdr: elf_program_header& = Elf_GetProgramHeader(elf, i)
             if (phdr.p_type == PT_LOAD or phdr.p_type == PT_SCE_RELRO) and phdr.p_memsz > 0:
-                if not Module_ProtectImageSegment(self.ref[mutable Module&], memory, phdr):
-                    return false
-        return loaded_dynamic
+                try Module_ProtectImageSegment(self.ref[mutable Module&], memory, phdr)
+        if not loaded_dynamic:
+            raise LoaderError.DynamicMissing
+        return
 
 def Module_DecodeEhFrame(self: mutable Module&) -> void:
     if self.eh_frame_hdr_addr == 0u64.uintptr():
@@ -598,7 +619,7 @@ def Module_PflagsToMemoryProt(flags: u32) -> MemoryProt:
         prot <- prot | MemoryProt_CpuExec
     return prot
 
-def Module_MapImageSegment(self: mutable Module&, memory: mutable MemoryManager&, phdr: elf_program_header&, load_writable: bool) -> bool:
+def Module_MapImageSegment(self: mutable Module&, memory: mutable MemoryManager&, phdr: elf_program_header&, load_writable: bool) -> void error[LoaderError]:
     segment_vaddr: VAddr = self.base_virtual_addr + phdr.p_vaddr.uintptr()
     segment_size: u64 = Module_GetAlignedProgramHeaderSize(phdr)
     segment_addr: mutable VAddr = segment_vaddr
@@ -609,7 +630,7 @@ def Module_MapImageSegment(self: mutable Module&, memory: mutable MemoryManager&
     if load_writable:
         map_prot <- map_prot | MemoryProt_CpuWrite
     if MemoryManager_MapMemory(memory, segment_addr, segment_vaddr, segment_size, map_prot, MemoryMapFlags_Fixed, vma_type, self.name, false, 0.uintptr(), phdr.p_align) != 0:
-        return false
+        raise LoaderError.MapFailed(segment_vaddr.u64())
     if phdr.p_type == PT_LOAD and (phdr.p_flags & PF_EXEC) != 0:
         if self.executable_segment_count == 0:
             self.first_executable_segment_addr <- segment_vaddr
@@ -630,19 +651,19 @@ def Module_MapImageSegment(self: mutable Module&, memory: mutable MemoryManager&
         self.info.segments[idx].prot <- phdr.p_flags.s32()
         self.info.num_segments <- self.info.num_segments + 1u32
     self.mapped_segment_count <- self.mapped_segment_count + 1
-    return true
+    return
 
-def Module_ProtectImageSegment(self: mutable Module&, memory: mutable MemoryManager&, phdr: elf_program_header&) -> bool:
+def Module_ProtectImageSegment(self: mutable Module&, memory: mutable MemoryManager&, phdr: elf_program_header&) -> void error[LoaderError]:
     segment_vaddr: VAddr = self.base_virtual_addr + phdr.p_vaddr.uintptr()
     segment_size: u64 = Module_GetAlignedProgramHeaderSize(phdr)
     prot: MemoryProt = Module_PflagsToMemoryProt(phdr.p_flags)
     if MemoryManager_Protect(memory, segment_vaddr, segment_size, prot) != 0:
-        return false
+        raise LoaderError.ProtectFailed(segment_vaddr.u64())
     if (prot & MemoryProt_CpuExec) != 0 and GuestExec_IsEnabled() and GuestExec_IsSupported():
         trusted Unsafe.ExecutableCodePublish:
             if not GuestExec_PublishExecutableCode(segment_vaddr, segment_size):
-                return false
-    return true
+                raise LoaderError.PublishFailed(segment_vaddr.u64())
+    return
 
 def Module_PrepareLoadImage(self: mutable Module&, elf: mutable Elf&) -> void:
     min_vaddr: mutable u64 = 0
@@ -669,30 +690,28 @@ def Module_PrepareLoadImage(self: mutable Module&, elf: mutable Elf&) -> void:
         self.image_virtual_size <- max_vaddr - min_vaddr
         Module_ResizeBytes(self.image, self.image_virtual_size.usize())
 
-def Module_LoadImageSegment(self: mutable Module&, elf: mutable Elf&, memory: mutable MemoryManager&, phdr: elf_program_header&) -> bool:
+def Module_LoadImageSegment(self: mutable Module&, elf: mutable Elf&, memory: mutable MemoryManager&, phdr: elf_program_header&) -> void error[LoaderError]:
     can Memory.Allocate:
         if self.image_virtual_size == 0:
-            return false
+            raise LoaderError.ImageBounds
         if phdr.p_vaddr < self.image_virtual_base:
-            return false
+            raise LoaderError.ImageBounds
         offset: u64 = phdr.p_vaddr - self.image_virtual_base
         if offset + phdr.p_filesz > self.image_virtual_size:
-            return false
+            raise LoaderError.ImageBounds
         # This staging buffer is transient: it is copied into self.image and the
         # guest memory map below, then discarded when this function returns. Keep it
         # in a function-scoped arena that stays alive through those reads.
         seg_arena: Arena = zeroed
         segment: mutable darray[u8] = []
-        catch Elf_LoadSegmentBytes(elf, segment, phdr.p_offset, phdr.p_filesz.usize(), seg_arena.ref[mutable Arena&]):
-            n:
-                true
-            error e:
-                return false
+        # `try` widens the loader's ElfError into this function's combined error set.
+        try Elf_LoadSegmentBytes(elf, segment, phdr.p_offset, phdr.p_filesz.usize(), seg_arena.ref[mutable Arena&])
         for i in 0..<segment.count:
             self.image[(offset.usize() + i)] <- segment[i]
         if segment.count > 0:
-            return MemoryManager_WriteBytes(memory, self.base_virtual_addr + phdr.p_vaddr.uintptr(), segment[0], segment.count.u64())
-        return true
+            if not MemoryManager_WriteBytes(memory, self.base_virtual_addr + phdr.p_vaddr.uintptr(), segment[0], segment.count.u64()):
+                raise LoaderError.SegmentWriteFailed(phdr.p_vaddr)
+        return
 
 def Module_ResizeBytes(out: mutable darray[u8]&, size: usize) -> void:
     # Grows persistent module buffers (e.g. self.image); allocate the backing

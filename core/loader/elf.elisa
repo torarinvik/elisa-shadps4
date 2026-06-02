@@ -3,14 +3,25 @@
 
 include "../../common/io_file.elisa"
 
-# Failure modes of ELF/SELF parsing and segment I/O. Replaces the prior bool /
-# silent-void sentinels so callers must explicitly handle (or propagate) each
+# Unified failure set for the whole loader stack — ELF/SELF parse + segment I/O
+# (this file) and image mapping/loading/protection (module.elisa). One set lets the
+# loader chain propagate failures with `try` (same-type, no cross-set remap) while
+# still carrying per-failure payloads (the offending guest virtual address) that a
+# handler can bind and report. Callers must explicitly handle or propagate each
 # failure rather than forgetting a status check.
-error ElfError:
+error LoaderError:
     FileNotOpen
     NotElf
     SeekFailed
     ShortRead
+    NotHostFile
+    EmptyPath
+    ImageBounds
+    MapFailed(vaddr: u64)
+    SegmentWriteFailed(vaddr: u64)
+    ProtectFailed(vaddr: u64)
+    PublishFailed(vaddr: u64)
+    DynamicMissing
 
 # Persistent arena owning the buffers grown while parsing an ELF/SELF (segment
 # bytes, program/section headers, self segments). These outlive the individual
@@ -459,10 +470,10 @@ def Elf_IsElfFile(self: Elf&) -> bool:
         return false
     return true
 
-def Elf_Open(self: mutable Elf&, file_name: static u8&) -> void error[ElfError]:
+def Elf_Open(self: mutable Elf&, file_name: static u8&) -> void error[LoaderError]:
     self.f <- IOFile_opened(file_name, FileAccessMode.Read)
     if not IOFile_IsOpen(self.f):
-        raise ElfError.FileNotOpen
+        raise LoaderError.FileNotOpen
     self.self <- Elf_ReadSelfHeader(self.f)
     self.is_self <- Elf_IsSelfFile(self.ref[Elf&])
     if not self.is_self:
@@ -476,7 +487,7 @@ def Elf_Open(self: mutable Elf&, file_name: static u8&) -> void error[ElfError]:
     elf_header_pos: i64 = IOFile_Tell(self.f)
     self.elf_header_value <- Elf_ReadElfHeader(self.f)
     if not Elf_IsElfFile(self.ref[Elf&]):
-        raise ElfError.NotElf
+        raise LoaderError.NotElf
     if self.elf_header_value.e_phoff > 0 and self.elf_header_value.e_phnum > 0:
         _ = IOFile_Seek(self.f, elf_header_pos + self.elf_header_value.e_phoff.i64())
         i: mutable u16 = 0
@@ -506,13 +517,13 @@ def Elf_Open(self: mutable Elf&, file_name: static u8&) -> void error[ElfError]:
             # of the field argument, so bind T at the call site.
             _ = IOFile_ReadObject[elf_program_id_header](self.f, self.self_id_header)
 
-def Elf_LoadSegment(self: mutable Elf&, virtual_addr: uintptr, file_offset: u64, size: usize) -> void error[ElfError]:
+def Elf_LoadSegment(self: mutable Elf&, virtual_addr: uintptr, file_offset: u64, size: usize) -> void error[LoaderError]:
     try Elf_SeekSegment(self.ref[mutable Elf&], file_offset)
     if IOFile_ReadRaw(self.f, virtual_addr.cast[mutable void&], 1, size) != size:
-        raise ElfError.ShortRead
+        raise LoaderError.ShortRead
     return
 
-def Elf_LoadSegmentBytes(self: mutable Elf&, out: mutable darray[u8]&, file_offset: u64, size: usize, target_arena: mutable Arena&) -> void error[ElfError]:
+def Elf_LoadSegmentBytes(self: mutable Elf&, out: mutable darray[u8]&, file_offset: u64, size: usize, target_arena: mutable Arena&) -> void error[LoaderError]:
     try Elf_SeekSegment(self.ref[mutable Elf&], file_offset)
     # Grow the destination buffer in the arena chosen by the caller. Segment
     # data that outlives the load (dynamic data, symbol/relocation tables, the
@@ -527,11 +538,11 @@ def Elf_LoadSegmentBytes(self: mutable Elf&, out: mutable darray[u8]&, file_offs
             i <- i + 1
     return
 
-def Elf_SeekSegment(self: mutable Elf&, file_offset: u64) -> void error[ElfError]:
+def Elf_SeekSegment(self: mutable Elf&, file_offset: u64) -> void error[LoaderError]:
     if not self.is_self:
         if IOFile_Seek(self.f, file_offset.i64()):
             return
-        raise ElfError.SeekFailed
+        raise LoaderError.SeekFailed
     i: mutable usize = 0
     while i < self.self_segments.count:
         seg: self_segment_header = self.self_segments[i]
@@ -543,9 +554,9 @@ def Elf_SeekSegment(self: mutable Elf&, file_offset: u64) -> void error[ElfError
                     mapped_off: u64 = (file_offset - phdr.p_offset) + seg.file_offset
                     if IOFile_Seek(self.f, mapped_off.i64()):
                         return
-                    raise ElfError.SeekFailed
+                    raise LoaderError.SeekFailed
         i <- i + 1
-    raise ElfError.SeekFailed
+    raise LoaderError.SeekFailed
 
 def Elf_GetProgramHeader(self: Elf&, index: usize) -> elf_program_header&:
     return self.program_headers[index].ref[elf_program_header&]
