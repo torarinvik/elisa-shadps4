@@ -41,6 +41,29 @@ global mutable libc_heap_cursor: u64 = 0
 global mutable libc_heap_limit: u64 = 0
 global mutable libc_heap_bytes_served: u64 = 0
 
+# Uninitialized-memory poisoning (opt-in via ELISA_POISON_UNINIT). malloc memory is
+# uninitialized by contract, so filling each freshly-handed-out block with a recognizable
+# non-canonical pattern (0xBE bytes -> 8-byte reads = 0xBEBEBEBEBEBEBEBE) turns a
+# use-before-init bug from a silent wrong value into a loud, self-identifying fault: a
+# pointer read from the block dereferences 0xBEBE... (non-canonical -> debug_referee flags
+# it; the fault address screams "poisoned/uninitialized" instead of looking like garbage).
+# Safe because the block's contents are undefined until the caller writes them; never
+# applied to .bss/loaded segments (which must keep their zero/file contents).
+const LIBC_POISON_BYTE: int = 0xBE
+# 0=unchecked, 1=on, 2=off. Resolved once from the environment.
+global mutable libc_poison_state: int = 0
+
+def libc_heap_poison_enabled() -> bool:
+    if libc_heap_poison_state_unset():
+        if getenv("ELISA_POISON_UNINIT".cast[u8&]) != null:
+            libc_poison_state <- 1
+        else:
+            libc_poison_state <- 2
+    return libc_poison_state == 1
+
+def libc_heap_poison_state_unset() -> bool:
+    return libc_poison_state == 0
+
 def libc_heap_align_up(value: u64, alignment: u64) -> u64:
     remainder: u64 = value % alignment
     if remainder == 0:
@@ -63,7 +86,10 @@ def libc_heap_alloc(size: u64) -> mutable void&? can[Unsafe.SegmentMutation, Seg
         return null
     libc_heap_cursor <- start + request
     libc_heap_bytes_served <- libc_heap_bytes_served + request
-    return start.uintptr().cast[mutable void&?]
+    block: mutable void&? = start.uintptr().cast[mutable void&?]
+    if block != null and libc_heap_poison_enabled():
+        _ = memset(block.cast[mutable void&], LIBC_POISON_BYTE, request.usize())
+    return block
 
 # @port core/libraries/libc_internal/libc_internal_memory.cpp::internal_malloc
 # Oracle: `void* internal_malloc(u64 size) { return std::malloc(size); }` (NID
@@ -75,6 +101,11 @@ def internal_malloc(size: u64) -> mutable void&? can[Unsafe.SegmentMutation, Seg
         GuestExec_RecordRuntimeHle("libSceLibcInternal", "malloc_enter", size.uintptr(), 0.uintptr(), 0.uintptr(), 0.uintptr())
         result <- libc_heap_alloc(size)
         GuestExec_RecordRuntimeHle("libSceLibcInternal", "malloc", size.uintptr(), 0.uintptr(), 0.uintptr(), result.uintptr())
+        # Canary: only record when the guest-heap arena hands back NULL (arena not
+        # reserved, exhausted, or oversized request). a=size, b=cursor, c=limit, d=0.
+        # Low-noise: nothing is emitted on the common success path.
+        if result == null:
+            GuestExec_EmergencyMark(141, size.uintptr(), libc_heap_cursor.uintptr(), libc_heap_limit.uintptr(), 0.uintptr())
     return result
 
 # @port core/libraries/libc_internal/libc_internal_memory.cpp::internal_free
