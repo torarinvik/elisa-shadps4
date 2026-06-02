@@ -68,6 +68,11 @@ struct VirtualMemoryArea:
     name: mutable static u8&
     fd: mutable s32
     disallow_merge: mutable bool
+    # Set while a bulk-write window is active and this VMA received a deferred
+    # (un-restored) native write; MemoryManager_EndBulkWriteWindow reprotects and
+    # clears it. Independent of the bounded writable-page cache, so it is correct
+    # even when that cache overflows/evicts during a large relocation burst.
+    bulk_dirty: mutable bool
 
 # Linear map transaction: produced by MemoryManager_MapBegin once the
 # AddressSpace mapping has been recorded, and MUST be consumed exactly once by
@@ -516,7 +521,7 @@ def MemoryManager_MapCommit(self: mutable MemoryManager&, txn: MapTxn, vma_type:
     _ = move txn
     map_owner: mutable Arena& = memory_arena.ref[mutable Arena&]
     in map_owner:
-        self.vma_areas.push(VirtualMemoryArea(m, sz, vma_type, effective_prot, name, 0, false))
+        self.vma_areas.push(VirtualMemoryArea(m, sz, vma_type, effective_prot, name, 0, false, false))
     # AddBacking fills a MappedMemoryBytes buffer one byte at a time. For the guest's own
     # large runtime regions (libc heap / direct-memory pools, hundreds of MB to GBs) that
     # is catastrophic — a 3GB libc-heap MapDirectMemory would push ~3.2 billion bytes and
@@ -568,7 +573,7 @@ def MemoryManager_MapFileCommit(self: mutable MemoryManager&, txn: MapTxn, effec
     _ = move txn
     file_owner: mutable Arena& = memory_arena.ref[mutable Arena&]
     in file_owner:
-        self.vma_areas.push(VirtualMemoryArea(m, sz, VMAType_File, effective_prot, "file", fd, false))
+        self.vma_areas.push(VirtualMemoryArea(m, sz, VMAType_File, effective_prot, "file", fd, false, false))
     MemoryManager_AddBacking(self.ref[mutable MemoryManager&], m, sz)
 
 def MemoryManager_PoolDecommit(self: mutable MemoryManager&, virtual_addr: VAddr, size: u64) -> s32:
@@ -611,10 +616,44 @@ def MemoryManager_Protect(self: mutable MemoryManager&, addr: VAddr, size: u64, 
         return 0
     return -1
 
+# Bulk-write window: while active, per-write native-protection restores are deferred
+# (the touched page stays writable+cached so repeated relocation writes to it skip the
+# make-writable mprotect entirely). MemoryManager_EndBulkWriteWindow then restores
+# exactly the pages that were made writable, each to its declared VMA protection,
+# faithfully reproducing the per-write end state in one pass — the ~2.6x relocation win
+# without leaving any executable page RWX (the W^X hazard on Apple Silicon).
+global mutable memory_bulk_write_window_active: bool = false
+
+def MemoryManager_BeginBulkWriteWindow() -> void:
+    memory_bulk_write_window_active <- true
+
+def MemoryManager_EndBulkWriteWindow(self: mutable MemoryManager&) -> void:
+    if not memory_bulk_write_window_active:
+        return
+    memory_bulk_write_window_active <- false
+    # Reprotect every VMA that took a deferred write back to its declared protection
+    # (whole-VMA, exactly as the per-write restore did — covers every touched page even
+    # if the writable-page cache evicted some), then drop the cache once. VMAs that are
+    # CpuWrite (or never matched a VMA) were never marked, mirroring the per-write path,
+    # which leaves those untouched.
+    for i in 0..<self.vma_areas.count:
+        if self.vma_areas[i].bulk_dirty:
+            self.vma_areas[i].bulk_dirty <- false
+            if GuestExec_IsEnabled() and GuestExec_IsSupported():
+                _ = GuestExec_ProtectRegion(self.vma_areas[i].base, self.vma_areas[i].size, self.vma_areas[i].prot)
+    GuestExec_ClearWritablePageCache()
+
 def MemoryManager_RestoreNativeProtectionAfterWrite(self: mutable MemoryManager&, addr: VAddr, size: u64) -> bool:
     if size == 0 or not GuestExec_IsEnabled() or not GuestExec_IsSupported():
         return true
     index: s32 = MemoryManager_FindBestVmaIndex(self, addr, size)
+    if memory_bulk_write_window_active:
+        # Defer the reprotect: mark the VMA dirty (skip CpuWrite VMAs, exactly as the
+        # immediate path below early-returns for them) and leave the page writable+cached
+        # so subsequent writes to it skip the make-writable mprotect entirely.
+        if index >= 0 and (self.vma_areas[index.usize()].prot & MemoryProt_CpuWrite) == 0:
+            self.vma_areas[index.usize()].bulk_dirty <- true
+        return true
     if index < 0:
         return true
     area: VirtualMemoryArea = self.vma_areas[index.usize()]
