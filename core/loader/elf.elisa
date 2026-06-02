@@ -516,17 +516,27 @@ def Elf_LoadSegment(self: mutable Elf&, virtual_addr: uintptr, file_offset: u64,
 
 def Elf_LoadSegmentBytes(self: mutable Elf&, out: mutable darray[u8]&, file_offset: u64, size: usize, target_arena: mutable Arena&) -> void error[ElfError]:
     try Elf_SeekSegment(self.ref[mutable Elf&], file_offset)
+    if size == 0:
+        return
     # Grow the destination buffer in the arena chosen by the caller. Segment
     # data that outlives the load (dynamic data, symbol/relocation tables, the
     # module image) must use a persistent arena; using a transient local arena
     # here previously freed the backing on return, so symbol/relocation reads
     # hit use-after-free memory and import resolution was nondeterministic.
+    #
+    # Read the whole segment in ONE IOFile_ReadRaw rather than a byte-at-a-time
+    # Elf_ReadU8 loop: a multi-MB segment otherwise issues millions of 1-byte
+    # freads (the dominant boot cost under Rosetta). Append semantics are kept by
+    # reading into the freshly-grown tail; the bounds-checked darray index makes
+    # the destination span safe without raw pointer arithmetic.
+    base: usize = out.count
     in target_arena:
-        i: mutable usize = 0
-        while i < size:
-            b: u8 = Elf_ReadU8(self.f)
-            out.push(b)
-            i <- i + 1
+        while out.count < base + size:
+            out.push(0)
+    dst: mutable u8& = out[base].ref[mutable u8&]
+    got: usize = IOFile_ReadRaw(self.f, dst.cast[mutable void&], 1usize, size)
+    if got != size:
+        raise ElfError.ShortRead
     return
 
 def Elf_SeekSegment(self: mutable Elf&, file_offset: u64) -> void error[ElfError]:
