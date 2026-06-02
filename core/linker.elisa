@@ -1404,7 +1404,14 @@ def Linker_RelocProbePath() -> u32:
 def Linker_RelocProbeAddr() -> u64:
     return linker_reloc_probe_addr
 
-def Linker_WriteRelocationU64(module: mutable Module&, memory: mutable MemoryManager&, addr: u64, value: u64) -> bool can[Memory.Allocate]:
+# A relocation write that lands in neither the module image nor guest memory. The
+# payload carries the target guest address so a handler is self-describing. This is
+# the linker's own error set (distinct from the loader's LoaderError), caught — not
+# propagated — at the relocation-apply layer, which records and continues.
+error RelocError:
+    WriteUnlanded(addr: u64)
+
+def Linker_WriteRelocationU64(module: mutable Module&, memory: mutable MemoryManager&, addr: u64, value: u64) -> void error[RelocError] can[Memory.Allocate]:
     Linker_RelocProbeNote(addr, value, 0xFFFFFFFF, 1)
     image_ok: bool = Module_WriteImageU64(module.ref[mutable Module&], addr, value)
     memory_ok: mutable bool = false
@@ -1413,7 +1420,9 @@ def Linker_WriteRelocationU64(module: mutable Module&, memory: mutable MemoryMan
     else:
         can Memory.Allocate:
             memory_ok <- MemoryManager_WriteU64(memory, addr.uintptr(), value)
-    return image_ok or memory_ok
+    if image_ok or memory_ok:
+        return
+    raise RelocError.WriteUnlanded(addr)
 
 def Linker_WriteRelativeRelocationFast(module: mutable Module&, memory: mutable MemoryManager&, addr: u64, value: u64, cached_backing_index: mutable s32&) -> bool:
     Linker_RelocProbeNote(addr, value, 8, 2)  # 8 = R_X86_64_RELATIVE
@@ -1872,9 +1881,12 @@ def Linker_ApplyRelocationEntry(self: mutable Linker&, module: mutable Module&, 
         value: u64 = module.base_virtual_addr.u64() + rel.rel_addend.u64()
         Linker_NoteRelocatedPointerValue(value, rel_virtual_addr, rel_type, null, module.name)
         can Memory.Allocate:
-            if Linker_WriteRelocationU64(module.ref[mutable Module&], memory, rel_virtual_addr, value):
-                module.applied_relocation_count <- module.applied_relocation_count + 1
-                return true
+            catch Linker_WriteRelocationU64(module.ref[mutable Module&], memory, rel_virtual_addr, value):
+                n:
+                    module.applied_relocation_count <- module.applied_relocation_count + 1
+                    return true
+                error e:
+                    true
         Linker_RecordFailedRelocationDetail(self.ref[mutable Linker&], 1, IMPORT_RESOLUTION_UNRESOLVED, value)
         return false
     if rel_type == R_X86_64_64 or rel_type == R_X86_64_GLOB_DAT or rel_type == R_X86_64_JUMP_SLOT:
@@ -1892,9 +1904,12 @@ def Linker_ApplyRelocationEntry(self: mutable Linker&, module: mutable Module&, 
                     symbol_name_val <- Module_GetSymbolNameByIndex(module.ref[mutable Module&], symbol_index)
                 Linker_NoteRelocatedPointerValue(value, rel_virtual_addr, rel_type, symbol_name_val, module.name)
                 can Memory.Allocate:
-                    if Linker_WriteRelocationU64(module.ref[mutable Module&], memory, rel_virtual_addr, value):
-                        module.applied_relocation_count <- module.applied_relocation_count + 1
-                        return true
+                    catch Linker_WriteRelocationU64(module.ref[mutable Module&], memory, rel_virtual_addr, value):
+                        n:
+                            module.applied_relocation_count <- module.applied_relocation_count + 1
+                            return true
+                        error e:
+                            true
                 Linker_RecordFailedRelocationDetail(self.ref[mutable Linker&], 2, IMPORT_RESOLUTION_PRX_EXPORT, value)
                 return false
         symbol_name: mutable static u8& = ""
@@ -1956,19 +1971,25 @@ def Linker_ApplyRelocationEntry(self: mutable Linker&, module: mutable Module&, 
             value: u64 = resolved_addr + addend.u64()
             Linker_NoteRelocatedPointerValue(value, rel_virtual_addr, rel_type, symbol_name, module.name)
             can Memory.Allocate:
-                if Linker_WriteRelocationU64(module.ref[mutable Module&], memory, rel_virtual_addr, value):
-                    module.applied_relocation_count <- module.applied_relocation_count + 1
-                    module.patched_import_relocation_count <- module.patched_import_relocation_count + 1
-                    return true
+                catch Linker_WriteRelocationU64(module.ref[mutable Module&], memory, rel_virtual_addr, value):
+                    n:
+                        module.applied_relocation_count <- module.applied_relocation_count + 1
+                        module.patched_import_relocation_count <- module.patched_import_relocation_count + 1
+                        return true
+                    error e:
+                        true
             Linker_RecordFailedRelocationDetail(self.ref[mutable Linker&], 4, rel_kind, value)
             return false
         Linker_RecordFailedRelocationDetail(self.ref[mutable Linker&], 3, rel_kind, resolved_addr)
         return false
     if rel_type == R_X86_64_DTPMOD64:
         can Memory.Allocate:
-            if Linker_WriteRelocationU64(module.ref[mutable Module&], memory, rel_virtual_addr, module.tls.modid.u64()):
-                module.applied_relocation_count <- module.applied_relocation_count + 1
-                return true
+            catch Linker_WriteRelocationU64(module.ref[mutable Module&], memory, rel_virtual_addr, module.tls.modid.u64()):
+                n:
+                    module.applied_relocation_count <- module.applied_relocation_count + 1
+                    return true
+                error e:
+                    true
         Linker_RecordFailedRelocationDetail(self.ref[mutable Linker&], 5, IMPORT_RESOLUTION_UNRESOLVED, module.tls.modid.u64())
     return false
 
