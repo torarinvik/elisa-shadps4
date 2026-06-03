@@ -250,80 +250,104 @@ def fs_directory_size(path: static u8&) -> u64:
     static else:
         return posix_fs_directory_size(path)
 
-def IOFile_new() -> IOFile:
-    return IOFile(null, "", FileAccessMode.Read, FileType.BinaryFile, 0.uintptr())
+# Constructors: type-named `def IOFile(...)` overloads resolve by signature
+# alongside the implicit all-fields brace literal `IOFile{...}`.
+def IOFile() -> IOFile:
+    return IOFile{file: null, file_path: "", file_access_mode: FileAccessMode.Read, file_type: FileType.BinaryFile, file_mapping: 0.uintptr()}
 
-def IOFile_opened(path: static u8&, mode: FileAccessMode, file_type: FileType = FileType.BinaryFile, flag: FileShareFlag = FileShareFlag.ShareReadOnly) -> IOFile:
-    out: mutable IOFile = IOFile_new()
-    _ = IOFile_Open(out.ref[mutable IOFile&], path, mode, file_type, flag)
+def IOFile(path: static u8&, mode: FileAccessMode, file_type: FileType = FileType.BinaryFile, flag: FileShareFlag = FileShareFlag.ShareReadOnly) -> IOFile:
+    out: mutable IOFile = IOFile()
+    _ = out.Open(path, mode, file_type, flag)
     return out
 
-def IOFile_IsOpen(self: IOFile&) -> bool:
+# Methods: `@method` makes these receiver-overloadable so short names (Close,
+# Read, Open, …) coexist with same-named methods on other types. Call as
+# `file.IsOpen()`, `file.Open(path, mode)`, etc.
+@method
+def IsOpen(self: IOFile&) -> bool:
     return self.file != null
 
-def IOFile_IsWriteOnly(self: IOFile&) -> bool:
+@method
+def IsWriteOnly(self: IOFile&) -> bool:
     return self.file_access_mode == FileAccessMode.Append or self.file_access_mode == FileAccessMode.Write
 
-def IOFile_Open(self: mutable IOFile&, path: static u8&, mode: FileAccessMode, file_type: FileType = FileType.BinaryFile, flag: FileShareFlag = FileShareFlag.ShareReadOnly) -> int:
-    IOFile_Close(self)
+@method
+def Open(self: mutable IOFile&, path: static u8&, mode: FileAccessMode, file_type: FileType = FileType.BinaryFile, flag: FileShareFlag = FileShareFlag.ShareReadOnly) -> int:
+    self.Close()
     self.file <- io_open(path, mode, file_type, flag)
     self.file_path <- path
     self.file_access_mode <- mode
     self.file_type <- file_type
     return 0 if self.file != null else -1
 
-def IOFile_Close(self: mutable IOFile&) -> void:
+@method
+def Close(self: mutable IOFile&) -> void:
     if self.file != null:
         io_close(self.file.cast[void&])
         self.file <- null
 
-def IOFile_Unlink(self: IOFile&) -> void:
+@method
+def Unlink(self: IOFile&) -> void:
     # file_path is a raw C-string (static u8&); `!= ""` compared the pointer to
     # the empty-literal's address (never equal), so unlink always fired. Compare
     # by content length instead (static_strlen handles a null/zeroed pointer).
     if static_strlen(self.file_path) != 0:
         io_unlink(self.file_path)
 
-def IOFile_Flush(self: IOFile&) -> bool:
+@method
+def Flush(self: IOFile&) -> bool:
     return false if self.file == null else io_flush(self.file.cast[void&])
 
-def IOFile_Commit(self: IOFile&) -> bool:
+@method
+def Commit(self: IOFile&) -> bool:
     return false if self.file == null else io_commit(self.file.cast[void&])
 
-def IOFile_SetSize(self: IOFile&, size: u64) -> bool:
+@method
+def SetSize(self: IOFile&, size: u64) -> bool:
     return false if self.file == null else io_set_size(self.file.cast[void&], size)
 
-def IOFile_GetSize(self: IOFile&) -> u64:
+@method
+def GetSize(self: IOFile&) -> u64:
     return 0 if self.file == null else io_get_size(self.file.cast[void&])
 
-def IOFile_Seek(self: IOFile&, offset: i64, origin: SeekOrigin = SeekOrigin.SetOrigin) -> bool:
+@method
+def Seek(self: IOFile&, offset: i64, origin: SeekOrigin = SeekOrigin.SetOrigin) -> bool:
     return false if self.file == null else io_seek(self.file.cast[void&], offset, origin)
 
-def IOFile_Tell(self: IOFile&) -> i64:
+@method
+def Tell(self: IOFile&) -> i64:
     return -1 if self.file == null else io_tell(self.file.cast[void&])
 
-def IOFile_ReadRaw(self: IOFile&, data: mutable void&, elem_size: usize, count: usize) -> usize:
+@method
+def ReadRaw(self: IOFile&, data: mutable void&, elem_size: usize, count: usize) -> usize:
     return 0 if self.file == null else io_read(self.file.cast[void&], data, elem_size, count)
 
-def IOFile_WriteRaw(self: IOFile&, data: void&, elem_size: usize, count: usize) -> usize:
+@method
+def WriteRaw(self: IOFile&, data: void&, elem_size: usize, count: usize) -> usize:
     return 0 if self.file == null else io_write(self.file.cast[void&], data, elem_size, count)
 
-def IOFile_ReadObject[T](self: IOFile&, out: mutable T&) -> bool:
-    return IOFile_ReadRaw(self, out.cast[mutable void&], size_of(T), 1) == 1
+@method
+def ReadObject[T](self: IOFile&, out: mutable T&) -> bool:
+    return self.ReadRaw(out.cast[mutable void&], size_of(T), 1) == 1
 
-def IOFile_WriteObject[T](self: IOFile&, value: T&) -> bool:
-    return IOFile_WriteRaw(self, value.cast[void&], size_of(T), 1) == 1
+@method
+def WriteObject[T](self: IOFile&, value: T&) -> bool:
+    return self.WriteRaw(value.cast[void&], size_of(T), 1) == 1
 
-def IOFile_ReadSpan[T](self: IOFile&, data: mutable T&, count: usize) -> usize:
-    return IOFile_ReadRaw(self, data.cast[mutable void&], size_of(T), count)
+@method
+def ReadSpan[T](self: IOFile&, data: mutable T&, count: usize) -> usize:
+    return self.ReadRaw(data.cast[mutable void&], size_of(T), count)
 
-def IOFile_WriteSpan[T](self: IOFile&, data: T&, count: usize) -> usize:
-    return IOFile_WriteRaw(self, data.cast[void&], size_of(T), count)
+@method
+def WriteSpan[T](self: IOFile&, data: T&, count: usize) -> usize:
+    return self.WriteRaw(data.cast[void&], size_of(T), count)
 
-def IOFile_ReadString(self: IOFile&, length: usize) -> static u8&:
+@method
+def ReadString(self: IOFile&, length: usize) -> static u8&:
     return "" if self.file == null else io_read_string(self.file.cast[void&], length)
 
-def IOFile_GetFileMapping(self: mutable IOFile&) -> uintptr:
+@method
+def GetFileMapping(self: mutable IOFile&) -> uintptr:
     if self.file_mapping == 0.uintptr() and self.file != null:
         self.file_mapping <- io_get_mapping(self.file.cast[void&])
     return self.file_mapping
