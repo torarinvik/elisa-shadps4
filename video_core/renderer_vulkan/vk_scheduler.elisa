@@ -300,7 +300,7 @@ def RenderState_Default() -> RenderState:
 def Scheduler_New(instance: Instance) -> Scheduler:
     can Memory.Allocate, Abort.Panic:
         master: mutable MasterSemaphore = MasterSemaphore_New()
-        pool: CommandPool = CommandPool_New(master.ref[mutable MasterSemaphore&])
+        pool: CommandPool = CommandPool_New(&master)
         out: mutable Scheduler = Scheduler(
             instance,
             master,
@@ -312,7 +312,7 @@ def Scheduler_New(instance: Instance) -> Scheduler:
             RenderState_Default(),
             false
         )
-        Scheduler_AllocateWorkerCommandBuffers(out.ref[mutable Scheduler&])
+        Scheduler_AllocateWorkerCommandBuffers(&out)
         return out
 
 def Scheduler_BeginRendering(self: mutable Scheduler&, new_state: RenderState) -> void:
@@ -338,21 +338,21 @@ def Scheduler_Flush(self: mutable Scheduler&, info: mutable SubmitInfo&) -> u64:
 def Scheduler_FlushNoInfo(self: mutable Scheduler&) -> u64:
     can Memory.Allocate, Abort.Panic:
         info: mutable SubmitInfo = SubmitInfo_New()
-        return Scheduler_Flush(self, info.ref[mutable SubmitInfo&])
+        return Scheduler_Flush(self, &info)
 
 def Scheduler_Finish(self: mutable Scheduler&) -> void:
     can Memory.Allocate, Abort.Panic:
         info: mutable SubmitInfo = SubmitInfo_New()
-        submitted_tick: u64 = Scheduler_SubmitExecution(self, info.ref[mutable SubmitInfo&])
+        submitted_tick: u64 = Scheduler_SubmitExecution(self, &info)
         Scheduler_Wait(self, submitted_tick)
 
 def Scheduler_Wait(self: mutable Scheduler&, tick: u64) -> void:
     if tick >= MasterSemaphore_CurrentTick(self.master_semaphore):
         _ = Scheduler_FlushNoInfo(self)
-    MasterSemaphore_Wait(self.master_semaphore.ref[mutable MasterSemaphore&], tick)
+    MasterSemaphore_Wait(&self.master_semaphore, tick)
 
 def Scheduler_PopPendingOperations(self: mutable Scheduler&) -> void:
-    MasterSemaphore_Refresh(self.master_semaphore.ref[mutable MasterSemaphore&])
+    MasterSemaphore_Refresh(&self.master_semaphore)
     i: mutable usize = 0usize
     while i < self.pending_ops.count:
         if MasterSemaphore_IsFree(self.master_semaphore, self.pending_ops[i].tick):
@@ -371,15 +371,15 @@ def Scheduler_DeferPriorityOperation(self: mutable Scheduler&) -> void:
 
 def Scheduler_AllocateWorkerCommandBuffers(self: mutable Scheduler&) -> void:
     can Memory.Allocate, Abort.Panic:
-        self.current_cmdbuf <- CommandPool_Commit(self.command_pool.ref[mutable CommandPool&])
-        DynamicState_Invalidate(self.dynamic_state.ref[mutable DynamicState&])
+        self.current_cmdbuf <- CommandPool_Commit(&self.command_pool)
+        DynamicState_Invalidate(&self.dynamic_state)
 
 def Scheduler_SubmitExecution(self: mutable Scheduler&, info: mutable SubmitInfo&) -> u64:
     can Memory.Allocate, Abort.Panic:
-        signal_value: u64 = MasterSemaphore_NextTick(self.master_semaphore.ref[mutable MasterSemaphore&])
+        signal_value: u64 = MasterSemaphore_NextTick(&self.master_semaphore)
         _ = SubmitInfo_AddSignal(info, MasterSemaphore_Handle(self.master_semaphore), signal_value)
         Scheduler_EndRendering(self)
-        MasterSemaphore_Refresh(self.master_semaphore.ref[mutable MasterSemaphore&], signal_value)
+        MasterSemaphore_Refresh(&self.master_semaphore, signal_value)
         Scheduler_AllocateWorkerCommandBuffers(self)
         Scheduler_PopPendingOperations(self)
         return signal_value
@@ -391,8 +391,8 @@ def Scheduler_CurrentTick(self: Scheduler) -> u64:
 def Scheduler_IsFree(self: mutable Scheduler&, tick: u64) -> bool:
     if MasterSemaphore_IsFree(self.master_semaphore, tick):
         return true
-    MasterSemaphore_Refresh(self.master_semaphore.ref[mutable MasterSemaphore&])
+    MasterSemaphore_Refresh(&self.master_semaphore)
     return MasterSemaphore_IsFree(self.master_semaphore, tick)
 
 def Scheduler_GetMasterSemaphore(self: mutable Scheduler&) -> mutable MasterSemaphore&:
-    return self.master_semaphore.ref[mutable MasterSemaphore&]
+    return &self.master_semaphore

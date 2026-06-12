@@ -395,3 +395,27 @@ cd "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/eli
 - Result: `passed=27 failed=0 selected=27`
 - What improved: all 27 selected gate steps passed
 - Next blocker: promote execute/boundary/frame stages deeper into runtime coverage
+
+## 2026-06-12: Emulator Parity Gate Run
+
+- Date: 2026-06-12
+- Command run: `./emulator-cpp-parity --quick`
+- Result: `passed=16 failed=8 selected=24`
+- What improved: CUSA unresolved imports are zero
+- Next blocker: No unclassified project-owned C++ modules violated: 1 Missing units
+
+## 2026-06-12: Emulator Parity Gate Run
+
+- Date: 2026-06-12
+- Command run: `./emulator-cpp-parity --quick`
+- Result: `passed=18 failed=6 selected=24`
+- What improved: CUSA unresolved imports are zero
+- Next blocker: No unclassified project-owned C++ modules violated: 1 Missing units
+
+## 2026-06-12: Emulator Parity Gate Run
+
+- Date: 2026-06-12
+- Command run: `./emulator-cpp-parity --quick`
+- Result: `passed=20 failed=4 selected=24`
+- What improved: CUSA unresolved imports are zero
+- Next blocker: No unclassified project-owned C++ modules violated: 1 Missing units

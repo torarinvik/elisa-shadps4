@@ -143,7 +143,7 @@ def MemoryManager_New() -> MemoryManager:
     )
 
 def Memory_Instance() -> mutable MemoryManager&:
-    return memory_singleton.ref[mutable MemoryManager&]
+    return &memory_singleton
 
 def MemoryManager_ResetNativeMappings(self: mutable MemoryManager&) -> void:
     if not GuestExec_IsSupported():
@@ -157,7 +157,7 @@ def Memory_Reset() -> void:
     memory_singleton <- MemoryManager_New()
 
 def MemoryManager_GetAddressSpace(self: mutable MemoryManager&) -> mutable AddressSpace&:
-    return self.address_space.ref[mutable AddressSpace&]
+    return &self.address_space
 
 def MemoryManager_GetTotalDirectSize(self: MemoryManager&) -> u64:
     return self.total_direct_size
@@ -326,13 +326,13 @@ def MemoryManager_SetupMemoryRegions(self: mutable MemoryManager&, flexible_size
         self.total_flexible_size <- flexible_size
     self.pool_budget <- self.total_flexible_size
     self.flexible_usage <- 0
-    owner: mutable Arena& = memory_arena.ref[mutable Arena&]
+    owner: mutable Arena& = &memory_arena
     in owner:
         self.dmem_areas.count <- 0
         self.dmem_areas.push(PhysicalMemoryArea(0.uintptr(), self.total_direct_size, 0, PhysicalMemoryType_Free))
 
 def MemoryManager_InsertDmemArea(self: mutable MemoryManager&, index: usize, area: PhysicalMemoryArea) -> void:
-    owner: mutable Arena& = memory_arena.ref[mutable Arena&]
+    owner: mutable Arena& = &memory_arena
     in owner:
         self.dmem_areas.push(area)
     j: mutable usize = self.dmem_areas.count - 1
@@ -360,7 +360,7 @@ def MemoryManager_Allocate(self: mutable MemoryManager&, search_start: PAddr, se
     align: mutable u64 = alignment
     if align == 0:
         align <- 16 * 1024
-    owner: mutable Arena& = memory_arena.ref[mutable Arena&]
+    owner: mutable Arena& = &memory_arena
     in owner:
         for i in 0..<self.dmem_areas.count:
             area: PhysicalMemoryArea = self.dmem_areas[i]
@@ -384,12 +384,12 @@ def MemoryManager_Allocate(self: mutable MemoryManager&, search_start: PAddr, se
 
             before_size: u64 = alloc_start - area_start
             after_size: u64 = area_end - alloc_end
-            MemoryManager_RemoveDmemArea(self.ref[mutable MemoryManager&], i)
+            MemoryManager_RemoveDmemArea((&self).cast[mutable MemoryManager&], i)
             if after_size != 0:
-                MemoryManager_InsertDmemArea(self.ref[mutable MemoryManager&], i, PhysicalMemoryArea(alloc_end.uintptr(), after_size, 0, PhysicalMemoryType_Free))
-            MemoryManager_InsertDmemArea(self.ref[mutable MemoryManager&], i, PhysicalMemoryArea(alloc_start.uintptr(), size, memory_type, PhysicalMemoryType_Allocated))
+                MemoryManager_InsertDmemArea((&self).cast[mutable MemoryManager&], i, PhysicalMemoryArea(alloc_end.uintptr(), after_size, 0, PhysicalMemoryType_Free))
+            MemoryManager_InsertDmemArea((&self).cast[mutable MemoryManager&], i, PhysicalMemoryArea(alloc_start.uintptr(), size, memory_type, PhysicalMemoryType_Allocated))
             if before_size != 0:
-                MemoryManager_InsertDmemArea(self.ref[mutable MemoryManager&], i, PhysicalMemoryArea(area_start.uintptr(), before_size, 0, PhysicalMemoryType_Free))
+                MemoryManager_InsertDmemArea((&self).cast[mutable MemoryManager&], i, PhysicalMemoryArea(area_start.uintptr(), before_size, 0, PhysicalMemoryType_Free))
             return alloc_start.uintptr()
     return search_end
 
@@ -451,7 +451,7 @@ def MemoryManager_MarkDirectMapped(self: mutable MemoryManager&, phys_addr: PAdd
     mark_end: u64 = mark_start + size
     if mark_end <= mark_start:
         return false
-    owner: mutable Arena& = memory_arena.ref[mutable Arena&]
+    owner: mutable Arena& = &memory_arena
     in owner:
         for i in 0..<self.dmem_areas.count:
             area: PhysicalMemoryArea = self.dmem_areas[i]
@@ -466,12 +466,12 @@ def MemoryManager_MarkDirectMapped(self: mutable MemoryManager&, phys_addr: PAdd
 
             before_size: u64 = mark_start - area_start
             after_size: u64 = area_end - mark_end
-            MemoryManager_RemoveDmemArea(self.ref[mutable MemoryManager&], i)
+            MemoryManager_RemoveDmemArea((&self).cast[mutable MemoryManager&], i)
             if after_size != 0:
-                MemoryManager_InsertDmemArea(self.ref[mutable MemoryManager&], i, PhysicalMemoryArea(mark_end.uintptr(), after_size, 0, PhysicalMemoryType_Free))
-            MemoryManager_InsertDmemArea(self.ref[mutable MemoryManager&], i, PhysicalMemoryArea(mark_start.uintptr(), size, memory_type, PhysicalMemoryType_Mapped))
+                MemoryManager_InsertDmemArea((&self).cast[mutable MemoryManager&], i, PhysicalMemoryArea(mark_end.uintptr(), after_size, 0, PhysicalMemoryType_Free))
+            MemoryManager_InsertDmemArea((&self).cast[mutable MemoryManager&], i, PhysicalMemoryArea(mark_start.uintptr(), size, memory_type, PhysicalMemoryType_Mapped))
             if before_size != 0:
-                MemoryManager_InsertDmemArea(self.ref[mutable MemoryManager&], i, PhysicalMemoryArea(area_start.uintptr(), before_size, 0, PhysicalMemoryType_Free))
+                MemoryManager_InsertDmemArea((&self).cast[mutable MemoryManager&], i, PhysicalMemoryArea(area_start.uintptr(), before_size, 0, PhysicalMemoryType_Free))
             return true
     return false
 
@@ -490,16 +490,16 @@ def MemoryManager_MapMemory(self: mutable MemoryManager&, out_addr: mutable VAdd
         out_addr <- 0.uintptr()
         return -1
     effective_prot: MemoryProt = MemoryProt_NormalizeCpu(prot)
-    txn: MapTxn = MemoryManager_MapBegin(self.ref[mutable MemoryManager&], virtual_addr, size, effective_prot, vma_type, phys_addr)
+    txn: MapTxn = MemoryManager_MapBegin((&self).cast[mutable MemoryManager&], virtual_addr, size, effective_prot, vma_type, phys_addr)
     mapped: VAddr = txn.mapped
     out_addr <- mapped
     if mapped == 0.uintptr():
-        MemoryManager_MapRollback(self.ref[mutable MemoryManager&], move txn)
+        MemoryManager_MapRollback((&self).cast[mutable MemoryManager&], move txn)
         return -1
     if GuestExec_IsEnabled() and GuestExec_IsSupported() and not GuestExec_MapRegion(mapped, size, effective_prot):
-        MemoryManager_MapRollback(self.ref[mutable MemoryManager&], move txn)
+        MemoryManager_MapRollback((&self).cast[mutable MemoryManager&], move txn)
         return -1
-    MemoryManager_MapCommit(self.ref[mutable MemoryManager&], move txn, vma_type, effective_prot, name)
+    MemoryManager_MapCommit((&self).cast[mutable MemoryManager&], move txn, vma_type, effective_prot, name)
     return 0
 
 # Records the AddressSpace mapping and hands back an affine MapTxn that the
@@ -519,7 +519,7 @@ def MemoryManager_MapCommit(self: mutable MemoryManager&, txn: MapTxn, vma_type:
     m: VAddr = txn.mapped
     sz: u64 = txn.size
     _ = move txn
-    map_owner: mutable Arena& = memory_arena.ref[mutable Arena&]
+    map_owner: mutable Arena& = &memory_arena
     in map_owner:
         self.vma_areas.push(VirtualMemoryArea(m, sz, vma_type, effective_prot, name, 0, false, false))
     # AddBacking fills a MappedMemoryBytes buffer one byte at a time. For the guest's own
@@ -532,7 +532,7 @@ def MemoryManager_MapCommit(self: mutable MemoryManager&, txn: MapTxn, vma_type:
     if vma_type != VMAType_Reserved:
         skip_backing: bool = GuestExec_IsEnabled() and GuestExec_IsSupported() and sz >= MEMORY_NATIVE_ONLY_BACKING_THRESHOLD
         if not skip_backing:
-            MemoryManager_AddBacking(self.ref[mutable MemoryManager&], m, sz)
+            MemoryManager_AddBacking((&self).cast[mutable MemoryManager&], m, sz)
 
 # Consumes the transaction and undoes the AddressSpace mapping (and the native
 # guest-exec map, if any) so no half-mapped state survives a failed map.
@@ -548,16 +548,16 @@ def MemoryManager_MapRollback(self: mutable MemoryManager&, txn: MapTxn) -> void
 def MemoryManager_MapFile(self: mutable MemoryManager&, out_addr: mutable VAddr&, virtual_addr: VAddr, size: u64, prot: MemoryProt, flags: MemoryMapFlags, fd: s32, phys_addr: s64) -> s32:
     _ = flags
     effective_prot: MemoryProt = MemoryProt_NormalizeCpu(prot)
-    txn: MapTxn = MemoryManager_MapFileBegin(self.ref[mutable MemoryManager&], virtual_addr, size, effective_prot, fd, phys_addr)
+    txn: MapTxn = MemoryManager_MapFileBegin((&self).cast[mutable MemoryManager&], virtual_addr, size, effective_prot, fd, phys_addr)
     mapped: VAddr = txn.mapped
     out_addr <- mapped
     if mapped == 0.uintptr():
-        MemoryManager_MapRollback(self.ref[mutable MemoryManager&], move txn)
+        MemoryManager_MapRollback((&self).cast[mutable MemoryManager&], move txn)
         return -1
     if GuestExec_IsEnabled() and GuestExec_IsSupported() and not GuestExec_MapRegion(mapped, size, effective_prot):
-        MemoryManager_MapRollback(self.ref[mutable MemoryManager&], move txn)
+        MemoryManager_MapRollback((&self).cast[mutable MemoryManager&], move txn)
         return -1
-    MemoryManager_MapFileCommit(self.ref[mutable MemoryManager&], move txn, effective_prot, fd)
+    MemoryManager_MapFileCommit((&self).cast[mutable MemoryManager&], move txn, effective_prot, fd)
     return 0
 
 # Records the file-backed AddressSpace mapping and hands back an affine MapTxn
@@ -571,19 +571,19 @@ def MemoryManager_MapFileCommit(self: mutable MemoryManager&, txn: MapTxn, effec
     m: VAddr = txn.mapped
     sz: u64 = txn.size
     _ = move txn
-    file_owner: mutable Arena& = memory_arena.ref[mutable Arena&]
+    file_owner: mutable Arena& = &memory_arena
     in file_owner:
         self.vma_areas.push(VirtualMemoryArea(m, sz, VMAType_File, effective_prot, "file", fd, false, false))
-    MemoryManager_AddBacking(self.ref[mutable MemoryManager&], m, sz)
+    MemoryManager_AddBacking((&self).cast[mutable MemoryManager&], m, sz)
 
 def MemoryManager_PoolDecommit(self: mutable MemoryManager&, virtual_addr: VAddr, size: u64) -> s32:
-    return MemoryManager_UnmapMemory(self.ref[mutable MemoryManager&], virtual_addr, size)
+    return MemoryManager_UnmapMemory((&self).cast[mutable MemoryManager&], virtual_addr, size)
 
 def MemoryManager_UnmapMemory(self: mutable MemoryManager&, virtual_addr: VAddr, size: u64) -> s32:
     if GuestExec_IsEnabled() and GuestExec_IsSupported():
         _ = GuestExec_UnmapRegion(virtual_addr, size)
     AddressSpace_Unmap(self.address_space, virtual_addr, size)
-    MemoryManager_RemoveBacking(self.ref[mutable MemoryManager&], virtual_addr, size)
+    MemoryManager_RemoveBacking((&self).cast[mutable MemoryManager&], virtual_addr, size)
     for i in 0..<self.vma_areas.count:
         if self.vma_areas[i].base == virtual_addr and self.vma_areas[i].size == size:
             j: mutable usize = i
@@ -676,7 +676,7 @@ def MemoryManager_AddBacking(self: mutable MemoryManager&, base: VAddr, size: u6
     if size == 0:
         return
     bytes: mutable darray[u8] = []
-    backing_owner: mutable Arena& = memory_arena.ref[mutable Arena&]
+    backing_owner: mutable Arena& = &memory_arena
     in backing_owner:
         while bytes.count < size.usize():
             bytes.push(0)
@@ -717,7 +717,7 @@ def MemoryManager_WriteU8(self: mutable MemoryManager&, addr: VAddr, value: u8) 
         if index < 0:
             return false
         if GuestExec_IsEnabled() and GuestExec_IsSupported():
-            if not GuestExec_WriteBytes(addr, value.ref[u8&].cast[void&?], 1):
+            if not GuestExec_WriteBytes(addr, (&value).cast[void&?], 1):
                 return false
             if not MemoryManager_RestoreNativeProtectionAfterWrite(self, addr, 1.u64()):
                 return false
@@ -804,7 +804,7 @@ def MemoryManager_SyncNativeBackingToGuestExec(self: mutable MemoryManager&) -> 
             entry: MappedMemoryBytes = self.mapped_bytes[i]
             if entry.size == 0 or entry.bytes.count == 0:
                 continue
-            if not GuestExec_WriteBytes(entry.base, entry.bytes[0].ref[u8&].cast[void&?], entry.size):
+            if not GuestExec_WriteBytes(entry.base, (&entry.bytes[0]).cast[void&?], entry.size):
                 return false
             if not MemoryManager_RestoreNativeProtectionAfterWrite(self, entry.base, entry.size):
                 return false

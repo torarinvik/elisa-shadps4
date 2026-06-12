@@ -1,15 +1,15 @@
 # Emulator C++ Parity Gate
 
-Passed: 27
-Failed: 0
+Passed: 20
+Failed: 4
 
-Summary score: 32/32
+Summary score: 24/29
 Per-subsystem counts:
-- External-C-ABI: 11
-- Native-Elisa: 248
+- External-C-ABI: 4
+- Native-Elisa: 255
 - Stub-Parity: 30
 Parity gate counts (native/bridge/fallback/unresolved):
-- native: 248
+- native: 255
 - bridge: 0
 - fallback: 0
 - unresolved: 0
@@ -23,7 +23,7 @@ CUSA07399 stage:
 - handoff: PASS
 - execute stage: guarded-entry
 - first boundary: PASS
-- synthetic renderer smoke: PASS
+- synthetic renderer smoke: FAIL
 - real CUSA first frame: PENDING
 - first frame ladder: none
 - host note: arm64 macOS probe-only
@@ -31,20 +31,10 @@ CUSA07399 stage:
 - guest exec host mode: macOS
 - guest exec supported native execution: 0
 - guest exec x64 subprocess available: 1
-- guest exec x64 subprocess smoke: PASS
-- CUSA07399 x64 real execution lane: ok
+- guest exec x64 subprocess smoke: FAIL
+- CUSA07399 x64 real execution lane: failed
 - CUSA07399 x64 execution mode: cross-emit-rosetta-x86_64
-- CUSA07399 x64 boundary status: -10
-- CUSA07399 x64 last pc: 0
-- CUSA07399 x64 last sp: 12987210056
-- CUSA07399 x64 last bp: 12987210208
-- CUSA07399 x64 last rdi: 2
-- CUSA07399 x64 expected EntryParams: 12987210712
-- CUSA07399 x64 expected stack words: 2, 0
-- CUSA07399 x64 entry stack words: 2, 0
-- CUSA07399 x64 fault words: 0, 0
-- CUSA07399 x64 signal stack words: 0, 0
-- CUSA07399 x64 diagnostic: true-signal-pc-is-null,guest-entry-rdi-not-entryparams,last-pc-not-in-native-region,last-hle-recorded-before-crash
+- CUSA07399 x64 execution reason: target-failed
 - guest exec probe only: 1
 - guest exec started: 1
 - guest exec entry reached: 1
@@ -61,8 +51,8 @@ CUSA07399 stage:
 - guest exec fault words: 0x0, 0x0
 - guest exec signal stack words: 0x0, 0x0
 - guest exec last signal: 0
-- guest exec last module: libc
-- guest exec last symbol: RpQJJVKTiFM
+- guest exec last module: libSceNpToolkit
+- guest exec last symbol: module_start
 - first boundary blocker: probe-only host (arm64 macOS)
 - first frame gate signals:
   - shader_translate_attempted=0
@@ -74,9 +64,9 @@ CUSA07399 stage:
   - VIDEO_STAGE_first_frame_candidate=0
 CUSA07399 artifact metrics:
 - CUSA module count: 4
-- imports total: 1152
-- native HLE count: 841
-- PRX export count: 311
+- imports total: 1153
+- native HLE count: 849
+- PRX export count: 304
 - AeroLib fallback count: 0
 - unresolved count: 0
 - malformed count: 0
@@ -99,7 +89,7 @@ Real CUSA runtime service signals:
 - audio input silent state: 0
 - audio input closed: 0
 - current execution stage: 4 (guarded-entry)
-- last HLE call: module=libc symbol=RpQJJVKTiFM
+- last HLE call: module=libSceNpToolkit symbol=module_start
 - current video/audio/input stage: graphics=0 audio-input-service=0
 - current save/dialog/misc fallback stage: save-dialog-misc=0
 Save/Dialog/Misc parity test signals:
@@ -112,9 +102,16 @@ Save/Dialog/Misc parity test signals:
 Top 50 fallback symbols:
 - none
 Top blockers:
-- none
+- No unclassified project-owned C++ modules violated: 1 Missing units
+- Gate step failed: parity workqueue summary
+- Gate step failed: guest exec ABI smoke x64
+- Gate step failed: CUSA07399 x64 real execution lane
+- Gate step failed: elisacore test emulator-renderer-first-frame-smoke
 Failing scenario ids:
-- none
+- emulator_guest_exec_guarded_entry_trap_reports_entry_params_context
+- emulator_real_game_boot_smoke_probes_native_guest_exec_handoff
+- emulator_real_game_boot_smoke_guarded_game_entry_reports_host_status
+- emulator_renderer_first_frame_synthetic_ladder_smoke
 
 ## Agent Work Queues
 ### kernel_fallbacks
@@ -139,22 +136,19 @@ Failing scenario ids:
 - PASS: parity ABI guard
 - PASS: emulator ABI smoke
 - PASS: strict native ABI contracts
-- PASS: parity workqueue summary
+- FAIL: parity workqueue summary
 - PASS: bridge syntax
 - PASS: elisacore test core-libraries-audio-parity-tests
 - PASS: elisacore test core-libraries-np-parity-tests
-- PASS: native guest_exec_runtime warnings
-- PASS: guest exec x64 subprocess smoke
-- PASS: guest exec ABI smoke x64
-- PASS: CUSA07399 x64 real execution lane
+- FAIL: guest exec ABI smoke x64
+- FAIL: CUSA07399 x64 real execution lane
 - PASS: emulator ABI smoke x64
-- PASS: native kernel_threads_runtime warnings
 - PASS: elisacore test emulator-core-boot-smoke
 - PASS: elisacore test real-self-loader-tests
 - PASS: elisacore test emulator-real-game-boot-smoke
 - PASS: elisacore test emulator-runtime-services-smoke
 - PASS: elisacore test emulator-guest-exec-runtime-tests
-- PASS: elisacore test emulator-renderer-first-frame-smoke
+- FAIL: elisacore test emulator-renderer-first-frame-smoke
 - PASS: elisacore run elisa_tests/core_libraries_save_data_parity_tests.elisa
 - PASS: elisacore run elisa_tests/core_libraries_save_data_dialog_pure_tests.elisa
 - PASS: elisacore run elisa_tests/core_libraries_web_browser_dialog_pure_tests.elisa

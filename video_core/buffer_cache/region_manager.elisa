@@ -30,10 +30,10 @@ struct RegionManager:
 def RegionManager_New(cpu_addr: u64) -> RegionManager:
     out: mutable RegionManager = zeroed
     out.cpu_addr <- cpu_addr
-    RegionBits_Fill(out.cpu.ref[mutable RegionBits&])
-    RegionBits_Clear(out.gpu.ref[mutable RegionBits&])
-    RegionBits_Fill(out.writeable.ref[mutable RegionBits&])
-    RegionBits_Fill(out.readable.ref[mutable RegionBits&])
+    RegionBits_Fill(&out.cpu)
+    RegionBits_Clear(&out.gpu)
+    RegionBits_Fill(&out.writeable)
+    RegionBits_Fill(&out.readable)
     return out
 
 def RegionManager_SetCpuAddress(self: mutable RegionManager&, new_cpu_addr: u64) -> void:
@@ -49,8 +49,8 @@ def RegionManager_SanitizeAddress(address: i64) -> u64:
 
 def RegionManager_GetRegionBits(self: mutable RegionManager&, region_type: u32) -> mutable RegionBits&:
     if region_type == REGION_TYPE_GPU:
-        return self.gpu.ref[mutable RegionBits&]
-    return self.cpu.ref[mutable RegionBits&]
+        return &self.gpu
+    return &self.cpu
 
 def RegionManager_GetRegionBitsConst(self: RegionManager&, region_type: u32) -> RegionBits:
     if region_type == REGION_TYPE_GPU:
@@ -66,7 +66,7 @@ def RegionManager_ChangeRegionState(self: mutable RegionManager&, region_type: u
     end_page: u64 = DivCeil(end_byte.usize(), TRACKER_BYTES_PER_PAGE.usize()).u64()
     if start_page >= NUM_PAGES_PER_REGION or end_page <= start_page:
         return
-    bits: mutable RegionBits& = RegionManager_GetRegionBits(self.ref[mutable RegionManager&], region_type)
+    bits: mutable RegionBits& = RegionManager_GetRegionBits((&self).cast[mutable RegionManager&], region_type)
     if enable:
         RegionBits_SetRange(bits, start_page, end_page)
     else:
@@ -89,14 +89,14 @@ def RegionManager_IsRegionModified(self: RegionManager&, region_type: u32, offse
     bits: RegionBits = RegionManager_GetRegionBitsConst(self, region_type)
     page: mutable u64 = start_page
     while page < end_page and page < NUM_PAGES_PER_REGION:
-        if RegionBits_IsSet(bits.ref[RegionBits&], page):
+        if RegionBits_IsSet(&bits, page):
             return true
         page <- page + 1u64
     return false
 
 def RegionManager_ForEachModifiedRange(self: mutable RegionManager&, region_type: u32, clear: bool, query_cpu_addr: u64, size: i64, out: mutable RegionRangeList&) -> void:
     can Memory.Allocate, Abort.Panic:
-        RegionRangeList_Clear(out.ref[mutable RegionRangeList&])
+        RegionRangeList_Clear((&out).cast[mutable RegionRangeList&])
         if size <= 0:
             return
         offset: i64 = (query_cpu_addr.cast[i64]) - (self.cpu_addr.cast[i64])
@@ -104,12 +104,12 @@ def RegionManager_ForEachModifiedRange(self: mutable RegionManager&, region_type
         end_page: u64 = DivCeil((RegionManager_SanitizeAddress(offset + size)).usize(), TRACKER_BYTES_PER_PAGE.usize()).u64()
         if start_page >= NUM_PAGES_PER_REGION or end_page <= start_page:
             return
-        bits: mutable RegionBits& = RegionManager_GetRegionBits(self.ref[mutable RegionManager&], region_type)
+        bits: mutable RegionBits& = RegionManager_GetRegionBits((&self).cast[mutable RegionManager&], region_type)
         current_begin_page: mutable u64 = 0u64
         in_run: mutable bool = false
         page: mutable u64 = start_page
         while page < end_page and page < NUM_PAGES_PER_REGION:
-            is_set: bool = RegionBits_IsSet(bits.ref[RegionBits&], page)
+            is_set: bool = RegionBits_IsSet((&bits).cast[RegionBits&], page)
             if is_set and not in_run:
                 in_run <- true
                 current_begin_page <- page

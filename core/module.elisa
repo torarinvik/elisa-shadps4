@@ -372,7 +372,7 @@ def Module_CallGuestInitEntry(entry_addr: VAddr, args: u64, argp: void&?, param:
                         guest_selector <- TLS_PrepareTcbBase((!TLS_PrimaryTcbBase()).cast[void&?])
                     result <- TLS_CallGuestInitEntryOnStackWithPreparedSegment(fn, args, argp, param, stack_top, guest_selector, host_selector)
                 else:
-                    result <- TLS_CallGuestInitEntry(guard.ref[FsGuard&], fn, args, argp, param)
+                    result <- TLS_CallGuestInitEntry((&guard).cast[FsGuard&], fn, args, argp, param)
             ge_emergency_mark(GE_EV_MODULE_INIT_ENTRY_AFTER_CALL, entry_addr, result.u64().uintptr(), argp.uintptr(), param.uintptr())
             TLS_RestoreHostSegment(move guard)
             ge_emergency_mark(GE_EV_MODULE_INIT_ENTRY_AFTER_RESTORE, entry_addr, result.u64().uintptr(), argp.uintptr(), param.uintptr())
@@ -398,7 +398,7 @@ def Module_CallGuestInitArrayEntry(entry_addr: VAddr) -> void can[Unsafe.Segment
                         guest_selector <- TLS_PrepareTcbBase((!TLS_PrimaryTcbBase()).cast[void&?])
                     _ = TLS_CallGuestInitEntryOnStackWithPreparedSegment(fn, 0u64, null, null, stack_top, guest_selector, host_selector)
                 else:
-                    TLS_CallGuestInitArrayEntry(guard.ref[FsGuard&], fn)
+                    TLS_CallGuestInitArrayEntry((&guard).cast[FsGuard&], fn)
             ge_emergency_mark(GE_EV_MODULE_INIT_ARRAY_AFTER_CALL, entry_addr, 0.uintptr(), 0.uintptr(), 0.uintptr())
             TLS_RestoreHostSegment(move guard)
             ge_emergency_mark(GE_EV_MODULE_INIT_ARRAY_AFTER_RESTORE, entry_addr, 0.uintptr(), 0.uintptr(), 0.uintptr())
@@ -481,7 +481,7 @@ def Module_LoadModuleToMemory(self: mutable Module&, memory: mutable MemoryManag
         # The host-file loader either succeeds (ok), reports "not a host file"
         # (NotHostFile/EmptyPath -> fall through to the boot-ELF fallback), or fails
         # mid-load on a real error (MapFailed/ProtectFailed/… -> the module is invalid).
-        catch Module_LoadElfFromHostFile(self.ref[mutable Module&], memory):
+        catch Module_LoadElfFromHostFile((&self).cast[mutable Module&], memory):
             n:
                 return
             ModuleError.NotHostFile:
@@ -507,7 +507,7 @@ def Module_LoadModuleToMemory(self: mutable Module&, memory: mutable MemoryManag
             error e:
                 self.is_valid <- false
                 return
-        Module_LoadBootElfDynamicImports(self.ref[mutable Module&])
+        Module_LoadBootElfDynamicImports((&self).cast[mutable Module&])
 
 def Module_LoadElfFromHostFile(self: mutable Module&, memory: mutable MemoryManager&) -> void error[ModuleError, ElfError]:
     can Memory.Allocate, Abort.Panic:
@@ -520,9 +520,9 @@ def Module_LoadElfFromHostFile(self: mutable Module&, memory: mutable MemoryMana
         # ElfError]) straight up to the caller — no manual status threading.
         try Elf_Open(elf, self.host_file)
         self.entry_virtual_addr <- Elf_GetElfEntry(elf).uintptr()
-        try Module_LoadElfSegments(self.ref[mutable Module&], elf, memory)
-        Module_LoadDynamicInfo(self.ref[mutable Module&])
-        Module_LoadSymbols(self.ref[mutable Module&])
+        try Module_LoadElfSegments((&self).cast[mutable Module&], elf, memory)
+        Module_LoadDynamicInfo((&self).cast[mutable Module&])
+        Module_LoadSymbols((&self).cast[mutable Module&])
         if static_strlen(self.dynamic_info.filename) == 0:
             self.dynamic_info.filename <- self.host_file
         return
@@ -542,7 +542,7 @@ def Module_IsLikelyHostFile(path: static u8&) -> bool:
 def Module_LoadElfSegments(self: mutable Module&, elf: mutable Elf&, memory: mutable MemoryManager&) -> void error[ModuleError, ElfError]:
     can Memory.Allocate:
         loaded_dynamic: mutable bool = false
-        Module_PrepareLoadImage(self.ref[mutable Module&], elf)
+        Module_PrepareLoadImage((&self).cast[mutable Module&], elf)
         if self.aligned_base_size > 0:
             out_addr: mutable VAddr = self.base_virtual_addr
             if MemoryManager_MapMemory(memory, out_addr, self.base_virtual_addr, self.aligned_base_size + MODULE_TRAMPOLINE_SIZE, MemoryProt_NoAccess, MemoryMapFlags_NoFlags, VMAType_Reserved, self.name, false, 0.uintptr(), MODULE_BLOCK_ALIGN) != 0:
@@ -556,25 +556,25 @@ def Module_LoadElfSegments(self: mutable Module&, elf: mutable Elf&, memory: mut
         for i in 0..<elf.elf_header_value.e_phnum.usize():
             phdr: elf_program_header& = Elf_GetProgramHeader(elf, i)
             if phdr.p_type == PT_LOAD and phdr.p_memsz > 0:
-                try Module_MapImageSegment(self.ref[mutable Module&], memory, phdr, true)
-                try Module_LoadImageSegment(self.ref[mutable Module&], elf, memory, phdr)
+                try Module_MapImageSegment((&self).cast[mutable Module&], memory, phdr, true)
+                try Module_LoadImageSegment((&self).cast[mutable Module&], elf, memory, phdr)
             if phdr.p_type == PT_SCE_RELRO and phdr.p_memsz > 0:
                 # RELRO carries initialized file data (e.g. the sceLibcParam header:
                 # Size/version constants alongside relocated pointers). Map it writable
                 # and copy the file bytes like PT_LOAD; the protect pass below restores
                 # read-only. Without the copy, non-relocated constants stay zero and the
                 # guest's libc skips application-heap setup.
-                try Module_MapImageSegment(self.ref[mutable Module&], memory, phdr, true)
+                try Module_MapImageSegment((&self).cast[mutable Module&], memory, phdr, true)
                 if phdr.p_filesz > 0:
-                    try Module_LoadImageSegment(self.ref[mutable Module&], elf, memory, phdr)
+                    try Module_LoadImageSegment((&self).cast[mutable Module&], elf, memory, phdr)
             if phdr.p_type == PT_DYNAMIC and phdr.p_filesz > 0:
-                dyn_owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
+                dyn_owner: mutable Arena& = &module_metadata_arena
                 # Fatal: the dynamic segment drives relocation/imports. `try` widens
                 # ElfError into this function's combined error set.
                 try Elf_LoadSegmentBytes(elf, self.dynamic_segment, phdr.p_offset, phdr.p_filesz.usize(), dyn_owner)
                 loaded_dynamic <- true
             if phdr.p_type == PT_SCE_DYNLIBDATA and phdr.p_filesz > 0:
-                data_owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
+                data_owner: mutable Arena& = &module_metadata_arena
                 # Best-effort: a missing dynlibdata table is tolerated. `match ... as`
                 # consumes the error union with an explicit ok/else split.
                 match Elf_LoadSegmentBytes(elf, self.dynamic_data, phdr.p_offset, phdr.p_filesz.usize(), data_owner) as ok:
@@ -596,11 +596,11 @@ def Module_LoadElfSegments(self: mutable Module&, elf: mutable Elf&, memory: mut
         # segment has been copied into self.image. shadPS4 does this inline against guest
         # memory; that backing is not stable mid-load here, so we decode from self.image
         # (the loaded-segment byte copy) while keeping shadPS4's virtual-address math.
-        Module_DecodeEhFrame(self.ref[mutable Module&])
+        Module_DecodeEhFrame((&self).cast[mutable Module&])
         for i in 0..<elf.elf_header_value.e_phnum.usize():
             phdr: elf_program_header& = Elf_GetProgramHeader(elf, i)
             if (phdr.p_type == PT_LOAD or phdr.p_type == PT_SCE_RELRO) and phdr.p_memsz > 0:
-                try Module_ProtectImageSegment(self.ref[mutable Module&], memory, phdr)
+                try Module_ProtectImageSegment((&self).cast[mutable Module&], memory, phdr)
         if not loaded_dynamic:
             raise ModuleError.DynamicMissing
         return
@@ -621,7 +621,7 @@ def Module_DecodeEhFrame(self: mutable Module&) -> void:
     info: mutable EHHeaderInfo = zeroed
     # Any decode failure (too small / bad version / unsupported encoding) just means
     # "no usable unwind info" — leave eh_frame_addr at 0 and carry on.
-    catch DecodeEHHdrFromImage(self.image, img_off, hdr_size, virt_base, info.ref[mutable EHHeaderInfo&]):
+    catch DecodeEHHdrFromImage(self.image, img_off, hdr_size, virt_base, &info):
         n:
             true
         error e:
@@ -739,7 +739,7 @@ def Module_LoadImageSegment(self: mutable Module&, elf: mutable Elf&, memory: mu
         seg_arena: Arena = zeroed
         segment: mutable darray[u8] = []
         # `try` widens the loader's ElfError into this function's combined error set.
-        try Elf_LoadSegmentBytes(elf, segment, phdr.p_offset, phdr.p_filesz.usize(), seg_arena.ref[mutable Arena&])
+        try Elf_LoadSegmentBytes(elf, segment, phdr.p_offset, phdr.p_filesz.usize(), (&seg_arena).cast[mutable Arena&])
         for i in 0..<segment.count:
             self.image[(offset.usize() + i)] <- segment[i]
         if segment.count > 0:
@@ -751,7 +751,7 @@ def Module_ResizeBytes(out: mutable darray[u8]&, size: usize) -> void:
     # Grows persistent module buffers (e.g. self.image); allocate the backing
     # from the persistent metadata arena rather than a per-byte transient arena
     # that would free the buffer on return.
-    owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
+    owner: mutable Arena& = &module_metadata_arena
     in owner:
         while out.count < size:
             out.push(0)
@@ -873,7 +873,7 @@ def Module_ReadImageU64(self: Module&, addr: u64) -> u64:
 
 def Module_ReadDynString(self: Module&, offset: u32) -> static u8&:
     can Memory.Allocate, Abort.Panic:
-        return Module_CopyDynDataString(self.ref[Module&], offset.usize())
+        return Module_CopyDynDataString((&self).cast[Module&], offset.usize())
 
 def Module_ReadDynStringAtTable(self: Module&, str_offset: u64) -> static u8&:
     can Memory.Allocate, Abort.Panic:
@@ -893,14 +893,14 @@ def Module_SymbolNameAndNidAt(self: Module&, offset: u32, out_name: mutable stat
         # Scan within bounds-safe views of the segment: indexing a view is proven in
         # range by its length, so no unchecked indexing and no over-read past the
         # segment (the bug this guards against).
-        seg: dview[u8] = self.dynamic_data[base:self.dynamic_data.count]
+        seg: view[u8] = self.dynamic_data[base:self.dynamic_data.count]
         name_len: mutable usize = 0
         while name_len < seg.len and seg[name_len] != 0:
             name_len <- name_len + 1
         if name_len == 0:
             return false
-        out_name <- Module_CopyDynDataSlice(self.ref[Module&], base, base + name_len)
-        name_seg: dview[u8] = seg[0:name_len]
+        out_name <- Module_CopyDynDataSlice((&self).cast[Module&], base, base + name_len)
+        name_seg: view[u8] = seg[0:name_len]
         hash_index: mutable usize = name_len
         i: mutable usize = 0
         while i < name_seg.len:
@@ -911,7 +911,7 @@ def Module_SymbolNameAndNidAt(self: Module&, offset: u32, out_name: mutable stat
                 i <- i + 1
         if hash_index == 0:
             return false
-        out_nid <- Module_CopyDynDataSlice(self.ref[Module&], base, base + hash_index)
+        out_nid <- Module_CopyDynDataSlice((&self).cast[Module&], base, base + hash_index)
         return static_strlen(out_nid) > 0
 
 # input is taken as cstr (length-carrying, sliceable) so the slice is a
@@ -923,13 +923,11 @@ def Module_CopySlice(input: cstr, start: usize, end_exclusive: usize) -> static 
     out: mutable dstr = []
     can Memory.Allocate, Abort.Panic:
         trusted Unsafe.MutableGlobal:
-            owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
-            in owner:
-                out <- clone[dstr](seg)
-                out.push(0)
+            out <- clone[dstr](seg)
+            out.push(0)
     # Bytes live in the persistent metadata arena; out is non-empty here.
     trusted Unsafe.PointerCast, Unsafe.UncheckedIndex:
-        return out[0].ref[static u8&]
+        return (&out[0]).cast[static u8&]
 
 # Copy dynamic-data bytes [start, end_exclusive) into a fresh heap-owned,
 # NUL-terminated string. Reads are bounded by the buffer (the caller passes
@@ -945,18 +943,16 @@ def Module_CopyDynDataSlice(self: Module&, start: usize, end_exclusive: usize) -
     # persistent metadata arena as an owned, NUL-terminated string. No malloc and
     # no unchecked indexing: the copy is the language's clone, and the view never
     # reads past the buffer.
-    seg: dview[u8] = self.dynamic_data[start:end_bounded]
+    seg: view[u8] = self.dynamic_data[start:end_bounded]
     out: mutable dstr = []
     can Memory.Allocate, Abort.Panic:
         trusted Unsafe.MutableGlobal:
-            owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
-            in owner:
-                out <- clone[dstr](seg)
-                out.push(0)
+            out <- clone[dstr](seg)
+            out.push(0)
     # The bytes live in the persistent metadata arena, valid for the module's
     # lifetime; the cast asserts that managed lifetime. out is non-empty here.
     trusted Unsafe.PointerCast, Unsafe.UncheckedIndex:
-        return out[0].ref[static u8&]
+        return (&out[0]).cast[static u8&]
 
 # Bounded NUL-terminated copy of the dynamic-data string starting at offset,
 # scanning only within the segment.
@@ -967,7 +963,7 @@ def Module_CopyDynDataString(self: Module&, offset: usize) -> static u8&:
         end: mutable usize = offset
         while end < self.dynamic_data.count and self.dynamic_data[end] != 0:
             end <- end + 1
-        return Module_CopyDynDataSlice(self.ref[Module&], offset, end)
+        return Module_CopyDynDataSlice((&self).cast[Module&], offset, end)
 
 # raw_symbol is taken as cstr so it can be scanned through a bounds-safe view
 # (no unchecked indexing past the string); callers passing static u8& coerce.
@@ -1035,20 +1031,18 @@ def Module_EncodeId(value: u16) -> static u8&:
     out: mutable dstr = []
     can Memory.Allocate, Abort.Panic:
         trusted Unsafe.MutableGlobal:
-            owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
-            in owner:
-                if value.u64() < 0x40:
-                    out.push(codes[value.usize()])
-                elif value.u64() < 0x1000:
-                    out.push(codes[((value >> 6) & 0x3f).usize()])
-                    out.push(codes[(value & 0x3f).usize()])
-                else:
-                    out.push(codes[((value >> 12) & 0x3f).usize()])
-                    out.push(codes[((value >> 6) & 0x3f).usize()])
-                    out.push(codes[(value & 0x3f).usize()])
-                out.push(0)
+            if value.u64() < 0x40:
+                out.push(codes[value.usize()])
+            elif value.u64() < 0x1000:
+                out.push(codes[((value >> 6) & 0x3f).usize()])
+                out.push(codes[(value & 0x3f).usize()])
+            else:
+                out.push(codes[((value >> 12) & 0x3f).usize()])
+                out.push(codes[((value >> 6) & 0x3f).usize()])
+                out.push(codes[(value & 0x3f).usize()])
+            out.push(0)
     trusted Unsafe.PointerCast, Unsafe.UncheckedIndex:
-        return out[0].ref[static u8&]
+        return (&out[0]).cast[static u8&]
 
 def Module_SymbolNidAt(self: Module&, symbol_name: static u8&) -> static u8&:
     known: static u8& = TinyBootElf_NidForSymbol(symbol_name)
@@ -1078,9 +1072,9 @@ def Module_LoadBootElfDynamicImports(self: mutable Module&) -> void:
             if i == 4:
                 name_offset <- BOOT_EBOOT_ELF_STR_AUDIO_IN_INIT
             symbol_name: static u8& = TinyBootElf_DynstrAt(name_offset)
-            nid: static u8& = Module_SymbolNidAt(self.ref[Module&], symbol_name)
+            nid: static u8& = Module_SymbolNidAt((&self).cast[Module&], symbol_name)
             if static_strlen(symbol_name) > 0 and static_strlen(nid) > 0:
-                Module_AddImportSymbol(self.ref[mutable Module&], nid, symbol_name, IMPORT_SYMBOL_TYPE_UNKNOWN)
+                Module_AddImportSymbol((&self).cast[mutable Module&], nid, symbol_name, IMPORT_SYMBOL_TYPE_UNKNOWN)
             i <- i + 1
 
 def Module_LoadDynamicInfo(self: mutable Module&) -> void:
@@ -1142,19 +1136,19 @@ def Module_LoadDynamicInfo(self: mutable Module&) -> void:
             if dyn.d_tag == DT_NEEDED:
                 name: static u8& = Module_ReadDynStringAtTable(self, dyn.d_un)
                 enc: static u8& = ""
-                owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
+                owner: mutable Arena& = &module_metadata_arena
                 in owner:
                     self.dynamic_info.import_modules.push(ModuleInfo(name, dyn.d_un, enc))
             if dyn.d_tag == DT_SCE_NEEDED_MODULE:
                 name: static u8& = Module_ReadDynStringAtTable(self, Module_DynamicNameOffset(dyn.d_un).u64())
                 enc: static u8& = Module_EncodeId(Module_DynamicModuleId(dyn.d_un))
-                owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
+                owner: mutable Arena& = &module_metadata_arena
                 in owner:
                     self.dynamic_info.import_modules.push(ModuleInfo(name, dyn.d_un, enc))
             if dyn.d_tag == DT_SCE_MODULE_INFO:
                 name: static u8& = Module_ReadDynStringAtTable(self, Module_DynamicNameOffset(dyn.d_un).u64())
                 enc: static u8& = Module_EncodeId(Module_DynamicModuleId(dyn.d_un))
-                owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
+                owner: mutable Arena& = &module_metadata_arena
                 in owner:
                     self.dynamic_info.export_modules.push(ModuleInfo(name, dyn.d_un, enc))
                 if static_strlen(name) > 0:
@@ -1163,13 +1157,13 @@ def Module_LoadDynamicInfo(self: mutable Module&) -> void:
             if dyn.d_tag == DT_SCE_IMPORT_LIB:
                 name: static u8& = Module_ReadDynStringAtTable(self, Module_DynamicNameOffset(dyn.d_un).u64())
                 enc: static u8& = Module_EncodeId(Module_DynamicLibraryId(dyn.d_un))
-                owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
+                owner: mutable Arena& = &module_metadata_arena
                 in owner:
                     self.dynamic_info.import_libs.push(LibraryInfo(name, dyn.d_un, enc))
             if dyn.d_tag == DT_SCE_EXPORT_LIB:
                 name: static u8& = Module_ReadDynStringAtTable(self, Module_DynamicNameOffset(dyn.d_un).u64())
                 enc: static u8& = Module_EncodeId(Module_DynamicLibraryId(dyn.d_un))
-                owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
+                owner: mutable Arena& = &module_metadata_arena
                 in owner:
                     self.dynamic_info.export_libs.push(LibraryInfo(name, dyn.d_un, enc))
         _ = found_null
@@ -1194,8 +1188,8 @@ def Module_LoadSymbols(self: mutable Module&) -> void:
                 name_offset: u32 = (self.dynamic_info.str_table_offset + sym.st_name.u64()).u32()
                 symbol_name: mutable static u8& = ""
                 nid: mutable static u8& = ""
-                if Module_SymbolNameAndNidAt(self, name_offset, symbol_name.ref[mutable static u8&], nid.ref[mutable static u8&]):
-                    Module_AddImportSymbol(self.ref[mutable Module&], nid, symbol_name, Module_ImportSymbolTypeFromElfType(typ))
+                if Module_SymbolNameAndNidAt(self, name_offset, (&symbol_name).cast[mutable static u8&], (&nid).cast[mutable static u8&]):
+                    Module_AddImportSymbol((&self).cast[mutable Module&], nid, symbol_name, Module_ImportSymbolTypeFromElfType(typ))
             sym_offset <- sym_offset + entry_size
 
 def Module_GetSymbolNameByIndex(self: mutable Module&, symbol_index: u32) -> static u8&:
@@ -1211,7 +1205,7 @@ def Module_GetSymbolNameByIndex(self: mutable Module&, symbol_index: u32) -> sta
             return ""
         symbol_name: mutable static u8& = ""
         nid: mutable static u8& = ""
-        if Module_SymbolNameAndNidAt(self.ref[Module&], (self.dynamic_info.str_table_offset + name_offset.u64()).u32(), symbol_name.ref[mutable static u8&], nid.ref[mutable static u8&]):
+        if Module_SymbolNameAndNidAt((&self).cast[Module&], (self.dynamic_info.str_table_offset + name_offset.u64()).u32(), (&symbol_name).cast[mutable static u8&], (&nid).cast[mutable static u8&]):
             return nid
         return ""
 
@@ -1284,7 +1278,7 @@ def Module_BuildExportSymbolIndex(self: mutable Module&) -> void:
         qualifying: mutable u64 = 0
         scan_off: mutable u64 = self.dynamic_info.symbol_table_offset
         while scan_off + size_of(elf_symbol).u64() <= sym_end and scan_off + size_of(elf_symbol).u64() <= self.dynamic_data.count.u64():
-            sym: elf_symbol = Module_ReadSymbolAt(self.ref[Module&], scan_off.usize())
+            sym: elf_symbol = Module_ReadSymbolAt((&self).cast[Module&], scan_off.usize())
             bind: u8 = ElfSymbol_GetBind(sym)
             typ: u8 = ElfSymbol_GetType(sym)
             defined: bool = sym.st_shndx != ELF_SHN_UNDEF
@@ -1299,7 +1293,7 @@ def Module_BuildExportSymbolIndex(self: mutable Module&) -> void:
         while capacity < (qualifying * 4u64):
             capacity <- capacity * 2u64
         mask: u64 = capacity - 1u64
-        index_owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
+        index_owner: mutable Arena& = &module_metadata_arena
         in index_owner:
             slot_i: mutable u64 = 0
             while slot_i < capacity:
@@ -1307,7 +1301,7 @@ def Module_BuildExportSymbolIndex(self: mutable Module&) -> void:
                 slot_i <- slot_i + 1
             sym_offset: mutable u64 = self.dynamic_info.symbol_table_offset
             while sym_offset + size_of(elf_symbol).u64() <= sym_end and sym_offset + size_of(elf_symbol).u64() <= self.dynamic_data.count.u64():
-                sym: elf_symbol = Module_ReadSymbolAt(self.ref[Module&], sym_offset.usize())
+                sym: elf_symbol = Module_ReadSymbolAt((&self).cast[Module&], sym_offset.usize())
                 bind: u8 = ElfSymbol_GetBind(sym)
                 typ: u8 = ElfSymbol_GetType(sym)
                 defined: bool = sym.st_shndx != ELF_SHN_UNDEF
@@ -1316,9 +1310,9 @@ def Module_BuildExportSymbolIndex(self: mutable Module&) -> void:
                 if defined and supported_bind and supported_type and sym.st_name != 0:
                     symbol_name: mutable static u8& = ""
                     nid: mutable static u8& = ""
-                    _ = Module_SymbolNameAndNidAt(self.ref[Module&], (self.dynamic_info.str_table_offset + sym.st_name.u64()).u32(), symbol_name.ref[mutable static u8&], nid.ref[mutable static u8&])
-                    Module_ExportIndexInsert(self.ref[mutable Module&], nid, sym.st_value, mask)
-                    Module_ExportIndexInsert(self.ref[mutable Module&], symbol_name, sym.st_value, mask)
+                    _ = Module_SymbolNameAndNidAt((&self).cast[Module&], (self.dynamic_info.str_table_offset + sym.st_name.u64()).u32(), (&symbol_name).cast[mutable static u8&], (&nid).cast[mutable static u8&])
+                    Module_ExportIndexInsert((&self).cast[mutable Module&], nid, sym.st_value, mask)
+                    Module_ExportIndexInsert((&self).cast[mutable Module&], symbol_name, sym.st_value, mask)
                 sym_offset <- sym_offset + entry_size
 
 def Module_FindDefinedSymbolAddress(self: mutable Module&, name: static u8&, out_virtual_address: mutable u64&) -> bool:
@@ -1328,14 +1322,14 @@ def Module_FindDefinedSymbolAddress(self: mutable Module&, name: static u8&, out
             return false
         if self.dynamic_info.symbol_table_offset == 0 or self.dynamic_info.symbol_table_total_size == 0:
             return false
-        Module_BuildExportSymbolIndex(self.ref[mutable Module&])
+        Module_BuildExportSymbolIndex((&self).cast[mutable Module&])
         if self.export_index.count == 0:
             return false
         mask: u64 = self.export_index.count.u64() - 1u64
         slot: mutable u64 = Module_CstrHash(name) & mask
         probes: mutable u64 = 0
         while probes <= mask:
-            entry: ModuleExportSlot& = self.export_index[slot.usize()].ref[ModuleExportSlot&]
+            entry: ModuleExportSlot& = &self.export_index[slot.usize()]
             if static_strlen(entry.key) == 0:
                 return false
             if streq(entry.key, name) == 1:
@@ -1383,7 +1377,7 @@ def Module_FindDefinedQualifiedSymbolAddress(self: Module&, nid: static u8&, lib
                 parsed_nid: mutable static u8& = ""
                 parsed_library_id: mutable static u8& = ""
                 parsed_module_id: mutable static u8& = ""
-                if Module_ParseImportSymbol(raw, parsed_nid.ref[mutable static u8&], parsed_library_id.ref[mutable static u8&], parsed_module_id.ref[mutable static u8&]):
+                if Module_ParseImportSymbol(raw, (&parsed_nid).cast[mutable static u8&], (&parsed_library_id).cast[mutable static u8&], (&parsed_module_id).cast[mutable static u8&]):
                     if streq(parsed_nid, nid) == 1:
                         lib: LibraryInfo? = Module_FindLibrary(self, parsed_library_id)
                         mod: ModuleInfo? = Module_FindModule(self, parsed_module_id)
@@ -1409,11 +1403,11 @@ def Module_AddImportSymbol(self: mutable Module&, nid: static u8&, name: static 
         parsed_nid: mutable static u8& = ""
         parsed_library: mutable static u8& = ""
         parsed_module: mutable static u8& = ""
-        _ = Module_ParseImportSymbol(name, parsed_nid.ref[mutable static u8&], parsed_library.ref[mutable static u8&], parsed_module.ref[mutable static u8&])
+        _ = Module_ParseImportSymbol(name, (&parsed_nid).cast[mutable static u8&], (&parsed_library).cast[mutable static u8&], (&parsed_module).cast[mutable static u8&])
         final_nid: mutable static u8& = nid
         if static_strlen(parsed_nid) > 0:
             final_nid <- parsed_nid
-        owner: mutable Arena& = module_metadata_arena.ref[mutable Arena&]
+        owner: mutable Arena& = &module_metadata_arena
         in owner:
             self.import_symbols.push(ImportSymbolRecord(name, final_nid, parsed_library, parsed_module, symbol_type, IMPORT_RESOLUTION_UNRESOLVED, name, self.file, 0, false))
 

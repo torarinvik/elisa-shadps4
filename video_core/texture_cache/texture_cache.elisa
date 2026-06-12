@@ -89,7 +89,7 @@ struct TextureCache:
 def TextureCache_New(owner: mutable Arena&) -> TextureCache:
     can Memory.Allocate, Abort.Panic:
         local_buffer_cache: BufferCache = BufferCache_New(owner)
-        stream_ref: mutable StreamBuffer& = BufferCache_GetUtilityBuffer(local_buffer_cache.ref[mutable BufferCache&], MEMORY_USAGE_STREAM)
+        stream_ref: mutable StreamBuffer& = BufferCache_GetUtilityBuffer((&local_buffer_cache).cast[mutable BufferCache&], MEMORY_USAGE_STREAM)
         out: mutable TextureCache = TextureCache(
             null,
             local_buffer_cache,
@@ -111,12 +111,12 @@ def TextureCache_New(owner: mutable Arena&) -> TextureCache:
         )
         out.owner as & <- owner
         null_info: ImageInfo = ImageInfo_FromVideoOut(0u64, 1u32, 1u32, 1u32, VK_FORMAT_R8G8B8A8_UNORM, false)
-        _ = TextureCache_InsertImage(out.ref[mutable TextureCache&], null_info, 0u64)
-        _ = TextureCache_GetNullImage(out.ref[mutable TextureCache&], VK_FORMAT_R8G8B8A8_UNORM)
+        _ = TextureCache_InsertImage(&out, null_info, 0u64)
+        _ = TextureCache_GetNullImage(&out, VK_FORMAT_R8G8B8A8_UNORM)
         return out
 
 def TextureCache_GetTileManager(self: mutable TextureCache&) -> mutable TileManager&:
-    return self.tile_manager.ref[mutable TileManager&]
+    return &self.tile_manager
 
 def TextureCache_IsValidImageId(self: TextureCache&, image_id: ImageId) -> bool:
     if image_id.index.usize() >= self.images.count:
@@ -124,9 +124,9 @@ def TextureCache_IsValidImageId(self: TextureCache&, image_id: ImageId) -> bool:
     return self.image_alive[image_id.index.usize()]
 
 def TextureCache_GetImage(self: mutable TextureCache&, image_id: ImageId) -> mutable Image&?:
-    if not TextureCache_IsValidImageId(self.ref[TextureCache&], image_id):
+    if not TextureCache_IsValidImageId((&self).cast[TextureCache&], image_id):
         return null
-    img: mutable Image& = self.images[image_id.index.usize()].ref[mutable Image&]
+    img: mutable Image& = &self.images[image_id.index.usize()]
     TextureCache_TouchImage(self, img.value())
     return img
 
@@ -152,19 +152,19 @@ def TextureCache_InsertImage(self: mutable TextureCache&, info: ImageInfo, cpu_a
         return id
 
 def TextureCache_RegisterImage(self: mutable TextureCache&, image_id: ImageId) -> void:
-    if not TextureCache_IsValidImageId(self.ref[TextureCache&], image_id):
+    if not TextureCache_IsValidImageId((&self).cast[TextureCache&], image_id):
         return
     self.images[image_id.index.usize()].flags <- self.images[image_id.index.usize()].flags | IMAGE_FLAG_REGISTERED
 
 def TextureCache_UnregisterImage(self: mutable TextureCache&, image_id: ImageId) -> void:
-    if not TextureCache_IsValidImageId(self.ref[TextureCache&], image_id):
+    if not TextureCache_IsValidImageId((&self).cast[TextureCache&], image_id):
         return
     self.images[image_id.index.usize()].flags <- self.images[image_id.index.usize()].flags & ~IMAGE_FLAG_REGISTERED
 
 def TextureCache_TrackImage(self: mutable TextureCache&, image_id: ImageId) -> void:
-    if not TextureCache_IsValidImageId(self.ref[TextureCache&], image_id):
+    if not TextureCache_IsValidImageId((&self).cast[TextureCache&], image_id):
         return
-    img: mutable Image& = self.images[image_id.index.usize()].ref[mutable Image&]
+    img: mutable Image& = &self.images[image_id.index.usize()]
     TextureCache_TrackImageHead(self, image_id)
     TextureCache_TrackImageTail(self, image_id)
     img.track_addr <- img.info.guest_address
@@ -179,7 +179,7 @@ def TextureCache_TrackImageTail(self: mutable TextureCache&, image_id: ImageId) 
     _ = image_id
 
 def TextureCache_UntrackImage(self: mutable TextureCache&, image_id: ImageId) -> void:
-    if not TextureCache_IsValidImageId(self.ref[TextureCache&], image_id):
+    if not TextureCache_IsValidImageId((&self).cast[TextureCache&], image_id):
         return
     TextureCache_UntrackImageHead(self, image_id)
     TextureCache_UntrackImageTail(self, image_id)
@@ -200,7 +200,7 @@ def TextureCache_MarkAsMaybeDirty(self: mutable TextureCache&, image_id: ImageId
     image.flags <- image.flags | IMAGE_FLAG_MAYBE_CPU_DIRTY
 
 def TextureCache_DeleteImage(self: mutable TextureCache&, image_id: ImageId) -> void:
-    if not TextureCache_IsValidImageId(self.ref[TextureCache&], image_id):
+    if not TextureCache_IsValidImageId((&self).cast[TextureCache&], image_id):
         return
     TextureCache_UntrackImage(self, image_id)
     TextureCache_UnregisterImage(self, image_id)
@@ -219,9 +219,9 @@ def TextureCache_TouchImage(self: mutable TextureCache&, image: mutable Image&) 
     image.lru_id <- self.gc_tick
 
 def TextureCache_DownloadImageMemory(self: mutable TextureCache&, image_id: ImageId) -> void:
-    if not TextureCache_IsValidImageId(self.ref[TextureCache&], image_id):
+    if not TextureCache_IsValidImageId((&self).cast[TextureCache&], image_id):
         return
-    img: mutable Image& = self.images[image_id.index.usize()].ref[mutable Image&]
+    img: mutable Image& = &self.images[image_id.index.usize()]
     copies: mutable darray[BufferImageCopy] = []
     Image_Download(img, copies, 0u64, 0u64, img.info.guest_size.u64())
     img.flags <- img.flags & ~IMAGE_FLAG_GPU_DIRTY
@@ -232,7 +232,7 @@ def TextureCache_InvalidateMemory(self: mutable TextureCache&, addr: u64, size: 
     i: mutable usize = 0usize
     while i < self.images.count:
         if self.image_alive[i]:
-            img: mutable Image& = self.images[i].ref[mutable Image&]
+            img: mutable Image& = &self.images[i]
             if Image_Overlaps(img.value(), addr, size):
                 img.flags <- img.flags | IMAGE_FLAG_CPU_DIRTY
         i <- i + 1usize
@@ -243,7 +243,7 @@ def TextureCache_InvalidateMemoryFromGPU(self: mutable TextureCache&, address: u
     i: mutable usize = 0usize
     while i < self.images.count:
         if self.image_alive[i]:
-            img: mutable Image& = self.images[i].ref[mutable Image&]
+            img: mutable Image& = &self.images[i]
             if Image_Overlaps(img.value(), address, max_size):
                 img.flags <- (img.flags | IMAGE_FLAG_GPU_DIRTY | IMAGE_FLAG_GPU_MODIFIED) & ~IMAGE_FLAG_CPU_DIRTY
         i <- i + 1usize
@@ -254,7 +254,7 @@ def TextureCache_UnmapMemory(self: mutable TextureCache&, cpu_addr: u64, size: u
     i: mutable usize = 0usize
     while i < self.images.count:
         if self.image_alive[i]:
-            img: mutable Image& = self.images[i].ref[mutable Image&]
+            img: mutable Image& = &self.images[i]
             if Image_Overlaps(img.value(), cpu_addr, size):
                 TextureCache_DeleteImage(self, ImageId_new(i.u32()))
         i <- i + 1usize
@@ -282,7 +282,7 @@ def TextureCache_FindImage(self: mutable TextureCache&, desc: ImageDesc, exact_f
     i: mutable usize = 0usize
     while i < self.images.count:
         if self.image_alive[i]:
-            img: mutable Image& = self.images[i].ref[mutable Image&]
+            img: mutable Image& = &self.images[i]
             if img.info.guest_address == desc.info.guest_address and img.info.guest_size == desc.info.guest_size:
                 if exact_fmt:
                     if img.info.pixel_format == desc.info.pixel_format:
@@ -348,7 +348,7 @@ def TextureCache_UpdateImage(self: mutable TextureCache&, image_id: ImageId) -> 
 def TextureCache_ResolveOverlap(self: mutable TextureCache&, info: ImageInfo, binding: TextureCacheBindingType, cache_img_id: ImageId, merged_image_id: ImageId) -> TextureCacheResolveOverlapResult:
     _ = binding
     _ = merged_image_id
-    if not TextureCache_IsValidImageId(self.ref[TextureCache&], cache_img_id):
+    if not TextureCache_IsValidImageId((&self).cast[TextureCache&], cache_img_id):
         created: ImageId = TextureCache_InsertImage(self, info, info.guest_address)
         return TextureCacheResolveOverlapResult(created, 0i64, 0i64)
     cached: Image = self.images[cache_img_id.index.usize()]
@@ -362,7 +362,7 @@ def TextureCache_ResolveOverlap(self: mutable TextureCache&, info: ImageInfo, bi
 
 def TextureCache_ResolveDepthOverlap(self: mutable TextureCache&, requested_info: ImageInfo, binding: TextureCacheBindingType, cache_img_id: ImageId) -> ImageId:
     _ = binding
-    if not TextureCache_IsValidImageId(self.ref[TextureCache&], cache_img_id):
+    if not TextureCache_IsValidImageId((&self).cast[TextureCache&], cache_img_id):
         return TextureCache_InsertImage(self, requested_info, requested_info.guest_address)
     existing: Image = self.images[cache_img_id.index.usize()]
     if ImageInfo_IsCompatible(existing.info, requested_info):

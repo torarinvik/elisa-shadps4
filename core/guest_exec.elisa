@@ -8,8 +8,8 @@ include "../../compiler/runtime/elisacore_std/debug_referee.elisai"
 
 const GUEST_EXEC_MAX_ARGS: usize = 33
 
-extern snprintf(buf: mutable u8&?, bufsize: usize, fmt: u8&, ...) -> int effects[Console.Format]
-extern puts(s: u8&) -> int effects[Console.Write]
+extern snprintf(buf: mutable u8&?, bufsize: usize, fmt: u8&, ...) -> int can[Console.Format]
+extern puts(s: u8&) -> int can[Console.Write]
 extern popen(command: u8&, mode: u8&) -> void&?
 extern pclose(stream: void&) -> int
 extern fgets(s: mutable u8&, size: int, stream: void&) -> mutable u8&?
@@ -78,7 +78,7 @@ def c_GuestExec_HostCanRunX64Subprocess() -> s32:
                     i <- 64
                 else:
                     i <- i + 1
-            if streq(line[0].ref[u8&].cast[static u8&], "x86_64") == 1:
+            if streq((&line[0]).cast[static u8&], "x86_64") == 1:
                 has_x64 <- 1
         status: int = pclose(proc.cast[void&])
         if status != 0:
@@ -122,7 +122,7 @@ extern mmap(addr: uintptr, length: usize, prot: int, flags: int, fd: int, offset
 @reentrant_safe
 extern ge_mprotect(addr: uintptr, length: usize, prot: int) -> int
 @link_name(munmap)
-extern ge_munmap(addr: uintptr, length: usize) -> int
+extern ge_munmap(addr: heap void&, length: usize) -> int
 # Unique name + @link_name: a bare `extern memcpy` call resolves to the compiler builtin
 # memcpy (not @reentrant_safe), so the @reentrant_safe annotation here was ignored and
 # ge_memcpy could not stay @reentrant_safe. Linking the C symbol under a distinct name fixes it.
@@ -677,7 +677,7 @@ def ge_abort_active_guard_for_debug_trap(status: s32) -> void can[Unsafe.Segment
     current_thread: uintptr = !ge_pthread_self()
     if ge_guard_target_thread == 0.uintptr() or current_thread == ge_guard_target_thread:
         ge_mark_guard_longjmp(status, GE_LONGJMP_SOURCE_DEBUG_TRAP_ABORT, ge_debug_trap_value)
-        ge_siglongjmp(ge_jmp_buf[0].ref[void&], 1)
+        ge_siglongjmp((&ge_jmp_buf[0]).cast[void&], 1)
     ge_cross_thread_signal_count <- ge_cross_thread_signal_count + 1
     ge_cross_thread_signal_guard_thread <- ge_guard_target_thread
     ge_cross_thread_signal_fault_thread <- current_thread
@@ -1003,7 +1003,7 @@ def ge_read_native_word(address: uintptr) -> uintptr:
         if (ge_native_regions[index.usize()].prot & 1) == 0:
             return 0.uintptr()
         out: mutable u64 = 0
-        _ = ge_memcpy(out.ref[void&], ge_addr_to_ptr(address), 8)
+        _ = ge_memcpy((&out).cast[void&], ge_addr_to_ptr(address), 8)
         return out.uintptr()
 
 @reentrant_safe
@@ -1022,7 +1022,7 @@ def ge_read_native_u32(address: uintptr) -> u32:
 
 @reentrant_safe
 def ge_sign_extend_u32_to_u64(v: u32) -> u64:
-    s: s32 = v.cast[s32]
+    s: s32 = v.s32()
     return s.i64().u64()
 
 def ge_maybe_debug_trap_boundary_guard() -> void:
@@ -1045,7 +1045,7 @@ def ge_maybe_debug_trap_boundary_guard() -> void:
         current_thread: uintptr = !ge_pthread_self()
         if ge_guard_target_thread == 0.uintptr() or current_thread == ge_guard_target_thread:
             ge_mark_guard_longjmp(GE_DEBUG_TRAP_BOUNDARY_GUARD_STATUS, GE_LONGJMP_SOURCE_BOUNDARY_GUARD, ge_runtime_hle_boundary_guard_value)
-            ge_siglongjmp(ge_jmp_buf[0].ref[void&], 1)
+            ge_siglongjmp((&ge_jmp_buf[0]).cast[void&], 1)
         ge_cross_thread_signal_count <- ge_cross_thread_signal_count + 1
         ge_cross_thread_signal_guard_thread <- ge_guard_target_thread
         ge_cross_thread_signal_fault_thread <- current_thread
@@ -1135,7 +1135,7 @@ def c_GuestExec_UnmapRegion(address: uintptr, size: u64) -> s32:
     static if PLATFORM_WINDOWS:
         return -1
     static else:
-        if ge_munmap(address, size.usize()) == 0:
+        if ge_munmap(address.cast[heap void&], size.usize()) == 0:
             ge_forget_native_region(address, size)
             return 0
         return -1
@@ -1177,7 +1177,7 @@ def c_GuestExec_WriteU64(address: uintptr, value: u64) -> s32:
         if ge_make_writable_cached(address, 8) != 0:
             return -1
         v: mutable u64 = value
-        _ = ge_memcpy(ge_addr_to_ptr(address), v.ref[void&], 8)
+        _ = ge_memcpy(ge_addr_to_ptr(address), (&v).cast[void&], 8)
         ge_flush_instruction_cache(address, 8)
         return 0
 
@@ -1203,7 +1203,7 @@ def ge_create_host_fs_entry_thunk(target: uintptr) -> HostSegmentAgnosticEntry c
         code[0] <- 0x66u8
         code[1] <- 0x41u8
         code[2] <- 0xBAu8
-        ge_write_u16_le(code[0].ref[mutable u8&], 3usize, host_selector)
+        ge_write_u16_le((&code[0]).cast[mutable u8&], 3usize, host_selector)
         code[5] <- 0x66u8
         code[6] <- 0x41u8
         code[7] <- 0x8Eu8
@@ -1211,7 +1211,7 @@ def ge_create_host_fs_entry_thunk(target: uintptr) -> HostSegmentAgnosticEntry c
         # movabs $target, %r11; jmp *%r11
         code[9] <- 0x49u8
         code[10] <- 0xBBu8
-        ge_write_u64_le(code[0].ref[mutable u8&], 11usize, target.u64())
+        ge_write_u64_le((&code[0]).cast[mutable u8&], 11usize, target.u64())
         code[19] <- 0x41u8
         code[20] <- 0xFFu8
         code[21] <- 0xE3u8
@@ -1219,7 +1219,7 @@ def ge_create_host_fs_entry_thunk(target: uintptr) -> HostSegmentAgnosticEntry c
         if thunk == 0.uintptr():
             return target.cast[HostSegmentAgnosticEntry]
         can Memory:
-            if c_GuestExec_WriteBytes(thunk, code[0].ref[void&], GE_HOST_FS_ENTRY_THUNK_SIZE) != 0:
+            if c_GuestExec_WriteBytes(thunk, (&code[0]).cast[void&], GE_HOST_FS_ENTRY_THUNK_SIZE) != 0:
                 return target.cast[HostSegmentAgnosticEntry]
         can Unsafe.ExecutableCodePublish:
             if c_GuestExec_PublishExecutableCode(thunk, GE_HOST_FS_ENTRY_THUNK_SIZE) != 0:
@@ -1585,7 +1585,7 @@ def ge_emergency_dump_raw() -> void:
     fd: int = ge_raw_open(GE_EMERGENCY_DUMP_PATH, GE_O_WRONLY | GE_O_CREAT | GE_O_TRUNC, GE_CREATE_MODE_0644)
     if fd >= 0:
         _ = ge_raw_fchmod(fd, GE_CREATE_MODE_0644)
-        _ = ge_raw_write(fd, ge_emergency_events[0].ref[void&], GE_EMERGENCY_DUMP_BYTES)
+        _ = ge_raw_write(fd, (&ge_emergency_events[0]).cast[void&], GE_EMERGENCY_DUMP_BYTES)
         _ = ge_raw_close(fd)
 
 def ge_pack_bytes_u64(bytes: u8&, start: usize, limit: usize) -> u64:
@@ -1688,14 +1688,14 @@ def GuestExec_RecordDebugRaise(err_code: int, unk: i64) -> void:
 def ge_symbol_is_kernel_write(symbol: static u8&?) -> bool:
     if symbol == null:
         return false
-    s: static u8& = symbol.ref[static u8&]
+    s: static u8& = (&symbol).cast[static u8&]
     return s[0] == 0x46 and s[1] == 0x78 and s[2] == 0x56 and s[3] == 0x5a and s[4] == 0x71 and s[5] == 0x42 and s[6] == 0x41 and s[7] == 0x41 and s[8] == 0x37 and s[9] == 0x6b and s[10] == 0x73 and s[11] == 0
 
 def GuestExec_RecordHleRingSymbol(seq: u64, symbol: static u8&?) -> void:
     if symbol == null:
         ge_emergency_mark(GE_EV_HLE_RING_SYMBOL, seq.uintptr(), 0.uintptr(), 0.uintptr(), 0.uintptr())
         return
-    text: u8& = symbol.ref[u8&]
+    text: u8& = (&symbol).cast[u8&]
     a: u64 = ge_pack_bytes_u64(text, 0, 24)
     b: u64 = ge_pack_bytes_u64(text, 8, 24)
     c: u64 = ge_pack_bytes_u64(text, 16, 24)
@@ -1776,7 +1776,7 @@ def ge_read_context_word(address: uintptr) -> uintptr:
         if address == 0.uintptr():
             return 0.uintptr()
         out: mutable u64 = 0u64
-        _ = ge_memcpy(out.ref[void&], ge_addr_to_ptr(address), 8usize)
+        _ = ge_memcpy((&out).cast[void&], ge_addr_to_ptr(address), 8usize)
         return out.uintptr()
 
 @reentrant_safe
@@ -1785,7 +1785,7 @@ def ge_write_context_word(address: uintptr, value: uintptr) -> void:
         if address == 0.uintptr():
             return
         v: mutable u64 = value.u64()
-        _ = ge_memcpy(ge_addr_to_ptr(address), v.ref[void&], 8)
+        _ = ge_memcpy(ge_addr_to_ptr(address), (&v).cast[void&], 8)
 
 @reentrant_safe
 def ge_uctx_word(uctx: void&?, offset: u64) -> uintptr:
@@ -2044,7 +2044,7 @@ def ge_resolve_pc_symbol(address: uintptr, is_stack: bool) -> void:
     img: mutable static u8&? = ""
     if address != 0.uintptr():
         info: mutable GeDlInfo = zeroed
-        if ge_dladdr(ge_addr_to_ptr(address), info.ref[void&]) != 0:
+        if ge_dladdr(ge_addr_to_ptr(address), (&info).cast[void&]) != 0:
             if info.dli_sname != null:
                 sym <- info.dli_sname
             if info.dli_fname != null:
@@ -2072,10 +2072,10 @@ def ge_install_guards() -> void:
     static if PLATFORM_APPLE and ARCH_X86_64:
         if ge_alt_signal_stack_installed == 0:
             ss: mutable GeStackT = zeroed
-            ss.ss_sp <- ge_alt_signal_stack[0usize].ref[void&]
+            ss.ss_sp <- (&ge_alt_signal_stack[0usize]).cast[void&]
             ss.ss_size <- GE_SIGSTKSZ
             ss.ss_flags <- 0
-            if ge_sigaltstack(ss.ref[void&], null) == 0:
+            if ge_sigaltstack((&ss).cast[void&], null) == 0:
                 ge_alt_signal_stack_installed <- 1
         if ge_alt_signal_stack_installed != 0:
             # SA_ONSTACK = 0x0001 on macOS.
@@ -2089,11 +2089,11 @@ def ge_install_guards() -> void:
         sa.handler <- ge_signal_handler.cast[void&?]
     sa.mask <- 0
     sa.flags <- fault_flags
-    _ = ge_sigaction(GE_SIG_SEGV, sa.ref[void&], ge_old_segv.ref[void&])
-    _ = ge_sigaction(ge_sig_bus(), sa.ref[void&], ge_old_bus.ref[void&])
-    _ = ge_sigaction(GE_SIG_ILL, sa.ref[void&], ge_old_ill.ref[void&])
-    _ = ge_sigaction(GE_SIG_FPE, sa.ref[void&], ge_old_fpe.ref[void&])
-    _ = ge_sigaction(GE_SIG_TRAP, sa.ref[void&], ge_old_trap.ref[void&])
+    _ = ge_sigaction(GE_SIG_SEGV, (&sa).cast[void&], (&ge_old_segv).cast[void&])
+    _ = ge_sigaction(ge_sig_bus(), (&sa).cast[void&], (&ge_old_bus).cast[void&])
+    _ = ge_sigaction(GE_SIG_ILL, (&sa).cast[void&], (&ge_old_ill).cast[void&])
+    _ = ge_sigaction(GE_SIG_FPE, (&sa).cast[void&], (&ge_old_fpe).cast[void&])
+    _ = ge_sigaction(GE_SIG_TRAP, (&sa).cast[void&], (&ge_old_trap).cast[void&])
     alarm_sa: mutable GeSigaction = zeroed
     static if PLATFORM_APPLE and ARCH_X86_64:
         if ge_pc_sampler_enabled:
@@ -2113,15 +2113,15 @@ def ge_install_guards() -> void:
     static if PLATFORM_APPLE and ARCH_X86_64:
         if ge_alt_signal_stack_installed != 0:
             alarm_sa.flags <- alarm_sa.flags | 0x1
-    _ = ge_sigaction(GE_SIG_ALRM, alarm_sa.ref[void&], ge_old_alrm.ref[void&])
+    _ = ge_sigaction(GE_SIG_ALRM, (&alarm_sa).cast[void&], (&ge_old_alrm).cast[void&])
 
 def ge_restore_guards() -> void:
-    _ = ge_sigaction(GE_SIG_SEGV, ge_old_segv.ref[void&], null)
-    _ = ge_sigaction(ge_sig_bus(), ge_old_bus.ref[void&], null)
-    _ = ge_sigaction(GE_SIG_ILL, ge_old_ill.ref[void&], null)
-    _ = ge_sigaction(GE_SIG_FPE, ge_old_fpe.ref[void&], null)
-    _ = ge_sigaction(GE_SIG_TRAP, ge_old_trap.ref[void&], null)
-    _ = ge_sigaction(GE_SIG_ALRM, ge_old_alrm.ref[void&], null)
+    _ = ge_sigaction(GE_SIG_SEGV, (&ge_old_segv).cast[void&], null)
+    _ = ge_sigaction(ge_sig_bus(), (&ge_old_bus).cast[void&], null)
+    _ = ge_sigaction(GE_SIG_ILL, (&ge_old_ill).cast[void&], null)
+    _ = ge_sigaction(GE_SIG_FPE, (&ge_old_fpe).cast[void&], null)
+    _ = ge_sigaction(GE_SIG_TRAP, (&ge_old_trap).cast[void&], null)
+    _ = ge_sigaction(GE_SIG_ALRM, (&ge_old_alrm).cast[void&], null)
 
 @c_abi(c)
 @async_entry
@@ -2161,7 +2161,7 @@ def ge_alarm_handler(sig: int) -> void:
         if ge_guard_target_thread == 0.uintptr() or current_thread == ge_guard_target_thread:
             ge_raw_breadcrumb("GE:ALRM_LONGJMP\n", 16)
             ge_mark_guard_longjmp(-3, GE_LONGJMP_SOURCE_ALARM, ge_current_return_pc)
-            ge_siglongjmp(ge_jmp_buf[0].ref[void&], 1)
+            ge_siglongjmp((&ge_jmp_buf[0]).cast[void&], 1)
         ge_cross_thread_signal_count <- ge_cross_thread_signal_count + 1
         ge_cross_thread_signal_guard_thread <- ge_guard_target_thread
         ge_cross_thread_signal_fault_thread <- current_thread
@@ -2204,7 +2204,7 @@ def ge_pc_sampler_alarm_handler(sig: int, info: void&?, uctx: void&?) -> void:
         ge_last_status <- -3
         ge_last_signal <- GE_SIG_ALRM.s32()
         ge_mark_guard_longjmp(-3, GE_LONGJMP_SOURCE_PC_SAMPLER, !pc)
-        ge_siglongjmp(ge_jmp_buf[0].ref[void&], 1)
+        ge_siglongjmp((&ge_jmp_buf[0]).cast[void&], 1)
 
 # --- Instruction-precise page watchpoint (debug) ---------------------------
 # Arming write-protects the page containing the watched address. A guest write
@@ -2484,7 +2484,7 @@ def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
         if ge_guard_active != 0:
             if ge_guard_target_thread == 0.uintptr() or fault_thread == ge_guard_target_thread:
                 ge_mark_guard_longjmp(ge_last_status, GE_LONGJMP_SOURCE_SIGNAL, !ge_last_guest_pc)
-                ge_siglongjmp(ge_jmp_buf[0].ref[void&], 1)
+                ge_siglongjmp((&ge_jmp_buf[0]).cast[void&], 1)
             ge_cross_thread_signal_count <- ge_cross_thread_signal_count + 1
             ge_cross_thread_signal_guard_thread <- ge_guard_target_thread
             ge_cross_thread_signal_fault_thread <- fault_thread
@@ -2605,8 +2605,8 @@ def ge_call_main_entry(params: mutable GuestEntryParams&, exit_func: uintptr) ->
     if ef == 0.uintptr():
         ef <- ge_default_exit.cast[uintptr]
     static if ARCH_X86_64:
-        ElisaGuestExec_LoadOrbisFpStateAsm(ge_orbis_mxcsr.ref[u32&].uintptr().cast[HostPtr[u32]], ge_orbis_fpucw.ref[u16&].uintptr().cast[HostPtr[u16]])
-    ElisaGuestExec_CallMainEntryAsm(params.entry_addr.cast[GuestEntryPoint], params.ref[void&].uintptr().cast[HostPtr[void]], ef.cast[ExitFunction])
+        ElisaGuestExec_LoadOrbisFpStateAsm((&ge_orbis_mxcsr).cast[u32&].uintptr().cast[HostPtr[u32]], (&ge_orbis_fpucw).cast[u16&].uintptr().cast[HostPtr[u16]])
+    ElisaGuestExec_CallMainEntryAsm(params.entry_addr.cast[GuestEntryPoint], (&params).cast[void&].uintptr().cast[HostPtr[void]], ef.cast[ExitFunction])
 
 def ge_jump_main_entry(params: mutable GuestEntryParams&, exit_func: uintptr) -> void can[Unsafe.SegmentMutation, Segment.Host, Segment.Guest]:
     ef: mutable uintptr = exit_func
@@ -2619,16 +2619,16 @@ def ge_jump_main_entry(params: mutable GuestEntryParams&, exit_func: uintptr) ->
     guest_fs_selector: mutable GuestFsSelector = 0u32.cast[GuestFsSelector]
     static if PLATFORM_APPLE and ARCH_X86_64:
         guest_fs_selector <- TLS_PrepareTcbBase((!TLS_PrimaryTcbBase()).cast[void&?])
-    ge_prejump_rdi <- params.ref[void&].uintptr()
+    ge_prejump_rdi <- (&params).cast[void&].uintptr()
     ge_prejump_rsi <- ef
-    ge_prejump_rsp <- params.ref[void&].uintptr()
+    ge_prejump_rsp <- (&params).cast[void&].uintptr()
     fr: ElisaGuestExecForkReport&? = ge_fork_report
     if fr != null:
         fr.prejump_rdi <- ge_prejump_rdi
         fr.prejump_rsi <- ge_prejump_rsi
         fr.prejump_rsp <- ge_prejump_rsp
     static if ARCH_X86_64:
-        ElisaGuestExec_LoadOrbisFpStateAsm(ge_orbis_mxcsr.ref[u32&].uintptr().cast[HostPtr[u32]], ge_orbis_fpucw.ref[u16&].uintptr().cast[HostPtr[u16]])
+        ElisaGuestExec_LoadOrbisFpStateAsm((&ge_orbis_mxcsr).cast[u32&].uintptr().cast[HostPtr[u32]], (&ge_orbis_fpucw).cast[u16&].uintptr().cast[HostPtr[u16]])
     can Unsafe.SegmentMutation, Segment.Host:
         ge_observe_fs_owner("pre-main-host-before-easm", false)
     static if PLATFORM_APPLE and ARCH_X86_64:
@@ -2840,7 +2840,7 @@ def ge_run_child_main_entry(params: mutable GuestEntryParams&) -> void can[Memor
     ge_set_native_phase(GE_PHASE_CHILD_GUARDS_INSTALLED)
     fr: ElisaGuestExecForkReport&? = ge_fork_report
     if fr != null:
-        ge_expected_entry_params <- params.ref[void&].uintptr()
+        ge_expected_entry_params <- (&params).cast[void&].uintptr()
         ge_expected_stack_word0 <- params.argc.u32().uintptr()
         ge_expected_stack_word1 <- params.argv[0].uintptr()
         ge_entry_stack_word0 <- ge_expected_stack_word0
@@ -2862,7 +2862,7 @@ def ge_run_child_main_entry(params: mutable GuestEntryParams&) -> void can[Memor
             fr.execution_stage <- 4
     ge_set_native_phase(GE_PHASE_CHILD_ENTRY_SNAPSHOT)
     ge_set_native_phase(GE_PHASE_CHILD_BEFORE_SIGSETJMP)
-    if ge_sigsetjmp(ge_jmp_buf[0].ref[void&], 1) != 0:
+    if ge_sigsetjmp((&ge_jmp_buf[0]).cast[void&], 1) != 0:
         ge_set_native_phase(GE_PHASE_CHILD_SIGLONGJMP)
         can Unsafe.SegmentMutation, Segment.Host:
             ge_assert_host_fs_owner("child-after-longjmp-host-owner")
@@ -3146,13 +3146,13 @@ def ge_is_synthetic_main_entry(entry_addr: uintptr) -> bool:
 def ge_read_byte(addr: uintptr) -> u8:
     can Memory.Allocate:
         out: mutable u8 = 0
-        _ = ge_memcpy(out.ref[void&], ge_addr_to_ptr(addr), 1)
+        _ = ge_memcpy((&out).cast[void&], ge_addr_to_ptr(addr), 1)
         return out
 
 def ge_read_disp32(addr: uintptr) -> s32:
     can Memory.Allocate:
         out: mutable u32 = 0
-        _ = ge_memcpy(out.ref[void&], ge_addr_to_ptr(addr), 4)
+        _ = ge_memcpy((&out).cast[void&], ge_addr_to_ptr(addr), 4)
         return out.s32()
 
 @c_abi(c)
@@ -3269,7 +3269,7 @@ def ge_arm_timer(timeout_ms: u32) -> void:
         timer: mutable GeItimerval = zeroed
         timer.value.tv_sec <- (timeout_ms / 1000).i64()
         timer.value.tv_usec <- ((timeout_ms % 1000) * 1000).i32()
-        _ = ge_setitimer(GE_ITIMER_REAL, timer.ref[void&], null)
+        _ = ge_setitimer(GE_ITIMER_REAL, (&timer).cast[void&], null)
 
 def ge_arm_pc_sampler_timer(timeout_ms: u32) -> void:
     if timeout_ms != 0:
@@ -3286,12 +3286,12 @@ def ge_arm_pc_sampler_timer(timeout_ms: u32) -> void:
         timer.interval.tv_usec <- ((interval_ms % 1000) * 1000).i32()
         timer.value.tv_sec <- timer.interval.tv_sec
         timer.value.tv_usec <- timer.interval.tv_usec
-        _ = ge_setitimer(GE_ITIMER_REAL, timer.ref[void&], null)
+        _ = ge_setitimer(GE_ITIMER_REAL, (&timer).cast[void&], null)
 
 def ge_disarm_timer() -> void:
     ge_raw_breadcrumb("GE:TIMER_DISARM\n", 16)
     timer_off: mutable GeItimerval = zeroed
-    _ = ge_setitimer(GE_ITIMER_REAL, timer_off.ref[void&], null)
+    _ = ge_setitimer(GE_ITIMER_REAL, (&timer_off).cast[void&], null)
 
 def ge_run_synthetic_function(entry_addr: uintptr, arg0: u64, arg1: u64) -> u64:
     ge_debug_trace_boundary("guest-exec-synthetic-entry", entry_addr, arg0.uintptr(), arg1.uintptr())
@@ -3310,7 +3310,7 @@ def ge_run_synthetic_function(entry_addr: uintptr, arg0: u64, arg1: u64) -> u64:
         ge_install_guards()
         ge_guard_active <- 1
         ge_guard_target_thread <- !ge_pthread_self()
-        if ge_sigsetjmp(ge_jmp_buf[0usize].ref[void&], 1) != 0:
+        if ge_sigsetjmp((&ge_jmp_buf[0usize]).cast[void&], 1) != 0:
             ge_guard_active <- 0
             ge_restore_guards()
             ge_debug_trace_boundary("guest-exec-synthetic-stop", entry_addr, (GE_SENTINEL_MAX - 2u64).uintptr(), ge_last_status.u64().uintptr())
@@ -3347,7 +3347,7 @@ def ge_run_synthetic_function_with_timeout(entry_addr: uintptr, arg0: u64, arg1:
         ge_guard_active <- 1
         ge_guard_target_thread <- !ge_pthread_self()
         ge_arm_timer(timeout_ms)
-        if ge_sigsetjmp(ge_jmp_buf[0usize].ref[void&], 1) != 0:
+        if ge_sigsetjmp((&ge_jmp_buf[0usize]).cast[void&], 1) != 0:
             ge_disarm_timer()
             ge_guard_active <- 0
             ge_restore_guards()
@@ -3378,14 +3378,14 @@ def ge_run_main_entry(params: mutable GuestEntryParams&, exit_func: void&?) -> v
         ef: mutable uintptr = exit_func.uintptr()
         if ef == 0.uintptr():
             ef <- ge_default_exit.cast[uintptr]
-        ElisaGuestExec_EnterMainEntryAsm(params.ref[void&].uintptr().cast[HostPtr[void]], ef.cast[ExitFunction])
+        ElisaGuestExec_EnterMainEntryAsm((&params).cast[void&].uintptr().cast[HostPtr[void]], ef.cast[ExitFunction])
     static else:
         _ = params
         _ = exit_func
 
 def ge_prepare_main_entry_snapshot(params: mutable GuestEntryParams&) -> void:
     can Memory.Allocate:
-        ge_expected_entry_params <- params.ref[void&].uintptr()
+        ge_expected_entry_params <- (&params).cast[void&].uintptr()
         ge_expected_stack_word0 <- params.argc.u32().uintptr()
         ge_expected_stack_word1 <- params.argv[0].uintptr()
         ge_entry_stack_word0 <- ge_expected_stack_word0
@@ -3425,7 +3425,7 @@ def ge_run_main_entry_guarded_in_process(params: mutable GuestEntryParams&, time
         else:
             ge_arm_timer(timeout_ms)
         ge_set_native_phase(GE_PHASE_SYNTHETIC_BEFORE_SIGSETJMP)
-        if ge_sigsetjmp(ge_jmp_buf[0usize].ref[void&], 1) != 0:
+        if ge_sigsetjmp((&ge_jmp_buf[0usize]).cast[void&], 1) != 0:
             ge_raw_breadcrumb("GE:GUARD_LONGJMP_ENTER\n", 23usize)
             static if PLATFORM_APPLE and ARCH_X86_64:
                 can Unsafe.SegmentMutation, Segment.Host:
@@ -3502,7 +3502,7 @@ def ge_run_main_entry_guarded(params: mutable GuestEntryParams&, timeout_ms: u32
             ge_guard_target_thread <- !ge_pthread_self()
             ge_arm_timer(timeout_ms)
             ge_set_native_phase(GE_PHASE_SYNTHETIC_BEFORE_SIGSETJMP)
-            if ge_sigsetjmp(ge_jmp_buf[0usize].ref[void&], 1) != 0:
+            if ge_sigsetjmp((&ge_jmp_buf[0usize]).cast[void&], 1) != 0:
                 ge_disarm_timer()
                 ge_guard_active <- 0
                 ge_restore_guards()
@@ -3538,7 +3538,7 @@ def ge_run_main_entry_guarded(params: mutable GuestEntryParams&, timeout_ms: u32
         waited_ms: mutable u32 = 0u32
         status: mutable int = 0
         while true:
-            result: int = ge_waitpid(child, status.ref[mutable int&], GE_WNOHANG)
+            result: int = ge_waitpid(child, (&status).cast[mutable int&], GE_WNOHANG)
             if result == child:
                 ge_set_native_phase(GE_PHASE_PARENT_WAITPID_CHILD)
                 ge_last_errno <- -104
@@ -3603,7 +3603,7 @@ def ge_run_main_entry_guarded(params: mutable GuestEntryParams&, timeout_ms: u32
                 _ = ge_kill(child, GE_SIG_TRAP)
                 snapshot_wait_ms: mutable u32 = 0u32
                 while snapshot_wait_ms < 50u32:
-                    snapshot_result: int = ge_waitpid(child, status.ref[mutable int&], GE_WNOHANG)
+                    snapshot_result: int = ge_waitpid(child, (&status).cast[mutable int&], GE_WNOHANG)
                     if snapshot_result == child or snapshot_result < 0:
                         break
                     _ = ge_usleep(1000u32)
@@ -3616,7 +3616,7 @@ def ge_run_main_entry_guarded(params: mutable GuestEntryParams&, timeout_ms: u32
                     _ = ge_kill(child, 9)
                 reap_wait_ms: mutable u32 = 0u32
                 while reap_wait_ms < 250u32:
-                    reap_result: int = ge_waitpid(child, status.ref[mutable int&], GE_WNOHANG)
+                    reap_result: int = ge_waitpid(child, (&status).cast[mutable int&], GE_WNOHANG)
                     if reap_result == child or reap_result < 0:
                         break
                     _ = ge_usleep(1000u32)
@@ -5322,7 +5322,7 @@ def GuestExec_EntryArgc() -> int:
     return guest_exec_last_argc
 
 def GuestExec_EntryArgv() -> u8&?:
-    return guest_exec_last_argv[0].ref[static u8&?&].cast[u8&?]
+    return (&guest_exec_last_argv[0]).cast[u8&?]
 
 def GuestExec_FillEntryParamsArgv(params: mutable GuestEntryParams&, argc: int, argv0: void&?) -> void:
     i: mutable usize = 0
@@ -6228,7 +6228,7 @@ def GuestExec_DumpHleCallRingLine(line: mutable u8&, size: usize, written: int) 
     if written > 0 and written.usize() < size:
         line[written.usize()] <- 0x0A
         can Unsafe.SegmentMutation, Segment.Host:
-            _ = ge_raw_write(1, line.ref[void&], (written + 1).usize())
+            _ = ge_raw_write(1, (&line).cast[void&], (written + 1).usize())
 
 def GuestExec_DumpHleCallRing() -> void can[Console.Format, Unsafe.SegmentMutation, Segment.Host]:
     total: u64 = Linker_HleCallRingTotal()
