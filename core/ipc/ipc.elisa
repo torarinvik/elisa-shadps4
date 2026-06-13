@@ -359,19 +359,16 @@ def IPC_RuntimeInputLoop(state: mutable IpcState&) -> void:
                 if runtime_strlen(out) > 0:
                     IPC_RuntimeWriteStderrLine(out)
 
-def IPC_RuntimeInputLoopThreadRaw(state_bits: void&?) -> void&?:
+def IPC_RuntimeInputDaemon(state: mutable heap IpcState&) -> void:
     can Abort.Panic, Memory.Allocate, Console, Atomics.Store:
         SetCurrentThreadName("IPC Read thread")
-        if state_bits == null:
-            return null
-        state: mutable heap IpcState& = state_bits.cast[mutable heap IpcState&]
         IPC_RuntimeInputLoop(state)
-        return state_bits
-
-def IPC_RuntimeStartInputThread(state: mutable heap IpcState&) -> Thread[void&?, Joinable]:
-    return spawn_raw(IPC_RuntimeInputLoopThreadRaw.cast[void&], state.cast[void&]) can Thread.Spawn, Abort.Panic
 
 def IPC_RuntimeStartInputThreadDetached(state: mutable heap IpcState&) -> void:
-    can Thread.Spawn, Thread.Detach, Abort.Panic:
-        thread: Thread[void&?, Joinable] = IPC_RuntimeStartInputThread(state)
-        detach_raw(move thread)
+    can Thread.Spawn, Thread.Detach, Memory.Allocate, Memory.Release, Abort.Panic, Atomics.Load, Atomics.CompareExchange, Console, Atomics.Store:
+        # spawn_daemon is the blessed detached, process-lifetime thread surface.
+        # The IPC state is heap-allocated and never freed (process-lifetime) and is
+        # shared with the main thread only through the binary semaphore; vouch that
+        # this daemon's capture is lifetime- and share-safe.
+        trusted Unsafe.ThreadShare:
+            spawn_daemon(IPC_RuntimeInputDaemon, state)
