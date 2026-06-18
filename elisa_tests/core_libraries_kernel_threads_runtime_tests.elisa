@@ -75,8 +75,8 @@ struct OrbisKernelTimespec:
     tv_sec: i64
     tv_nsec: i64
 
-const RUNTIME_WAIT_SHORT_US: u64 = 50000u64
-const RUNTIME_WAIT_LONG_US: u64 = 250000u64
+const RUNTIME_WAIT_SHORT_US: u64 = 50000
+const RUNTIME_WAIT_LONG_US: u64 = 250000
 
 global mutable rt_mutex: void&? = null
 global mutable rt_cond: void&? = null
@@ -89,7 +89,7 @@ global mutable rt_kernel_sem_id: int = -1
 global mutable rt_event_flag_id: int = -1
 global mutable rt_kernel_sem_waiters: int = 0
 global mutable rt_event_waiters: int = 0
-global mutable rt_event_attr: u32 = 0u32
+global mutable rt_event_attr: u32 = 0
 
 # @port core/libraries/kernel/threads/pthread.cpp::posix_pthread_create sha256=986247c91ea1155d oracle@a3773841
 def posix_pthread_create(thread: mutable void&?&, attr: void&?, start_routine: void&?, arg: void&?) -> int:
@@ -220,11 +220,11 @@ def posix_pthread_rwlock_unlock(rwlock: void&?) -> int:
 def posix_sem_init(sem: mutable void&?&, pshared: int, value: u32) -> int:
     _ = pshared
     err: mutable int = 0
-    handle: void&? = elisa_kernel_sem_create(value.cast[int], 2147483647, err)
+    handle: void&? = elisa_kernel_sem_create(value.int(), 2147483647, err)
     if handle == null:
         return -1
     sem <- handle
-    rt_sem_shadow_count <- value.cast[int]
+    rt_sem_shadow_count <- value.int()
     return 0
 
 # @port core/libraries/kernel/threads/semaphore.cpp::posix_sem_destroy sha256=8c297838b90a58e8 oracle@a3773841
@@ -248,7 +248,7 @@ def posix_sem_trywait(sem: void&?) -> int:
 # @port core/libraries/kernel/threads/semaphore.cpp::posix_sem_timedwait sha256=2bd211a1e572066b oracle@a3773841
 def posix_sem_timedwait(sem: void&?, timeout: void&?) -> int:
     _ = timeout
-    if elisa_kernel_sem_timedwait(sem, 1, 1000u64) == 0:
+    if elisa_kernel_sem_timedwait(sem, 1, 1000) == 0:
         rt_sem_shadow_count <- rt_sem_shadow_count - 1
         return 0
     return -1
@@ -306,14 +306,14 @@ def sceKernelWaitSema(id: int, need_count: int, timeout: mutable u32&?) -> int:
             return ORBIS_KERNEL_ERROR_EACCES
         return r_wait
     rt_kernel_sem_waiters <- rt_kernel_sem_waiters + 1
-    r: int = elisa_kernel_sem_timedwait(rt_kernel_sem, need_count, (timeout[0].cast[u64]) * 1000u64)
+    r: int = elisa_kernel_sem_timedwait(rt_kernel_sem, need_count, (timeout[0].u64()) * 1000)
     rt_kernel_sem_waiters <- rt_kernel_sem_waiters - 1
     if r == POSIX_ECANCELED:
         return ORBIS_KERNEL_ERROR_ECANCELED
     if r == POSIX_EACCES:
         return ORBIS_KERNEL_ERROR_EACCES
     if r == POSIX_ETIMEDOUT:
-        timeout <- 0u32
+        timeout <- 0
         return ORBIS_KERNEL_ERROR_ETIMEDOUT
     return r
 
@@ -352,7 +352,7 @@ def sceKernelDeleteEventFlag(id: int) -> int:
     rt_event_flag <- null
     rt_event_flag_id <- -1
     rt_event_waiters <- 0
-    rt_event_attr <- 0u32
+    rt_event_attr <- 0
     return r
 
 # @port core/libraries/kernel/threads/event_flag.cpp::sceKernelSetEventFlag sha256=b46ac5743862e59c oracle@a3773841
@@ -374,13 +374,13 @@ def sceKernelPollEventFlag(id: int, pattern: u64, wait_mode: u32, out_bits: muta
 def sceKernelWaitEventFlag(id: int, pattern: u64, wait_mode: u32, out_bits: mutable u64&?, timeout: mutable u32&?) -> int:
     if id != rt_event_flag_id:
         return 22
-    attr_mode: u32 = rt_event_attr & 0x30u32
-    single_wait_mode: bool = attr_mode == 0x10u32
+    attr_mode: u32 = rt_event_attr & 0x30
+    single_wait_mode: bool = attr_mode == 0x10
     if single_wait_mode and rt_event_waiters > 0:
         return ORBIS_KERNEL_ERROR_EPERM
-    wait_usec: mutable u64 = 0xffffffffffffffffu64
+    wait_usec: mutable u64 = 0xffffffffffffffff
     if timeout != null:
-        wait_usec <- (timeout[0].cast[u64]) * 1000u64
+        wait_usec <- (timeout[0].u64()) * 1000
     rt_event_waiters <- rt_event_waiters + 1
     r: int = elisa_kernel_event_wait(rt_event_flag, pattern, wait_mode, out_bits, wait_usec)
     rt_event_waiters <- rt_event_waiters - 1
@@ -390,7 +390,7 @@ def sceKernelWaitEventFlag(id: int, pattern: u64, wait_mode: u32, out_bits: muta
         return ORBIS_KERNEL_ERROR_EACCES
     if r == POSIX_ETIMEDOUT:
         if timeout != null:
-            timeout <- 0u32
+            timeout <- 0
         return ORBIS_KERNEL_ERROR_ETIMEDOUT
     return r
 
@@ -433,7 +433,7 @@ def rt_wait_kernel_sem_waiters_at_least(expected: int):
             while rt_kernel_sem_waiters < expected:
                 if elisa_kernel_test_monotonic_usec() - start > RUNTIME_WAIT_LONG_US:
                     panic("kernel sem waiter did not reach expected count")
-                elisa_kernel_test_sleep_usec(1000u64)
+                elisa_kernel_test_sleep_usec(1000)
 
 def rt_join(thread: void&?) -> void&?:
     ret: mutable void&? = null
@@ -448,7 +448,7 @@ def rt_thread_lifecycle_entry(arg: void&?) -> void&?:
 def rt_thread_sleep_entry(arg: void&?) -> void&?:
     _ = arg
     elisa_kernel_test_slot_set(0, 1)
-    elisa_kernel_test_sleep_usec(50000u64)
+    elisa_kernel_test_sleep_usec(50000)
     return 0x77.cast[void&?]
 
 def rt_mutex_owner_entry(arg: void&?) -> void&?:
@@ -472,7 +472,7 @@ def rt_cond_wait_entry(arg: void&?) -> void&?:
     return r.cast[void&?]
 
 def rt_cond_broadcast_entry(arg: void&?) -> void&?:
-    slot: int = arg.cast[int]
+    slot: int = arg.int()
     if posix_pthread_mutex_lock(rt_mutex) != 0:
         return 0xdead.cast[void&?]
     _ = elisa_kernel_test_slot_add(0, 1)
@@ -483,7 +483,7 @@ def rt_cond_broadcast_entry(arg: void&?) -> void&?:
     return r.cast[void&?]
 
 def rt_rw_reader_entry(arg: void&?) -> void&?:
-    slot: int = arg.cast[int]
+    slot: int = arg.int()
     if posix_pthread_rwlock_rdlock(rt_rwlock) != 0:
         return 0xdead.cast[void&?]
     _ = elisa_kernel_test_slot_add(0, 1)
@@ -534,12 +534,12 @@ def rt_posix_sem_wait_entry(arg: void&?) -> void&?:
     return r.cast[void&?]
 
 def rt_event_wait_entry(arg: void&?) -> void&?:
-    wait_mode: u32 = arg.cast[u32]
-    result: mutable u64 = 0u64
+    wait_mode: u32 = arg.u32()
+    result: mutable u64 = 0
     elisa_kernel_test_slot_set(0, 1)
-    r: int = sceKernelWaitEventFlag(rt_event_flag_id, 0x3u64, wait_mode, result, null)
+    r: int = sceKernelWaitEventFlag(rt_event_flag_id, 0x3, wait_mode, result, null)
     if r == ORBIS_OK:
-        elisa_kernel_test_slot_set(1, result.cast[i64])
+        elisa_kernel_test_slot_set(1, result.i64())
     if r == ORBIS_KERNEL_ERROR_ECANCELED:
         elisa_kernel_test_slot_set(2, 1)
     if r == ORBIS_KERNEL_ERROR_EACCES:
@@ -547,10 +547,10 @@ def rt_event_wait_entry(arg: void&?) -> void&?:
     return r.cast[void&?]
 
 def rt_event_wait_counting_entry(arg: void&?) -> void&?:
-    wait_mode: u32 = arg.cast[u32]
-    result: mutable u64 = 0u64
+    wait_mode: u32 = arg.u32()
+    result: mutable u64 = 0
     _ = elisa_kernel_test_slot_add(0, 1)
-    r: int = sceKernelWaitEventFlag(rt_event_flag_id, 0x3u64, wait_mode, result, null)
+    r: int = sceKernelWaitEventFlag(rt_event_flag_id, 0x3, wait_mode, result, null)
     if r == ORBIS_OK:
         _ = elisa_kernel_test_slot_add(1, 1)
     if r == ORBIS_KERNEL_ERROR_ECANCELED:
@@ -561,9 +561,9 @@ def rt_event_wait_counting_entry(arg: void&?) -> void&?:
 
 def rt_mixed_wait_entry(arg: void&?) -> void&?:
     _ = arg
-    result: mutable u64 = 0u64
+    result: mutable u64 = 0
     elisa_kernel_test_slot_set(0, 1)
-    r1: int = sceKernelWaitEventFlag(rt_event_flag_id, 0x8u64, 0x02u32, result, null)
+    r1: int = sceKernelWaitEventFlag(rt_event_flag_id, 0x8, 0x02, result, null)
     r2: int = sceKernelWaitSema(rt_kernel_sem_id, 1, null)
     r3: mutable int = posix_pthread_mutex_lock(rt_mutex)
     if r3 == 0:
@@ -596,7 +596,7 @@ def runtime_thread_detach_then_join_invalid() -> void:
         rt_assert_zero(posix_pthread_detach(thread))
         ret: mutable void&? = null
         rt_assert_eq_int(posix_pthread_join(thread, ret), POSIX_EINVAL)
-        elisa_kernel_test_sleep_usec(70000u64)
+        elisa_kernel_test_sleep_usec(70000)
 
 @test
 def runtime_thread_detach_then_timedjoin_invalid() -> void:
@@ -609,7 +609,7 @@ def runtime_thread_detach_then_timedjoin_invalid() -> void:
         ts: mutable OrbisKernelTimespec = OrbisKernelTimespec(0, 1000000)
         ret: mutable void&? = null
         rt_assert_eq_int(posix_pthread_timedjoin_np(thread, ret, ts), POSIX_EINVAL)
-        elisa_kernel_test_sleep_usec(70000u64)
+        elisa_kernel_test_sleep_usec(70000)
 
 @test
 def runtime_thread_timedjoin_times_out_then_joins() -> void:
@@ -619,7 +619,7 @@ def runtime_thread_timedjoin_times_out_then_joins() -> void:
         rt_assert_zero(posix_pthread_create(thread, null, rt_thread_sleep_entry.cast[void&], null))
         rt_wait_slot(0, 1)
         now_us: u64 = elisa_kernel_test_monotonic_usec()
-        timeout_abs: mutable OrbisKernelTimespec = OrbisKernelTimespec((now_us / 1000000u64).i64(), ((now_us % 1000000u64) * 1000u64).i64())
+        timeout_abs: mutable OrbisKernelTimespec = OrbisKernelTimespec((now_us / 1000000).i64(), ((now_us % 1000000) * 1000).i64())
         ret: mutable void&? = null
         rt_assert_eq_int(posix_pthread_timedjoin_np(thread, ret, timeout_abs), POSIX_ETIMEDOUT)
         long_abs: mutable OrbisKernelTimespec = OrbisKernelTimespec(timeout_abs.tv_sec + 1, timeout_abs.tv_nsec)
@@ -668,7 +668,7 @@ def runtime_cond_timedwait_timeout() -> void:
         r: int = posix_pthread_cond_timedwait(rt_cond, rt_mutex, null)
         elapsed: u64 = elisa_kernel_test_monotonic_usec() - start
         rt_assert_eq_int(r, POSIX_ETIMEDOUT)
-        assert elapsed < 200000u64
+        assert elapsed < 200000
         rt_assert_zero(posix_pthread_mutex_unlock(rt_mutex))
         rt_assert_zero(posix_pthread_cond_destroy(rt_cond))
         rt_assert_zero(posix_pthread_mutex_destroy(rt_mutex))
@@ -684,7 +684,7 @@ def runtime_cond_signal_wakes_waiter() -> void:
         thread: mutable void&? = null
         rt_assert_zero(posix_pthread_create(thread, null, rt_cond_wait_entry.cast[void&], null))
         rt_wait_slot(0, 1)
-        elisa_kernel_test_sleep_usec(10000u64)
+        elisa_kernel_test_sleep_usec(10000)
         rt_assert_eq_i64(elisa_kernel_test_slot_get(1), 0)
         rt_assert_zero(posix_pthread_mutex_lock(rt_mutex))
         rt_assert_zero(posix_pthread_cond_signal(rt_cond))
@@ -733,7 +733,7 @@ def runtime_rwlock_readers_and_writer_contention() -> void:
         rt_assert_eq_int(posix_pthread_rwlock_trywrlock(rt_rwlock), POSIX_EBUSY)
         rt_assert_zero(posix_pthread_create(writer, null, rt_rw_writer_entry.cast[void&], null))
         rt_wait_slot(2, 1)
-        elisa_kernel_test_sleep_usec(10000u64)
+        elisa_kernel_test_sleep_usec(10000)
         rt_assert_eq_i64(elisa_kernel_test_slot_get(3), 0)
         elisa_kernel_test_slot_set(1, 1)
         rt_wait_slot(3, 1)
@@ -750,18 +750,18 @@ def runtime_kernel_sema_wait_signal_timeout() -> void:
     can Abort.Panic:
         elisa_kernel_test_slots_reset()
         rt_kernel_sem_id <- -1
-        rt_assert_zero(sceKernelCreateSema(rt_kernel_sem_id, "runtime-sema", 0u32, 0, 1, null))
+        rt_assert_zero(sceKernelCreateSema(rt_kernel_sem_id, "runtime-sema", 0, 0, 1, null))
         thread: mutable void&? = null
         rt_assert_zero(posix_pthread_create(thread, null, rt_kernel_sema_wait_entry.cast[void&], null))
         rt_wait_slot(0, 1)
-        elisa_kernel_test_sleep_usec(10000u64)
+        elisa_kernel_test_sleep_usec(10000)
         rt_assert_eq_i64(elisa_kernel_test_slot_get(1), 0)
         rt_assert_zero(sceKernelSignalSema(rt_kernel_sem_id, 1))
         rt_wait_slot(1, 1)
         assert rt_join(thread) == null
-        timeout: mutable u32 = 1000u32
+        timeout: mutable u32 = 1000
         rt_assert_eq_int(sceKernelWaitSema(rt_kernel_sem_id, 1, timeout), ORBIS_KERNEL_ERROR_ETIMEDOUT)
-        assert timeout == 0u32
+        assert timeout == 0
         rt_assert_zero(sceKernelDeleteSema(rt_kernel_sem_id))
 
 @test
@@ -769,7 +769,7 @@ def runtime_kernel_sema_cancel_reports_waiters() -> void:
     can Abort.Panic:
         elisa_kernel_test_slots_reset()
         rt_kernel_sem_id <- -1
-        rt_assert_zero(sceKernelCreateSema(rt_kernel_sem_id, "runtime-sema-cancel", 0u32, 0, 1, null))
+        rt_assert_zero(sceKernelCreateSema(rt_kernel_sem_id, "runtime-sema-cancel", 0, 0, 1, null))
         thread: mutable void&? = null
         rt_assert_zero(posix_pthread_create(thread, null, rt_kernel_sema_wait_entry.cast[void&], null))
         rt_wait_slot(0, 1)
@@ -786,7 +786,7 @@ def runtime_kernel_sema_delete_wakes_waiter() -> void:
     can Abort.Panic:
         elisa_kernel_test_slots_reset()
         rt_kernel_sem_id <- -1
-        rt_assert_zero(sceKernelCreateSema(rt_kernel_sem_id, "runtime-sema-delete", 0u32, 0, 1, null))
+        rt_assert_zero(sceKernelCreateSema(rt_kernel_sem_id, "runtime-sema-delete", 0, 0, 1, null))
         thread: mutable void&? = null
         rt_assert_zero(posix_pthread_create(thread, null, rt_kernel_sema_wait_entry.cast[void&], null))
         rt_wait_slot(0, 1)
@@ -800,13 +800,13 @@ def runtime_posix_sem_wait_post_try_timed_getvalue() -> void:
     can Abort.Panic:
         elisa_kernel_test_slots_reset()
         rt_sem <- null
-        rt_assert_zero(posix_sem_init(rt_sem, 0, 0u32))
+        rt_assert_zero(posix_sem_init(rt_sem, 0, 0))
         if posix_sem_trywait(rt_sem) != -1:
             panic("sem trywait should fail on empty semaphore")
         thread: mutable void&? = null
         rt_assert_zero(posix_pthread_create(thread, null, rt_posix_sem_wait_entry.cast[void&], null))
         rt_wait_slot(0, 1)
-        elisa_kernel_test_sleep_usec(10000u64)
+        elisa_kernel_test_sleep_usec(10000)
         rt_assert_eq_i64(elisa_kernel_test_slot_get(1), 0)
         rt_assert_zero(posix_sem_post(rt_sem))
         rt_wait_slot(1, 1)
@@ -825,34 +825,34 @@ def runtime_event_flag_wait_set_clear_cancel() -> void:
     can Abort.Panic:
         elisa_kernel_test_slots_reset()
         rt_event_flag_id <- -1
-        rt_assert_zero(sceKernelCreateEventFlag(rt_event_flag_id, "runtime-event", 0u32, 0u64, null))
+        rt_assert_zero(sceKernelCreateEventFlag(rt_event_flag_id, "runtime-event", 0, 0, null))
         thread: mutable void&? = null
-        rt_assert_zero(posix_pthread_create(thread, null, rt_event_wait_entry.cast[void&], 0x01u32.cast[void&?]))
+        rt_assert_zero(posix_pthread_create(thread, null, rt_event_wait_entry.cast[void&], 0x01.cast[void&?]))
         rt_wait_slot(0, 1)
-        elisa_kernel_test_sleep_usec(10000u64)
+        elisa_kernel_test_sleep_usec(10000)
         rt_assert_eq_i64(elisa_kernel_test_slot_get(1), 0)
-        rt_assert_zero(sceKernelSetEventFlag(rt_event_flag_id, 0x1u64))
-        elisa_kernel_test_sleep_usec(10000u64)
+        rt_assert_zero(sceKernelSetEventFlag(rt_event_flag_id, 0x1))
+        elisa_kernel_test_sleep_usec(10000)
         rt_assert_eq_i64(elisa_kernel_test_slot_get(1), 0)
-        rt_assert_zero(sceKernelSetEventFlag(rt_event_flag_id, 0x2u64))
+        rt_assert_zero(sceKernelSetEventFlag(rt_event_flag_id, 0x2))
         rt_wait_slot(1, 3)
         if rt_join(thread) != null:
             panic("event waiter should return null")
 
-        out_bits: mutable u64 = 0u64
-        rt_assert_zero(sceKernelSetEventFlag(rt_event_flag_id, 0xfu64))
-        rt_assert_zero(sceKernelPollEventFlag(rt_event_flag_id, 0x4u64, 0x22u32, out_bits))
-        if out_bits != 0xfu64:
+        out_bits: mutable u64 = 0
+        rt_assert_zero(sceKernelSetEventFlag(rt_event_flag_id, 0xf))
+        rt_assert_zero(sceKernelPollEventFlag(rt_event_flag_id, 0x4, 0x22, out_bits))
+        if out_bits != 0xf:
             panic("event clear-pattern should report original bits")
-        rt_assert_zero(sceKernelPollEventFlag(rt_event_flag_id, 0x8u64, 0x12u32, out_bits))
-        if out_bits != 0xbu64:
+        rt_assert_zero(sceKernelPollEventFlag(rt_event_flag_id, 0x8, 0x12, out_bits))
+        if out_bits != 0xb:
             panic("event clear-all should report post-clear bits")
-        timeout: mutable u32 = 1000u32
-        rt_assert_eq_int(sceKernelWaitEventFlag(rt_event_flag_id, 0x80u64, 0x02u32, null, timeout), ORBIS_KERNEL_ERROR_ETIMEDOUT)
-        if timeout != 0u32:
+        timeout: mutable u32 = 1000
+        rt_assert_eq_int(sceKernelWaitEventFlag(rt_event_flag_id, 0x80, 0x02, null, timeout), ORBIS_KERNEL_ERROR_ETIMEDOUT)
+        if timeout != 0:
             panic("event timeout should be zeroed")
         waiters: mutable int = -1
-        rt_assert_zero(sceKernelCancelEventFlag(rt_event_flag_id, 0u64, waiters))
+        rt_assert_zero(sceKernelCancelEventFlag(rt_event_flag_id, 0, waiters))
         if waiters != 0:
             panic("event cancel should report zero waiters")
         rt_assert_zero(sceKernelDeleteEventFlag(rt_event_flag_id))
@@ -862,14 +862,14 @@ def runtime_event_flag_single_mode_rejects_second_waiter() -> void:
     can Abort.Panic:
         elisa_kernel_test_slots_reset()
         rt_event_flag_id <- -1
-        rt_assert_zero(sceKernelCreateEventFlag(rt_event_flag_id, "runtime-event-single", 0x10u32, 0u64, null))
+        rt_assert_zero(sceKernelCreateEventFlag(rt_event_flag_id, "runtime-event-single", 0x10, 0, null))
         thread: mutable void&? = null
-        rt_assert_zero(posix_pthread_create(thread, null, rt_event_wait_entry.cast[void&], 0x01u32.cast[void&?]))
+        rt_assert_zero(posix_pthread_create(thread, null, rt_event_wait_entry.cast[void&], 0x01.cast[void&?]))
         rt_wait_slot(0, 1)
-        result_bits: mutable u64 = 0u64
-        timeout: mutable u32 = 1000u32
-        rt_assert_eq_int(sceKernelWaitEventFlag(rt_event_flag_id, 0x3u64, 0x01u32, result_bits, timeout), ORBIS_KERNEL_ERROR_EPERM)
-        rt_assert_zero(sceKernelSetEventFlag(rt_event_flag_id, 0x3u64))
+        result_bits: mutable u64 = 0
+        timeout: mutable u32 = 1000
+        rt_assert_eq_int(sceKernelWaitEventFlag(rt_event_flag_id, 0x3, 0x01, result_bits, timeout), ORBIS_KERNEL_ERROR_EPERM)
+        rt_assert_zero(sceKernelSetEventFlag(rt_event_flag_id, 0x3))
         rt_wait_slot(1, 3)
         assert rt_join(thread) == null
         rt_assert_zero(sceKernelDeleteEventFlag(rt_event_flag_id))
@@ -879,12 +879,12 @@ def runtime_event_flag_cancel_wakes_waiter() -> void:
     can Abort.Panic:
         elisa_kernel_test_slots_reset()
         rt_event_flag_id <- -1
-        rt_assert_zero(sceKernelCreateEventFlag(rt_event_flag_id, "runtime-event-cancel", 0x20u32, 0u64, null))
+        rt_assert_zero(sceKernelCreateEventFlag(rt_event_flag_id, "runtime-event-cancel", 0x20, 0, null))
         thread: mutable void&? = null
-        rt_assert_zero(posix_pthread_create(thread, null, rt_event_wait_entry.cast[void&], 0x01u32.cast[void&?]))
+        rt_assert_zero(posix_pthread_create(thread, null, rt_event_wait_entry.cast[void&], 0x01.cast[void&?]))
         rt_wait_slot(0, 1)
         waiters: mutable int = -1
-        rt_assert_zero(sceKernelCancelEventFlag(rt_event_flag_id, 0u64, waiters))
+        rt_assert_zero(sceKernelCancelEventFlag(rt_event_flag_id, 0, waiters))
         if waiters < 1:
             panic("event cancel should report at least one waiter")
         rt_wait_slot(2, 1)
@@ -896,9 +896,9 @@ def runtime_event_flag_delete_wakes_waiter() -> void:
     can Abort.Panic:
         elisa_kernel_test_slots_reset()
         rt_event_flag_id <- -1
-        rt_assert_zero(sceKernelCreateEventFlag(rt_event_flag_id, "runtime-event-delete", 0x20u32, 0u64, null))
+        rt_assert_zero(sceKernelCreateEventFlag(rt_event_flag_id, "runtime-event-delete", 0x20, 0, null))
         thread: mutable void&? = null
-        rt_assert_zero(posix_pthread_create(thread, null, rt_event_wait_entry.cast[void&], 0x01u32.cast[void&?]))
+        rt_assert_zero(posix_pthread_create(thread, null, rt_event_wait_entry.cast[void&], 0x01.cast[void&?]))
         rt_wait_slot(0, 1)
         rt_assert_zero(sceKernelDeleteEventFlag(rt_event_flag_id))
         rt_wait_slot(3, 1)
@@ -937,12 +937,12 @@ def runtime_mixed_primitives_no_stale_handles() -> void:
         rt_event_flag_id <- -1
         rt_assert_zero(posix_pthread_mutex_init(rt_mutex, null))
         rt_assert_zero(posix_pthread_cond_init(rt_cond, null))
-        rt_assert_zero(sceKernelCreateSema(rt_kernel_sem_id, "mixed-sema", 0u32, 0, 1, null))
-        rt_assert_zero(sceKernelCreateEventFlag(rt_event_flag_id, "mixed-event", 0u32, 0u64, null))
+        rt_assert_zero(sceKernelCreateSema(rt_kernel_sem_id, "mixed-sema", 0, 0, 1, null))
+        rt_assert_zero(sceKernelCreateEventFlag(rt_event_flag_id, "mixed-event", 0, 0, null))
         thread: mutable void&? = null
         rt_assert_zero(posix_pthread_create(thread, null, rt_mixed_wait_entry.cast[void&], null))
         rt_wait_slot(0, 1)
-        rt_assert_zero(sceKernelSetEventFlag(rt_event_flag_id, 0x8u64))
+        rt_assert_zero(sceKernelSetEventFlag(rt_event_flag_id, 0x8))
         rt_assert_zero(sceKernelSignalSema(rt_kernel_sem_id, 1))
         rt_wait_slot(1, 1)
         rt_assert_zero(posix_pthread_mutex_lock(rt_mutex))
@@ -960,7 +960,7 @@ def runtime_kernel_sema_two_waiters_contention() -> void:
     can Abort.Panic:
         elisa_kernel_test_slots_reset()
         rt_kernel_sem_id <- -1
-        rt_assert_zero(sceKernelCreateSema(rt_kernel_sem_id, "runtime-sema-two", 0u32, 0, 2, null))
+        rt_assert_zero(sceKernelCreateSema(rt_kernel_sem_id, "runtime-sema-two", 0, 0, 2, null))
         t1: mutable void&? = null
         t2: mutable void&? = null
         rt_assert_zero(posix_pthread_create(t1, null, rt_kernel_sema_wait_counting_entry.cast[void&], null))
@@ -980,13 +980,13 @@ def runtime_event_flag_two_waiters_contention() -> void:
     can Abort.Panic:
         elisa_kernel_test_slots_reset()
         rt_event_flag_id <- -1
-        rt_assert_zero(sceKernelCreateEventFlag(rt_event_flag_id, "runtime-event-two", 0u32, 0u64, null))
+        rt_assert_zero(sceKernelCreateEventFlag(rt_event_flag_id, "runtime-event-two", 0, 0, null))
         t1: mutable void&? = null
         t2: mutable void&? = null
-        rt_assert_zero(posix_pthread_create(t1, null, rt_event_wait_counting_entry.cast[void&], 0x01u32.cast[void&?]))
-        rt_assert_zero(posix_pthread_create(t2, null, rt_event_wait_counting_entry.cast[void&], 0x01u32.cast[void&?]))
+        rt_assert_zero(posix_pthread_create(t1, null, rt_event_wait_counting_entry.cast[void&], 0x01.cast[void&?]))
+        rt_assert_zero(posix_pthread_create(t2, null, rt_event_wait_counting_entry.cast[void&], 0x01.cast[void&?]))
         rt_wait_slot_at_least(0, 2)
-        rt_assert_zero(sceKernelSetEventFlag(rt_event_flag_id, 0x3u64))
+        rt_assert_zero(sceKernelSetEventFlag(rt_event_flag_id, 0x3))
         rt_wait_slot_at_least(1, 2)
         _ = rt_join(t1)
         _ = rt_join(t2)
@@ -1005,7 +1005,7 @@ def runtime_differential_return_codes_and_wakeup_behavior() -> void:
 
         elisa_kernel_test_slots_reset()
         rt_kernel_sem_id <- -1
-        rt_assert_zero(sceKernelCreateSema(rt_kernel_sem_id, "runtime-sema-diff", 0u32, 0, 1, null))
+        rt_assert_zero(sceKernelCreateSema(rt_kernel_sem_id, "runtime-sema-diff", 0, 0, 1, null))
         sem_waiter: mutable void&? = null
         rt_assert_zero(posix_pthread_create(sem_waiter, null, rt_kernel_sema_wait_entry.cast[void&], null))
         rt_wait_slot(0, 1)
@@ -1015,25 +1015,25 @@ def runtime_differential_return_codes_and_wakeup_behavior() -> void:
         _ = waiters
         rt_wait_slot(2, 1)
         _ = rt_join(sem_waiter)
-        timeout: mutable u32 = 1000u32
+        timeout: mutable u32 = 1000
         rt_assert_eq_int(sceKernelWaitSema(rt_kernel_sem_id, 1, timeout), ORBIS_KERNEL_ERROR_ETIMEDOUT)
-        assert timeout == 0u32
+        assert timeout == 0
         rt_assert_zero(sceKernelDeleteSema(rt_kernel_sem_id))
 
         elisa_kernel_test_slots_reset()
         rt_event_flag_id <- -1
-        rt_assert_zero(sceKernelCreateEventFlag(rt_event_flag_id, "runtime-event-diff", 0u32, 0u64, null))
+        rt_assert_zero(sceKernelCreateEventFlag(rt_event_flag_id, "runtime-event-diff", 0, 0, null))
         event_waiter: mutable void&? = null
-        rt_assert_zero(posix_pthread_create(event_waiter, null, rt_event_wait_entry.cast[void&], 0x01u32.cast[void&?]))
+        rt_assert_zero(posix_pthread_create(event_waiter, null, rt_event_wait_entry.cast[void&], 0x01.cast[void&?]))
         rt_wait_slot(0, 1)
         event_waiters: mutable int = -1
-        rt_assert_zero(sceKernelCancelEventFlag(rt_event_flag_id, 0u64, event_waiters))
+        rt_assert_zero(sceKernelCancelEventFlag(rt_event_flag_id, 0, event_waiters))
         _ = event_waiters
         rt_wait_slot(2, 1)
         _ = rt_join(event_waiter)
-        event_timeout: mutable u32 = 1000u32
-        rt_assert_eq_int(sceKernelWaitEventFlag(rt_event_flag_id, 0x80u64, 0x02u32, null, event_timeout), ORBIS_KERNEL_ERROR_ETIMEDOUT)
-        if event_timeout != 0u32:
+        event_timeout: mutable u32 = 1000
+        rt_assert_eq_int(sceKernelWaitEventFlag(rt_event_flag_id, 0x80, 0x02, null, event_timeout), ORBIS_KERNEL_ERROR_ETIMEDOUT)
+        if event_timeout != 0:
             panic("event timeout should be zeroed")
         rt_assert_zero(sceKernelDeleteEventFlag(rt_event_flag_id))
 
@@ -1050,12 +1050,12 @@ def runtime_stress_repeated_create_wait_signal_join_cycles() -> void:
                 rt_event_flag_id <- -1
                 rt_assert_zero(posix_pthread_mutex_init(rt_mutex, null))
                 rt_assert_zero(posix_pthread_cond_init(rt_cond, null))
-                rt_assert_zero(sceKernelCreateSema(rt_kernel_sem_id, "cycle-sema", 0u32, 0, 1, null))
-                rt_assert_zero(sceKernelCreateEventFlag(rt_event_flag_id, "cycle-event", 0u32, 0u64, null))
+                rt_assert_zero(sceKernelCreateSema(rt_kernel_sem_id, "cycle-sema", 0, 0, 1, null))
+                rt_assert_zero(sceKernelCreateEventFlag(rt_event_flag_id, "cycle-event", 0, 0, null))
                 thread: mutable void&? = null
                 rt_assert_zero(posix_pthread_create(thread, null, rt_mixed_wait_entry.cast[void&], null))
                 rt_wait_slot(0, 1)
-                rt_assert_zero(sceKernelSetEventFlag(rt_event_flag_id, 0x8u64))
+                rt_assert_zero(sceKernelSetEventFlag(rt_event_flag_id, 0x8))
                 rt_assert_zero(sceKernelSignalSema(rt_kernel_sem_id, 1))
                 rt_wait_slot(1, 1)
                 rt_assert_zero(posix_pthread_mutex_lock(rt_mutex))
@@ -1115,7 +1115,7 @@ def runtime_stress_rwlock_sema_event_cancel_timeout_cycles() -> void:
                 rt_assert_zero(posix_pthread_rwlock_destroy(rt_rwlock))
 
                 rt_kernel_sem_id <- -1
-                rt_assert_zero(sceKernelCreateSema(rt_kernel_sem_id, "runtime-sema-stress", 0u32, 0, 1, null))
+                rt_assert_zero(sceKernelCreateSema(rt_kernel_sem_id, "runtime-sema-stress", 0, 0, 1, null))
                 sem_waiter: mutable void&? = null
                 rt_assert_zero(posix_pthread_create(sem_waiter, null, rt_kernel_sema_wait_entry.cast[void&], null))
                 rt_wait_slot(0, 1)
@@ -1124,22 +1124,22 @@ def runtime_stress_rwlock_sema_event_cancel_timeout_cycles() -> void:
                 rt_assert_zero(sceKernelCancelSema(rt_kernel_sem_id, 0, waiters))
                 rt_wait_slot(2, 1)
                 _ = rt_join(sem_waiter)
-                sem_timeout: mutable u32 = 200u32
+                sem_timeout: mutable u32 = 200
                 rt_assert_eq_int(sceKernelWaitSema(rt_kernel_sem_id, 1, sem_timeout), ORBIS_KERNEL_ERROR_ETIMEDOUT)
-                assert sem_timeout == 0u32
+                assert sem_timeout == 0
                 rt_assert_zero(sceKernelDeleteSema(rt_kernel_sem_id))
 
                 rt_event_flag_id <- -1
-                rt_assert_zero(sceKernelCreateEventFlag(rt_event_flag_id, "runtime-event-stress", 0x20u32, 0u64, null))
+                rt_assert_zero(sceKernelCreateEventFlag(rt_event_flag_id, "runtime-event-stress", 0x20, 0, null))
                 event_waiter: mutable void&? = null
-                rt_assert_zero(posix_pthread_create(event_waiter, null, rt_event_wait_entry.cast[void&], 0x01u32.cast[void&?]))
+                rt_assert_zero(posix_pthread_create(event_waiter, null, rt_event_wait_entry.cast[void&], 0x01.cast[void&?]))
                 rt_wait_slot(0, 1)
                 event_waiters: mutable int = -1
-                rt_assert_zero(sceKernelCancelEventFlag(rt_event_flag_id, 0u64, event_waiters))
+                rt_assert_zero(sceKernelCancelEventFlag(rt_event_flag_id, 0, event_waiters))
                 rt_wait_slot(2, 1)
                 _ = rt_join(event_waiter)
-                event_timeout: mutable u32 = 200u32
-                rt_assert_eq_int(sceKernelWaitEventFlag(rt_event_flag_id, 0x80u64, 0x02u32, null, event_timeout), ORBIS_KERNEL_ERROR_ETIMEDOUT)
-                assert event_timeout == 0u32
+                event_timeout: mutable u32 = 200
+                rt_assert_eq_int(sceKernelWaitEventFlag(rt_event_flag_id, 0x80, 0x02, null, event_timeout), ORBIS_KERNEL_ERROR_ETIMEDOUT)
+                assert event_timeout == 0
                 rt_assert_zero(sceKernelDeleteEventFlag(rt_event_flag_id))
                 cycle <- cycle + 1

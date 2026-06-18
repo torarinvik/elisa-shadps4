@@ -23,7 +23,7 @@ CUSA07399 stage:
 - handoff: PASS
 - execute stage: guarded-entry
 - first boundary: PASS
-- synthetic renderer smoke: FAIL
+- synthetic renderer smoke: PASS
 - real CUSA first frame: PENDING
 - first frame ladder: none
 - host note: arm64 macOS probe-only
@@ -32,9 +32,7 @@ CUSA07399 stage:
 - guest exec supported native execution: 0
 - guest exec x64 subprocess available: 1
 - guest exec x64 subprocess smoke: FAIL
-- CUSA07399 x64 real execution lane: failed
-- CUSA07399 x64 execution mode: cross-emit-rosetta-x86_64
-- CUSA07399 x64 execution reason: target-failed
+- CUSA07399 x64 real execution lane: missing-output
 - guest exec probe only: 1
 - guest exec started: 1
 - guest exec entry reached: 1
@@ -52,7 +50,7 @@ CUSA07399 stage:
 - guest exec signal stack words: 0x0, 0x0
 - guest exec last signal: 0
 - guest exec last module: libSceNpToolkit
-- guest exec last symbol: module_start
+- guest exec last symbol: zr094EQ39Ww
 - first boundary blocker: probe-only host (arm64 macOS)
 - first frame gate signals:
   - shader_translate_attempted=0
@@ -64,8 +62,8 @@ CUSA07399 stage:
   - VIDEO_STAGE_first_frame_candidate=0
 CUSA07399 artifact metrics:
 - CUSA module count: 4
-- imports total: 1153
-- native HLE count: 849
+- imports total: 1154
+- native HLE count: 850
 - PRX export count: 304
 - AeroLib fallback count: 0
 - unresolved count: 0
@@ -102,16 +100,12 @@ Save/Dialog/Misc parity test signals:
 Top 50 fallback symbols:
 - none
 Top blockers:
-- No unclassified project-owned C++ modules violated: 1 Missing units
-- Gate step failed: parity workqueue summary
+- Gate step failed: elisacore test core-libraries-audio-parity-tests
 - Gate step failed: guest exec ABI smoke x64
 - Gate step failed: CUSA07399 x64 real execution lane
-- Gate step failed: elisacore test emulator-renderer-first-frame-smoke
+- Gate step failed: elisacore test emulator-runtime-services-smoke
 Failing scenario ids:
 - emulator_guest_exec_guarded_entry_trap_reports_entry_params_context
-- emulator_real_game_boot_smoke_probes_native_guest_exec_handoff
-- emulator_real_game_boot_smoke_guarded_game_entry_reports_host_status
-- emulator_renderer_first_frame_synthetic_ladder_smoke
 
 ## Agent Work Queues
 ### kernel_fallbacks
@@ -136,9 +130,9 @@ Failing scenario ids:
 - PASS: parity ABI guard
 - PASS: emulator ABI smoke
 - PASS: strict native ABI contracts
-- FAIL: parity workqueue summary
+- PASS: parity workqueue summary
 - PASS: bridge syntax
-- PASS: elisacore test core-libraries-audio-parity-tests
+- FAIL: elisacore test core-libraries-audio-parity-tests
 - PASS: elisacore test core-libraries-np-parity-tests
 - FAIL: guest exec ABI smoke x64
 - FAIL: CUSA07399 x64 real execution lane
@@ -146,9 +140,9 @@ Failing scenario ids:
 - PASS: elisacore test emulator-core-boot-smoke
 - PASS: elisacore test real-self-loader-tests
 - PASS: elisacore test emulator-real-game-boot-smoke
-- PASS: elisacore test emulator-runtime-services-smoke
+- FAIL: elisacore test emulator-runtime-services-smoke
 - PASS: elisacore test emulator-guest-exec-runtime-tests
-- FAIL: elisacore test emulator-renderer-first-frame-smoke
+- PASS: elisacore test emulator-renderer-first-frame-smoke
 - PASS: elisacore run elisa_tests/core_libraries_save_data_parity_tests.elisa
 - PASS: elisacore run elisa_tests/core_libraries_save_data_dialog_pure_tests.elisa
 - PASS: elisacore run elisa_tests/core_libraries_web_browser_dialog_pure_tests.elisa

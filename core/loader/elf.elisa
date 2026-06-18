@@ -14,14 +14,9 @@ error ElfError:
     SeekFailed
     ShortRead
 
-# Persistent arena owning the buffers grown while parsing an ELF/SELF (segment
-# bytes, program/section headers, self segments). These outlive the individual
-# helper calls that append to them, so they must NOT be grown from a transient
-# local arena (whose storage is freed on return -> use-after-free).
-global mutable elf_parse_arena: Arena = zeroed
-
-def Elf_ResetParseArena() -> void:
-    elf_parse_arena <- zeroed
+# The buffers grown while parsing an ELF/SELF (segment bytes, program/section
+# headers, self segments) outlive the individual append calls and live as long
+# as the loaded module, so they are grown in the program-lifetime `perm` region.
 
 const EI_MAG0: u8 = 0
 const EI_MAG1: u8 = 1
@@ -249,45 +244,6 @@ def Elf_new() -> Elf:
 def Elf_IsOpen(self: Elf&) -> bool:
     return self.f.IsOpen()
 
-def Elf_ResizeBytes(out: mutable darray[u8]&, size: usize) -> void:
-    owner: mutable Arena& = &elf_parse_arena
-    in owner:
-        while out.count < size:
-            out.push(0)
-
-def Elf_ResizeSelfSegments(out: mutable darray[self_segment_header]&, size: usize) -> void:
-    owner: mutable Arena& = &elf_parse_arena
-    in owner:
-        while out.count < size:
-            out.push(zeroed.cast[self_segment_header])
-
-def Elf_ResizeProgramHeaders(out: mutable darray[elf_program_header]&, size: usize) -> void:
-    owner: mutable Arena& = &elf_parse_arena
-    in owner:
-        while out.count < size:
-            out.push(zeroed.cast[elf_program_header])
-
-def Elf_ResizeSectionHeaders(out: mutable darray[elf_section_header]&, size: usize) -> void:
-    owner: mutable Arena& = &elf_parse_arena
-    in owner:
-        while out.count < size:
-            out.push(zeroed.cast[elf_section_header])
-
-def Elf_PushSelfSegment(out: mutable darray[self_segment_header]&, value: self_segment_header) -> void:
-    owner: mutable Arena& = &elf_parse_arena
-    in owner:
-        out.push(value)
-
-def Elf_PushProgramHeader(out: mutable darray[elf_program_header]&, value: elf_program_header) -> void:
-    owner: mutable Arena& = &elf_parse_arena
-    in owner:
-        out.push(value)
-
-def Elf_PushSectionHeader(out: mutable darray[elf_section_header]&, value: elf_section_header) -> void:
-    owner: mutable Arena& = &elf_parse_arena
-    in owner:
-        out.push(value)
-
 def Elf_ReadU8(f: IOFile&) -> u8:
     value: mutable u8 = 0
     _ = f.ReadRaw((&value).cast[mutable void&], 1, 1)
@@ -473,7 +429,8 @@ def Elf_Open(self: mutable Elf&, file_name: static u8&) -> void error[ElfError]:
         i: mutable u16 = 0
         while i < self.self.segment_count:
             seg: self_segment_header = Elf_ReadSelfSegmentHeader(self.f)
-            Elf_PushSelfSegment(self.self_segments, seg)
+            in perm:
+                self.self_segments.push(seg)
             i <- i + 1
     elf_header_pos: i64 = self.f.Tell()
     self.elf_header_value <- Elf_ReadElfHeader(self.f)
@@ -484,14 +441,16 @@ def Elf_Open(self: mutable Elf&, file_name: static u8&) -> void error[ElfError]:
         i: mutable u16 = 0
         while i < self.elf_header_value.e_phnum:
             phdr: elf_program_header = Elf_ReadProgramHeader(self.f)
-            Elf_PushProgramHeader(self.program_headers, phdr)
+            in perm:
+                self.program_headers.push(phdr)
             i <- i + 1
     if self.elf_header_value.e_shoff > 0 and self.elf_header_value.e_shnum > 0:
         _ = self.f.Seek(elf_header_pos + self.elf_header_value.e_shoff.i64())
         i: mutable u16 = 0
         while i < self.elf_header_value.e_shnum:
             shdr: elf_section_header = Elf_ReadSectionHeader(self.f)
-            Elf_PushSectionHeader(self.section_headers, shdr)
+            in perm:
+                self.section_headers.push(shdr)
             i <- i + 1
 
     if self.is_self:
@@ -514,27 +473,23 @@ def Elf_LoadSegment(self: mutable Elf&, virtual_addr: uintptr, file_offset: u64,
         raise ElfError.ShortRead
     return
 
-def Elf_LoadSegmentBytes(self: mutable Elf&, out: mutable darray[u8]&, file_offset: u64, size: usize, target_arena: mutable Arena&) -> void error[ElfError]:
+# Reads `size` segment bytes into `out` starting at index `base`. The caller must
+# already have grown `out` to at least `base + size` IN ITS OWN REGION (perm for
+# data that outlives the load — dynamic data, symbol/relocation tables, the module
+# image; a transient local region for staging buffers discarded on return). This
+# function never grows `out`, so it carries no region: it only reads into the
+# already-allocated tail.
+#
+# The whole segment is read in ONE IOFile_ReadRaw rather than a byte-at-a-time
+# Elf_ReadU8 loop: a multi-MB segment otherwise issues millions of 1-byte freads
+# (the dominant boot cost under Rosetta). The bounds-checked darray index makes the
+# destination span safe without raw pointer arithmetic.
+def Elf_LoadSegmentBytes(self: mutable Elf&, out: mutable darray[u8]&, base: usize, file_offset: u64, size: usize) -> void error[ElfError]:
     try Elf_SeekSegment((&self).cast[mutable Elf&], file_offset)
     if size == 0:
         return
-    # Grow the destination buffer in the arena chosen by the caller. Segment
-    # data that outlives the load (dynamic data, symbol/relocation tables, the
-    # module image) must use a persistent arena; using a transient local arena
-    # here previously freed the backing on return, so symbol/relocation reads
-    # hit use-after-free memory and import resolution was nondeterministic.
-    #
-    # Read the whole segment in ONE IOFile_ReadRaw rather than a byte-at-a-time
-    # Elf_ReadU8 loop: a multi-MB segment otherwise issues millions of 1-byte
-    # freads (the dominant boot cost under Rosetta). Append semantics are kept by
-    # reading into the freshly-grown tail; the bounds-checked darray index makes
-    # the destination span safe without raw pointer arithmetic.
-    base: usize = out.count
-    in target_arena:
-        while out.count < base + size:
-            out.push(0)
     dst: mutable u8& = &out[base]
-    got: usize = self.f.ReadRaw(dst.cast[mutable void&], 1usize, size)
+    got: usize = self.f.ReadRaw(dst.cast[mutable void&], 1, size)
     if got != size:
         raise ElfError.ShortRead
     return

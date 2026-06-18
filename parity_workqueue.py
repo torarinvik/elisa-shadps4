@@ -49,6 +49,10 @@ OVERRIDES: dict[str, tuple[str, str]] = {
         "Not-Applicable-External",
         "AMD FidelityFX FSR shader header consumed as shader source data",
     ),
+    "video_core/host_diagnostics": (
+        "Temporary-Cpp-Bridge",
+        "host-only GPU command-recording validation/diagnostics (pure log/assert, never alters rendering); stays as C++ developer tooling, not part of the emulation surface to port",
+    ),
     "video_core/renderer_vulkan/vk_gpu_command_diagnostics": (
         "Missing",
         "Milestone C renderer diagnostic runtime helper; port native Elisa ring/env behavior or bridge behind Vulkan host API",

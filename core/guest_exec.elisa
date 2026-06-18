@@ -3,6 +3,7 @@
 
 include "../common/types.elisa"
 include "../common/arch.elisa"
+include "../common/streq.elisa"
 include "./tls.elisa"
 include "../../compiler/runtime/elisacore_std/debug_referee.elisai"
 
@@ -13,6 +14,7 @@ extern puts(s: u8&) -> int can[Console.Write]
 extern popen(command: u8&, mode: u8&) -> void&?
 extern pclose(stream: void&) -> int
 extern fgets(s: mutable u8&, size: int, stream: void&) -> mutable u8&?
+extern sysctlbyname(name: u8&, oldp: void&?, oldlenp: mutable usize&, newp: void&?, newlen: usize) -> int
 
 @fixed_layout
 @abi_layout(size, 280, align, 8, field, argc, 0, field, argv, 8, field, entry_addr, 272)
@@ -27,11 +29,46 @@ struct GuestEntryParams:
 # time via `static if`, so the unselected branches are eliminated (no runtime
 # checks). HostCanRunX64Subprocess uses libc process I/O FFI only for the Apple
 # Silicon Rosetta probe.
+# Runtime confirmation that this process can ACTUALLY execute native x86_64 guest
+# code. The compile-time ARCH_X86_64 fact is necessary but not sufficient: the test
+# harness can interpret an x86_64-target build on an Apple Silicon host, where
+# ARCH_X86_64 is statically true yet jumping to guest x86_64 code traps (the arm64
+# interpreter cannot run x86_64 machine code). Distinguish the genuinely-runnable
+# cases — a real Intel binary, or an x86_64 binary under Rosetta — from the arm64
+# interpreter via two in-process sysctls: native exec works UNLESS we are on Apple
+# Silicon hardware (hw.optional.arm64==1) running natively (proc_translated==0).
+global mutable ge_native_x64_runnable_cache: s32 = -1
+
+def ge_sysctl_flag(name: u8&) -> s32:
+    value: mutable s32 = 0
+    length: mutable usize = 4
+    rc: int = sysctlbyname(name, (&value).cast[void&?], &length, null, 0)
+    if rc != 0:
+        return 0
+    return value
+
+def ge_host_native_x64_runnable() -> s32:
+    if ge_native_x64_runnable_cache >= 0:
+        return ge_native_x64_runnable_cache
+    result: mutable s32 = 1
+    apple_silicon_hw: s32 = ge_sysctl_flag("hw.optional.arm64")
+    translated: s32 = ge_sysctl_flag("sysctl.proc_translated")
+    if apple_silicon_hw == 1 and translated == 0:
+        # Apple Silicon hardware, running natively (not under Rosetta): this build is
+        # the arm64 interpreter masquerading as an x86_64 target — guest exec traps.
+        result <- 0
+    trusted Global:
+        ge_native_x64_runnable_cache <- result
+    return result
+
 def c_GuestExec_IsSupported() -> s32:
     static if PLATFORM_WINDOWS:
         return 0
     static elif ARCH_X86_64:
-        return 1
+        static if PLATFORM_APPLE:
+            return ge_host_native_x64_runnable()
+        static else:
+            return 1
     static else:
         return 0
 
@@ -145,7 +182,7 @@ def ge_memcpy(dst: void&?, src: void&?, n: usize) -> void&?:
 const GE_NATIVE_REGION_CAP: u32 = 8192
 const GE_WRITABLE_PAGE_CAP: u64 = 65536
 const GE_BOUNDARY_NEAR_NULL_LIMIT: u64 = 0x10000
-const GE_BOUNDARY_POISON_WORD: u64 = 0xBADC0DEBADC0DEADu64
+const GE_BOUNDARY_POISON_WORD: u64 = 0xBADC0DEBADC0DEAD
 const GE_BOUNDARY_GUARD_NONE: u64 = 0
 const GE_BOUNDARY_GUARD_POISON: u64 = 1
 const GE_BOUNDARY_GUARD_NEAR_NULL_UNMAPPED: u64 = 2
@@ -398,7 +435,7 @@ def ge_page_size() -> uintptr:
         return ps.uintptr() if ps > 0 else 4096.uintptr()
     static elif PLATFORM_LINUX:
         ps: i64 = ge_sysconf(30)
-        return ps.uintptr() if ps > 0i64 else 4096.uintptr()
+        return ps.uintptr() if ps > 0 else 4096.uintptr()
     static else:
         return 4096.uintptr()
 
@@ -575,11 +612,11 @@ def ge_guest_pointer_guard_reason_for_value(value: uintptr) -> u64:
 
 def ge_is_noncanonical_x86_address(value: uintptr) -> bool:
     raw: u64 = value.u64()
-    sign: u64 = (raw >> 47u64) & 1u64
-    upper: u64 = raw >> 48u64
-    if sign == 0u64:
-        return upper != 0u64
-    return upper != 0xffffu64
+    sign: u64 = (raw >> 47) & 1
+    upper: u64 = raw >> 48
+    if sign == 0:
+        return upper != 0
+    return upper != 0xffff
 
 def ge_callable_guard_reason_for_value(value: uintptr) -> u64:
     base_reason: u64 = ge_boundary_guard_reason_for_value(value)
@@ -832,7 +869,7 @@ def ge_observe_fs_owner_state(site: cstr, expected_owner: u32) -> void can[Unsaf
         host_selector: u16 = TLS_HostFsSelectorRaw()
         actual_owner: u32 = ge_classify_fs_owner(actual_selector, host_selector, guest_selector)
         ok: bool = expected_owner == GE_FS_OWNER_UNKNOWN or actual_owner == expected_owner
-        ge_fs_state_observation_count <- ge_fs_state_observation_count + 1u64
+        ge_fs_state_observation_count <- ge_fs_state_observation_count + 1
         ge_fs_state_last_site <- site
         ge_fs_state_last_expect_guest <- expected_owner == GE_FS_OWNER_GUEST
         ge_fs_state_last_expected <- ge_expected_fs_selector(expected_owner, host_selector, guest_selector)
@@ -1200,22 +1237,22 @@ def ge_create_host_fs_entry_thunk(target: uintptr) -> HostSegmentAgnosticEntry c
         host_selector: u16 = TLS_HostFsSelectorRaw()
         code: mutable u8[22] = zeroed
         # movw $host_selector, %r10w; movw %r10w, %fs
-        code[0] <- 0x66u8
-        code[1] <- 0x41u8
-        code[2] <- 0xBAu8
-        ge_write_u16_le((&code[0]).cast[mutable u8&], 3usize, host_selector)
-        code[5] <- 0x66u8
-        code[6] <- 0x41u8
-        code[7] <- 0x8Eu8
-        code[8] <- 0xE2u8
+        code[0] <- 0x66
+        code[1] <- 0x41
+        code[2] <- 0xBA
+        ge_write_u16_le((&code[0]).cast[mutable u8&], 3, host_selector)
+        code[5] <- 0x66
+        code[6] <- 0x41
+        code[7] <- 0x8E
+        code[8] <- 0xE2
         # movabs $target, %r11; jmp *%r11
-        code[9] <- 0x49u8
-        code[10] <- 0xBBu8
-        ge_write_u64_le((&code[0]).cast[mutable u8&], 11usize, target.u64())
-        code[19] <- 0x41u8
-        code[20] <- 0xFFu8
-        code[21] <- 0xE3u8
-        thunk: uintptr = c_GuestExec_AllocateRegion(4096u64, 5u32)
+        code[9] <- 0x49
+        code[10] <- 0xBB
+        ge_write_u64_le((&code[0]).cast[mutable u8&], 11, target.u64())
+        code[19] <- 0x41
+        code[20] <- 0xFF
+        code[21] <- 0xE3
+        thunk: uintptr = c_GuestExec_AllocateRegion(4096, 5)
         if thunk == 0.uintptr():
             return target.cast[HostSegmentAgnosticEntry]
         can Memory:
@@ -1769,20 +1806,30 @@ def ge_set_native_phase(phase: s32) -> void:
     if fr != null:
         fr.native_phase <- phase
 
+# Lowest address ge_read/write_context_word will touch. One 4 KiB page: anything
+# below is the null page (uninitialized/zero context plus a small field offset).
+const GE_MIN_READABLE_ADDRESS: u64 = 0x1000
+
 # Raw read of a uintptr at an arbitrary host address (signal/stack context).
 @reentrant_safe
 def ge_read_context_word(address: uintptr) -> uintptr:
     can Memory.Allocate:
-        if address == 0.uintptr():
+        # Null-page guard: reject the whole first page, not just exact 0. Diagnostic
+        # probes read word triples at addr+8/+16/+24; when the source context was
+        # never established (addr==0), those offsets become tiny unmapped addresses
+        # (8/16/24) that the bare `== 0` check let through, faulting in ge_memcpy.
+        # Every legitimate read — guest VAs (>=0x800000000) and host uctx/mcontext
+        # pointers — sits far above the null page, so this never rejects a real read.
+        if address.u64() < GE_MIN_READABLE_ADDRESS:
             return 0.uintptr()
-        out: mutable u64 = 0u64
-        _ = ge_memcpy((&out).cast[void&], ge_addr_to_ptr(address), 8usize)
+        out: mutable u64 = 0
+        _ = ge_memcpy((&out).cast[void&], ge_addr_to_ptr(address), 8)
         return out.uintptr()
 
 @reentrant_safe
 def ge_write_context_word(address: uintptr, value: uintptr) -> void:
     can Memory.Allocate:
-        if address == 0.uintptr():
+        if address.u64() < GE_MIN_READABLE_ADDRESS:
             return
         v: mutable u64 = value.u64()
         _ = ge_memcpy(ge_addr_to_ptr(address), (&v).cast[void&], 8)
@@ -1797,7 +1844,7 @@ def ge_uctx_word(uctx: void&?, offset: u64) -> uintptr:
 @reentrant_safe
 def ge_extract_mctx(uctx: void&?) -> MachineContextPtr:
     static if ARCH_X86_64 and PLATFORM_APPLE:
-        return ge_uctx_word(uctx, 48u64).cast[MachineContextPtr]
+        return ge_uctx_word(uctx, 48).cast[MachineContextPtr]
     static elif ARCH_X86_64 and PLATFORM_LINUX:
         return (uctx.uintptr() + 40.uintptr()).cast[MachineContextPtr] if uctx != null else 0.uintptr().cast[MachineContextPtr]
     static else:
@@ -1824,7 +1871,7 @@ def ge_extract_pc(uctx: void&?) -> GuestPC:
         ss: uintptr = ge_darwin_mcontext64_ss(uctx)
         return ge_read_context_word(ss + 128.uintptr()).cast[GuestPC]
     static elif ARCH_X86_64 and PLATFORM_LINUX:
-        return ge_uctx_word(uctx, 40u64 + 16u64 * 8u64).cast[GuestPC]
+        return ge_uctx_word(uctx, 40 + 16 * 8).cast[GuestPC]
     static else:
         return 0.uintptr().cast[GuestPC]
 
@@ -1834,7 +1881,7 @@ def ge_extract_sp(uctx: void&?) -> GuestStackPointer:
         ss: uintptr = ge_darwin_mcontext64_ss(uctx)
         return ge_read_context_word(ss + 56.uintptr()).cast[GuestStackPointer]
     static elif ARCH_X86_64 and PLATFORM_LINUX:
-        return ge_uctx_word(uctx, 40u64 + 15u64 * 8u64).cast[GuestStackPointer]
+        return ge_uctx_word(uctx, 40 + 15 * 8).cast[GuestStackPointer]
     static else:
         return 0.uintptr().cast[GuestStackPointer]
 
@@ -1844,7 +1891,7 @@ def ge_extract_bp(uctx: void&?) -> GuestFramePointer:
         ss: uintptr = ge_darwin_mcontext64_ss(uctx)
         return ge_read_context_word(ss + 48.uintptr()).cast[GuestFramePointer]
     static elif ARCH_X86_64 and PLATFORM_LINUX:
-        return ge_uctx_word(uctx, 40u64 + 10u64 * 8u64).cast[GuestFramePointer]
+        return ge_uctx_word(uctx, 40 + 10 * 8).cast[GuestFramePointer]
     static else:
         return 0.uintptr().cast[GuestFramePointer]
 
@@ -1854,70 +1901,70 @@ def ge_extract_bp(uctx: void&?) -> GuestFramePointer:
 def ge_extract_greg(uctx: void&?, reg: int) -> uintptr:
     static if ARCH_X86_64 and PLATFORM_APPLE:
         ss: uintptr = ge_darwin_mcontext64_ss(uctx)
-        off: mutable u64 = 0u64
+        off: mutable u64 = 0
         if reg == 0:
-            off <- 32u64
+            off <- 32
         elif reg == 1:
-            off <- 40u64
+            off <- 40
         elif reg == 2:
-            off <- 0u64
+            off <- 0
         elif reg == 3:
-            off <- 8u64
+            off <- 8
         elif reg == 4:
-            off <- 24u64
+            off <- 24
         elif reg == 5:
-            off <- 16u64
+            off <- 16
         elif reg == 6:
-            off <- 64u64
+            off <- 64
         elif reg == 7:
-            off <- 72u64
+            off <- 72
         elif reg == 8:
-            off <- 96u64
+            off <- 96
         elif reg == 9:
-            off <- 104u64
+            off <- 104
         elif reg == 10:
-            off <- 112u64
+            off <- 112
         elif reg == 11:
-            off <- 120u64
+            off <- 120
         else:
             return 0.uintptr()
         return ge_read_context_word(ss + off.uintptr())
     static elif ARCH_X86_64 and PLATFORM_LINUX:
-        gi: mutable u64 = 0u64
+        gi: mutable u64 = 0
         if reg == 0:
-            gi <- 8u64
+            gi <- 8
         elif reg == 1:
-            gi <- 9u64
+            gi <- 9
         elif reg == 2:
-            gi <- 13u64
+            gi <- 13
         elif reg == 3:
-            gi <- 11u64
+            gi <- 11
         elif reg == 4:
-            gi <- 12u64
+            gi <- 12
         elif reg == 5:
-            gi <- 14u64
+            gi <- 14
         elif reg == 6:
-            gi <- 0u64
+            gi <- 0
         elif reg == 7:
-            gi <- 1u64
+            gi <- 1
         elif reg == 8:
-            gi <- 4u64
+            gi <- 4
         elif reg == 9:
-            gi <- 5u64
+            gi <- 5
         elif reg == 10:
-            gi <- 6u64
+            gi <- 6
         elif reg == 11:
-            gi <- 7u64
+            gi <- 7
         else:
             return 0.uintptr()
-        return ge_uctx_word(uctx, 40u64 + gi * 8u64)
+        return ge_uctx_word(uctx, 40 + gi * 8)
     static else:
         return 0.uintptr()
 
 @reentrant_safe
 def ge_write_pc(uctx: void&?, pc: GuestPC) -> void:
     static if ARCH_X86_64 and PLATFORM_APPLE:
-        mctx: uintptr = ge_uctx_word(uctx, 48u64)
+        mctx: uintptr = ge_uctx_word(uctx, 48)
         ge_write_context_word(mctx + 128.uintptr(), !pc)
     static else:
         _ = uctx
@@ -1926,7 +1973,7 @@ def ge_write_pc(uctx: void&?, pc: GuestPC) -> void:
 @reentrant_safe
 def ge_xmm_addr_from_mctx(mctx: uintptr, idx: u8) -> uintptr:
     static if ARCH_X86_64 and PLATFORM_APPLE:
-        return mctx + 352.uintptr() + (idx.u64() * 16u64).uintptr()
+        return mctx + 352.uintptr() + (idx.u64() * 16).uintptr()
     static else:
         _ = mctx
         _ = idx
@@ -1963,57 +2010,57 @@ def ge_try_handle_sse4a_sigill(uctx: void&?) -> bool:
         pc: GuestPC = ge_extract_pc(uctx)
         if mctx == 0.uintptr() or !pc == 0.uintptr():
             return false
-        word: u32 = (ge_read_context_word(!pc).u64() & 0xffffffffu64).u32()
-        b0: u8 = (word & 0xffu32).u8()
-        b1: u8 = ((word >> 8u32) & 0xffu32).u8()
-        b2: u8 = ((word >> 16u32) & 0xffu32).u8()
-        modrm: u8 = ((word >> 24u32) & 0xffu32).u8()
+        word: u32 = (ge_read_context_word(!pc).u64() & 0xffffffff).u32()
+        b0: u8 = (word & 0xff).u8()
+        b1: u8 = ((word >> 8) & 0xff).u8()
+        b2: u8 = ((word >> 16) & 0xff).u8()
+        modrm: u8 = ((word >> 24) & 0xff).u8()
         ge_emergency_mark(GE_EV_SSE4A_SIGILL_ENTER, !pc, word.u64().uintptr(), 0.uintptr(), 0.uintptr())
-        if b1 != 0x0fu8 or (b2 != 0x79u8 and b2 != 0x78u8):
+        if b1 != 0x0f or (b2 != 0x79 and b2 != 0x78):
             ge_emergency_mark(GE_EV_SSE4A_UNHANDLED, !pc, word.u64().uintptr(), 1.uintptr(), 0.uintptr())
             return false
-        mod_bits: u8 = (modrm >> 6u8) & 0x03u8
-        if mod_bits != 0x03u8:
+        mod_bits: u8 = (modrm >> 6) & 0x03
+        if mod_bits != 0x03:
             ge_emergency_mark(GE_EV_SSE4A_UNHANDLED, !pc, word.u64().uintptr(), 2.uintptr(), 0.uintptr())
             return false
-        dst: u8 = (modrm >> 3u8) & 0x07u8
-        src: u8 = modrm & 0x07u8
-        immediate_form: bool = b2 == 0x78u8
-        imm_length: mutable u64 = 0u64
-        imm_index: mutable u64 = 0u64
+        dst: u8 = (modrm >> 3) & 0x07
+        src: u8 = modrm & 0x07
+        immediate_form: bool = b2 == 0x78
+        imm_length: mutable u64 = 0
+        imm_index: mutable u64 = 0
         if immediate_form:
             imm_word: u64 = ge_read_context_word(!pc + 4.uintptr()).u64()
-            imm_length <- imm_word & 0xffu64
-            imm_index <- (imm_word >> 8u64) & 0xffu64
-        if b0 == 0x66u8:
+            imm_length <- imm_word & 0xff
+            imm_index <- (imm_word >> 8) & 0xff
+        if b0 == 0x66:
             dst_low: u64 = ge_read_xmm_low(mctx, dst)
             src_low: u64 = ge_read_xmm_low(mctx, src)
-            length: u64 = imm_length if immediate_form else (src_low & 0x3Fu64)
-            index: mutable u64 = imm_index if immediate_form else ((src_low >> 8u64) & 0x3Fu64)
-            index <- index & 0x3Fu64
+            length: u64 = imm_length if immediate_form else (src_low & 0x3F)
+            index: mutable u64 = imm_index if immediate_form else ((src_low >> 8) & 0x3F)
+            index <- index & 0x3F
             mask: u64 = ge_sse4a_mask(length)
             result: u64 = (dst_low >> index) & mask
             ge_write_xmm_low_zero_high(mctx, dst, result)
             advance: uintptr = 6.uintptr() if immediate_form else 4.uintptr()
             ge_write_pc(uctx, (!pc + advance).cast[GuestPC])
-            ge_sse4a_extrq_handled_count <- ge_sse4a_extrq_handled_count + 1u64
+            ge_sse4a_extrq_handled_count <- ge_sse4a_extrq_handled_count + 1
             ge_sse4a_last_pc <- !pc
             ge_sse4a_last_word <- word
             ge_emergency_mark(GE_EV_SSE4A_EXTRQ_HANDLED, !pc, word.u64().uintptr(), result.uintptr(), ge_sse4a_extrq_handled_count.uintptr())
             return true
-        if b0 == 0xf2u8:
+        if b0 == 0xf2:
             src_low: u64 = ge_read_xmm_low(mctx, src)
             src_high: u64 = ge_read_xmm_high(mctx, src)
             dst_low: u64 = ge_read_xmm_low(mctx, dst)
-            length: u64 = imm_length if immediate_form else (src_high & 0x3Fu64)
-            index: mutable u64 = imm_index if immediate_form else ((src_high >> 8u64) & 0x3Fu64)
-            index <- index & 0x3Fu64
+            length: u64 = imm_length if immediate_form else (src_high & 0x3F)
+            index: mutable u64 = imm_index if immediate_form else ((src_high >> 8) & 0x3F)
+            index <- index & 0x3F
             mask: u64 = ge_sse4a_mask(length)
             result: u64 = (dst_low & ~(mask << index)) | ((src_low & mask) << index)
             ge_write_xmm_low_zero_high(mctx, dst, result)
             advance: uintptr = 6.uintptr() if immediate_form else 4.uintptr()
             ge_write_pc(uctx, (!pc + advance).cast[GuestPC])
-            ge_sse4a_insertq_handled_count <- ge_sse4a_insertq_handled_count + 1u64
+            ge_sse4a_insertq_handled_count <- ge_sse4a_insertq_handled_count + 1
             ge_sse4a_last_pc <- !pc
             ge_sse4a_last_word <- word
             ge_emergency_mark(GE_EV_SSE4A_INSERTQ_HANDLED, !pc, word.u64().uintptr(), result.uintptr(), ge_sse4a_insertq_handled_count.uintptr())
@@ -2072,7 +2119,7 @@ def ge_install_guards() -> void:
     static if PLATFORM_APPLE and ARCH_X86_64:
         if ge_alt_signal_stack_installed == 0:
             ss: mutable GeStackT = zeroed
-            ss.ss_sp <- (&ge_alt_signal_stack[0usize]).cast[void&]
+            ss.ss_sp <- (&ge_alt_signal_stack[0]).cast[void&]
             ss.ss_size <- GE_SIGSTKSZ
             ss.ss_flags <- 0
             if ge_sigaltstack((&ss).cast[void&], null) == 0:
@@ -2139,7 +2186,7 @@ def ge_alarm_handler(sig: int) -> void:
     static if PLATFORM_APPLE and ARCH_X86_64:
         can Unsafe.SegmentMutation, Segment.Host:
             TLS_RestoreHostFsSelector()
-        ge_raw_breadcrumb("GE:ALRM_HOSTFS\n", 15usize)
+        ge_raw_breadcrumb("GE:ALRM_HOSTFS\n", 15)
         ge_shadow_fs_transition("alarm-handler-host-fs-restored", GE_FS_OWNER_HOST)
         can Unsafe.SegmentMutation, Segment.Host:
             ge_assert_host_fs_owner("alarm-handler-after-host-fs-restore")
@@ -2251,9 +2298,9 @@ def ge_pw_set_tf(uctx: void&?, on: bool) -> void:
         ss: uintptr = ge_darwin_mcontext64_ss(uctx)
         rf: mutable u64 = ge_read_context_word(ss + 136.uintptr()).u64()
         if on:
-            rf <- rf | 0x100u64
+            rf <- rf | 0x100
         else:
-            rf <- rf & 0xfffffffffffffeffu64
+            rf <- rf & 0xfffffffffffffeff
         ge_write_context_word(ss + 136.uintptr(), rf.uintptr())
     static else:
         _ = uctx
@@ -2309,14 +2356,14 @@ def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
         static if PLATFORM_APPLE and ARCH_X86_64:
             can Unsafe.SegmentMutation, Segment.Host:
                 TLS_RestoreHostFsSelector()
-            ge_raw_breadcrumb("GE:SIGNAL_AFTER_RESTORE\n", 24usize)
+            ge_raw_breadcrumb("GE:SIGNAL_AFTER_RESTORE\n", 24)
             ge_emergency_mark(GE_EV_SIGNAL_AFTER_RESTORE, sig.u64().uintptr(), info.uintptr(), uctx.uintptr(), 0.uintptr())
             ge_shadow_fs_transition("signal-handler-host-fs-restored", GE_FS_OWNER_HOST)
-            ge_raw_breadcrumb("GE:SIGNAL_AFTER_SHADOW\n", 23usize)
+            ge_raw_breadcrumb("GE:SIGNAL_AFTER_SHADOW\n", 23)
             ge_emergency_mark(GE_EV_SIGNAL_AFTER_SHADOW, sig.u64().uintptr(), info.uintptr(), uctx.uintptr(), 0.uintptr())
             can Unsafe.SegmentMutation, Segment.Host:
                 ge_assert_host_fs_owner("signal-handler-after-host-fs-restore")
-            ge_raw_breadcrumb("GE:SIGNAL_AFTER_ASSERT\n", 23usize)
+            ge_raw_breadcrumb("GE:SIGNAL_AFTER_ASSERT\n", 23)
             ge_emergency_mark(GE_EV_SIGNAL_AFTER_ASSERT, sig.u64().uintptr(), info.uintptr(), uctx.uintptr(), 0.uintptr())
         ge_set_native_phase(GE_PHASE_SIGNAL_HANDLER_ENTERED)
         ge_last_status <- (0 - sig).s32()
@@ -2361,11 +2408,11 @@ def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
             # If fault_pc-16 is `mov rax,[rip+disp32]` (opcode 48 8b 05), resolve the
             # global it loaded and read its value to confirm the null source.
             pre_word: u64 = ge_read_context_word(fault_pc - 16.uintptr()).u64()
-            if (pre_word & 0xffffffu64) == 0x058b48u64:
-                disp32: u64 = (pre_word >> 24u64) & 0xffffffffu64
+            if (pre_word & 0xffffff) == 0x058b48:
+                disp32: u64 = (pre_word >> 24) & 0xffffffff
                 disp_se: mutable u64 = disp32
-                if (disp32 & 0x80000000u64) != 0u64:
-                    disp_se <- disp32 | 0xffffffff00000000u64
+                if (disp32 & 0x80000000) != 0:
+                    disp_se <- disp32 | 0xffffffff00000000
                 global_addr: uintptr = (fault_pc - 16.uintptr() + 7.uintptr()) + disp_se.uintptr()
                 ge_emergency_mark(GE_EV_SIGNAL_FAULT_GLOBAL, global_addr, ge_read_context_word(global_addr), pre_word.uintptr(), disp32.uintptr())
             ge_emergency_mark(GE_EV_SIGNAL_SEGMENTS, ge_read_context_word(ss_seg + 152.uintptr()), ge_read_context_word(ss_seg + 160.uintptr()), ge_read_context_word(ss_seg + 144.uintptr()), ss_seg)
@@ -2616,7 +2663,7 @@ def ge_jump_main_entry(params: mutable GuestEntryParams&, exit_func: uintptr) ->
         guarded_exit_addr: uintptr = ge_guarded_exit.cast[uintptr]
         if ef == guarded_exit_addr:
             ef <- !ge_create_host_fs_entry_thunk_trusted(ef)
-    guest_fs_selector: mutable GuestFsSelector = 0u32.cast[GuestFsSelector]
+    guest_fs_selector: mutable GuestFsSelector = 0.cast[GuestFsSelector]
     static if PLATFORM_APPLE and ARCH_X86_64:
         guest_fs_selector <- TLS_PrepareTcbBase((!TLS_PrimaryTcbBase()).cast[void&?])
     ge_prejump_rdi <- (&params).cast[void&].uintptr()
@@ -2632,7 +2679,7 @@ def ge_jump_main_entry(params: mutable GuestEntryParams&, exit_func: uintptr) ->
     can Unsafe.SegmentMutation, Segment.Host:
         ge_observe_fs_owner("pre-main-host-before-easm", false)
     static if PLATFORM_APPLE and ARCH_X86_64:
-        if !guest_fs_selector != 0u32:
+        if !guest_fs_selector != 0:
             if guest_exec_main_stack_top != 0.uintptr():
                 ge_shadow_fs_transition("pre-main-easm-transition-to-guest", GE_FS_OWNER_GUEST)
                 can Unsafe.SegmentMutation, Segment.Guest:
@@ -3115,7 +3162,7 @@ def ge_synthetic_main_call_boundary(params: GuestEntryParams&?, exit_func: void&
         return
     static if ARCH_X86_64 and not PLATFORM_WINDOWS:
         boundary: func(u64) -> void = params.argv[0].uintptr().cast[func(u64) -> void]
-        boundary(0xB000000000000042u64)
+        boundary(0xB000000000000042)
     static else:
         _ = params
 
@@ -3249,7 +3296,7 @@ struct GeItimerval:
 
 const GE_WNOHANG: int = 1
 const GE_ITIMER_REAL: int = 0
-const GE_SENTINEL_MAX: u64 = 0xFFFFFFFFFFFFFFFFu64
+const GE_SENTINEL_MAX: u64 = 0xFFFFFFFFFFFFFFFF
 
 def ge_wif_signaled(status: int) -> bool:
     low: int = status & 0x7f
@@ -3300,21 +3347,21 @@ def ge_run_synthetic_function(entry_addr: uintptr, arg0: u64, arg1: u64) -> u64:
         ge_debug_trace_boundary("guest-exec-synthetic-stop", entry_addr, GE_SENTINEL_MAX.uintptr(), 0.uintptr())
         return GE_SENTINEL_MAX
     static if ARCH_X86_64 and not PLATFORM_WINDOWS:
-        if not ge_debug_guard_callable_target(entry_addr, 1u64):
-            ge_debug_trace_boundary("guest-exec-synthetic-stop", entry_addr, (GE_SENTINEL_MAX - 5u64).uintptr(), ge_debug_trap_reason.uintptr())
-            return GE_SENTINEL_MAX - 5u64
+        if not ge_debug_guard_callable_target(entry_addr, 1):
+            ge_debug_trace_boundary("guest-exec-synthetic-stop", entry_addr, (GE_SENTINEL_MAX - 5).uintptr(), ge_debug_trap_reason.uintptr())
+            return GE_SENTINEL_MAX - 5
         if not ge_check_entry_published(entry_addr):
-            ge_debug_trace_boundary("guest-exec-synthetic-stop", entry_addr, (GE_SENTINEL_MAX - 4u64).uintptr(), GE_DEBUG_TRAP_UNPUBLISHED_EXEC_STATUS.u64().uintptr())
-            return GE_SENTINEL_MAX - 4u64
+            ge_debug_trace_boundary("guest-exec-synthetic-stop", entry_addr, (GE_SENTINEL_MAX - 4).uintptr(), GE_DEBUG_TRAP_UNPUBLISHED_EXEC_STATUS.u64().uintptr())
+            return GE_SENTINEL_MAX - 4
         ge_reset_crash_state()
         ge_install_guards()
         ge_guard_active <- 1
         ge_guard_target_thread <- !ge_pthread_self()
-        if ge_sigsetjmp((&ge_jmp_buf[0usize]).cast[void&], 1) != 0:
+        if ge_sigsetjmp((&ge_jmp_buf[0]).cast[void&], 1) != 0:
             ge_guard_active <- 0
             ge_restore_guards()
-            ge_debug_trace_boundary("guest-exec-synthetic-stop", entry_addr, (GE_SENTINEL_MAX - 2u64).uintptr(), ge_last_status.u64().uintptr())
-            return GE_SENTINEL_MAX - 2u64
+            ge_debug_trace_boundary("guest-exec-synthetic-stop", entry_addr, (GE_SENTINEL_MAX - 2).uintptr(), ge_last_status.u64().uintptr())
+            return GE_SENTINEL_MAX - 2
         fn: func(u64, u64) -> u64 = entry_addr.cast[func(u64, u64) -> u64]
         result: u64 = fn(arg0, arg1)
         ge_guard_active <- 0
@@ -3336,27 +3383,27 @@ def ge_run_synthetic_function_with_timeout(entry_addr: uintptr, arg0: u64, arg1:
         ge_debug_trace_boundary("guest-exec-synthetic-timeout-stop", entry_addr, GE_SENTINEL_MAX.uintptr(), 0.uintptr())
         return GE_SENTINEL_MAX
     static if ARCH_X86_64 and not PLATFORM_WINDOWS:
-        if not ge_debug_guard_callable_target(entry_addr, 1u64):
-            ge_debug_trace_boundary("guest-exec-synthetic-timeout-stop", entry_addr, (GE_SENTINEL_MAX - 5u64).uintptr(), ge_debug_trap_reason.uintptr())
-            return GE_SENTINEL_MAX - 5u64
+        if not ge_debug_guard_callable_target(entry_addr, 1):
+            ge_debug_trace_boundary("guest-exec-synthetic-timeout-stop", entry_addr, (GE_SENTINEL_MAX - 5).uintptr(), ge_debug_trap_reason.uintptr())
+            return GE_SENTINEL_MAX - 5
         if not ge_check_entry_published(entry_addr):
-            ge_debug_trace_boundary("guest-exec-synthetic-timeout-stop", entry_addr, (GE_SENTINEL_MAX - 4u64).uintptr(), GE_DEBUG_TRAP_UNPUBLISHED_EXEC_STATUS.u64().uintptr())
-            return GE_SENTINEL_MAX - 4u64
+            ge_debug_trace_boundary("guest-exec-synthetic-timeout-stop", entry_addr, (GE_SENTINEL_MAX - 4).uintptr(), GE_DEBUG_TRAP_UNPUBLISHED_EXEC_STATUS.u64().uintptr())
+            return GE_SENTINEL_MAX - 4
         ge_reset_crash_state()
         ge_install_guards()
         ge_guard_active <- 1
         ge_guard_target_thread <- !ge_pthread_self()
         ge_arm_timer(timeout_ms)
-        if ge_sigsetjmp((&ge_jmp_buf[0usize]).cast[void&], 1) != 0:
+        if ge_sigsetjmp((&ge_jmp_buf[0]).cast[void&], 1) != 0:
             ge_disarm_timer()
             ge_guard_active <- 0
             ge_restore_guards()
             if ge_timeout_fired != 0:
                 ge_last_status <- -3
-                ge_debug_trace_boundary("guest-exec-synthetic-timeout-stop", entry_addr, (GE_SENTINEL_MAX - 3u64).uintptr(), ge_last_status.u64().uintptr())
-                return GE_SENTINEL_MAX - 3u64
-            ge_debug_trace_boundary("guest-exec-synthetic-timeout-stop", entry_addr, (GE_SENTINEL_MAX - 2u64).uintptr(), ge_last_status.u64().uintptr())
-            return GE_SENTINEL_MAX - 2u64
+                ge_debug_trace_boundary("guest-exec-synthetic-timeout-stop", entry_addr, (GE_SENTINEL_MAX - 3).uintptr(), ge_last_status.u64().uintptr())
+                return GE_SENTINEL_MAX - 3
+            ge_debug_trace_boundary("guest-exec-synthetic-timeout-stop", entry_addr, (GE_SENTINEL_MAX - 2).uintptr(), ge_last_status.u64().uintptr())
+            return GE_SENTINEL_MAX - 2
         fn: func(u64, u64) -> u64 = entry_addr.cast[func(u64, u64) -> u64]
         result: u64 = fn(arg0, arg1)
         ge_disarm_timer()
@@ -3425,30 +3472,30 @@ def ge_run_main_entry_guarded_in_process(params: mutable GuestEntryParams&, time
         else:
             ge_arm_timer(timeout_ms)
         ge_set_native_phase(GE_PHASE_SYNTHETIC_BEFORE_SIGSETJMP)
-        if ge_sigsetjmp((&ge_jmp_buf[0usize]).cast[void&], 1) != 0:
-            ge_raw_breadcrumb("GE:GUARD_LONGJMP_ENTER\n", 23usize)
+        if ge_sigsetjmp((&ge_jmp_buf[0]).cast[void&], 1) != 0:
+            ge_raw_breadcrumb("GE:GUARD_LONGJMP_ENTER\n", 23)
             static if PLATFORM_APPLE and ARCH_X86_64:
                 can Unsafe.SegmentMutation, Segment.Host:
                     TLS_RestoreHostFsSelector()
-                ge_raw_breadcrumb("GE:GUARD_LONGJMP_RESTORE\n", 25usize)
+                ge_raw_breadcrumb("GE:GUARD_LONGJMP_RESTORE\n", 25)
                 can Unsafe.SegmentMutation, Segment.Host:
                     ge_assert_host_fs_owner("guarded-in-process-after-longjmp-host-restore")
-                ge_raw_breadcrumb("GE:GUARD_LONGJMP_ASSERT\n", 24usize)
+                ge_raw_breadcrumb("GE:GUARD_LONGJMP_ASSERT\n", 24)
             ge_disarm_timer()
-            ge_raw_breadcrumb("GE:GUARD_LONGJMP_DISARMED\n", 26usize)
+            ge_raw_breadcrumb("GE:GUARD_LONGJMP_DISARMED\n", 26)
             ge_guard_active <- 0
-            ge_raw_breadcrumb("GE:GUARD_LONGJMP_INACTIVE\n", 26usize)
+            ge_raw_breadcrumb("GE:GUARD_LONGJMP_INACTIVE\n", 26)
             ge_restore_guards()
-            ge_raw_breadcrumb("GE:GUARD_LONGJMP_RESTORED\n", 26usize)
+            ge_raw_breadcrumb("GE:GUARD_LONGJMP_RESTORED\n", 26)
             if ge_timeout_fired != 0:
                 ge_last_status <- -3
-                ge_raw_breadcrumb("GE:GUARD_LONGJMP_TIMEOUT\n", 25usize)
+                ge_raw_breadcrumb("GE:GUARD_LONGJMP_TIMEOUT\n", 25)
             if ge_last_status == 0:
                 ge_last_status <- -11
-                ge_raw_breadcrumb("GE:GUARD_LONGJMP_DEFAULT\n", 25usize)
+                ge_raw_breadcrumb("GE:GUARD_LONGJMP_DEFAULT\n", 25)
             if ge_debug_trace_enabled or getenv("ELISA_FORCE_TAPE_DUMP".cast[u8&]) != null:
                 ge_emergency_dump_raw()
-            ge_raw_breadcrumb("GE:GUARD_LONGJMP_RETURN\n", 24usize)
+            ge_raw_breadcrumb("GE:GUARD_LONGJMP_RETURN\n", 24)
             return ge_last_status
         ge_set_native_phase(GE_PHASE_CHILD_BEFORE_MAIN_ENTRY)
         can Unsafe.SegmentMutation, Segment.Host:
@@ -3460,20 +3507,20 @@ def ge_run_main_entry_guarded_in_process(params: mutable GuestEntryParams&, time
         # before _start. last_entry_addr / params.entry_addr stay the real entry for
         # reporting; only the actual jump target is redirected.
         ge_init_trampoline: u64 = Linker_InitTrampolineAddr()
-        if ge_init_trampoline != 0u64:
+        if ge_init_trampoline != 0:
             params.entry_addr <- ge_init_trampoline.uintptr()
         can Unsafe.SegmentMutation, Segment.Host, Segment.Guest:
             ge_jump_main_entry(params, ge_guarded_exit.cast[uintptr])
-        ge_raw_breadcrumb("GE:GUARD_AFTER_JUMP\n", 20usize)
+        ge_raw_breadcrumb("GE:GUARD_AFTER_JUMP\n", 20)
         ge_disarm_timer()
-        ge_raw_breadcrumb("GE:GUARD_AFTER_DISARM\n", 22usize)
+        ge_raw_breadcrumb("GE:GUARD_AFTER_DISARM\n", 22)
         ge_guard_active <- 0
-        ge_raw_breadcrumb("GE:GUARD_BEFORE_RESTORE\n", 24usize)
+        ge_raw_breadcrumb("GE:GUARD_BEFORE_RESTORE\n", 24)
         ge_restore_guards()
-        ge_raw_breadcrumb("GE:GUARD_AFTER_RESTORE\n", 23usize)
+        ge_raw_breadcrumb("GE:GUARD_AFTER_RESTORE\n", 23)
         if ge_last_status == 0:
             ge_last_status <- 1
-        ge_raw_breadcrumb("GE:GUARD_RETURN\n", 16usize)
+        ge_raw_breadcrumb("GE:GUARD_RETURN\n", 16)
         return ge_last_status
     static else:
         _ = timeout_ms
@@ -3502,7 +3549,7 @@ def ge_run_main_entry_guarded(params: mutable GuestEntryParams&, timeout_ms: u32
             ge_guard_target_thread <- !ge_pthread_self()
             ge_arm_timer(timeout_ms)
             ge_set_native_phase(GE_PHASE_SYNTHETIC_BEFORE_SIGSETJMP)
-            if ge_sigsetjmp((&ge_jmp_buf[0usize]).cast[void&], 1) != 0:
+            if ge_sigsetjmp((&ge_jmp_buf[0]).cast[void&], 1) != 0:
                 ge_disarm_timer()
                 ge_guard_active <- 0
                 ge_restore_guards()
@@ -3535,7 +3582,7 @@ def ge_run_main_entry_guarded(params: mutable GuestEntryParams&, timeout_ms: u32
             can Unsafe.SegmentMutation, Segment.Host, Segment.Guest:
                 ge_run_child_main_entry(params)
         ge_set_native_phase(GE_PHASE_PARENT_BRANCH_ENTERED)
-        waited_ms: mutable u32 = 0u32
+        waited_ms: mutable u32 = 0
         status: mutable int = 0
         while true:
             result: int = ge_waitpid(child, (&status).cast[mutable int&], GE_WNOHANG)
@@ -3586,7 +3633,7 @@ def ge_run_main_entry_guarded(params: mutable GuestEntryParams&, timeout_ms: u32
                 if ge_last_status == 0:
                     ge_last_status <- -1
                 return ge_last_status
-            if timeout_ms != 0u32 and waited_ms >= timeout_ms:
+            if timeout_ms != 0 and waited_ms >= timeout_ms:
                 ge_set_native_phase(GE_PHASE_PARENT_TIMEOUT)
                 ge_timeout_fired <- 1
                 ge_last_status <- -3
@@ -3601,33 +3648,33 @@ def ge_run_main_entry_guarded(params: mutable GuestEntryParams&, timeout_ms: u32
                 # the parent falls back to SIGKILL, turning timeout hangs into a
                 # concrete guest PC instead of a blind kill.
                 _ = ge_kill(child, GE_SIG_TRAP)
-                snapshot_wait_ms: mutable u32 = 0u32
-                while snapshot_wait_ms < 50u32:
+                snapshot_wait_ms: mutable u32 = 0
+                while snapshot_wait_ms < 50:
                     snapshot_result: int = ge_waitpid(child, (&status).cast[mutable int&], GE_WNOHANG)
                     if snapshot_result == child or snapshot_result < 0:
                         break
-                    _ = ge_usleep(1000u32)
-                    snapshot_wait_ms <- snapshot_wait_ms + 1u32
+                    _ = ge_usleep(1000)
+                    snapshot_wait_ms <- snapshot_wait_ms + 1
                 ge_absorb_fork_report()
                 ge_last_status <- -3
                 if ge_last_signal == 0:
                     ge_last_signal <- GE_SIG_ALRM.s32()
-                if snapshot_wait_ms >= 50u32:
+                if snapshot_wait_ms >= 50:
                     _ = ge_kill(child, 9)
-                reap_wait_ms: mutable u32 = 0u32
-                while reap_wait_ms < 250u32:
+                reap_wait_ms: mutable u32 = 0
+                while reap_wait_ms < 250:
                     reap_result: int = ge_waitpid(child, (&status).cast[mutable int&], GE_WNOHANG)
                     if reap_result == child or reap_result < 0:
                         break
-                    _ = ge_usleep(1000u32)
-                    reap_wait_ms <- reap_wait_ms + 1u32
+                    _ = ge_usleep(1000)
+                    reap_wait_ms <- reap_wait_ms + 1
                 ge_absorb_fork_report()
                 ge_last_status <- -3
                 if ge_last_signal == 0:
                     ge_last_signal <- GE_SIG_ALRM.s32()
                 return -3
-            _ = ge_usleep(1000u32)
-            waited_ms <- waited_ms + 1u32
+            _ = ge_usleep(1000)
+            waited_ms <- waited_ms + 1
         return ge_last_status
     static else:
         _ = timeout_ms

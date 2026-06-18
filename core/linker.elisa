@@ -428,59 +428,59 @@ def Linker_InitTrampolineAddr() -> u64:
 def Linker_BuildInitTrampoline(real_entry: u64) -> u64:
     linker_init_trampoline_addr <- 0
     static if PLATFORM_APPLE and ARCH_X86_64:
-        if real_entry == 0u64:
-            return 0u64
+        if real_entry == 0:
+            return 0
         n: usize = linker_deferred_init_count
-        total: usize = 24usize + (12usize * n)
-        if total > 4096usize:
-            return 0u64
+        total: usize = 24 + (12 * n)
+        if total > 4096:
+            return 0
         buf: mutable u8[4096] = zeroed
         # Guest entry ABI (easm JumpMainEntryOnStackWithFsAsm): rdi=EntryParams ptr,
         # rsi=exit_func, rsp%16==8, EntryParams words on stack. Preserve rdi/rsi and
         # keep rsp balanced so the real entry sees the same state after the inits.
         # push rdi (57); push rsi (56)  -> saves args, rsp%16: 8->0->8
-        buf[0] <- 0x57u8
-        buf[1] <- 0x56u8
+        buf[0] <- 0x57
+        buf[1] <- 0x56
         # sub rsp,8 (48 83 EC 08) -> rsp%16: 8->0 so each `call` lands callee at %16==8
-        buf[2] <- 0x48u8
-        buf[3] <- 0x83u8
-        buf[4] <- 0xECu8
-        buf[5] <- 0x08u8
-        pos: mutable usize = 6usize
-        k: mutable usize = 0usize
+        buf[2] <- 0x48
+        buf[3] <- 0x83
+        buf[4] <- 0xEC
+        buf[5] <- 0x08
+        pos: mutable usize = 6
+        k: mutable usize = 0
         while k < n:
             fn: u64 = linker_deferred_init_fns[k]
-            buf[pos] <- 0x48u8           # movabs rax, imm64
-            buf[pos + 1usize] <- 0xB8u8
-            Linker_WriteU64LE((&buf[0]).cast[mutable u8&], pos + 2usize, fn)
-            buf[pos + 10usize] <- 0xFFu8 # call rax
-            buf[pos + 11usize] <- 0xD0u8
-            pos <- pos + 12usize
-            k <- k + 1usize
+            buf[pos] <- 0x48           # movabs rax, imm64
+            buf[pos + 1] <- 0xB8
+            Linker_WriteU64LE((&buf[0]).cast[mutable u8&], pos + 2, fn)
+            buf[pos + 10] <- 0xFF # call rax
+            buf[pos + 11] <- 0xD0
+            pos <- pos + 12
+            k <- k + 1
         # add rsp,8 (48 83 C4 08); pop rsi (5E); pop rdi (5F) -> restore args + rsp%16==8
-        buf[pos] <- 0x48u8
-        buf[pos + 1usize] <- 0x83u8
-        buf[pos + 2usize] <- 0xC4u8
-        buf[pos + 3usize] <- 0x08u8
-        buf[pos + 4usize] <- 0x5Eu8
-        buf[pos + 5usize] <- 0x5Fu8
-        pos <- pos + 6usize
+        buf[pos] <- 0x48
+        buf[pos + 1] <- 0x83
+        buf[pos + 2] <- 0xC4
+        buf[pos + 3] <- 0x08
+        buf[pos + 4] <- 0x5E
+        buf[pos + 5] <- 0x5F
+        pos <- pos + 6
         # movabs rax, real_entry ; jmp rax
-        buf[pos] <- 0x48u8
-        buf[pos + 1usize] <- 0xB8u8
-        Linker_WriteU64LE((&buf[0]).cast[mutable u8&], pos + 2usize, real_entry)
-        buf[pos + 10usize] <- 0xFFu8
-        buf[pos + 11usize] <- 0xE0u8
-        pos <- pos + 12usize
-        tramp: VAddr = GuestExec_AllocateRegion(4096u64, 5u32)
+        buf[pos] <- 0x48
+        buf[pos + 1] <- 0xB8
+        Linker_WriteU64LE((&buf[0]).cast[mutable u8&], pos + 2, real_entry)
+        buf[pos + 10] <- 0xFF
+        buf[pos + 11] <- 0xE0
+        pos <- pos + 12
+        tramp: VAddr = GuestExec_AllocateRegion(4096, 5)
         if tramp == 0.uintptr():
-            return 0u64
+            return 0
         trusted Unsafe.MachineCodeBuilder:
             if not GuestExec_WriteBytes(tramp, (&buf[0]).cast[void&], pos.u64()):
-                return 0u64
+                return 0
         trusted Unsafe.ExecutableCodePublish:
             if not GuestExec_PublishExecutableCode(tramp, pos.u64()):
-                return 0u64
+                return 0
         linker_init_trampoline_addr <- tramp.u64()
         return tramp.u64()
     static else:
@@ -496,7 +496,6 @@ def Linker_Reset() -> void:
     Memory_Reset()
     GuestExec_ResetState()
     TLS_ResetForTests()
-    Module_ResetMetadataArena()
     Module_StartOracleReset()
     linker_hle_tiny_callable_count <- 0
     linker_hle_tiny_callable_first_value <- 0
@@ -520,8 +519,7 @@ def SymbolsResolver_AddBoundSymbolForLibrary(self: mutable SymbolsResolver&, nid
     # allocated from the persistent metadata arena. Using a transient local
     # arena here freed the darray backing on return, leaving the resolver table
     # in use-after-free memory and making import resolution nondeterministic.
-    owner: mutable Arena& = &module_metadata_arena
-    in owner:
+    in perm:
         self.symbols.push(SymbolRecord(nid, name, library, library_version, module, symbol_type, virtual_address, callable_address))
 
 def Linker_NoteHleCallableRegistration(nid: static u8&, name: static u8&, symbol_type: u8, callable_address: u64) -> void:
@@ -575,7 +573,7 @@ def Linker_BootstrapApplicationHeapApi() -> void can[Unsafe.SegmentMutation, Uns
     static if PLATFORM_APPLE and ARCH_X86_64:
         guest_selector: GuestFsSelector = TLS_PrepareTcbBase((!TLS_PrimaryTcbBase()).cast[void&?])
         host_selector: HostFsSelector = TLS_CaptureHostFsSelector()
-        if !guest_selector == 0u32:
+        if !guest_selector == 0:
             ge_emergency_mark(GE_EV_HLE_KNOWN_TARGET, 0x48454153.uintptr(), heap_api, malloc_fn_addr, 0.uintptr())
             return
         result: mutable void&? = null
@@ -1459,8 +1457,7 @@ def Linker_EnsureModuleRelocationBit(module: mutable Module&, bit_index: usize) 
     byte_index: usize = bit_index / 8
     can Memory.Allocate:
         trusted Unsafe.MutableGlobal:
-            owner: mutable Arena& = &module_metadata_arena
-            in owner:
+            in perm:
                 while module.applied_relocation_bits.count <= byte_index:
                     module.applied_relocation_bits.push(0)
 
@@ -1513,140 +1510,140 @@ def Linker_CreateNativeHleBoundaryThunk(target: u64, symbol_name: static u8&?) -
         # Capture the guest return address before touching the thunk stack.
         # At thunk entry, (%rsp) is the return PC pushed by the guest call.
         # movq (%rsp), %r11
-        full[0] <- 0x4Cu8
-        full[1] <- 0x8Bu8
-        full[2] <- 0x1Cu8
-        full[3] <- 0x24u8
+        full[0] <- 0x4C
+        full[1] <- 0x8B
+        full[2] <- 0x1C
+        full[3] <- 0x24
         # movabs $ge_runtime_hle_guest_return_addr, %r10; movq %r11, (%r10)
-        full[4] <- 0x49u8
-        full[5] <- 0xBAu8
-        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 6usize, (&ge_runtime_hle_guest_return_addr).cast[void&].uintptr().u64())
-        full[14] <- 0x4Du8
-        full[15] <- 0x89u8
-        full[16] <- 0x1Au8
+        full[4] <- 0x49
+        full[5] <- 0xBA
+        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 6, (&ge_runtime_hle_guest_return_addr).cast[void&].uintptr().u64())
+        full[14] <- 0x4D
+        full[15] <- 0x89
+        full[16] <- 0x1A
         # movabs $ge_runtime_hle_guest_rsp, %r10; movq %rsp, (%r10)
-        full[17] <- 0x49u8
-        full[18] <- 0xBAu8
-        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 19usize, (&ge_runtime_hle_guest_rsp).cast[void&].uintptr().u64())
-        full[27] <- 0x49u8
-        full[28] <- 0x89u8
-        full[29] <- 0x22u8
+        full[17] <- 0x49
+        full[18] <- 0xBA
+        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 19, (&ge_runtime_hle_guest_rsp).cast[void&].uintptr().u64())
+        full[27] <- 0x49
+        full[28] <- 0x89
+        full[29] <- 0x22
         # movabs $ge_runtime_hle_guest_rbp, %r10; movq %rbp, (%r10)
-        full[30] <- 0x49u8
-        full[31] <- 0xBAu8
-        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 32usize, (&ge_runtime_hle_guest_rbp).cast[void&].uintptr().u64())
-        full[40] <- 0x49u8
-        full[41] <- 0x89u8
-        full[42] <- 0x2Au8
+        full[30] <- 0x49
+        full[31] <- 0xBA
+        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 32, (&ge_runtime_hle_guest_rbp).cast[void&].uintptr().u64())
+        full[40] <- 0x49
+        full[41] <- 0x89
+        full[42] <- 0x2A
         # movabs $ge_runtime_hle_guest_rdi, %r10; movq %rdi, (%r10)
-        full[43] <- 0x49u8
-        full[44] <- 0xBAu8
-        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 45usize, (&ge_runtime_hle_guest_rdi).cast[void&].uintptr().u64())
-        full[53] <- 0x49u8
-        full[54] <- 0x89u8
-        full[55] <- 0x3Au8
+        full[43] <- 0x49
+        full[44] <- 0xBA
+        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 45, (&ge_runtime_hle_guest_rdi).cast[void&].uintptr().u64())
+        full[53] <- 0x49
+        full[54] <- 0x89
+        full[55] <- 0x3A
         # Capture the rest of the SysV argument register set. This lets the
         # artifact distinguish "real mutex call with a bad pointer" from
         # "wrong callee / corrupted call frame" without a debugger.
-        full[56] <- 0x49u8
-        full[57] <- 0xBAu8
-        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 58usize, (&ge_runtime_hle_guest_rsi).cast[void&].uintptr().u64())
-        full[66] <- 0x49u8
-        full[67] <- 0x89u8
-        full[68] <- 0x32u8
-        full[69] <- 0x49u8
-        full[70] <- 0xBAu8
-        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 71usize, (&ge_runtime_hle_guest_rdx).cast[void&].uintptr().u64())
-        full[79] <- 0x49u8
-        full[80] <- 0x89u8
-        full[81] <- 0x12u8
-        full[82] <- 0x49u8
-        full[83] <- 0xBAu8
-        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 84usize, (&ge_runtime_hle_guest_rcx).cast[void&].uintptr().u64())
-        full[92] <- 0x49u8
-        full[93] <- 0x89u8
-        full[94] <- 0x0Au8
-        full[95] <- 0x49u8
-        full[96] <- 0xBAu8
-        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 97usize, (&ge_runtime_hle_guest_r8).cast[void&].uintptr().u64())
-        full[105] <- 0x4Du8
-        full[106] <- 0x89u8
-        full[107] <- 0x02u8
-        full[108] <- 0x49u8
-        full[109] <- 0xBAu8
-        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 110usize, (&ge_runtime_hle_guest_r9).cast[void&].uintptr().u64())
-        full[118] <- 0x4Du8
-        full[119] <- 0x89u8
-        full[120] <- 0x0Au8
+        full[56] <- 0x49
+        full[57] <- 0xBA
+        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 58, (&ge_runtime_hle_guest_rsi).cast[void&].uintptr().u64())
+        full[66] <- 0x49
+        full[67] <- 0x89
+        full[68] <- 0x32
+        full[69] <- 0x49
+        full[70] <- 0xBA
+        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 71, (&ge_runtime_hle_guest_rdx).cast[void&].uintptr().u64())
+        full[79] <- 0x49
+        full[80] <- 0x89
+        full[81] <- 0x12
+        full[82] <- 0x49
+        full[83] <- 0xBA
+        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 84, (&ge_runtime_hle_guest_rcx).cast[void&].uintptr().u64())
+        full[92] <- 0x49
+        full[93] <- 0x89
+        full[94] <- 0x0A
+        full[95] <- 0x49
+        full[96] <- 0xBA
+        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 97, (&ge_runtime_hle_guest_r8).cast[void&].uintptr().u64())
+        full[105] <- 0x4D
+        full[106] <- 0x89
+        full[107] <- 0x02
+        full[108] <- 0x49
+        full[109] <- 0xBA
+        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 110, (&ge_runtime_hle_guest_r9).cast[void&].uintptr().u64())
+        full[118] <- 0x4D
+        full[119] <- 0x89
+        full[120] <- 0x0A
         # Save the live guest selector. Every guest thread has its own %fs, so
         # restoring a baked main-thread selector corrupts worker-thread TLS.
         # push %r10 also fixes the nested SysV call alignment.
-        full[121] <- 0x66u8
-        full[122] <- 0x41u8
-        full[123] <- 0x8Cu8
-        full[124] <- 0xE2u8
-        full[125] <- 0x41u8
-        full[126] <- 0x52u8
+        full[121] <- 0x66
+        full[122] <- 0x41
+        full[123] <- 0x8C
+        full[124] <- 0xE2
+        full[125] <- 0x41
+        full[126] <- 0x52
         # movw $host_selector, %r10w; movw %r10w, %fs
-        full[127] <- 0x66u8
-        full[128] <- 0x41u8
-        full[129] <- 0xBAu8
-        Linker_WriteU16LE((&full[0]).cast[mutable u8&], 130usize, (!host_selector).u16())
-        full[132] <- 0x66u8
-        full[133] <- 0x41u8
-        full[134] <- 0x8Eu8
-        full[135] <- 0xE2u8
+        full[127] <- 0x66
+        full[128] <- 0x41
+        full[129] <- 0xBA
+        Linker_WriteU16LE((&full[0]).cast[mutable u8&], 130, (!host_selector).u16())
+        full[132] <- 0x66
+        full[133] <- 0x41
+        full[134] <- 0x8E
+        full[135] <- 0xE2
         # movabs $target, %r11; call *%r11
-        full[136] <- 0x49u8
-        full[137] <- 0xBBu8
-        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 138usize, target)
-        full[146] <- 0x41u8
-        full[147] <- 0xFFu8
-        full[148] <- 0xD3u8
+        full[136] <- 0x49
+        full[137] <- 0xBB
+        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 138, target)
+        full[146] <- 0x41
+        full[147] <- 0xFF
+        full[148] <- 0xD3
         # Restore the original guest return slot before returning. Host HLE
         # bodies run on the guest stack; preserving the call continuation here
         # prevents host prologues/epilogues from accidentally skipping guest code.
-        full[149] <- 0x49u8
-        full[150] <- 0xBBu8
-        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 151usize, (&ge_runtime_hle_guest_return_addr).cast[void&].uintptr().u64())
-        full[159] <- 0x4Du8
-        full[160] <- 0x8Bu8
-        full[161] <- 0x1Bu8
-        full[162] <- 0x4Cu8
-        full[163] <- 0x89u8
-        full[164] <- 0x5Cu8
-        full[165] <- 0x24u8
-        full[166] <- 0x08u8
+        full[149] <- 0x49
+        full[150] <- 0xBB
+        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 151, (&ge_runtime_hle_guest_return_addr).cast[void&].uintptr().u64())
+        full[159] <- 0x4D
+        full[160] <- 0x8B
+        full[161] <- 0x1B
+        full[162] <- 0x4C
+        full[163] <- 0x89
+        full[164] <- 0x5C
+        full[165] <- 0x24
+        full[166] <- 0x08
         # pop saved selector into %r10; movw %r10w, %fs; ret
-        full[167] <- 0x41u8
-        full[168] <- 0x5Au8
-        full[169] <- 0x66u8
-        full[170] <- 0x41u8
-        full[171] <- 0x8Eu8
-        full[172] <- 0xE2u8
-        full[173] <- 0xC3u8
-        thunk: VAddr = GuestExec_AllocateRegion(4096u64, 5u32)
+        full[167] <- 0x41
+        full[168] <- 0x5A
+        full[169] <- 0x66
+        full[170] <- 0x41
+        full[171] <- 0x8E
+        full[172] <- 0xE2
+        full[173] <- 0xC3
+        thunk: VAddr = GuestExec_AllocateRegion(4096, 5)
         if thunk == 0.uintptr():
             return target
         trusted Unsafe.MachineCodeBuilder:
-            if not GuestExec_WriteBytes(thunk, (&full[0]).cast[void&], 174u64):
+            if not GuestExec_WriteBytes(thunk, (&full[0]).cast[void&], 174):
                 return target
         trusted Unsafe.ExecutableCodePublish:
-            if not GuestExec_PublishExecutableCode(thunk, 174u64):
+            if not GuestExec_PublishExecutableCode(thunk, 174):
                 return target
-        GuestExec_RecordHleBoundaryThunkContract(thunk, target.uintptr(), 174u64, host_selector)
+        GuestExec_RecordHleBoundaryThunkContract(thunk, target.uintptr(), 174, host_selector)
         # Wrap the real thunk in a recorder prefix that logs the symbol-name pointer
         # of this call into linker_hle_call_ring, then jmps through. The GOT ends up
         # pointing at the prefix; the prefix preserves %rsp and all SysV arg regs
         # (it only clobbers %r10/%r11, which the real thunk reloads immediately) so
         # the boundary contract is unaffected.
         entry_addr: u64 = Linker_CreateHleRecorderPrefix(thunk.u64(), sym_ptr, target)
-        final_addr: u64 = entry_addr if entry_addr != 0u64 else thunk.u64()
+        final_addr: u64 = entry_addr if entry_addr != 0 else thunk.u64()
         if linker_native_hle_thunk_count < LINKER_NATIVE_HLE_THUNK_CAP:
             linker_native_hle_thunk_targets[linker_native_hle_thunk_count] <- target
             linker_native_hle_thunk_addrs[linker_native_hle_thunk_count] <- final_addr
             linker_native_hle_thunk_symbol_ptrs[linker_native_hle_thunk_count] <- sym_ptr
-            linker_native_hle_thunk_count <- linker_native_hle_thunk_count + 1usize
+            linker_native_hle_thunk_count <- linker_native_hle_thunk_count + 1
         return final_addr
     static else:
         return target
@@ -1672,119 +1669,119 @@ def Linker_CreateHleRecorderPrefix(real_thunk: u64, sym_ptr: u64, target: u64) -
         rsi_ring_addr: u64 = (&linker_hle_call_rsi_ring[0]).cast[void&].uintptr().u64()
         rdx_ring_addr: u64 = (&linker_hle_call_rdx_ring[0]).cast[void&].uintptr().u64()
         # push %rax
-        stub[0] <- 0x50u8
+        stub[0] <- 0x50
         # movabs $&index, %r10 ; mov (%r10), %rax
-        stub[1] <- 0x49u8
-        stub[2] <- 0xBAu8
-        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 3usize, idx_addr)
-        stub[11] <- 0x49u8
-        stub[12] <- 0x8Bu8
-        stub[13] <- 0x02u8
+        stub[1] <- 0x49
+        stub[2] <- 0xBA
+        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 3, idx_addr)
+        stub[11] <- 0x49
+        stub[12] <- 0x8B
+        stub[13] <- 0x02
         # and $0x3ff, %rax
-        stub[14] <- 0x48u8
-        stub[15] <- 0x25u8
-        stub[16] <- 0xFFu8
-        stub[17] <- 0x03u8
-        stub[18] <- 0x00u8
-        stub[19] <- 0x00u8
+        stub[14] <- 0x48
+        stub[15] <- 0x25
+        stub[16] <- 0xFF
+        stub[17] <- 0x03
+        stub[18] <- 0x00
+        stub[19] <- 0x00
         # movabs $&ring, %r11
-        stub[20] <- 0x49u8
-        stub[21] <- 0xBBu8
-        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 22usize, ring_addr)
+        stub[20] <- 0x49
+        stub[21] <- 0xBB
+        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 22, ring_addr)
         # movabs $sym_ptr, %r10
-        stub[30] <- 0x49u8
-        stub[31] <- 0xBAu8
-        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 32usize, sym_ptr)
+        stub[30] <- 0x49
+        stub[31] <- 0xBA
+        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 32, sym_ptr)
         # mov %r10, (%r11,%rax,8)
-        stub[40] <- 0x4Du8
-        stub[41] <- 0x89u8
-        stub[42] <- 0x14u8
-        stub[43] <- 0xC3u8
+        stub[40] <- 0x4D
+        stub[41] <- 0x89
+        stub[42] <- 0x14
+        stub[43] <- 0xC3
         # movabs $&target_ring, %r11
-        stub[44] <- 0x49u8
-        stub[45] <- 0xBBu8
-        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 46usize, target_ring_addr)
+        stub[44] <- 0x49
+        stub[45] <- 0xBB
+        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 46, target_ring_addr)
         # movabs $target, %r10
-        stub[54] <- 0x49u8
-        stub[55] <- 0xBAu8
-        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 56usize, target)
+        stub[54] <- 0x49
+        stub[55] <- 0xBA
+        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 56, target)
         # mov %r10, (%r11,%rax,8)
-        stub[64] <- 0x4Du8
-        stub[65] <- 0x89u8
-        stub[66] <- 0x14u8
-        stub[67] <- 0xC3u8
+        stub[64] <- 0x4D
+        stub[65] <- 0x89
+        stub[66] <- 0x14
+        stub[67] <- 0xC3
         # movabs $&return_ring, %r11
-        stub[68] <- 0x49u8
-        stub[69] <- 0xBBu8
-        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 70usize, return_ring_addr)
+        stub[68] <- 0x49
+        stub[69] <- 0xBB
+        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 70, return_ring_addr)
         # mov 8(%rsp), %r10 -- return PC below the saved %rax
-        stub[78] <- 0x4Cu8
-        stub[79] <- 0x8Bu8
-        stub[80] <- 0x54u8
-        stub[81] <- 0x24u8
-        stub[82] <- 0x08u8
+        stub[78] <- 0x4C
+        stub[79] <- 0x8B
+        stub[80] <- 0x54
+        stub[81] <- 0x24
+        stub[82] <- 0x08
         # mov %r10, (%r11,%rax,8)
-        stub[83] <- 0x4Du8
-        stub[84] <- 0x89u8
-        stub[85] <- 0x14u8
-        stub[86] <- 0xC3u8
+        stub[83] <- 0x4D
+        stub[84] <- 0x89
+        stub[85] <- 0x14
+        stub[86] <- 0xC3
         # Store the first three SysV argument registers alongside the generic
         # call record. These are the fields the shadPS4 boot oracle compares at
         # each HLE boundary, and recording them in the prefix avoids patching
         # every individual HLE.
         # movabs $&rdi_ring, %r11 ; mov %rdi, (%r11,%rax,8)
-        stub[87] <- 0x49u8
-        stub[88] <- 0xBBu8
-        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 89usize, rdi_ring_addr)
-        stub[97] <- 0x49u8
-        stub[98] <- 0x89u8
-        stub[99] <- 0x3Cu8
-        stub[100] <- 0xC3u8
+        stub[87] <- 0x49
+        stub[88] <- 0xBB
+        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 89, rdi_ring_addr)
+        stub[97] <- 0x49
+        stub[98] <- 0x89
+        stub[99] <- 0x3C
+        stub[100] <- 0xC3
         # movabs $&rsi_ring, %r11 ; mov %rsi, (%r11,%rax,8)
-        stub[101] <- 0x49u8
-        stub[102] <- 0xBBu8
-        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 103usize, rsi_ring_addr)
-        stub[111] <- 0x49u8
-        stub[112] <- 0x89u8
-        stub[113] <- 0x34u8
-        stub[114] <- 0xC3u8
+        stub[101] <- 0x49
+        stub[102] <- 0xBB
+        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 103, rsi_ring_addr)
+        stub[111] <- 0x49
+        stub[112] <- 0x89
+        stub[113] <- 0x34
+        stub[114] <- 0xC3
         # movabs $&rdx_ring, %r11 ; mov %rdx, (%r11,%rax,8)
-        stub[115] <- 0x49u8
-        stub[116] <- 0xBBu8
-        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 117usize, rdx_ring_addr)
-        stub[125] <- 0x49u8
-        stub[126] <- 0x89u8
-        stub[127] <- 0x14u8
-        stub[128] <- 0xC3u8
+        stub[115] <- 0x49
+        stub[116] <- 0xBB
+        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 117, rdx_ring_addr)
+        stub[125] <- 0x49
+        stub[126] <- 0x89
+        stub[127] <- 0x14
+        stub[128] <- 0xC3
         # inc %rax
-        stub[129] <- 0x48u8
-        stub[130] <- 0xFFu8
-        stub[131] <- 0xC0u8
+        stub[129] <- 0x48
+        stub[130] <- 0xFF
+        stub[131] <- 0xC0
         # movabs $&index, %r11 ; mov %rax, (%r11)
-        stub[132] <- 0x49u8
-        stub[133] <- 0xBBu8
-        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 134usize, idx_addr)
-        stub[142] <- 0x49u8
-        stub[143] <- 0x89u8
-        stub[144] <- 0x03u8
+        stub[132] <- 0x49
+        stub[133] <- 0xBB
+        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 134, idx_addr)
+        stub[142] <- 0x49
+        stub[143] <- 0x89
+        stub[144] <- 0x03
         # pop %rax
-        stub[145] <- 0x58u8
+        stub[145] <- 0x58
         # movabs $real_thunk, %r11 ; jmp *%r11
-        stub[146] <- 0x49u8
-        stub[147] <- 0xBBu8
-        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 148usize, real_thunk)
-        stub[156] <- 0x41u8
-        stub[157] <- 0xFFu8
-        stub[158] <- 0xE3u8
-        prefix: VAddr = GuestExec_AllocateRegion(4096u64, 5u32)
+        stub[146] <- 0x49
+        stub[147] <- 0xBB
+        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 148, real_thunk)
+        stub[156] <- 0x41
+        stub[157] <- 0xFF
+        stub[158] <- 0xE3
+        prefix: VAddr = GuestExec_AllocateRegion(4096, 5)
         if prefix == 0.uintptr():
-            return 0u64
+            return 0
         trusted Unsafe.MachineCodeBuilder:
-            if not GuestExec_WriteBytes(prefix, (&stub[0]).cast[void&], 159u64):
-                return 0u64
+            if not GuestExec_WriteBytes(prefix, (&stub[0]).cast[void&], 159):
+                return 0
         trusted Unsafe.ExecutableCodePublish:
-            if not GuestExec_PublishExecutableCode(prefix, 159u64):
-                return 0u64
+            if not GuestExec_PublishExecutableCode(prefix, 159):
+                return 0
         return prefix.u64()
     static else:
         return 0
@@ -2285,8 +2282,7 @@ def Linker_LoadModuleFromHost(self: mutable Linker&, guest_name: static u8&, hos
         self.num_static_modules <- self.num_static_modules + 1
     # The module table is persistent linker state; allocate its backing from the
     # persistent metadata arena rather than a transient local arena.
-    owner: mutable Arena& = &module_metadata_arena
-    in owner:
+    in perm:
         self.modules.push(module)
     return (self.modules.count - 1).s32()
 
@@ -2579,8 +2575,7 @@ def Linker_Execute(self: mutable Linker&, args: darray[static u8&]) -> s32 can[U
 
 def Linker_DebugDump(self: Linker&) -> darray[static u8&]:
     out: mutable darray[static u8&] = []
-    owner: mutable Arena& = &module_metadata_arena
-    in owner:
+    in perm:
         for i in 0..<self.modules.count:
             out.push(self.modules[i].name)
     return out

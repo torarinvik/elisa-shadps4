@@ -419,3 +419,19 @@ cd "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/eli
 - Result: `passed=20 failed=4 selected=24`
 - What improved: CUSA unresolved imports are zero
 - Next blocker: No unclassified project-owned C++ modules violated: 1 Missing units
+
+## 2026-06-15: Emulator Parity Gate Run
+
+- Date: 2026-06-15
+- Command run: `./emulator-cpp-parity --quick`
+- Result: `passed=21 failed=3 selected=24`
+- What improved: CUSA unresolved imports are zero
+- Next blocker: Gate step failed: guest exec ABI smoke x64
+
+## 2026-06-15: Emulator Parity Gate Run
+
+- Date: 2026-06-15
+- Command run: `./emulator-cpp-parity --quick`
+- Result: `passed=22 failed=2 selected=24`
+- What improved: CUSA unresolved imports are zero
+- Next blocker: Gate step failed: guest exec ABI smoke x64

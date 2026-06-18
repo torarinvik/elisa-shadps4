@@ -75,8 +75,8 @@ def KernelFileHandle_new() -> KernelFileHandle:
 
 global mutable g_kernel_file_handles: array[KernelFileHandle, 1024] = zeroed
 global mutable kernel_file_last_write_fd: int = -1
-global mutable kernel_file_last_write_nbytes: u64 = 0u64
-global mutable kernel_file_last_write_ret: i64 = 0i64
+global mutable kernel_file_last_write_nbytes: u64 = 0
+global mutable kernel_file_last_write_ret: i64 = 0
 global mutable kernel_file_last_write_errno: int = 0
 
 def KernelFile_DebugLastWriteFd() -> int:
@@ -119,21 +119,19 @@ def KernelFile_DirentReclen(name: static u8&) -> usize:
     name_len: usize = runtime_strlen(name)
     return KernelFile_DirentAlign(KERNEL_FILE_DIRENT_BASE_SIZE + name_len + 1)
 
-def KernelFile_DirentPushU8(out: mutable darray[u8]&, value: u8) -> void:
+def KernelFile_DirentPushU8[@r](out: mutable darray[u8]& @r, value: u8) -> void:
     can Memory.Allocate, Abort.Panic:
-        owner: mutable Arena& = &scratch_arena
-        in owner:
-            out.push(value)
+        out.push(value)
 
-def KernelFile_DirentPushU16LE(out: mutable darray[u8]&, value: u16) -> void:
+def KernelFile_DirentPushU16LE[@r](out: mutable darray[u8]& @r, value: u16) -> void:
     KernelFile_DirentPushU8(out, (value & 0xff).u8())
     KernelFile_DirentPushU8(out, ((value >> 8) & 0xff).u8())
 
-def KernelFile_DirentPushU32LE(out: mutable darray[u8]&, value: u32) -> void:
+def KernelFile_DirentPushU32LE[@r](out: mutable darray[u8]& @r, value: u32) -> void:
     for i in 0..<4:
         KernelFile_DirentPushU8(out, ((value >> (i * 8)) & 0xff).u8())
 
-def KernelFile_DirentPushU64LE(out: mutable darray[u8]&, value: u64) -> void:
+def KernelFile_DirentPushU64LE[@r](out: mutable darray[u8]& @r, value: u64) -> void:
     for i in 0..<8:
         KernelFile_DirentPushU8(out, ((value >> (i * 8)) & 0xff).u8())
 
@@ -150,7 +148,7 @@ def KernelFile_DirentEntryLess(a: mutable ElisaFsDirEntry&, b: mutable ElisaFsDi
             return false
     return a_len < b_len
 
-def KernelFile_DirentEmit(out: mutable darray[u8]&, entry: mutable ElisaFsDirEntry&, index: usize) -> void:
+def KernelFile_DirentEmit[@r](out: mutable darray[u8]& @r, entry: mutable ElisaFsDirEntry&, index: usize) -> void:
     name: static u8& = entry.name if entry.name != "" else "?"
     name_len: usize = runtime_strlen(name)
     rec_len: usize = KernelFile_DirentReclen(name)
@@ -502,7 +500,7 @@ def sceKernelFcntl(fd: int, cmd: int, arg: i64) -> int:
 def KernelFile_Write(fd: int, buf: void&?, nbytes: u64) -> i64:
     kernel_file_last_write_fd <- fd
     kernel_file_last_write_nbytes <- nbytes
-    kernel_file_last_write_ret <- 0i64
+    kernel_file_last_write_ret <- 0
     kernel_file_last_write_errno <- 0
     GuestExec_RecordWriteBuffer(fd, buf, nbytes)
     # shadPS4 wires stdout/stderr to console devices. Until the device table is
@@ -510,42 +508,42 @@ def KernelFile_Write(fd: int, buf: void&?, nbytes: u64) -> i64:
     # startup diagnostics do not fail with EBADF.
     if fd == 1 or fd == 2:
         if buf == null and nbytes > 0:
-            kernel_file_last_write_ret <- -1i64
+            kernel_file_last_write_ret <- -1
             kernel_file_last_write_errno <- POSIX_EFAULT
             return KernelFile_PosixFail64(POSIX_EFAULT)
         kernel_file_last_write_ret <- nbytes.i64()
         return nbytes.i64()
     h: mutable KernelFileHandle&? = KernelFile_GetHandle(fd)
     if h == null:
-        kernel_file_last_write_ret <- -1i64
+        kernel_file_last_write_ret <- -1
         kernel_file_last_write_errno <- POSIX_EBADF
         return KernelFile_PosixFail64(POSIX_EBADF)
     handle: mutable KernelFileHandle& = h
     if handle.kind == KERNEL_FILE_KIND_DIRECTORY:
-        kernel_file_last_write_ret <- -1i64
+        kernel_file_last_write_ret <- -1
         kernel_file_last_write_errno <- POSIX_EBADF
         return KernelFile_PosixFail64(POSIX_EBADF)
     if KernelFile_IsReadOnlyFlags(handle.open_flags):
-        kernel_file_last_write_ret <- -1i64
+        kernel_file_last_write_ret <- -1
         kernel_file_last_write_errno <- POSIX_EBADF
         return KernelFile_PosixFail64(POSIX_EBADF)
     if handle.file == null:
-        kernel_file_last_write_ret <- -1i64
+        kernel_file_last_write_ret <- -1
         kernel_file_last_write_errno <- POSIX_EBADF
         return KernelFile_PosixFail64(POSIX_EBADF)
     if buf == null and nbytes > 0:
-        kernel_file_last_write_ret <- -1i64
+        kernel_file_last_write_ret <- -1
         kernel_file_last_write_errno <- POSIX_EFAULT
         return KernelFile_PosixFail64(POSIX_EFAULT)
     if not io_seek(handle.file.cast[void&], handle.offset, SeekOrigin.SetOrigin):
-        kernel_file_last_write_ret <- -1i64
+        kernel_file_last_write_ret <- -1
         kernel_file_last_write_errno <- POSIX_EINVAL
         return KernelFile_PosixFail64(POSIX_EINVAL)
     if nbytes == 0:
-        kernel_file_last_write_ret <- 0i64
+        kernel_file_last_write_ret <- 0
         return 0
     if buf == null:
-        kernel_file_last_write_ret <- -1i64
+        kernel_file_last_write_ret <- -1
         kernel_file_last_write_errno <- POSIX_EFAULT
         return KernelFile_PosixFail64(POSIX_EFAULT)
     write_buf: void& = buf.cast[void&]

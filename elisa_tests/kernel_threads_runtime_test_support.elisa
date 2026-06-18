@@ -1,14 +1,14 @@
 const ELISA_KERNEL_TEST_SLOT_COUNT: int = 64
 const ELISA_KERNEL_TEST_EINVAL: int = 22
 const ELISA_KERNEL_TEST_ETIMEDOUT: int = 60
-const ELISA_KERNEL_TEST_PTHREAD_CANCELED: u64 = 1u64 if PLATFORM_APPLE else 0xffffffffffffffffu64
+const ELISA_KERNEL_TEST_PTHREAD_CANCELED: u64 = 1 if PLATFORM_APPLE else 0xffffffffffffffff
 
 global mutable kernel_test_slots: i64[64] = zeroed
 global mutable kernel_test_slots_mutex: void&? = null
 global mutable kernel_test_slots_cond: void&? = null
 global mutable kernel_test_support_ready: bool = false
-global mutable kernel_test_cancel_once: KtPthreadOnce = KtPthreadOnce{sig: KT_PTHREAD_ONCE_SIG, opaque: 0u64}
-global mutable kernel_test_cancel_key: u64 = 0u64
+global mutable kernel_test_cancel_once: KtPthreadOnce = KtPthreadOnce{sig: KT_PTHREAD_ONCE_SIG, opaque: 0}
+global mutable kernel_test_cancel_key: u64 = 0
 
 @fixed_layout
 struct KernelTestCancelArgs:
@@ -117,7 +117,7 @@ def elisa_kernel_test_monotonic_usec() -> u64:
     now: mutable KtTimespec = zeroed
     if kt_clock_gettime(KT_CLOCK_MONOTONIC, (&now).cast[void&]) != 0:
         return 0
-    return (now.tv_sec.u64() * 1000000u64) + (now.tv_nsec.u64() / 1000u64)
+    return (now.tv_sec.u64() * 1000000) + (now.tv_nsec.u64() / 1000)
 
 @link_name(nanosleep)
 extern elisa_kernel_test_nanosleep(req: void&?, rem: void&?) -> int
@@ -127,8 +127,8 @@ extern elisa_kernel_test_sched_yield() -> int
 
 def elisa_kernel_test_sleep_usec(usec: u64) -> void:
     req: mutable KtTimespec = zeroed
-    req.tv_sec <- (usec / 1000000u64).i64()
-    req.tv_nsec <- ((usec % 1000000u64) * 1000u64).i64()
+    req.tv_sec <- (usec / 1000000).i64()
+    req.tv_nsec <- ((usec % 1000000) * 1000).i64()
     _ = elisa_kernel_test_nanosleep((&req).cast[void&], null)
 
 def elisa_kernel_test_yield() -> void:
@@ -165,7 +165,7 @@ def elisa_kernel_test_cancel_worker(raw: void&?) -> void&?:
     elisa_kernel_test_slot_set(args.started_slot, 1)
     trusted Unsafe.AssumeProgress:
         while true:
-            elisa_kernel_test_sleep_usec(5000u64)
+            elisa_kernel_test_sleep_usec(5000)
     return null
 
 def elisa_kernel_test_cancel_cleanup_tls_join_scenario() -> int:
@@ -173,16 +173,16 @@ def elisa_kernel_test_cancel_cleanup_tls_join_scenario() -> int:
     thr: void&? = kt_thread_create(elisa_kernel_test_cancel_worker.cast[void&?], (&kernel_test_cancel_join_args).cast[void&], err)
     if thr == null or err != 0:
         return -1
-    if elisa_kernel_test_wait_slot(kernel_test_cancel_join_args.started_slot, 1, 250000u64) != 0:
+    if elisa_kernel_test_wait_slot(kernel_test_cancel_join_args.started_slot, 1, 250000) != 0:
         return -2
     cancel_ret: int = kt_thread_cancel(thr)
     ret: mutable void&? = null
     join_ret: int = kt_thread_join(thr, ret)
     if cancel_ret != 0 or join_ret != 0:
         return -3
-    if elisa_kernel_test_wait_slot_at_least(kernel_test_cancel_join_args.cleanup_slot, 1, 250000u64) != 0:
+    if elisa_kernel_test_wait_slot_at_least(kernel_test_cancel_join_args.cleanup_slot, 1, 250000) != 0:
         return -4
-    if elisa_kernel_test_wait_slot_at_least(kernel_test_cancel_join_args.tls_slot, 1, 250000u64) != 0:
+    if elisa_kernel_test_wait_slot_at_least(kernel_test_cancel_join_args.tls_slot, 1, 250000) != 0:
         return -5
     if ret != ELISA_KERNEL_TEST_PTHREAD_CANCELED.cast[void&?]:
         return -6
@@ -193,7 +193,7 @@ def elisa_kernel_test_cancel_cleanup_tls_timedjoin_scenario() -> int:
     thr: void&? = kt_thread_create(elisa_kernel_test_cancel_worker.cast[void&?], (&kernel_test_cancel_timedjoin_args).cast[void&], err)
     if thr == null or err != 0:
         return -1
-    if elisa_kernel_test_wait_slot(kernel_test_cancel_timedjoin_args.started_slot, 1, 250000u64) != 0:
+    if elisa_kernel_test_wait_slot(kernel_test_cancel_timedjoin_args.started_slot, 1, 250000) != 0:
         return -2
     if kt_thread_cancel(thr) != 0:
         return -3
@@ -201,17 +201,17 @@ def elisa_kernel_test_cancel_cleanup_tls_timedjoin_scenario() -> int:
     if kt_clock_gettime(KT_CLOCK_MONOTONIC, (&now).cast[void&]) != 0:
         return -4
     sec: mutable i64 = now.tv_sec
-    nsec: mutable i64 = now.tv_nsec + 200000000i64
-    if nsec >= 1000000000i64:
+    nsec: mutable i64 = now.tv_nsec + 200000000
+    if nsec >= 1000000000:
         sec <- sec + 1
-        nsec <- nsec - 1000000000i64
+        nsec <- nsec - 1000000000
     ret: mutable void&? = null
     join_ret: int = kt_thread_timedjoin(thr, ret, sec, nsec)
     if join_ret != 0:
         return -4
-    if elisa_kernel_test_wait_slot_at_least(kernel_test_cancel_timedjoin_args.cleanup_slot, 1, 250000u64) != 0:
+    if elisa_kernel_test_wait_slot_at_least(kernel_test_cancel_timedjoin_args.cleanup_slot, 1, 250000) != 0:
         return -5
-    if elisa_kernel_test_wait_slot_at_least(kernel_test_cancel_timedjoin_args.tls_slot, 1, 250000u64) != 0:
+    if elisa_kernel_test_wait_slot_at_least(kernel_test_cancel_timedjoin_args.tls_slot, 1, 250000) != 0:
         return -6
     if ret != ELISA_KERNEL_TEST_PTHREAD_CANCELED.cast[void&?]:
         return -7

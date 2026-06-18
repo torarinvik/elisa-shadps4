@@ -11,7 +11,7 @@ struct ResourcePool:
     ticks: mutable darray[u64]
 
 def ResourcePool_New(master_semaphore: mutable MasterSemaphore&, grow_step: usize) -> ResourcePool:
-    out: mutable ResourcePool = ResourcePool(null, grow_step, 0usize, [])
+    out: mutable ResourcePool = ResourcePool(null, grow_step, 0, [])
     out.master_semaphore as & <- master_semaphore
     return out
 
@@ -20,13 +20,13 @@ def ResourcePool_ManageOverflow(self: mutable ResourcePool&) -> usize:
         old_capacity: usize = self.ticks.count
         target_capacity: usize = old_capacity + self.grow_step
         while self.ticks.count < target_capacity:
-            self.ticks.push(0u64)
+            self.ticks.push(0)
         return old_capacity
 
 def ResourcePool_CommitResource(self: mutable ResourcePool&) -> usize:
     can Memory.Allocate, Abort.Panic:
         master: mutable MasterSemaphore& = self.master_semaphore.value()
-        if self.ticks.count == 0usize:
+        if self.ticks.count == 0:
             _ = ResourcePool_ManageOverflow(self)
 
         known_gpu_tick: mutable u64 = MasterSemaphore_KnownGpuTick(master)
@@ -34,30 +34,30 @@ def ResourcePool_CommitResource(self: mutable ResourcePool&) -> usize:
         while i < self.ticks.count:
             if known_gpu_tick >= self.ticks[i]:
                 self.ticks[i] <- MasterSemaphore_CurrentTick(master)
-                self.hint_iterator <- (i + 1usize) % self.ticks.count
+                self.hint_iterator <- (i + 1) % self.ticks.count
                 return i
-            i <- i + 1usize
+            i <- i + 1
 
         MasterSemaphore_Refresh(master)
         known_gpu_tick <- MasterSemaphore_KnownGpuTick(master)
-        i <- 0usize
+        i <- 0
         while i < self.hint_iterator:
             if known_gpu_tick >= self.ticks[i]:
                 self.ticks[i] <- MasterSemaphore_CurrentTick(master)
-                self.hint_iterator <- (i + 1usize) % self.ticks.count
+                self.hint_iterator <- (i + 1) % self.ticks.count
                 return i
-            i <- i + 1usize
+            i <- i + 1
 
         free_resource: usize = ResourcePool_ManageOverflow(self)
         self.ticks[free_resource] <- MasterSemaphore_CurrentTick(master)
-        self.hint_iterator <- (free_resource + 1usize) % self.ticks.count
+        self.hint_iterator <- (free_resource + 1) % self.ticks.count
         return free_resource
 
 struct CommandPool:
     pool: mutable ResourcePool
     cmd_buffers: mutable darray[u64]
 
-def CommandPool_New(master_semaphore: mutable MasterSemaphore&, initial_grow_step: usize = 4usize) -> CommandPool:
+def CommandPool_New(master_semaphore: mutable MasterSemaphore&, initial_grow_step: usize = 4) -> CommandPool:
     return CommandPool(ResourcePool_New(master_semaphore, initial_grow_step), [])
 
 def CommandPool_Allocate(self: mutable CommandPool&, begin: usize, end: usize) -> void:
@@ -89,19 +89,19 @@ struct DescriptorHeap:
     pending_pools: mutable darray[PendingDescriptorPool]
     descriptor_sets: mutable darray[DescriptorSetBucket]
 
-def DescriptorHeap_New(master_semaphore: mutable MasterSemaphore&, descriptor_heap_count: u32 = 1024u32) -> DescriptorHeap:
+def DescriptorHeap_New(master_semaphore: mutable MasterSemaphore&, descriptor_heap_count: u32 = 1024) -> DescriptorHeap:
     can Memory.Allocate, Abort.Panic:
-        out: mutable DescriptorHeap = DescriptorHeap(null, descriptor_heap_count, 0u64, [], [])
+        out: mutable DescriptorHeap = DescriptorHeap(null, descriptor_heap_count, 0, [], [])
         out.master_semaphore as & <- master_semaphore
         DescriptorHeap_CreateDescriptorPool(&out)
         return out
 
 def DescriptorHeap_FindBucket(self: mutable DescriptorHeap&, layout: u64) -> usize?:
-    i: mutable usize = 0usize
+    i: mutable usize = 0
     while i < self.descriptor_sets.count:
         if self.descriptor_sets[i].layout == layout:
             return i
-        i <- i + 1usize
+        i <- i + 1
     return null
 
 def DescriptorHeap_CreateDescriptorPool(self: mutable DescriptorHeap&) -> void:
@@ -110,33 +110,33 @@ def DescriptorHeap_CreateDescriptorPool(self: mutable DescriptorHeap&) -> void:
 def DescriptorHeap_Commit(self: mutable DescriptorHeap&, set_layout: u64) -> u64:
     can Memory.Allocate, Abort.Panic:
         master: mutable MasterSemaphore& = self.master_semaphore.value()
-        bucket_index: mutable usize = DescriptorHeap_FindBucket(self, set_layout) else 0xffffffffffffffffusize
-        if bucket_index == 0xffffffffffffffffusize:
+        bucket_index: mutable usize = DescriptorHeap_FindBucket(self, set_layout) else 0xffffffffffffffff
+        if bucket_index == 0xffffffffffffffff:
             self.descriptor_sets.push(DescriptorSetBucket(set_layout, []))
-            bucket_index <- self.descriptor_sets.count - 1usize
+            bucket_index <- self.descriptor_sets.count - 1
 
         bucket: mutable DescriptorSetBucket& = &self.descriptor_sets[bucket_index]
-        if bucket.sets.count > 0usize:
-            set_handle: u64 = bucket.sets[bucket.sets.count - 1usize]
-            bucket.sets.count <- bucket.sets.count - 1usize
+        if bucket.sets.count > 0:
+            set_handle: u64 = bucket.sets[bucket.sets.count - 1]
+            bucket.sets.count <- bucket.sets.count - 1
             return set_handle
 
-        i: mutable u32 = 0u32
-        while i < 32u32:
+        i: mutable u32 = 0
+        while i < 32:
             bucket.sets.push(Vk_AllocHandle())
-            i <- i + 1u32
+            i <- i + 1
 
-        if self.pending_pools.count > 0usize:
-            front_tick: u64 = self.pending_pools[0usize].tick
+        if self.pending_pools.count > 0:
+            front_tick: u64 = self.pending_pools[0].tick
             if MasterSemaphore_IsFree(master, front_tick):
-                self.curr_pool <- self.pending_pools[0usize].pool
-                self.pending_pools[0usize] <- self.pending_pools[self.pending_pools.count - 1usize]
-                self.pending_pools.count <- self.pending_pools.count - 1usize
+                self.curr_pool <- self.pending_pools[0].pool
+                self.pending_pools[0] <- self.pending_pools[self.pending_pools.count - 1]
+                self.pending_pools.count <- self.pending_pools.count - 1
 
-        if bucket.sets.count == 0usize:
+        if bucket.sets.count == 0:
             DescriptorHeap_CreateDescriptorPool(self)
             bucket.sets.push(Vk_AllocHandle())
 
-        out_set: u64 = bucket.sets[bucket.sets.count - 1usize]
-        bucket.sets.count <- bucket.sets.count - 1usize
+        out_set: u64 = bucket.sets[bucket.sets.count - 1]
+        bucket.sets.count <- bucket.sets.count - 1
         return out_set

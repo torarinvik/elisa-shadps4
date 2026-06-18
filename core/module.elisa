@@ -34,11 +34,6 @@ const IMPORT_RESOLUTION_PRX_EXPORT: u8 = 2
 const IMPORT_RESOLUTION_AEROLIB_FALLBACK: u8 = 3
 const IMPORT_RESOLUTION_MALFORMED: u8 = 4
 
-global mutable module_metadata_arena: Arena = zeroed
-
-def Module_ResetMetadataArena() -> void:
-    module_metadata_arena <- zeroed
-
 struct OrbisKernelModuleSegmentInfo:
     address: mutable VAddr
     size: mutable u32
@@ -396,7 +391,7 @@ def Module_CallGuestInitArrayEntry(entry_addr: VAddr) -> void can[Unsafe.Segment
                     guest_selector: mutable GuestFsSelector = (!host_selector).cast[GuestFsSelector]
                     if !TLS_PrimaryTcbBase() != 0.uintptr():
                         guest_selector <- TLS_PrepareTcbBase((!TLS_PrimaryTcbBase()).cast[void&?])
-                    _ = TLS_CallGuestInitEntryOnStackWithPreparedSegment(fn, 0u64, null, null, stack_top, guest_selector, host_selector)
+                    _ = TLS_CallGuestInitEntryOnStackWithPreparedSegment(fn, 0, null, null, stack_top, guest_selector, host_selector)
                 else:
                     TLS_CallGuestInitArrayEntry((&guard).cast[FsGuard&], fn)
             ge_emergency_mark(GE_EV_MODULE_INIT_ARRAY_AFTER_CALL, entry_addr, 0.uintptr(), 0.uintptr(), 0.uintptr())
@@ -568,16 +563,27 @@ def Module_LoadElfSegments(self: mutable Module&, elf: mutable Elf&, memory: mut
                 if phdr.p_filesz > 0:
                     try Module_LoadImageSegment((&self).cast[mutable Module&], elf, memory, phdr)
             if phdr.p_type == PT_DYNAMIC and phdr.p_filesz > 0:
-                dyn_owner: mutable Arena& = &module_metadata_arena
+                # The dynamic segment outlives the load (drives relocation/imports),
+                # so grow it in the program-lifetime `perm` region before reading.
+                dyn_base: usize = self.dynamic_segment.count
+                dyn_size: usize = phdr.p_filesz.usize()
+                in perm:
+                    while self.dynamic_segment.count < dyn_base + dyn_size:
+                        self.dynamic_segment.push(0)
                 # Fatal: the dynamic segment drives relocation/imports. `try` widens
                 # ElfError into this function's combined error set.
-                try Elf_LoadSegmentBytes(elf, self.dynamic_segment, phdr.p_offset, phdr.p_filesz.usize(), dyn_owner)
+                try Elf_LoadSegmentBytes(elf, self.dynamic_segment, dyn_base, phdr.p_offset, dyn_size)
                 loaded_dynamic <- true
             if phdr.p_type == PT_SCE_DYNLIBDATA and phdr.p_filesz > 0:
-                data_owner: mutable Arena& = &module_metadata_arena
+                # Dynlibdata (symbol/relocation/string tables) outlives the load too.
+                data_base: usize = self.dynamic_data.count
+                data_size: usize = phdr.p_filesz.usize()
+                in perm:
+                    while self.dynamic_data.count < data_base + data_size:
+                        self.dynamic_data.push(0)
                 # Best-effort: a missing dynlibdata table is tolerated. `match ... as`
                 # consumes the error union with an explicit ok/else split.
-                match Elf_LoadSegmentBytes(elf, self.dynamic_data, phdr.p_offset, phdr.p_filesz.usize(), data_owner) as ok:
+                match Elf_LoadSegmentBytes(elf, self.dynamic_data, data_base, phdr.p_offset, data_size) as ok:
                     ok:
                         true
                     else:
@@ -606,9 +612,9 @@ def Module_LoadElfSegments(self: mutable Module&, elf: mutable Elf&, memory: mut
         return
 
 def Module_DecodeEhFrame(self: mutable Module&) -> void:
-    if self.eh_frame_hdr_addr == 0u64.uintptr():
+    if self.eh_frame_hdr_addr == 0.uintptr():
         return
-    if self.eh_frame_hdr_size == 0u32:
+    if self.eh_frame_hdr_size == 0:
         return
     hdr_mod: u64 = self.eh_frame_hdr_addr.u64()
     if hdr_mod < self.image_virtual_base:
@@ -678,12 +684,12 @@ def Module_MapImageSegment(self: mutable Module&, memory: mutable MemoryManager&
     # SCE_DBG_MAX_SEGMENTS. prot stores the raw ELF p_flags, address/size the mapped
     # (aligned) range — matching module.cpp so sceKernelGetModuleInfo[ForUnwind] can
     # report seg0 per module rather than a whole-module substitute.
-    if self.info.num_segments < 4u32:
+    if self.info.num_segments < 4:
         idx: usize = self.info.num_segments.usize()
         self.info.segments[idx].address <- segment_vaddr
         self.info.segments[idx].size <- segment_size.u32()
         self.info.segments[idx].prot <- phdr.p_flags.s32()
-        self.info.num_segments <- self.info.num_segments + 1u32
+        self.info.num_segments <- self.info.num_segments + 1
     self.mapped_segment_count <- self.mapped_segment_count + 1
     return
 
@@ -722,7 +728,11 @@ def Module_PrepareLoadImage(self: mutable Module&, elf: mutable Elf&) -> void:
     self.aligned_base_size <- Module_AlignUp(base_size, MODULE_BLOCK_ALIGN)
     if max_vaddr > min_vaddr:
         self.image_virtual_size <- max_vaddr - min_vaddr
-        Module_ResizeBytes(self.image, self.image_virtual_size.usize())
+        # The module image is program-lifetime; grow it in `perm`.
+        image_target: usize = self.image_virtual_size.usize()
+        in perm:
+            while self.image.count < image_target:
+                self.image.push(0)
 
 def Module_LoadImageSegment(self: mutable Module&, elf: mutable Elf&, memory: mutable MemoryManager&, phdr: elf_program_header&) -> void error[ModuleError, ElfError]:
     can Memory.Allocate:
@@ -734,27 +744,22 @@ def Module_LoadImageSegment(self: mutable Module&, elf: mutable Elf&, memory: mu
         if offset + phdr.p_filesz > self.image_virtual_size:
             raise ModuleError.ImageBounds
         # This staging buffer is transient: it is copied into self.image and the
-        # guest memory map below, then discarded when this function returns. Keep it
-        # in a function-scoped arena that stays alive through those reads.
-        seg_arena: Arena = zeroed
+        # guest memory map below, then discarded when this function returns. It is a
+        # plain local darray, so its storage lives in an inferred function-scoped
+        # region and is reclaimed on return (it must NOT leak into perm — image
+        # segments are tens of MB).
+        seg_size: usize = phdr.p_filesz.usize()
         segment: mutable darray[u8] = []
+        while segment.count < seg_size:
+            segment.push(0)
         # `try` widens the loader's ElfError into this function's combined error set.
-        try Elf_LoadSegmentBytes(elf, segment, phdr.p_offset, phdr.p_filesz.usize(), (&seg_arena).cast[mutable Arena&])
+        try Elf_LoadSegmentBytes(elf, segment, 0, phdr.p_offset, seg_size)
         for i in 0..<segment.count:
             self.image[(offset.usize() + i)] <- segment[i]
         if segment.count > 0:
             if not MemoryManager_WriteBytes(memory, self.base_virtual_addr + phdr.p_vaddr.uintptr(), segment[0], segment.count.u64()):
                 raise ModuleError.SegmentWriteFailed(phdr.p_vaddr)
         return
-
-def Module_ResizeBytes(out: mutable darray[u8]&, size: usize) -> void:
-    # Grows persistent module buffers (e.g. self.image); allocate the backing
-    # from the persistent metadata arena rather than a per-byte transient arena
-    # that would free the buffer on return.
-    owner: mutable Arena& = &module_metadata_arena
-    in owner:
-        while out.count < size:
-            out.push(0)
 
 def Module_DynamicDataChecksum(self: Module&) -> u64:
     # FNV-1a over the dynamic data buffer; used to detect nondeterministic
@@ -1136,20 +1141,17 @@ def Module_LoadDynamicInfo(self: mutable Module&) -> void:
             if dyn.d_tag == DT_NEEDED:
                 name: static u8& = Module_ReadDynStringAtTable(self, dyn.d_un)
                 enc: static u8& = ""
-                owner: mutable Arena& = &module_metadata_arena
-                in owner:
+                in perm:
                     self.dynamic_info.import_modules.push(ModuleInfo(name, dyn.d_un, enc))
             if dyn.d_tag == DT_SCE_NEEDED_MODULE:
                 name: static u8& = Module_ReadDynStringAtTable(self, Module_DynamicNameOffset(dyn.d_un).u64())
                 enc: static u8& = Module_EncodeId(Module_DynamicModuleId(dyn.d_un))
-                owner: mutable Arena& = &module_metadata_arena
-                in owner:
+                in perm:
                     self.dynamic_info.import_modules.push(ModuleInfo(name, dyn.d_un, enc))
             if dyn.d_tag == DT_SCE_MODULE_INFO:
                 name: static u8& = Module_ReadDynStringAtTable(self, Module_DynamicNameOffset(dyn.d_un).u64())
                 enc: static u8& = Module_EncodeId(Module_DynamicModuleId(dyn.d_un))
-                owner: mutable Arena& = &module_metadata_arena
-                in owner:
+                in perm:
                     self.dynamic_info.export_modules.push(ModuleInfo(name, dyn.d_un, enc))
                 if static_strlen(name) > 0:
                     self.name <- name
@@ -1157,14 +1159,12 @@ def Module_LoadDynamicInfo(self: mutable Module&) -> void:
             if dyn.d_tag == DT_SCE_IMPORT_LIB:
                 name: static u8& = Module_ReadDynStringAtTable(self, Module_DynamicNameOffset(dyn.d_un).u64())
                 enc: static u8& = Module_EncodeId(Module_DynamicLibraryId(dyn.d_un))
-                owner: mutable Arena& = &module_metadata_arena
-                in owner:
+                in perm:
                     self.dynamic_info.import_libs.push(LibraryInfo(name, dyn.d_un, enc))
             if dyn.d_tag == DT_SCE_EXPORT_LIB:
                 name: static u8& = Module_ReadDynStringAtTable(self, Module_DynamicNameOffset(dyn.d_un).u64())
                 enc: static u8& = Module_EncodeId(Module_DynamicLibraryId(dyn.d_un))
-                owner: mutable Arena& = &module_metadata_arena
-                in owner:
+                in perm:
                     self.dynamic_info.export_libs.push(LibraryInfo(name, dyn.d_un, enc))
         _ = found_null
 
@@ -1233,12 +1233,12 @@ def Module_GetSymbolByIndex(self: Module&, symbol_index: u32, out_symbol: mutabl
 # FNV-1a hash of a C string. Indexing a raw cstr has no length in its type, so the
 # walk is vouched against static_strlen under Unsafe.UncheckedIndex, exactly like streq.
 def Module_CstrHash(s: static u8&) -> u64:
-    h: mutable u64 = 0xcbf29ce484222325u64
+    h: mutable u64 = 0xcbf29ce484222325
     n: usize = static_strlen(s)
     trusted Unsafe.UncheckedIndex:
         i: mutable usize = 0
         while i < n:
-            h <- (h ^ s[i].u64()) * 0x100000001b3u64
+            h <- (h ^ s[i].u64()) * 0x100000001b3
             i <- i + 1
     return h
 
@@ -1289,15 +1289,14 @@ def Module_BuildExportSymbolIndex(self: mutable Module&) -> void:
             scan_off <- scan_off + entry_size
         if qualifying == 0:
             return
-        capacity: mutable u64 = 16u64
-        while capacity < (qualifying * 4u64):
-            capacity <- capacity * 2u64
-        mask: u64 = capacity - 1u64
-        index_owner: mutable Arena& = &module_metadata_arena
-        in index_owner:
+        capacity: mutable u64 = 16
+        while capacity < (qualifying * 4):
+            capacity <- capacity * 2
+        mask: u64 = capacity - 1
+        in perm:
             slot_i: mutable u64 = 0
             while slot_i < capacity:
-                self.export_index.push(ModuleExportSlot("", 0u64))
+                self.export_index.push(ModuleExportSlot("", 0))
                 slot_i <- slot_i + 1
             sym_offset: mutable u64 = self.dynamic_info.symbol_table_offset
             while sym_offset + size_of(elf_symbol).u64() <= sym_end and sym_offset + size_of(elf_symbol).u64() <= self.dynamic_data.count.u64():
@@ -1325,7 +1324,7 @@ def Module_FindDefinedSymbolAddress(self: mutable Module&, name: static u8&, out
         Module_BuildExportSymbolIndex((&self).cast[mutable Module&])
         if self.export_index.count == 0:
             return false
-        mask: u64 = self.export_index.count.u64() - 1u64
+        mask: u64 = self.export_index.count.u64() - 1
         slot: mutable u64 = Module_CstrHash(name) & mask
         probes: mutable u64 = 0
         while probes <= mask:
@@ -1407,8 +1406,7 @@ def Module_AddImportSymbol(self: mutable Module&, nid: static u8&, name: static 
         final_nid: mutable static u8& = nid
         if static_strlen(parsed_nid) > 0:
             final_nid <- parsed_nid
-        owner: mutable Arena& = &module_metadata_arena
-        in owner:
+        in perm:
             self.import_symbols.push(ImportSymbolRecord(name, final_nid, parsed_library, parsed_module, symbol_type, IMPORT_RESOLUTION_UNRESOLVED, name, self.file, 0, false))
 
 def Module_GetImportSymbolCount(self: Module&) -> usize:
@@ -1464,7 +1462,7 @@ def Module_GetModuleInfoEx(self: Module&) -> OrbisKernelModuleInfoEx:
     out.eh_frame_hdr_size <- self.eh_frame_hdr_size
     out.eh_frame_size <- self.eh_frame_size
     # Copy the per-segment table verbatim (shadPS4: .segments = info.segments).
-    for i in 0..<4u64.usize():
+    for i in 0..<4.usize():
         out.segments[i].address <- self.info.segments[i].address
         out.segments[i].size <- self.info.segments[i].size
         out.segments[i].prot <- self.info.segments[i].prot
