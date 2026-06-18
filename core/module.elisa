@@ -472,7 +472,10 @@ error ModuleError:
 def Module_LoadModuleToMemory(self: mutable Module&, memory: mutable MemoryManager&, max_tls_index: mutable u32&) -> void:
     can Memory.Allocate, Abort.Panic:
         max_tls_index <- max_tls_index + 1
-        self.tls.modid <- max_tls_index
+        # Copy the incremented index by value before storing into the module's
+        # program-lifetime TLS record (modid is a u32 value, not a borrow).
+        assigned_modid: u32 = max_tls_index
+        self.tls.modid <- assigned_modid
         # The host-file loader either succeeds (ok), reports "not a host file"
         # (NotHostFile/EmptyPath -> fall through to the boot-ELF fallback), or fails
         # mid-load on a real error (MapFailed/ProtectFailed/… -> the module is invalid).
@@ -567,8 +570,9 @@ def Module_LoadElfSegments(self: mutable Module&, elf: mutable Elf&, memory: mut
                 # so grow it in the program-lifetime `perm` region before reading.
                 dyn_base: usize = self.dynamic_segment.count
                 dyn_size: usize = phdr.p_filesz.usize()
-                while self.dynamic_segment.count < dyn_base + dyn_size:
-                    self.dynamic_segment.push(0)
+                in perm:
+                    while self.dynamic_segment.count < dyn_base + dyn_size:
+                        self.dynamic_segment.push(0)
                 # Fatal: the dynamic segment drives relocation/imports. `try` widens
                 # ElfError into this function's combined error set.
                 try Elf_LoadSegmentBytes(elf, self.dynamic_segment, dyn_base, phdr.p_offset, dyn_size)
@@ -577,8 +581,9 @@ def Module_LoadElfSegments(self: mutable Module&, elf: mutable Elf&, memory: mut
                 # Dynlibdata (symbol/relocation/string tables) outlives the load too.
                 data_base: usize = self.dynamic_data.count
                 data_size: usize = phdr.p_filesz.usize()
-                while self.dynamic_data.count < data_base + data_size:
-                    self.dynamic_data.push(0)
+                in perm:
+                    while self.dynamic_data.count < data_base + data_size:
+                        self.dynamic_data.push(0)
                 # Best-effort: a missing dynlibdata table is tolerated. `match ... as`
                 # consumes the error union with an explicit ok/else split.
                 match Elf_LoadSegmentBytes(elf, self.dynamic_data, data_base, phdr.p_offset, data_size) as ok:
@@ -728,8 +733,9 @@ def Module_PrepareLoadImage(self: mutable Module&, elf: mutable Elf&) -> void:
         self.image_virtual_size <- max_vaddr - min_vaddr
         # The module image is program-lifetime; grow it in `perm`.
         image_target: usize = self.image_virtual_size.usize()
-        while self.image.count < image_target:
-            self.image.push(0)
+        in perm:
+            while self.image.count < image_target:
+                self.image.push(0)
 
 def Module_LoadImageSegment(self: mutable Module&, elf: mutable Elf&, memory: mutable MemoryManager&, phdr: elf_program_header&) -> void error[ModuleError, ElfError]:
     can Memory.Allocate:
@@ -1138,26 +1144,31 @@ def Module_LoadDynamicInfo(self: mutable Module&) -> void:
             if dyn.d_tag == DT_NEEDED:
                 name: static u8& = Module_ReadDynStringAtTable(self, dyn.d_un)
                 enc: static u8& = ""
-                self.dynamic_info.import_modules.push(ModuleInfo(name, dyn.d_un, enc))
+                in perm:
+                    self.dynamic_info.import_modules.push(ModuleInfo(name, dyn.d_un, enc))
             if dyn.d_tag == DT_SCE_NEEDED_MODULE:
                 name: static u8& = Module_ReadDynStringAtTable(self, Module_DynamicNameOffset(dyn.d_un).u64())
                 enc: static u8& = Module_EncodeId(Module_DynamicModuleId(dyn.d_un))
-                self.dynamic_info.import_modules.push(ModuleInfo(name, dyn.d_un, enc))
+                in perm:
+                    self.dynamic_info.import_modules.push(ModuleInfo(name, dyn.d_un, enc))
             if dyn.d_tag == DT_SCE_MODULE_INFO:
                 name: static u8& = Module_ReadDynStringAtTable(self, Module_DynamicNameOffset(dyn.d_un).u64())
                 enc: static u8& = Module_EncodeId(Module_DynamicModuleId(dyn.d_un))
-                self.dynamic_info.export_modules.push(ModuleInfo(name, dyn.d_un, enc))
+                in perm:
+                    self.dynamic_info.export_modules.push(ModuleInfo(name, dyn.d_un, enc))
                 if static_strlen(name) > 0:
                     self.name <- name
                     self.info.name <- self.name
             if dyn.d_tag == DT_SCE_IMPORT_LIB:
                 name: static u8& = Module_ReadDynStringAtTable(self, Module_DynamicNameOffset(dyn.d_un).u64())
                 enc: static u8& = Module_EncodeId(Module_DynamicLibraryId(dyn.d_un))
-                self.dynamic_info.import_libs.push(LibraryInfo(name, dyn.d_un, enc))
+                in perm:
+                    self.dynamic_info.import_libs.push(LibraryInfo(name, dyn.d_un, enc))
             if dyn.d_tag == DT_SCE_EXPORT_LIB:
                 name: static u8& = Module_ReadDynStringAtTable(self, Module_DynamicNameOffset(dyn.d_un).u64())
                 enc: static u8& = Module_EncodeId(Module_DynamicLibraryId(dyn.d_un))
-                self.dynamic_info.export_libs.push(LibraryInfo(name, dyn.d_un, enc))
+                in perm:
+                    self.dynamic_info.export_libs.push(LibraryInfo(name, dyn.d_un, enc))
         _ = found_null
 
 def Module_LoadSymbols(self: mutable Module&) -> void:
@@ -1398,7 +1409,8 @@ def Module_AddImportSymbol(self: mutable Module&, nid: static u8&, name: static 
         final_nid: mutable static u8& = nid
         if static_strlen(parsed_nid) > 0:
             final_nid <- parsed_nid
-        self.import_symbols.push(ImportSymbolRecord(name, final_nid, parsed_library, parsed_module, symbol_type, IMPORT_RESOLUTION_UNRESOLVED, name, self.file, 0, false))
+        in perm:
+            self.import_symbols.push(ImportSymbolRecord(name, final_nid, parsed_library, parsed_module, symbol_type, IMPORT_RESOLUTION_UNRESOLVED, name, self.file, 0, false))
 
 def Module_GetImportSymbolCount(self: Module&) -> usize:
     return self.import_symbols.count
