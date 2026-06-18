@@ -112,7 +112,10 @@ def equeue_add_or_update_event(handle: int, incoming: OrbisKernelEvent) -> bool:
     idx: int = equeue_find_event_slot(handle, incoming.ident, incoming.filter.int())
     if idx >= 0:
         # Parity with C++: duplicate add updates user data and timer interval.
-        g_equeue_events[idx].event.udata <- incoming.udata
+        # The kernel holds the guest's opaque udata pointer (parity with C++ `void*`); its lifetime
+        # is the guest's, not provable here.
+        trusted Unsafe.StaleRef:
+            g_equeue_events[idx].event.udata <- incoming.udata
         if incoming.filter.int() == EQUEUE_FILTER_TIMER:
             g_equeue_events[idx].timer_period_us <- incoming.data * 1000
             g_equeue_events[idx].timer_deadline_us <- equeue_now_usec() + g_equeue_events[idx].timer_period_us
@@ -166,7 +169,9 @@ def equeue_trigger_event(handle: int, ident: u64, filter: int, trigger_data: voi
         if g_equeue_events[i].used and g_equeue_events[i].queue_handle == handle and g_equeue_events[i].event.ident == ident and g_equeue_events[i].event.filter.int() == filter:
             g_equeue_events[i].triggered <- true
             if filter == EQUEUE_FILTER_USER:
-                g_equeue_events[i].event.udata <- trigger_data
+                # Guest's opaque udata pointer held by the kernel; lifetime is the guest's.
+                trusted Unsafe.StaleRef:
+                    g_equeue_events[i].event.udata <- trigger_data
             elif filter == EQUEUE_FILTER_TIMER or filter == EQUEUE_FILTER_HRTIMER:
                 g_equeue_events[i].event.data <- g_equeue_events[i].event.data + 1
             else:

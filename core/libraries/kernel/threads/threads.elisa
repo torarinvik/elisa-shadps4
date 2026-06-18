@@ -146,7 +146,9 @@ def threads_attr_write_slot(slot: mutable void&?&?, attr: PthreadAttr&?) -> bool
     if attr == null:
         slot[0] <- null
     else:
-        slot[0] <- attr.uintptr().cast[void&?]
+        # Out-pointer write of the caller's attr handle; pointee lifetime is the caller's.
+        trusted Unsafe.StaleRef:
+            slot[0] <- attr.uintptr().cast[void&?]
     return true
 
 # @port core/libraries/kernel/threads/pthread_attr.cpp::posix_pthread_attr_init sha256=948285f3fb7147f8 oracle@a3773841
@@ -288,7 +290,9 @@ def posix_pthread_attr_getstack(attr: void&?&?, stackaddr: mutable void&?&, stac
     pattr: mutable PthreadAttr&? = threads_attr_read_slot(attr)
     if pattr == null:
         return POSIX_EINVAL
-    stackaddr[0] <- pattr.stackaddr_attr
+    # Out-pointer write of the attr's stored stack address (caller/guest memory).
+    trusted Unsafe.StaleRef:
+        stackaddr[0] <- pattr.stackaddr_attr
     stacksize <- pattr.stacksize_attr
     return 0
 
@@ -297,7 +301,9 @@ def posix_pthread_attr_setstack(attr: mutable void&?&?, stackaddr: void&?, stack
     pattr: mutable PthreadAttr&? = threads_attr_read_slot(attr)
     if pattr == null or stackaddr == null or stacksize < PTHREAD_STACK_MIN:
         return POSIX_EINVAL
-    pattr.stackaddr_attr <- stackaddr
+    # Caller's stack address stored into the caller-owned attr struct.
+    trusted Unsafe.StaleRef:
+        pattr.stackaddr_attr <- stackaddr
     pattr.stacksize_attr <- stacksize
     return 0
 
@@ -306,7 +312,9 @@ def posix_pthread_attr_getstackaddr(attr: void&?&?, stackaddr: mutable void&?&) 
     pattr: mutable PthreadAttr&? = threads_attr_read_slot(attr)
     if pattr == null:
         return POSIX_EINVAL
-    stackaddr[0] <- pattr.stackaddr_attr
+    # Out-pointer write of the attr's stored stack address (caller/guest memory).
+    trusted Unsafe.StaleRef:
+        stackaddr[0] <- pattr.stackaddr_attr
     return 0
 
 # @port core/libraries/kernel/threads/pthread_attr.cpp::posix_pthread_attr_setstackaddr sha256=ca8bcc4db99a9251 oracle@a3773841
@@ -314,7 +322,9 @@ def posix_pthread_attr_setstackaddr(attr: mutable void&?&?, stackaddr: void&?) -
     pattr: mutable PthreadAttr&? = threads_attr_read_slot(attr)
     if pattr == null or stackaddr == null:
         return POSIX_EINVAL
-    pattr.stackaddr_attr <- stackaddr
+    # Caller's stack address stored into the caller-owned attr struct.
+    trusted Unsafe.StaleRef:
+        pattr.stackaddr_attr <- stackaddr
     return 0
 
 # @port core/libraries/kernel/threads/pthread_attr.cpp::posix_pthread_attr_getstacksize sha256=ca343bc85dbe7e40 oracle@a3773841
@@ -383,7 +393,9 @@ def posix_pthread_attr_setaffinity_np(attr: mutable void&?&?, cpusetsize: u64, c
         pattr.cpuset <- null
         return 0
     pattr.cpusetsize <- cpusetsize
-    pattr.cpuset <- cpusetp
+    # Caller's cpuset pointer stored into the caller-owned attr struct.
+    trusted Unsafe.StaleRef:
+        pattr.cpuset <- cpusetp
     return 0
 
 # @port core/libraries/kernel/threads/pthread_attr.cpp::scePthreadAttrGetaffinity sha256=82bb390b4335750d oracle@a3773841
@@ -607,7 +619,9 @@ def posix_pthread_exit(status: void&?) -> void:
     g_fake_cancelling <- true
     g_fake_cancel_enable <- false
     g_fake_cancel_pending <- false
-    g_fake_threads_retval[g_fake_thread_id] <- status
+    # Thread retval is a guest pointer held in the runtime's thread table for the thread's lifetime.
+    trusted Unsafe.StaleRef:
+        g_fake_threads_retval[g_fake_thread_id] <- status
     g_fake_threads_exited[g_fake_thread_id] <- true
     threads_run_cleanup_handlers()
     if g_fake_thread_dtors != null:
@@ -643,7 +657,9 @@ def posix_pthread_join(pthread: void&?, thread_return: mutable void&?&) -> int:
             host_res: int = elisa_kernel_thread_join(threads_handle_for_id(id), host_ret)
             if host_res != 0:
                 return host_res
-            g_fake_threads_retval[id] <- host_ret
+            # Joined thread's retval (guest pointer) recorded in the runtime thread table.
+            trusted Unsafe.StaleRef:
+                g_fake_threads_retval[id] <- host_ret
         g_fake_threads_has_joiner[id] <- true
         if thread_return != null:
             thread_return[0] <- g_fake_threads_retval[id]
@@ -685,7 +701,9 @@ def posix_pthread_timedjoin_np(pthread: void&?, thread_return: mutable void&?&, 
                 return POSIX_ETIMEDOUT
             if host_res != 0:
                 return host_res
-            g_fake_threads_retval[id] <- host_ret
+            # Joined thread's retval (guest pointer) recorded in the runtime thread table.
+            trusted Unsafe.StaleRef:
+                g_fake_threads_retval[id] <- host_ret
             if thread_return != null:
                 thread_return[0] <- g_fake_threads_retval[id]
             g_fake_threads_alive[id] <- false
@@ -729,17 +747,25 @@ def posix_pthread_create(thread: mutable void&?&, attr: void&?, start_routine: v
                 g_fake_threads_detached[id] <- false
                 g_fake_threads_exited[id] <- false
                 return create_res
-            g_fake_threads_host_handle[id] <- host_thread
+            # OS thread handle recorded in the runtime table; OS-owned, lives until join/detach.
+            trusted Unsafe.StaleRef:
+                g_fake_threads_host_handle[id] <- host_thread
             g_fake_threads_host_backed[id] <- true
-            thread[0] <- host_thread
+            # Out-pointer: hand the OS thread handle back to the caller.
+            trusted Unsafe.StaleRef:
+                thread[0] <- host_thread
             if g_fake_threads_detached[id] == true:
                 _ = elisa_kernel_thread_detach(host_thread)
             return 0
         if g_fake_threads_autocomplete == true:
-            g_fake_threads_retval[id] <- arg
+            # Synchronous-run path: the guest entry arg becomes the retval (guest pointer) in the table.
+            trusted Unsafe.StaleRef:
+                g_fake_threads_retval[id] <- arg
             g_fake_threads_running[id] <- false
             g_fake_threads_exited[id] <- true
-        thread[0] <- id.cast[void&?]
+        # Out-pointer: hand the synthesized thread id (as an opaque handle) back to the caller.
+        trusted Unsafe.StaleRef:
+            thread[0] <- id.cast[void&?]
         return 0
 
 # @port core/libraries/kernel/threads/pthread.cpp::posix_pthread_create_name_np sha256=f9919786d75c130d oracle@a3773841
@@ -787,7 +813,9 @@ def posix_pthread_cancel(thread: void&?) -> int:
         host_res: int = elisa_kernel_thread_cancel(threads_handle_for_id(id))
         if host_res != 0:
             return host_res
-    g_fake_threads_retval[id] <- POSIX_PTHREAD_CANCELED_VALUE.cast[void&?]
+    # Sentinel CANCELED retval (a constant pointer value) recorded in the runtime table.
+    trusted Unsafe.StaleRef:
+        g_fake_threads_retval[id] <- POSIX_PTHREAD_CANCELED_VALUE.cast[void&?]
     g_fake_threads_exited[id] <- true
     g_fake_threads_running[id] <- false
     return 0
@@ -1005,7 +1033,9 @@ def posix_sched_yield_shim() -> int:
 
 # @port core/libraries/kernel/threads/pthread.cpp::_sceKernelSetThreadDtors sha256=5ce893b08baa49c7 oracle@a3773841
 def _sceKernelSetThreadDtors(dtor: void&?) -> void:
-    g_fake_thread_dtors <- dtor
+    # Guest destructor function pointer held by the runtime for the process lifetime.
+    trusted Unsafe.StaleRef:
+        g_fake_thread_dtors <- dtor
     return
 
 def __tls_get_addr(index: void&?) -> void&?:

@@ -60,7 +60,9 @@ def sceKernelCreateSema(sem: mutable int&, p_name: static u8&?, attr: u32, init_
                 g_orbis_sems[i].token_count <- init_count
                 g_orbis_sems[i].max_count <- max_count
                 g_orbis_sems[i].init_count <- init_count
-                g_orbis_sems[i].native_handle <- native
+                # OS semaphore handle held in the runtime sem table; OS-owned, lives until destroy.
+                trusted Unsafe.StaleRef:
+                    g_orbis_sems[i].native_handle <- native
                 sem <- i
                 return ORBIS_OK
             i <- i + 1
@@ -171,7 +173,9 @@ def posix_sem_init(sem: mutable PthreadSem&?, pshared: int, value: u32) -> int:
         if native == null:
             return -1
         sem.value <- value.int()
-        sem.native_handle <- native
+        # OS semaphore handle held in the sem state; OS-owned, lives until destroy.
+        trusted Unsafe.StaleRef:
+            sem.native_handle <- native
         return 0
 
 # @port core/libraries/kernel/threads/semaphore.cpp::posix_sem_destroy sha256=8c297838b90a58e8 oracle@a3773841
@@ -315,7 +319,9 @@ def posix_pthread_key_create(key: mutable int&, destructor: void&?) -> int:
         if g_tls_allocated[i] == false:
             g_tls_allocated[i] <- true
             g_tls_seqno[i] <- g_tls_seqno[i] + 1
-            g_tls_destructors[i] <- destructor
+            # Guest TLS destructor function pointer held in the global table for the process lifetime.
+            trusted Unsafe.StaleRef:
+                g_tls_destructors[i] <- destructor
             g_tls_values[i] <- null
             g_tls_value_seqno[i] <- g_tls_seqno[i]
             key <- i
@@ -343,7 +349,9 @@ def posix_pthread_setspecific(key: int, value: void&?) -> int:
     else:
         if g_tls_values[key] != null and value == null:
             g_tls_specific_count <- g_tls_specific_count - 1
-    g_tls_values[key] <- value
+    # Guest TLS value (opaque pointer) held in the global table; lifetime is the guest's.
+    trusted Unsafe.StaleRef:
+        g_tls_values[key] <- value
     g_tls_value_seqno[key] <- g_tls_seqno[key]
     return 0
 
