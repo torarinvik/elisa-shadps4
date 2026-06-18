@@ -444,6 +444,29 @@ def MemoryManager_DirectQueryAvailable(self: MemoryManager&, search_start: PAddr
     size_out <- max_size
     return 0
 
+# @port core/memory.cpp::MemoryManager::DirectMemoryType
+# Finds the dmem area containing `addr` (mirrors shadPS4's FindDmemArea scan).
+# Returns true and writes the area's memory_type + [base, end) when addr lies
+# inside a non-free area (allocated/mapped/pooled/committed/flexible); returns
+# false when addr falls in a Free run or outside every tracked area, i.e. it is
+# not a live direct-memory address. The `ensure` pins the core contract: a true
+# result always reports a range that actually contains addr.
+def MemoryManager_DirectMemoryType(self: MemoryManager&, addr: PAddr, type_out: mutable s32&, start_out: mutable PAddr&, end_out: mutable PAddr&) -> bool:
+    ensure not result or (start_out.u64() <= addr.u64() and addr.u64() < end_out.u64())
+    a: u64 = addr.u64()
+    for i in 0..<self.dmem_areas.count:
+        area: PhysicalMemoryArea = self.dmem_areas[i]
+        area_base: u64 = area.base.u64()
+        area_end: u64 = area_base + area.size
+        if a >= area_base and a < area_end:
+            if area.dma_type == PhysicalMemoryType_Free:
+                return false
+            type_out <- area.memory_type
+            start_out <- area.base
+            end_out <- area_end.uintptr()
+            return true
+    return false
+
 def MemoryManager_MarkDirectMapped(self: mutable MemoryManager&, phys_addr: PAddr, size: u64, memory_type: s32) -> bool:
     if size == 0:
         return false
