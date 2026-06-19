@@ -404,26 +404,41 @@ def _find_free_rack_slot() -> int:
 def _find_voice_rack_slot(handle: OrbisNgs2Handle) -> int:
     i: mutable int = 0
     while i < NGS2_MAX_RACKS:
-        rack_voice_end: OrbisNgs2Handle = ngs2_racks[i].voice_base + (ngs2_racks[i].max_voices.cast[OrbisNgs2Handle])
+        rack_voice_end: OrbisNgs2Handle = ngs2_racks[i].voice_base + ((ngs2_racks[i].max_voices).u64())
         if ngs2_racks[i].used and handle >= ngs2_racks[i].voice_base and handle < rack_voice_end:
             return i
         i <- i + 1
     return -1
 
 def _voice_index_for_handle(rack_slot: int, handle: OrbisNgs2Handle) -> u32:
-    return (handle - ngs2_racks[rack_slot].voice_base).cast[u32]
+    return (handle - ngs2_racks[rack_slot].voice_base).u32()
 
-def _voice_state_index(rack_slot: int, voice_index: u32) -> usize:
-    return (rack_slot.cast[usize]) * (NGS2_MAX_VOICES_TRACKED.cast[usize]) + (voice_index.cast[usize])
+# Value-class refinement predicate for the voice-state index proof.
+law BoundedSlot(self: usize, lo: usize, hi: usize) = self >= lo and self <= hi
+
+# STATICALLY PROVEN core: a valid rack (0..31) and voice (0..4095) index a flat
+# voice-state slot in 0..131071 — exactly the [0, NGS2_MAX_VOICE_STATE_SLOTS) range
+# of the voice_* arrays (NGS2_MAX_VOICE_STATE_SLOTS == NGS2_MAX_RACKS *
+# NGS2_MAX_VOICES_TRACKED == 32 * 4096). The tier-2 linear prover discharges the
+# result bound from the parameter bounds (31*4096 + 4095 == 131071) with NO runtime
+# bounds check — verified clean under `-smt -strict`.
+def _voice_slot_index(rack: usize is BoundedSlot[0, 31], voice: usize is BoundedSlot[0, 4095]) -> usize is BoundedSlot[0, 131071]:
+    return rack * NGS2_MAX_VOICES_TRACKED.usize() + voice
+
+# Adapter for the int/u32 call sites: the boundary conversion is range-checked
+# (debug) against the proven core's parameter bounds, after which the returned slot
+# index carries the proven [0, 131071] bound to every voice_* access site.
+def _voice_state_index(rack_slot: int, voice_index: u32) -> usize is BoundedSlot[0, 131071]:
+    return _voice_slot_index(rack_slot.usize(), voice_index.usize())
 
 def _voice_port_index(rack_slot: int, voice_index: u32, port: u32) -> usize:
-    return _voice_state_index(rack_slot, voice_index) * (MAX_TRACKED_PORTS.cast[usize]) + (port.cast[usize])
+    return _voice_state_index(rack_slot, voice_index) * (MAX_TRACKED_PORTS.usize()) + (port.usize())
 
 def _voice_matrix_index(rack_slot: int, voice_index: u32, matrix_id: u32) -> usize:
-    return _voice_state_index(rack_slot, voice_index) * (MAX_TRACKED_MATRICES.cast[usize]) + (matrix_id.cast[usize])
+    return _voice_state_index(rack_slot, voice_index) * (MAX_TRACKED_MATRICES.usize()) + (matrix_id.usize())
 
 def _voice_matrix_level_index(rack_slot: int, voice_index: u32, matrix_id: u32, level: u32) -> usize:
-    return _voice_matrix_index(rack_slot, voice_index, matrix_id) * (MAX_MATRIX_LEVELS.cast[usize]) + (level.cast[usize])
+    return _voice_matrix_index(rack_slot, voice_index, matrix_id) * (MAX_MATRIX_LEVELS.usize()) + (level.usize())
 
 def _clear_voice_slot_state(rack_slot: int, voice_index: u32) -> void:
     state_index: usize = _voice_state_index(rack_slot, voice_index)
@@ -509,7 +524,7 @@ def _fill_fallback_waveform_info(has_data: bool, data_size: usize, out_info: mut
     info: mutable OrbisNgs2WaveformInfo = zeroed
     info.format.num_channels <- 1
     info.format.sample_rate <- 48000
-    info.data_size <- data_size.cast[u32]
+    info.data_size <- data_size.u32()
     info.audio_unit_size <- 1
     info.num_audio_unit_samples <- 1
     info.num_audio_unit_per_frame <- 1
@@ -517,7 +532,7 @@ def _fill_fallback_waveform_info(has_data: bool, data_size: usize, out_info: mut
     info.num_audio_frame_samples <- 1
     if has_data:
         info.num_blocks <- 1
-        info.a_block0.data_size <- data_size.cast[u32]
+        info.a_block0.data_size <- data_size.u32()
         info.a_block0.num_repeats <- 1
         info.a_block0.user_data <- data_size
     cxx_copy_value_to[OrbisNgs2WaveformInfo](out_info.cast[mutable void&], info)
@@ -571,12 +586,15 @@ def sceNgs2RackCreate(system_handle: OrbisNgs2Handle, rack_id: u32, option: Orbi
     if max_voices > NGS2_MAX_VOICES_TRACKED:
         max_voices <- NGS2_MAX_VOICES_TRACKED
     voice_base: OrbisNgs2Handle = next_handle + 1
-    next_handle <- next_handle + (max_voices.cast[OrbisNgs2Handle])
+    next_handle <- next_handle + ((max_voices).u64())
     ngs2_racks[rack_slot].used <- true
     ngs2_racks[rack_slot].handle <- rack_handle
     ngs2_racks[rack_slot].buffer_info <- zeroed
     if buffer_info != null:
-        ngs2_racks[rack_slot].buffer_info.host_buffer <- buffer_info.host_buffer
+        # Guest-owned host buffer pointer cached in the program-lifetime rack table
+        # (PS4 ABI: the guest owns this buffer for the rack's lifetime).
+        can Unsafe.StaleRef:
+            ngs2_racks[rack_slot].buffer_info.host_buffer <- buffer_info.host_buffer
         ngs2_racks[rack_slot].buffer_info.host_buffer_size <- buffer_info.host_buffer_size
         ngs2_racks[rack_slot].buffer_info.reserved0 <- buffer_info.reserved0
         ngs2_racks[rack_slot].buffer_info.reserved1 <- buffer_info.reserved1
@@ -615,7 +633,7 @@ def sceNgs2RackCreateWithAllocator(system_handle: OrbisNgs2Handle, rack_id: u32,
     max_voices: mutable u32 = DEFAULT_MAX_VOICES
     if option != null and option.max_voices != 0:
         max_voices <- option.max_voices
-    buffer_info.host_buffer_size <- size_of(Ngs2RackSlot) + (max_voices.cast[usize]) * size_of(OrbisNgs2VoiceState)
+    buffer_info.host_buffer_size <- size_of(Ngs2RackSlot) + (max_voices.usize()) * size_of(OrbisNgs2VoiceState)
     alloc_result: s32 = allocator.alloc_handler(buffer_info)
     if alloc_result < 0:
         return alloc_result
@@ -661,7 +679,7 @@ def sceNgs2RackGetInfo(rack_handle: OrbisNgs2Handle, out_info: mutable OrbisNgs2
     out_info.buffer_info <- ngs2_racks[slot].buffer_info
     out_info.owner_system_handle <- ngs2_racks[slot].system_handle
     out_info.rack_id <- ngs2_racks[slot].rack_id
-    out_info.uid <- rack_handle.cast[u32]
+    out_info.uid <- rack_handle.u32()
     out_info.max_voices <- ngs2_racks[slot].max_voices
     out_info.render_count <- ngs2_racks[slot].render_count
     voice_count: mutable u32 = 0
@@ -694,7 +712,7 @@ def sceNgs2RackGetVoiceHandle(rack_handle: OrbisNgs2Handle, voice_index: u32, ou
         return ORBIS_NGS2_ERROR_INVALID_RACK_HANDLE
     if voice_index >= ngs2_racks[slot].max_voices:
         return ORBIS_NGS2_ERROR_INVALID_VOICE_INDEX
-    last_voice_handle <- ngs2_racks[slot].voice_base + (voice_index.cast[OrbisNgs2Handle])
+    last_voice_handle <- ngs2_racks[slot].voice_base + ((voice_index).u64())
     last_voice_index <- voice_index
     out_voice <- last_voice_handle
     return ORBIS_OK
@@ -712,7 +730,7 @@ def sceNgs2RackQueryBufferSize(rack_id: u32, option: OrbisNgs2RackOption&?, out_
     max_voices: mutable u32 = DEFAULT_MAX_VOICES
     if option != null and option.max_voices != 0:
         max_voices <- option.max_voices
-    out_size <- size_of(Ngs2RackSlot) + (max_voices.cast[usize]) * size_of(OrbisNgs2VoiceState)
+    out_size <- size_of(Ngs2RackSlot) + (max_voices.usize()) * size_of(OrbisNgs2VoiceState)
     return ORBIS_OK
 
 # @port core/libraries/ngs2/ngs2.cpp::sceNgs2RackSetUserData sha256=fbfde86581c56816 oracle@a3773841
@@ -750,7 +768,10 @@ def sceNgs2SystemCreate(option: OrbisNgs2SystemOption&?, buffer_info: OrbisNgs2C
     handle: OrbisNgs2Handle = _alloc()
     ngs2_systems[slot].used <- true
     ngs2_systems[slot].handle <- handle
-    ngs2_systems[slot].buffer_info.host_buffer <- buffer_info.host_buffer
+    # Guest-owned host buffer pointer cached in the program-lifetime system table
+    # (PS4 ABI: the guest owns this buffer for the system's lifetime).
+    can Unsafe.StaleRef:
+        ngs2_systems[slot].buffer_info.host_buffer <- buffer_info.host_buffer
     ngs2_systems[slot].buffer_info.host_buffer_size <- buffer_info.host_buffer_size
     ngs2_systems[slot].buffer_info.reserved0 <- buffer_info.reserved0
     ngs2_systems[slot].buffer_info.reserved1 <- buffer_info.reserved1
@@ -838,7 +859,7 @@ def sceNgs2SystemEnumHandles(out_handle: mutable OrbisNgs2Handle&?, max_handles:
             out_handle <- ngs2_systems[i].handle
             count <- count + 1
         i <- i + 1
-    return count.cast[s32]
+    return s32(count)
 
 # @port core/libraries/ngs2/ngs2.cpp::sceNgs2SystemEnumRackHandles sha256=d7aca0ba1cdd65df oracle@a3773841
 def sceNgs2SystemEnumRackHandles(system_handle: OrbisNgs2Handle, out_handles: mutable OrbisNgs2Handle&?, max_handles: u32) -> s32:
@@ -855,7 +876,7 @@ def sceNgs2SystemEnumRackHandles(system_handle: OrbisNgs2Handle, out_handles: mu
             out_handles <- ngs2_racks[i].handle
             count <- count + 1
         i <- i + 1
-    return count.cast[s32]
+    return s32(count)
 
 # @port core/libraries/ngs2/ngs2.cpp::sceNgs2SystemGetInfo sha256=e493ed34181408b0 oracle@a3773841
 def sceNgs2SystemGetInfo(system_handle: OrbisNgs2Handle, out_info: mutable OrbisNgs2SystemInfo&?, info_size: usize) -> s32:
@@ -870,7 +891,7 @@ def sceNgs2SystemGetInfo(system_handle: OrbisNgs2Handle, out_info: mutable Orbis
         return ORBIS_NGS2_ERROR_INVALID_SYSTEM_HANDLE
     out_info.system_handle <- system_handle
     out_info.buffer_info <- ngs2_systems[slot].buffer_info
-    out_info.uid <- system_handle.cast[u32]
+    out_info.uid <- system_handle.u32()
     out_info.min_grain_samples <- ngs2_systems[slot].num_grain_samples
     out_info.max_grain_samples <- ngs2_systems[slot].max_grain_samples
     out_info.sample_rate <- ngs2_systems[slot].sample_rate
@@ -915,7 +936,7 @@ def sceNgs2SystemRender(system_handle: OrbisNgs2Handle, a_buffer_info: void&?, n
     if a_buffer_info != null:
         buffer_index: mutable u32 = 0
         while buffer_index < num_buffer_info:
-            buffer_info: OrbisNgs2RenderBufferInfo = cxx_read_array_at[OrbisNgs2RenderBufferInfo](a_buffer_info, buffer_index.cast[usize])
+            buffer_info: OrbisNgs2RenderBufferInfo = cxx_read_array_at[OrbisNgs2RenderBufferInfo](a_buffer_info, buffer_index.usize())
             if buffer_info.buffer != null and buffer_info.buffer_size > 0:
                 _ = cxx_zero_memory(buffer_info.buffer.cast[mutable void&], buffer_info.buffer_size)
             buffer_index <- buffer_index + 1
@@ -1015,7 +1036,7 @@ def sceNgs2VoiceControl(voice_handle: OrbisNgs2Handle, param_list: void&?) -> s3
             voice_matrix_num_levels[matrix_index] <- count
             level: mutable u32 = 0
             while level < count:
-                voice_matrix_levels[_voice_matrix_level_index(rack_slot, voice_index, matrix_param.matrix_id, level)] <- matrix_param.a_level[level.cast[usize]]
+                voice_matrix_levels[_voice_matrix_level_index(rack_slot, voice_index, matrix_param.matrix_id, level)] <- matrix_param.a_level[level.usize()]
                 level <- level + 1
     elif header.id == VOICE_PARAM_ID_CALLBACK:
         callback_param: OrbisNgs2VoiceCallbackParam = cxx_read_value[OrbisNgs2VoiceCallbackParam](param_list)
@@ -1026,7 +1047,10 @@ def sceNgs2VoiceControl(voice_handle: OrbisNgs2Handle, param_list: void&?) -> s3
     elif header.id == CUSTOM_VOICE_PARAM_ID_WAVEFORM_BLOCKS:
         blocks_param: OrbisNgs2CustomSamplerVoiceWaveformBlocksParam = cxx_read_value[OrbisNgs2CustomSamplerVoiceWaveformBlocksParam](param_list)
         state_index: usize = _voice_state_index(rack_slot, voice_index)
-        voice_waveform_ptrs[state_index] <- blocks_param.data
+        # Guest-owned waveform data pointer cached in the program-lifetime voice table
+        # (PS4 ABI: the guest owns the sample buffer for the voice's lifetime).
+        can Unsafe.StaleRef:
+            voice_waveform_ptrs[state_index] <- blocks_param.data
         voice_decoded_data_sizes[state_index] <- 0
         voice_decoded_samples[state_index] <- 0
         if blocks_param.a_block != null and blocks_param.num_blocks != 0:
@@ -1035,13 +1059,16 @@ def sceNgs2VoiceControl(voice_handle: OrbisNgs2Handle, param_list: void&?) -> s3
                 block_count <- 4
             block_index: mutable u32 = 0
             while block_index < block_count:
-                block: OrbisNgs2WaveformBlock = blocks_param.a_block[block_index.cast[usize]]
-                voice_decoded_data_sizes[state_index] <- voice_decoded_data_sizes[state_index] + (block.data_size.cast[u64])
-                voice_decoded_samples[state_index] <- voice_decoded_samples[state_index] + (block.num_samples.cast[u64])
+                block: OrbisNgs2WaveformBlock = blocks_param.a_block[block_index.usize()]
+                voice_decoded_data_sizes[state_index] <- voice_decoded_data_sizes[state_index] + (block.data_size.u64())
+                voice_decoded_samples[state_index] <- voice_decoded_samples[state_index] + (block.num_samples.u64())
                 block_index <- block_index + 1
     elif header.id == CUSTOM_VOICE_PARAM_ID_WAVEFORM_ADDRESS:
         address_param: OrbisNgs2CustomSamplerVoiceWaveformAddressParam = cxx_read_value[OrbisNgs2CustomSamplerVoiceWaveformAddressParam](param_list)
-        voice_waveform_ptrs[_voice_state_index(rack_slot, voice_index)] <- address_param.from_addr
+        # Guest-owned waveform address cached in the program-lifetime voice table
+        # (PS4 ABI: the guest owns the sample buffer for the voice's lifetime).
+        can Unsafe.StaleRef:
+            voice_waveform_ptrs[_voice_state_index(rack_slot, voice_index)] <- address_param.from_addr
     elif header.id == CUSTOM_VOICE_PARAM_ID_WAVEFORM_FRAME_OFFSET:
         offset_param: OrbisNgs2CustomSamplerVoiceWaveformFrameOffsetParam = cxx_read_value[OrbisNgs2CustomSamplerVoiceWaveformFrameOffsetParam](param_list)
         voice_frame_offsets[_voice_state_index(rack_slot, voice_index)] <- offset_param.frame_offset
@@ -1068,7 +1095,7 @@ def sceNgs2VoiceGetMatrixInfo(voice_handle: OrbisNgs2Handle, matrix_id: u32, out
         info.num_levels <- voice_matrix_num_levels[matrix_index]
         level: mutable u32 = 0
         while level < info.num_levels and level < MAX_MATRIX_LEVELS:
-            info.a_level[level.cast[usize]] <- voice_matrix_levels[_voice_matrix_level_index(rack_slot, voice_index, matrix_id, level)]
+            info.a_level[level.usize()] <- voice_matrix_levels[_voice_matrix_level_index(rack_slot, voice_index, matrix_id, level)]
             level <- level + 1
     cxx_copy_value_to[OrbisNgs2VoiceMatrixInfo](out_info, info)
     return ORBIS_OK
@@ -1083,7 +1110,7 @@ def sceNgs2VoiceGetOwner(voice_handle: OrbisNgs2Handle, out_rack: mutable OrbisN
     if slot < 0:
         return ORBIS_NGS2_ERROR_INVALID_VOICE_HANDLE
     out_rack <- ngs2_racks[slot].handle
-    out_index <- (voice_handle - ngs2_racks[slot].voice_base).cast[u32]
+    out_index <- (voice_handle - ngs2_racks[slot].voice_base).u32()
     return ORBIS_OK
 
 # @port core/libraries/ngs2/ngs2.cpp::sceNgs2VoiceGetPortInfo sha256=7fbb12259eb3c13d oracle@a3773841
@@ -1129,7 +1156,7 @@ def sceNgs2VoiceGetState(voice_handle: OrbisNgs2Handle, out_state: mutable Orbis
         custom_state.waveform_data <- voice_waveform_ptrs[state_index]
         custom_state.num_decoded_samples <- voice_decoded_samples[state_index]
         custom_state.decoded_data_size <- voice_decoded_data_sizes[state_index]
-        custom_state.user_data <- voice_callback_data[state_index].cast[u64]
+        custom_state.user_data <- voice_callback_data[state_index].u64()
         cxx_copy_value_to[OrbisNgs2CustomSamplerVoiceState]((&out_state).cast[mutable void&], custom_state)
     else:
         out_state.state_flags <- voice_state_flags[state_index]
