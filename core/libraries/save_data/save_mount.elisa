@@ -202,6 +202,94 @@ def savedata_handle_valid(handle: int) -> bool:
         return false
     return g_save_mounts[handle.usize()].in_use
 
+# ---- directory search (sceSaveDataDirNameSearch backing) ----
+
+# One search hit: a save directory with param.sfo metadata loaded.
+struct SaveSearchHit:
+    name: mutable static u8&
+    blocks: mutable u64
+    free_blocks: mutable u64
+    user_param: mutable u32
+    title: mutable static u8&
+
+def savedata_str_starts_with(s: static u8&, prefix: static u8&) -> bool:
+    i: mutable usize = 0
+    while prefix[i] != 0:
+        if s[i] != prefix[i]:
+            return false
+        i <- i + 1
+    return true
+
+# savedata_cstr_lt orders two NUL-terminated strings lexicographically (a < b).
+def savedata_cstr_lt(a: static u8&, b: static u8&) -> bool:
+    i: mutable usize = 0
+    while a[i] != 0 and b[i] != 0:
+        if a[i] != b[i]:
+            return a[i] < b[i]
+        i <- i + 1
+    return a[i] == 0 and b[i] != 0
+
+# savedata_name_matches reports whether `name` passes the optional `filter`: an absent or
+# empty filter matches everything; otherwise it is an exact match. `filter` is a borrowed
+# (non-static) pointer, so it is compared without a lifetime-promoting cast.
+def savedata_name_matches(name: static u8&, filter: u8&?) -> bool:
+    if filter == null:
+        return true
+    f: u8& = filter
+    if f[0] == 0:
+        return true
+    i: mutable usize = 0
+    while name[i] != 0 and f[i] != 0:
+        if name[i] != f[i]:
+            return false
+        i <- i + 1
+    return name[i] == f[i]
+
+# savedata_search enumerates the save root for directories containing a param.sfo (skipping
+# sce_* entries), loads each param store, optionally filters by exact `dir_filter` name, and
+# returns the hits sorted by directory name ascending.
+def savedata_search(dir_filter: u8&?) -> darray[SaveSearchHit]:
+    out: mutable darray[SaveSearchHit] = []
+    can Memory.Allocate, Abort.Panic:
+        for entry in fs_list_directory(SAVE_MOUNT_ROOT):
+            if entry.is_dir and not savedata_str_starts_with(entry.name, "sce_"):
+                if savedata_name_matches(entry.name, dir_filter):
+                    host_dir: static u8& = string_concat2(SAVE_MOUNT_ROOT, entry.name)
+                    sfo_path: static u8& = string_concat2(host_dir, "/param.sfo")
+                    if fs_path_exists(sfo_path):
+                        bytes: darray[u8] = fs_read_all(sfo_path)
+                        if bytes.count > 0:
+                            sfo: mutable PsfFile = Psf_Parse(bytes)
+                            blocks: u64 = Psf_GetInteger(sfo, "SAVEDATA_BLOCKS").u64()
+                            user_param: u32 = Psf_GetInteger(sfo, "ACCOUNT_ID").u32()
+                            title: static u8& = string_concat2(Psf_GetString(sfo, "MAINTITLE"), "")
+                            out.push(SaveSearchHit(entry.name, blocks, blocks, user_param, title))
+        # insertion sort by name ascending (stable, small N)
+        i: mutable usize = 1
+        while i < out.count:
+            j: mutable usize = i
+            while j > 0 and savedata_cstr_lt(out[j].name, out[j - 1].name):
+                tmp: SaveSearchHit = out[j]
+                out[j] <- out[j - 1]
+                out[j - 1] <- tmp
+                j <- j - 1
+            i <- i + 1
+    return out
+
+# savedata_reverse_hits reverses a hit list in place (for DESCENT sort order).
+def savedata_reverse_hits(hits: mutable darray[SaveSearchHit]&) -> void:
+    n: usize = hits.count
+    if n < 2:
+        return
+    i: mutable usize = 0
+    j: mutable usize = n - 1
+    while i < j:
+        tmp: SaveSearchHit = hits[i]
+        hits[i] <- hits[j]
+        hits[j] <- tmp
+        i <- i + 1
+        j <- j - 1
+
 # savedata_delete_dir removes the on-disk save directory `dirname` (and its param.sfo /
 # contents) for a not-currently-mounted save. Returns NOT_FOUND if it never existed.
 def savedata_delete_dir(dirname: u8&?) -> u32:

@@ -157,3 +157,50 @@ def save_data_abi_struct_decode() -> void:
         assert sceSaveDataDelete((&del_buf[0]).cast[void&?]) != SAVE_DATA_OK
 
         assert sceSaveDataTerminate() == SAVE_DATA_OK
+
+# sceSaveDataDirNameSearch enumerates on-disk saves and fills OrbisSaveDataDirNameSearchResult
+# (dirNames[] sorted ascending, params[] from each param.sfo, infos[] blocks/freeBlocks).
+@test
+def save_data_abi_dir_name_search() -> void:
+    can Memory.Allocate, Abort.Panic:
+        assert sceSaveDataInitialize(null) == SAVE_DATA_OK
+        # Clean the save root so the enumeration is deterministic, then create two saves.
+        _ = fs_remove_tree("/tmp/elisa_savedata")
+
+        hb: int = savedata_mount(1, "SAVE_B", 64)
+        assert hb >= 0
+        assert savedata_set_param_title(hb, "Bravo") == SAVE_DATA_ERROR_OK
+        assert savedata_umount(hb) == SAVE_DATA_ERROR_OK
+        ha: int = savedata_mount(1, "SAVE_A", 128)
+        assert ha >= 0
+        assert savedata_set_param_title(ha, "Alpha") == SAVE_DATA_ERROR_OK
+        assert savedata_umount(ha) == SAVE_DATA_ERROR_OK
+
+        # OrbisSaveDataDirNameSearchCond (userId@0; dirName null = all; key/order 0).
+        cond: mutable array[u8, 64] = zeroed
+        abi_store_u32((&cond[0]).cast[mutable void&], 0, 1)
+
+        # Caller-provided output arrays (capacity 2).
+        dirnames: mutable array[u8, 64] = zeroed    # 2 * CString<32>
+        params: mutable array[u8, 2656] = zeroed    # 2 * OrbisSaveDataParam(1328)
+        infos: mutable array[u8, 96] = zeroed       # 2 * OrbisSaveDataSearchInfo(48)
+        result: mutable array[u8, 64] = zeroed
+        rmut: mutable void& = (&result[0]).cast[mutable void&]
+        abi_store_u32(rmut, 16, 2)                                          # dirNamesNum
+        abi_store_u64(rmut, 8, (&dirnames[0]).uintptr().u64())             # dirNames*
+        abi_store_u64(rmut, 24, (&params[0]).uintptr().u64())             # params*
+        abi_store_u64(rmut, 32, (&infos[0]).uintptr().u64())             # infos*
+
+        assert sceSaveDataDirNameSearch((&cond[0]).cast[void&?], (&result[0]).cast[void&?]) == SAVE_DATA_OK
+        rref: void& = (&result[0]).cast[void&]
+        assert abi_u32_at(rref, 0) == 2    # hitNum
+        assert abi_u32_at(rref, 20) == 2   # setNum
+
+        # Sorted ascending: "SAVE_A" (idx 0) then "SAVE_B" (idx 1, stride 32).
+        assert dirnames[5] == 'A'.u8()
+        assert dirnames[32 + 5] == 'B'.u8()
+        # infos[0].blocks == 128 (SAVE_A); params[0].title begins "Alpha".
+        assert abi_u64_at((&infos[0]).cast[void&], 0) == 128
+        assert params[0] == 'A'.u8()
+
+        assert sceSaveDataTerminate() == SAVE_DATA_OK
