@@ -612,7 +612,58 @@ def Module_LoadElfSegments(self: mutable Module&, elf: mutable Elf&, memory: mut
                 try Module_ProtectImageSegment((&self).cast[mutable Module&], memory, phdr)
         if not loaded_dynamic:
             raise ModuleError.DynamicMissing
+        module_last_segment_layout_code <- Module_VerifySegmentLayout((&self).cast[Module&], (&elf).cast[Elf&])
         return
+
+# Load-time correctness check on the program-header layout. Emits each loadable
+# segment's [vaddr, vaddr+memsz) + flags, and asserts the soundness invariant that
+# an EXECUTABLE segment's address range is not also covered by a NON-executable
+# loadable segment — an overlap means a later segment load would overwrite code
+# (e.g. _start) with data (a relocated pointer table), which presents as a SIGILL
+# at the entry point. This is exactly the CUSA07399 entry-handoff failure class.
+# Load-time structural soundness codes for the program-header layout.
+const MODULE_SEGLAYOUT_OK: u32 = 0
+const MODULE_SEGLAYOUT_EXEC_OVERLAPS_DATA: u32 = 1   # a non-exec segment covers part of executable code
+const MODULE_SEGLAYOUT_ENTRY_NOT_IN_EXEC: u32 = 2    # the entry point is not inside any executable segment
+
+# Records the last main-module layout-verification code (0 = sound). Read by tests
+# and boot diagnostics; a non-zero value means the load produced an unsound image.
+global mutable module_last_segment_layout_code: u32 = 0
+
+# Pure structural invariant on the loaded program headers (no I/O, effect-free):
+#   (1) no EXECUTABLE segment's VA range is also covered by a NON-executable
+#       loadable segment — an overlap means a later load overwrites code with data
+#       (the classic "jumped into a relocated pointer table → SIGILL at _start"
+#       failure); and
+#   (2) the ELF entry point lies within an executable segment.
+# Returns MODULE_SEGLAYOUT_OK or the first violation code.
+def Module_VerifySegmentLayout(self: Module&, elf: Elf&) -> u32:
+    n: usize = elf.elf_header_value.e_phnum.usize()
+    entry_va: u64 = self.base_virtual_addr.u64() + elf.elf_header_value.e_entry
+    entry_in_exec: mutable bool = false
+    i: mutable usize = 0
+    while i < n:
+        a: elf_program_header& = Elf_GetProgramHeader((&elf).cast[mutable Elf&], i)
+        if (a.p_type == PT_LOAD or a.p_type == PT_SCE_RELRO) and a.p_memsz > 0:
+            a_lo: u64 = self.base_virtual_addr.u64() + a.p_vaddr
+            a_hi: u64 = a_lo + a.p_memsz
+            if (a.p_flags & PF_EXEC) != 0:
+                if entry_va >= a_lo and entry_va < a_hi:
+                    entry_in_exec <- true
+                j: mutable usize = 0
+                while j < n:
+                    if j != i:
+                        b: elf_program_header& = Elf_GetProgramHeader((&elf).cast[mutable Elf&], j)
+                        if (b.p_type == PT_LOAD or b.p_type == PT_SCE_RELRO) and b.p_memsz > 0 and (b.p_flags & PF_EXEC) == 0:
+                            b_lo: u64 = self.base_virtual_addr.u64() + b.p_vaddr
+                            b_hi: u64 = b_lo + b.p_memsz
+                            if a_lo < b_hi and b_lo < a_hi:
+                                return MODULE_SEGLAYOUT_EXEC_OVERLAPS_DATA
+                    j <- j + 1
+        i <- i + 1
+    if not entry_in_exec and entry_va != self.base_virtual_addr.u64():
+        return MODULE_SEGLAYOUT_ENTRY_NOT_IN_EXEC
+    return MODULE_SEGLAYOUT_OK
 
 def Module_DecodeEhFrame(self: mutable Module&) -> void:
     if self.eh_frame_hdr_addr == 0.uintptr():
