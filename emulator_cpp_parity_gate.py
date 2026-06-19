@@ -147,10 +147,14 @@ def all_steps() -> list[Step]:
         compiler_test("video-core-multi-level-page-table-tests", slow=True, category="graphics"),
         compiler_test("core-libraries-avplayer", slow=True, category="audio-input-system"),
         compiler_test("core-libraries-pad-tests", slow=True, category="audio-input-system"),
+        # web-browser and signin dialog tests EXECUTE their @test bodies as real project targets
+        # (emit=test, linked against the project) — a stronger check than the parse-only source runs
+        # below. The remaining four still have latent compile errors in their HLE modules (see the
+        # save/dialog/misc backlog); they stay as parse-only checks until those modules are fixed.
+        compiler_test("core-libraries-web-browser-dialog-pure-tests", category="save-dialog-misc"),
+        compiler_test("core-libraries-signin-dialog-pure-tests", category="save-dialog-misc"),
         compiler_test_source("elisa_tests/core_libraries_save_data_parity_tests.elisa", category="save-dialog-misc"),
         compiler_test_source("elisa_tests/core_libraries_save_data_dialog_pure_tests.elisa", category="save-dialog-misc"),
-        compiler_test_source("elisa_tests/core_libraries_web_browser_dialog_pure_tests.elisa", category="save-dialog-misc"),
-        compiler_test_source("elisa_tests/core_libraries_signin_dialog_pure_tests.elisa", category="save-dialog-misc"),
         compiler_test_source("elisa_tests/core_libraries_playgo_pure_tests.elisa", category="save-dialog-misc"),
         compiler_test_source("elisa_tests/core_libraries_ime_dialog_parity_tests.elisa", category="save-dialog-misc"),
     ]
@@ -965,8 +969,8 @@ def summarize_progress(
     lines.append("Save/Dialog/Misc parity test signals:")
     lines.append(f"- save data parity tests: {'PASS' if step_passed(results, 'elisacore run elisa_tests/core_libraries_save_data_parity_tests.elisa') else 'FAIL'}")
     lines.append(f"- save data dialog parity tests: {'PASS' if step_passed(results, 'elisacore run elisa_tests/core_libraries_save_data_dialog_pure_tests.elisa') else 'FAIL'}")
-    lines.append(f"- web browser dialog parity tests: {'PASS' if step_passed(results, 'elisacore run elisa_tests/core_libraries_web_browser_dialog_pure_tests.elisa') else 'FAIL'}")
-    lines.append(f"- signin dialog parity tests: {'PASS' if step_passed(results, 'elisacore run elisa_tests/core_libraries_signin_dialog_pure_tests.elisa') else 'FAIL'}")
+    lines.append(f"- web browser dialog parity tests: {'PASS' if step_passed(results, 'elisacore test core-libraries-web-browser-dialog-pure-tests') else 'FAIL'}")
+    lines.append(f"- signin dialog parity tests: {'PASS' if step_passed(results, 'elisacore test core-libraries-signin-dialog-pure-tests') else 'FAIL'}")
     lines.append(f"- playgo parity tests: {'PASS' if step_passed(results, 'elisacore run elisa_tests/core_libraries_playgo_pure_tests.elisa') else 'FAIL'}")
     lines.append(f"- ime dialog parity tests: {'PASS' if step_passed(results, 'elisacore run elisa_tests/core_libraries_ime_dialog_parity_tests.elisa') else 'FAIL'}")
 
