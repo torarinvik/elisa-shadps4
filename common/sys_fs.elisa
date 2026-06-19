@@ -1,0 +1,164 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# sys_fs: a host filesystem standard library implemented natively in Elisa directly over the POSIX (and,
+# eventually, Win32) system call interface — no C/C++ bridge. The raw syscalls are declared as externs
+# (the same way the port already externs mkdir/opendir to libc) and ALL the file/dir/path logic lives in
+# Elisa. This grows the Elisa ecosystem instead of re-importing native code, and is the foundation for
+# higher-level subsystems (e.g. SaveData) that need real host files.
+#
+# A consuming target must NOT also include modules that declare these same syscall externs
+# (core/libraries/kernel/file_system.elisa for mkdir/rmdir/unlink, core/file_sys/bridge.elisa or
+# common/path_util.elisa for opendir, core/address_space.elisa for ftruncate) — that would be a
+# duplicate declaration. sys_fs is the single canonical home for this surface going forward.
+
+# ---- Raw POSIX system calls ----
+extern open(path: static u8&, flags: int, mode: int) -> int
+extern read(fd: int, buf: mutable u8&, count: usize) -> isize
+extern pwrite(fd: int, buf: u8&, count: usize, offset: i64) -> isize
+extern lseek(fd: int, offset: i64, whence: int) -> i64
+extern close(fd: int) -> int
+extern access(path: static u8&, mode: int) -> int
+extern mkdir(path: static u8&, mode: int) -> int
+extern rmdir(path: static u8&) -> int
+extern unlink(path: static u8&) -> int
+
+# ---- open(2) flags. Values are platform-specific; these are the macOS/BSD set, with Linux under the
+# static guard. ----
+static if PLATFORM_LINUX:
+    const O_RDONLY: int = 0x0
+    const O_WRONLY: int = 0x1
+    const O_RDWR: int = 0x2
+    const O_CREAT: int = 0x40
+    const O_TRUNC: int = 0x200
+    const O_APPEND: int = 0x400
+static else:
+    const O_RDONLY: int = 0x0
+    const O_WRONLY: int = 0x1
+    const O_RDWR: int = 0x2
+    const O_CREAT: int = 0x200
+    const O_TRUNC: int = 0x400
+    const O_APPEND: int = 0x8
+
+const SEEK_SET: int = 0
+const SEEK_CUR: int = 1
+const SEEK_END: int = 2
+
+const F_OK: int = 0
+const FS_DEFAULT_DIR_MODE: int = 0x1FF # 0o777
+const FS_DEFAULT_FILE_MODE: int = 0x1B6 # 0o666
+
+# ---- File handle. A thin owner over a raw fd; fd < 0 means "not open". ----
+struct SysFile:
+    fd: mutable int
+
+def SysFile_invalid() -> SysFile:
+    return SysFile(-1)
+
+# fs_open opens `path` with the given open(2) flags, returning a SysFile whose fd is < 0 on failure.
+def fs_open(path: static u8&, flags: int) -> SysFile:
+    return SysFile(open(path, flags, FS_DEFAULT_FILE_MODE))
+
+# fs_open_read opens an existing file for reading.
+def fs_open_read(path: static u8&) -> SysFile:
+    return fs_open(path, O_RDONLY)
+
+# fs_open_write opens `path` for writing, creating it and truncating any existing contents.
+def fs_open_write(path: static u8&) -> SysFile:
+    return fs_open(path, O_WRONLY | O_CREAT | O_TRUNC)
+
+def SysFile_is_open(self: SysFile&) -> bool:
+    return self.fd >= 0
+
+# SysFile_close closes the fd (idempotent). After this the handle is invalid.
+def SysFile_close(self: mutable SysFile&) -> void:
+    if self.fd >= 0:
+        _ = close(self.fd)
+        self.fd <- -1
+
+# SysFile_size returns the file size in bytes via lseek, restoring the original offset.
+def SysFile_size(self: SysFile&) -> u64:
+    if self.fd < 0:
+        return 0
+    cur: i64 = lseek(self.fd, 0, SEEK_CUR)
+    size: i64 = lseek(self.fd, 0, SEEK_END)
+    _ = lseek(self.fd, cur, SEEK_SET)
+    if size < 0:
+        return 0
+    return size.u64()
+
+# SysFile_read_into reads up to `count` bytes into `buf` (the address of a caller buffer), returning the
+# number of bytes actually read (0 on error/EOF). It loops until `count` bytes or a short/zero read.
+def SysFile_read_into(self: SysFile&, buf: mutable u8&, count: usize) -> usize:
+    if self.fd < 0 or count == 0:
+        return 0
+    n: isize = read(self.fd, buf, count)
+    if n < 0:
+        return 0
+    return n.usize()
+
+# SysFile_write_at writes `count` bytes from `buf` at byte `offset`, returning the number written.
+def SysFile_write_at(self: SysFile&, buf: u8&, count: usize, offset: i64) -> usize:
+    if self.fd < 0 or count == 0:
+        return 0
+    n: isize = pwrite(self.fd, buf, count, offset)
+    if n < 0:
+        return 0
+    return n.usize()
+
+# ---- Whole-file helpers ----
+
+# fs_read_all reads the entire file at `path` into a byte array (empty on any error).
+def fs_read_all(path: static u8&) -> darray[u8]:
+    out: mutable darray[u8] = []
+    file: mutable SysFile = fs_open_read(path)
+    if not file.SysFile_is_open():
+        return out
+    size: u64 = file.SysFile_size()
+    if size == 0:
+        file.SysFile_close()
+        return out
+    can Memory.Allocate, Abort.Panic:
+        for i in 0..<size.usize():
+            out.push(0)
+    got: usize = file.SysFile_read_into(out[0], size.usize())
+    file.SysFile_close()
+    if got != size.usize():
+        out.clear()
+    return out
+
+# fs_write_all writes `data` to `path`, creating/truncating it. Returns true on a complete write.
+def fs_write_all(path: static u8&, data: darray[u8]) -> bool:
+    file: mutable SysFile = fs_open_write(path)
+    if not file.SysFile_is_open():
+        return false
+    ok: mutable bool = true
+    if data.count != 0:
+        written: usize = file.SysFile_write_at(data[0], data.count, 0)
+        ok <- written == data.count
+    file.SysFile_close()
+    return ok
+
+# ---- Existence / directories ----
+
+# fs_exists reports whether any file or directory exists at `path`.
+def fs_path_exists(path: static u8&) -> bool:
+    return access(path, F_OK) == 0
+
+# fs_make_directory creates a single directory. Returns true if created or already present.
+def fs_make_directory(path: static u8&) -> bool:
+    if fs_path_exists(path):
+        return true
+    return mkdir(path, FS_DEFAULT_DIR_MODE) == 0
+
+# fs_remove_directory removes an empty directory. Returns true on success or if absent.
+def fs_remove_directory(path: static u8&) -> bool:
+    if not fs_path_exists(path):
+        return true
+    return rmdir(path) == 0
+
+# fs_remove_file removes a file. Returns true on success or if absent.
+def fs_remove_file(path: static u8&) -> bool:
+    if not fs_path_exists(path):
+        return true
+    return unlink(path) == 0
