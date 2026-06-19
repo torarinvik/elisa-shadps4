@@ -5,9 +5,13 @@
 # POSIX syscalls (no C/C++ bridge). Exercises real on-disk file I/O, sizing, existence, and directory
 # create/remove against /tmp.
 
+include "../common/string_util.elisa"
 include "../common/types.elisa"
 include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
 include "../common/arch.elisa"
+include "../common/io_file.elisa"
+include "../core/file_format/binary.elisa"
+include "../core/file_format/psf.elisa"
 include "../common/sys_fs.elisa"
 
 const SYSFS_TEST_FILE: static u8& = "/tmp/elisa_sys_fs_roundtrip.bin"
@@ -46,3 +50,21 @@ def sys_fs_directory_create_remove() -> void:
         assert fs_path_exists(SYSFS_TEST_DIR)
         assert fs_remove_directory(SYSFS_TEST_DIR)
         assert not fs_path_exists(SYSFS_TEST_DIR)
+
+# The savedata param.sfo flow, fully Elisa-native: build a PSF, serialize it (Psf_Encode, pure),
+# write it via sys_fs, read it back, and Psf_Parse — proving PSF + sys_fs compose into a real
+# on-disk param store, no C bridge and no IOFile.
+@test
+def sys_fs_psf_param_sfo_roundtrip() -> void:
+    can Memory.Allocate, Abort.Panic:
+        sfo: mutable PsfFile = PsfFile_empty()
+        Psf_AddString(sfo, "MAINTITLE", "Save Title", false)
+        Psf_AddInteger(sfo, "SAVEDATA_BLOCKS", 128, false)
+        bytes: darray[u8] = Psf_Encode(sfo)
+        assert bytes.count > 0
+        assert fs_write_all("/tmp/elisa_sys_fs_param.sfo", bytes)
+        readback: darray[u8] = fs_read_all("/tmp/elisa_sys_fs_param.sfo")
+        parsed: mutable PsfFile = Psf_Parse(readback)
+        assert Psf_GetInteger(parsed, "SAVEDATA_BLOCKS") == 128
+        assert string_slice_eq(Psf_GetString(parsed, "MAINTITLE"), 0, 10, "Save Title") == 1
+        assert fs_remove_file("/tmp/elisa_sys_fs_param.sfo")
