@@ -16,6 +16,7 @@ include "../common/sys_fs.elisa"
 
 const SYSFS_TEST_FILE: static u8& = "/tmp/elisa_sys_fs_roundtrip.bin"
 const SYSFS_TEST_DIR: static u8& = "/tmp/elisa_sys_fs_dir"
+const SYSFS_TREE_ROOT: static u8& = "/tmp/elisa_sys_fs_tree"
 
 @test
 def sys_fs_write_read_roundtrip() -> void:
@@ -68,3 +69,45 @@ def sys_fs_psf_param_sfo_roundtrip() -> void:
         assert Psf_GetInteger(parsed, "SAVEDATA_BLOCKS") == 128
         assert string_slice_eq(Psf_GetString(parsed, "MAINTITLE"), 0, 10, "Save Title") == 1
         assert fs_remove_file("/tmp/elisa_sys_fs_param.sfo")
+
+# Path utilities are pure string ops — separator-agnostic join / basename / dirname.
+@test
+def sys_fs_path_utilities() -> void:
+    can Memory.Allocate, Abort.Panic:
+        assert string_slice_eq(fs_path_join("/a/b", "c"), 0, 6, "/a/b/c") == 1
+        assert string_slice_eq(fs_path_join("/a/b/", "c"), 0, 6, "/a/b/c") == 1
+        assert string_slice_eq(fs_path_basename("/a/b/c.txt"), 0, 5, "c.txt") == 1
+        assert string_slice_eq(fs_path_basename("/a/b/"), 0, 1, "b") == 1
+        assert string_slice_eq(fs_path_dirname("/a/b/c.txt"), 0, 4, "/a/b") == 1
+
+# Directory listing + recursive mkdir/remove over real host directories.
+@test
+def sys_fs_listing_and_recursive_tree() -> void:
+    can Memory.Allocate, Abort.Panic:
+        _ = fs_remove_tree(SYSFS_TREE_ROOT)
+
+        # mkdir -p a nested path, then drop files into it.
+        nested: static u8& = fs_path_join(SYSFS_TREE_ROOT, "sub/deep")
+        assert fs_make_directories(nested)
+        assert fs_is_directory(nested)
+
+        f1: darray[u8] = [1, 2, 3]
+        assert fs_write_all(fs_path_join(SYSFS_TREE_ROOT, "a.bin"), f1)
+        assert fs_write_all(fs_path_join(SYSFS_TREE_ROOT, "b.bin"), f1)
+
+        # Listing the root sees a.bin, b.bin and the sub/ directory (3 entries, no . / ..).
+        entries: darray[SysDirEntry] = fs_list_directory(SYSFS_TREE_ROOT)
+        assert entries.count == 3
+        dirs: mutable int = 0
+        files: mutable int = 0
+        for e in entries:
+            if e.is_dir:
+                dirs <- dirs + 1
+            else:
+                files <- files + 1
+        assert dirs == 1
+        assert files == 2
+
+        # rm -rf removes the whole tree.
+        assert fs_remove_tree(SYSFS_TREE_ROOT)
+        assert not fs_path_exists(SYSFS_TREE_ROOT)

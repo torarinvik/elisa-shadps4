@@ -24,6 +24,14 @@ extern mkdir(path: static u8&, mode: int) -> int
 extern rmdir(path: static u8&) -> int
 extern unlink(path: static u8&) -> int
 
+# Directory iteration (POSIX). sys_fs is the canonical home for these — a consuming target
+# must NOT also include core/file_sys/bridge.elisa (which declares the same opendir/readdir/
+# closedir) or common/path_util.elisa.
+static if not PLATFORM_WINDOWS:
+    extern opendir(path: static u8&) -> mutable void&?
+    extern readdir(dirp: mutable void&) -> mutable void&?
+    extern closedir(dirp: mutable void&) -> int
+
 # ---- open(2) flags. Values are platform-specific; these are the macOS/BSD set, with Linux under the
 # static guard. ----
 static if PLATFORM_LINUX:
@@ -164,3 +172,172 @@ def fs_remove_file(path: static u8&) -> bool:
     if not fs_path_exists(path):
         return true
     return unlink(path) == 0
+
+# fs_is_directory reports whether `path` exists and is a directory (opendir succeeds).
+def fs_is_directory(path: static u8&) -> bool:
+    static if PLATFORM_WINDOWS:
+        return false
+    static else:
+        probe: mutable void&? = opendir(path)
+        if probe == null:
+            return false
+        _ = closedir(probe)
+        return true
+
+# ---- Path utilities (separator-agnostic: handle both '/' and '\\') ----
+
+def fs_is_sep(c: u8) -> bool:
+    return c == '/' or c == '\\'
+
+# fs_path_join joins two path components with a single '/'separator, avoiding a double
+# separator and treating an empty side as identity.
+def fs_path_join(left: static u8&, right: static u8&) -> static u8&:
+    left_len: usize = runtime_strlen(left)
+    if left_len == 0:
+        return right
+    right_len: usize = runtime_strlen(right)
+    if right_len == 0:
+        return left
+    trimmed_left: mutable static u8& = left
+    if fs_is_sep(left[left_len - 1]):
+        can Memory.Allocate, Abort.Panic:
+            trimmed_left <- string_substr(left, 0, left_len - 1)
+    sep_then_right: mutable static u8& = right
+    can Memory.Allocate, Abort.Panic:
+        sep_then_right <- string_concat2("/", right)
+    out: mutable static u8& = right
+    can Memory.Allocate, Abort.Panic:
+        out <- string_concat2(trimmed_left, sep_then_right)
+    return out
+
+# fs_path_basename returns the final path component (no trailing separators).
+def fs_path_basename(path: static u8&) -> static u8&:
+    len: usize = runtime_strlen(path)
+    if len == 0:
+        return path
+    end: mutable usize = len
+    while end > 0 and fs_is_sep(path[end - 1]):
+        end <- end - 1
+    if end == 0:
+        return "/"
+    start: mutable usize = end
+    while start > 0 and not fs_is_sep(path[start - 1]):
+        start <- start - 1
+    out: mutable static u8& = path
+    can Memory.Allocate, Abort.Panic:
+        out <- string_substr(path, start, end - start)
+    return out
+
+# fs_path_dirname returns everything up to (not including) the final component; "." when
+# there is no directory part.
+def fs_path_dirname(path: static u8&) -> static u8&:
+    len: usize = runtime_strlen(path)
+    if len == 0:
+        return "."
+    end: mutable usize = len
+    while end > 0 and fs_is_sep(path[end - 1]):
+        end <- end - 1
+    while end > 0 and not fs_is_sep(path[end - 1]):
+        end <- end - 1
+    while end > 1 and fs_is_sep(path[end - 1]):
+        end <- end - 1
+    if end == 0:
+        return "."
+    out: mutable static u8& = path
+    can Memory.Allocate, Abort.Panic:
+        out <- string_substr(path, 0, end)
+    return out
+
+# ---- Directory listing ----
+
+# A single directory entry. `name` is copied into the scratch arena, so it outlives the
+# readdir cursor.
+struct SysDirEntry:
+    name: mutable static u8&
+    is_dir: mutable bool
+
+const SYS_DT_DIR: u8 = 4
+
+# Raw dirent field offsets differ per platform. Linux dirent64: d_type@18, d_name@19.
+# Apple/BSD dirent: d_type@20, d_name@21. (Matches core/file_sys/bridge.elisa.)
+def sys_dirent_name(entry: mutable void&) -> static u8&:
+    raw: u8& = entry.cast[u8&]
+    static if PLATFORM_APPLE:
+        return (&raw[21]).cast[static u8&]
+    static else:
+        return (&raw[19]).cast[static u8&]
+
+def sys_dirent_type(entry: mutable void&) -> u8:
+    raw: u8& = entry.cast[u8&]
+    static if PLATFORM_APPLE:
+        return raw[20]
+    static else:
+        return raw[18]
+
+# fs_list_directory returns the entries of `path` (excluding "." and ".."), each name copied
+# so it stays valid after the scan. Empty on any error or on a non-existent directory.
+def fs_list_directory(path: static u8&) -> darray[SysDirEntry]:
+    out: mutable darray[SysDirEntry] = []
+    static if not PLATFORM_WINDOWS:
+        handle: mutable void&? = opendir(path)
+        if handle != null:
+            dirp: mutable void& = handle
+            can Memory.Allocate, Abort.Panic:
+                keep_reading: mutable bool = true
+                while keep_reading:
+                    entry: mutable void&? = readdir(dirp)
+                    if entry == null:
+                        keep_reading <- false
+                    else:
+                        bits: mutable void& = entry
+                        raw_name: static u8& = sys_dirent_name(bits)
+                        if not fs_name_is_dot(raw_name):
+                            copied: static u8& = string_concat2(raw_name, "")
+                            is_dir: bool = sys_dirent_type(bits) == SYS_DT_DIR
+                            out.push(SysDirEntry(copied, is_dir))
+            _ = closedir(dirp)
+    return out
+
+# fs_name_is_dot reports whether `name` is "." or "..".
+def fs_name_is_dot(name: static u8&) -> bool:
+    if name[0] != '.':
+        return false
+    if name[1] == 0:
+        return true
+    if name[1] == '.' and name[2] == 0:
+        return true
+    return false
+
+# ---- Recursive operations ----
+
+# fs_make_directories creates `path` and every missing parent (like `mkdir -p`).
+def fs_make_directories(path: static u8&) -> bool:
+    len: usize = runtime_strlen(path)
+    if len == 0:
+        return false
+    if fs_is_directory(path):
+        return true
+    can Memory.Allocate, Abort.Panic:
+        # Create each prefix directory in turn.
+        for i in 1..<len:
+            if fs_is_sep(path[i]):
+                prefix: static u8& = string_substr(path, 0, i)
+                if runtime_strlen(prefix) > 0 and not fs_is_directory(prefix):
+                    _ = mkdir(prefix, FS_DEFAULT_DIR_MODE)
+    return mkdir(path, FS_DEFAULT_DIR_MODE) == 0 or fs_is_directory(path)
+
+# fs_remove_tree recursively removes `path` and all its contents (like `rm -rf`). Returns
+# true if `path` no longer exists afterward.
+def fs_remove_tree(path: static u8&) -> bool:
+    if not fs_path_exists(path):
+        return true
+    if not fs_is_directory(path):
+        return fs_remove_file(path)
+    can Memory.Allocate, Abort.Panic:
+        for entry in fs_list_directory(path):
+            child: static u8& = fs_path_join(path, entry.name)
+            if entry.is_dir:
+                _ = fs_remove_tree(child)
+            else:
+                _ = fs_remove_file(child)
+    return fs_remove_directory(path)
