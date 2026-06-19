@@ -1,0 +1,88 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Native SaveData mount-core test. Exercises core/libraries/save_data/save_mount.elisa
+# — mount/umount, param.sfo-backed title + user params, and disk persistence across
+# an umount/mount cycle — entirely through the native Elisa filesystem + PSF stdlib,
+# with NO C/C++ bridge (the abandoned c_savedata_test_* path is gone).
+
+include "../common/string_util.elisa"
+include "../common/types.elisa"
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../common/arch.elisa"
+include "../common/io_file.elisa"
+include "../core/file_format/binary.elisa"
+include "../core/file_format/psf.elisa"
+include "../common/sys_fs.elisa"
+include "../core/libraries/save_data/savedata_error.elisa"
+include "../core/libraries/save_data/save_mount.elisa"
+
+@test
+def savedata_mount_requires_init() -> void:
+    can Memory.Allocate, Abort.Panic:
+        # Before initialize, mount fails with NOT_INITIALIZED.
+        assert savedata_core_is_initialized() == false
+        rc: int = savedata_mount(1, "ELISA_NOINIT", 128)
+        assert rc < 0
+
+@test
+def savedata_mount_param_umount_roundtrip() -> void:
+    can Memory.Allocate, Abort.Panic:
+        assert savedata_core_initialize() == SAVE_DATA_ERROR_OK
+
+        handle: int = savedata_mount(1, "ELISA_NATIVE_SLOT", 128)
+        assert handle >= 0
+
+        blocks: mutable u64 = 0
+        free_blocks: mutable u64 = 0
+        assert savedata_get_mount_info(handle, blocks, free_blocks) == SAVE_DATA_ERROR_OK
+        assert blocks == 128
+
+        assert savedata_set_param_title(handle, "Elisa Native Save") == SAVE_DATA_ERROR_OK
+        title_buf: mutable array[u8, 128] = zeroed
+        got_size: mutable u64 = 0
+        assert savedata_get_param_title(handle, title_buf[0], 128, got_size) == SAVE_DATA_ERROR_OK
+        assert got_size == 17
+        assert title_buf[0] == 'E'.u8()
+
+        assert savedata_set_param_user(handle, 77) == SAVE_DATA_ERROR_OK
+        user_param: mutable u32 = 0
+        user_size: mutable u64 = 0
+        assert savedata_get_param_user(handle, user_param, user_size) == SAVE_DATA_ERROR_OK
+        assert user_param == 77
+
+        assert savedata_umount(handle) == SAVE_DATA_ERROR_OK
+        assert savedata_core_terminate() == SAVE_DATA_ERROR_OK
+
+@test
+def savedata_persists_across_umount_mount() -> void:
+    can Memory.Allocate, Abort.Panic:
+        assert savedata_core_initialize() == SAVE_DATA_ERROR_OK
+
+        # First mount: set params, then umount (flushes param.sfo to disk).
+        h1: int = savedata_mount(2, "ELISA_PERSIST_SLOT", 256)
+        assert h1 >= 0
+        assert savedata_set_param_title(h1, "Persisted Title") == SAVE_DATA_ERROR_OK
+        assert savedata_set_param_user(h1, 4242) == SAVE_DATA_ERROR_OK
+        assert savedata_umount(h1) == SAVE_DATA_ERROR_OK
+
+        # Second mount of the same dir: param.sfo is read back from disk.
+        h2: int = savedata_mount(2, "ELISA_PERSIST_SLOT", 1)
+        assert h2 >= 0
+        user_param: mutable u32 = 0
+        user_size: mutable u64 = 0
+        assert savedata_get_param_user(h2, user_param, user_size) == SAVE_DATA_ERROR_OK
+        assert user_param == 4242
+
+        blocks: mutable u64 = 0
+        free_blocks: mutable u64 = 0
+        assert savedata_get_mount_info(h2, blocks, free_blocks) == SAVE_DATA_ERROR_OK
+        assert blocks == 256  # loaded from disk, NOT the `1` passed to the 2nd mount
+
+        title_buf: mutable array[u8, 128] = zeroed
+        got_size: mutable u64 = 0
+        assert savedata_get_param_title(h2, title_buf[0], 128, got_size) == SAVE_DATA_ERROR_OK
+        assert got_size == 15
+
+        assert savedata_umount(h2) == SAVE_DATA_ERROR_OK
+        assert savedata_core_terminate() == SAVE_DATA_ERROR_OK

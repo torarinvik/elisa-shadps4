@@ -1,0 +1,210 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Native Elisa SaveData mount core. This is the real, host-backed save-data
+# subsystem: a 16-slot mount table whose param store is a param.sfo on the host
+# filesystem, written and read entirely through the native Elisa stdlib
+# (common/sys_fs.elisa over POSIX syscalls + core/file_format/psf.elisa). No
+# C/C++ bridge — this is what the abandoned `c_savedata_test_*` / shadPS4
+# `Libraries::SaveData::*` bridge is replaced by.
+#
+# A mount is identified by an opaque slot handle (>= 0). mount() creates the
+# host directory and a fresh (or loads the existing) param.sfo; umount()
+# flushes the param store back to disk and frees the slot. The param.sfo
+# round-trips across umount/mount, so save state genuinely persists on disk.
+
+const SAVE_MOUNT_MAX: usize = 16
+const SAVE_MOUNT_ROOT: static u8& = "/tmp/elisa_savedata/"
+
+# One mount slot. Strings (host_dir / sfo_path / title) are duplicated into the
+# scratch arena via string_concat2 and held by pointer, so they outlive the
+# call that set them.
+struct SaveMount:
+    in_use: mutable bool
+    user_id: mutable int
+    host_dir: mutable static u8&?
+    sfo_path: mutable static u8&?
+    blocks: mutable u64
+    user_param: mutable u32
+    title: mutable static u8&?
+
+global mutable g_save_mounts: array[SaveMount, 16] = zeroed
+global mutable g_savedata_initialized: bool = false
+
+# ---- lifecycle ----
+
+def savedata_core_initialize() -> u32:
+    g_savedata_initialized <- true
+    return SAVE_DATA_ERROR_OK
+
+def savedata_core_terminate() -> u32:
+    if not g_savedata_initialized:
+        return SAVE_DATA_ERROR_NOT_INITIALIZED
+    for i in 0..<SAVE_MOUNT_MAX:
+        g_save_mounts[i] <- zeroed
+    g_savedata_initialized <- false
+    return SAVE_DATA_ERROR_OK
+
+def savedata_core_is_initialized() -> bool:
+    return g_savedata_initialized
+
+# ---- param.sfo persistence (PSF + sys_fs) ----
+
+# savedata_flush_sfo serializes the slot's param state to its param.sfo on disk.
+def savedata_flush_sfo(slot: usize) -> bool:
+    if not g_save_mounts[slot].in_use:
+        return false
+    path: u8&? = g_save_mounts[slot].sfo_path
+    if path == null:
+        return false
+    ok: mutable bool = false
+    can Memory.Allocate, Abort.Panic:
+        sfo: mutable PsfFile = PsfFile_empty()
+        title: u8&? = g_save_mounts[slot].title
+        if title != null:
+            Psf_AddString(sfo, "MAINTITLE", title.cast[static u8&], false)
+        Psf_AddInteger(sfo, "SAVEDATA_BLOCKS", g_save_mounts[slot].blocks.i32(), false)
+        Psf_AddInteger(sfo, "ACCOUNT_ID", g_save_mounts[slot].user_param.i32(), false)
+        bytes: darray[u8] = Psf_Encode(sfo)
+        ok <- fs_write_all(path.cast[static u8&], bytes)
+    return ok
+
+# savedata_load_sfo reads the slot's param.sfo (if present) back into the slot,
+# proving the on-disk param store round-trips.
+def savedata_load_sfo(slot: usize) -> bool:
+    path: u8&? = g_save_mounts[slot].sfo_path
+    if path == null:
+        return false
+    if not fs_path_exists(path.cast[static u8&]):
+        return false
+    ok: mutable bool = false
+    can Memory.Allocate, Abort.Panic:
+        bytes: darray[u8] = fs_read_all(path.cast[static u8&])
+        if bytes.count > 0:
+            parsed: mutable PsfFile = Psf_Parse(bytes)
+            g_save_mounts[slot].blocks <- Psf_GetInteger(parsed, "SAVEDATA_BLOCKS").u64()
+            g_save_mounts[slot].user_param <- Psf_GetInteger(parsed, "ACCOUNT_ID").u32()
+            title: static u8& = Psf_GetString(parsed, "MAINTITLE")
+            if runtime_strlen(title) > 0:
+                g_save_mounts[slot].title <- string_concat2(title, "")
+            ok <- true
+    return ok
+
+# ---- mount / umount ----
+
+# savedata_mount creates (or reopens) the save directory `dirname` for `user_id`
+# under the host root, loading any existing param.sfo. Returns the slot handle
+# (>= 0) or a negative SaveData error code.
+def savedata_mount(user_id: int, dirname: u8&?, blocks: u64) -> int:
+    if not g_savedata_initialized:
+        return SAVE_DATA_ERROR_NOT_INITIALIZED.i32().int()
+    if dirname == null:
+        return SAVE_DATA_ERROR_PARAMETER.i32().int()
+    slot: mutable int = -1
+    for i in 0..<SAVE_MOUNT_MAX:
+        if not g_save_mounts[i].in_use:
+            slot <- i.int()
+            break
+    if slot < 0:
+        return SAVE_DATA_ERROR_MOUNT_FULL.i32().int()
+    si: usize = slot.usize()
+    host_dir: mutable static u8&? = null
+    sfo_path: mutable static u8&? = null
+    can Memory.Allocate, Abort.Panic:
+        _ = fs_make_directory(SAVE_MOUNT_ROOT)
+        host_dir <- string_concat2(SAVE_MOUNT_ROOT, dirname.cast[static u8&])
+        _ = fs_make_directory(host_dir.cast[static u8&])
+        sfo_path <- string_concat2(host_dir.cast[static u8&], "/param.sfo")
+    if host_dir == null or sfo_path == null:
+        return SAVE_DATA_ERROR_INTERNAL.i32().int()
+    g_save_mounts[si] <- zeroed
+    g_save_mounts[si].in_use <- true
+    g_save_mounts[si].user_id <- user_id
+    g_save_mounts[si].host_dir <- host_dir
+    g_save_mounts[si].sfo_path <- sfo_path
+    g_save_mounts[si].blocks <- blocks
+    g_save_mounts[si].user_param <- 0
+    g_save_mounts[si].title <- null
+    # Reload prior param.sfo if it exists; otherwise create a fresh one on disk.
+    if not savedata_load_sfo(si):
+        _ = savedata_flush_sfo(si)
+    return slot
+
+# savedata_umount flushes and releases a mount slot.
+def savedata_umount(handle: int) -> u32:
+    if not savedata_handle_valid(handle):
+        return SAVE_DATA_ERROR_NOT_MOUNTED
+    si: usize = handle.usize()
+    _ = savedata_flush_sfo(si)
+    g_save_mounts[si] <- zeroed
+    return SAVE_DATA_ERROR_OK
+
+def savedata_handle_valid(handle: int) -> bool:
+    if handle < 0:
+        return false
+    if handle.usize() >= SAVE_MOUNT_MAX:
+        return false
+    return g_save_mounts[handle.usize()].in_use
+
+# ---- mount info ----
+
+def savedata_get_mount_info(handle: int, out_blocks: mutable u64&, out_free_blocks: mutable u64&) -> u32:
+    if not savedata_handle_valid(handle):
+        return SAVE_DATA_ERROR_NOT_MOUNTED
+    si: usize = handle.usize()
+    out_blocks <- g_save_mounts[si].blocks
+    out_free_blocks <- g_save_mounts[si].blocks
+    return SAVE_DATA_ERROR_OK
+
+# ---- params: MAINTITLE ----
+
+def savedata_set_param_title(handle: int, title: u8&?) -> u32:
+    if not savedata_handle_valid(handle):
+        return SAVE_DATA_ERROR_NOT_MOUNTED
+    if title == null:
+        return SAVE_DATA_ERROR_PARAMETER
+    si: usize = handle.usize()
+    can Memory.Allocate, Abort.Panic:
+        g_save_mounts[si].title <- string_concat2(title.cast[static u8&], "")
+    _ = savedata_flush_sfo(si)
+    return SAVE_DATA_ERROR_OK
+
+# savedata_get_param_title copies the MAINTITLE into the caller buffer (NUL
+# terminated, truncated to `cap`), reporting the source length in out_got_size.
+def savedata_get_param_title(handle: int, out_title: mutable u8&, cap: u32, out_got_size: mutable u64&) -> u32:
+    if not savedata_handle_valid(handle):
+        return SAVE_DATA_ERROR_NOT_MOUNTED
+    si: usize = handle.usize()
+    title: u8&? = g_save_mounts[si].title
+    if title == null:
+        out_got_size <- 0
+        return SAVE_DATA_ERROR_OK
+    src: static u8& = title.cast[static u8&]
+    n: usize = runtime_strlen(src)
+    out_got_size <- n.u64()
+    limit: mutable usize = n
+    if cap.usize() > 0 and limit >= cap.usize():
+        limit <- cap.usize() - 1
+    for i in 0..<limit:
+        out_title[i] <- src[i]
+    if cap.usize() > 0:
+        out_title[limit] <- 0
+    return SAVE_DATA_ERROR_OK
+
+# ---- params: user (ACCOUNT_ID) ----
+
+def savedata_set_param_user(handle: int, user_param: u32) -> u32:
+    if not savedata_handle_valid(handle):
+        return SAVE_DATA_ERROR_NOT_MOUNTED
+    si: usize = handle.usize()
+    g_save_mounts[si].user_param <- user_param
+    _ = savedata_flush_sfo(si)
+    return SAVE_DATA_ERROR_OK
+
+def savedata_get_param_user(handle: int, out_user_param: mutable u32&, out_got_size: mutable u64&) -> u32:
+    if not savedata_handle_valid(handle):
+        return SAVE_DATA_ERROR_NOT_MOUNTED
+    si: usize = handle.usize()
+    out_user_param <- g_save_mounts[si].user_param
+    out_got_size <- 4
+    return SAVE_DATA_ERROR_OK
