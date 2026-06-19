@@ -1,9 +1,9 @@
 # Emulator C++ Parity Gate
 
-Passed: 20
-Failed: 4
+Passed: 10
+Failed: 1
 
-Summary score: 24/29
+Summary score: 14/16
 Per-subsystem counts:
 - External-C-ABI: 4
 - Native-Elisa: 255
@@ -17,41 +17,40 @@ Ledger risk counts (missing/unverified):
 - missing: 0
 - unverified: 30
 CUSA07399 stage:
-- execution stage raw: 4
-- load: PASS
-- link: PASS
-- handoff: PASS
-- execute stage: guarded-entry
+- execution stage raw: 6
+- load: FAIL
+- link: FAIL
+- handoff: FAIL
+- execute stage: crash-captured
 - first boundary: PASS
-- synthetic renderer smoke: PASS
+- synthetic renderer smoke: FAIL
 - real CUSA first frame: PENDING
 - first frame ladder: none
 - host note: arm64 macOS probe-only
-- guest exec host arch: arm64
+- guest exec host arch: x86_64
 - guest exec host mode: macOS
-- guest exec supported native execution: 0
+- guest exec supported native execution: 1
 - guest exec x64 subprocess available: 1
 - guest exec x64 subprocess smoke: FAIL
 - CUSA07399 x64 real execution lane: missing-output
-- guest exec probe only: 1
+- guest exec probe only: 0
 - guest exec started: 1
 - guest exec entry reached: 1
 - guest exec first boundary reached: 0
-- guest exec boundary reason: 7 (unsupported-host)
-- guest exec boundary reason name: unsupported-host
-- guest exec last pc: 0x0
-- guest exec last sp: 0x0
-- guest exec last bp: 0x0
-- guest exec last rdi: 0x0
-- guest exec expected EntryParams: 0x0
+- guest exec boundary reason: 4 (host-crash)
+- guest exec boundary reason name: host-crash
+- guest exec last pc: 0x800002030
+- guest exec last sp: 0x7efdd3fd8
+- guest exec last bp: 0x70020513bb90
+- guest exec last rdi: 0x70020513b6e8
+- guest exec expected EntryParams: 0x70020513b6e8
 - guest exec expected stack words: 0x0, 0x0
 - guest exec entry stack words: 0x0, 0x0
-- guest exec fault words: 0x0, 0x0
+- guest exec fault words: 0x80050c660, 0x80050c710
 - guest exec signal stack words: 0x0, 0x0
-- guest exec last signal: 0
-- guest exec last module: libSceNpToolkit
-- guest exec last symbol: zr094EQ39Ww
-- first boundary blocker: probe-only host (arm64 macOS)
+- guest exec last signal: 4
+- guest exec last module: 
+- guest exec last symbol: 
 - first frame gate signals:
   - shader_translate_attempted=0
   - shader_path_bridge=0 shader_path_native=0
@@ -71,9 +70,9 @@ CUSA07399 artifact metrics:
 - audio SDL available: 0
 - audio OpenAL available: 0
 Real CUSA runtime service signals:
-- real CUSA user service initialized: 1
-- user service initial user: 1
-- user service login user count: 2
+- real CUSA user service initialized: 0
+- user service initial user: 0
+- user service login user count: 0
 - real CUSA pad initialized: 0
 - pad open attempted/opened: 0/0
 - pad no controller: 0
@@ -86,26 +85,23 @@ Real CUSA runtime service signals:
 - audio input read attempted/rc: 0/0
 - audio input silent state: 0
 - audio input closed: 0
-- current execution stage: 4 (guarded-entry)
-- last HLE call: module=libSceNpToolkit symbol=module_start
+- current execution stage: 6 (crash-captured)
+- last HLE call: module= symbol=
 - current video/audio/input stage: graphics=0 audio-input-service=0
 - current save/dialog/misc fallback stage: save-dialog-misc=0
 Save/Dialog/Misc parity test signals:
-- save data parity tests: PASS
-- save data dialog parity tests: PASS
-- web browser dialog parity tests: PASS
-- signin dialog parity tests: PASS
-- playgo parity tests: PASS
-- ime dialog parity tests: PASS
+- save data parity tests: FAIL
+- save data dialog parity tests: FAIL
+- web browser dialog parity tests: FAIL
+- signin dialog parity tests: FAIL
+- playgo parity tests: FAIL
+- ime dialog parity tests: FAIL
 Top 50 fallback symbols:
 - none
 Top blockers:
-- Gate step failed: elisacore test core-libraries-audio-parity-tests
-- Gate step failed: guest exec ABI smoke x64
 - Gate step failed: CUSA07399 x64 real execution lane
-- Gate step failed: elisacore test emulator-runtime-services-smoke
 Failing scenario ids:
-- emulator_guest_exec_guarded_entry_trap_reports_entry_params_context
+- none
 
 ## Agent Work Queues
 ### kernel_fallbacks
@@ -132,20 +128,7 @@ Failing scenario ids:
 - PASS: strict native ABI contracts
 - PASS: parity workqueue summary
 - PASS: bridge syntax
-- FAIL: elisacore test core-libraries-audio-parity-tests
+- PASS: elisacore test core-libraries-audio-parity-tests
 - PASS: elisacore test core-libraries-np-parity-tests
-- FAIL: guest exec ABI smoke x64
+- PASS: guest exec ABI smoke x64
 - FAIL: CUSA07399 x64 real execution lane
-- PASS: emulator ABI smoke x64
-- PASS: elisacore test emulator-core-boot-smoke
-- PASS: elisacore test real-self-loader-tests
-- PASS: elisacore test emulator-real-game-boot-smoke
-- FAIL: elisacore test emulator-runtime-services-smoke
-- PASS: elisacore test emulator-guest-exec-runtime-tests
-- PASS: elisacore test emulator-renderer-first-frame-smoke
-- PASS: elisacore run elisa_tests/core_libraries_save_data_parity_tests.elisa
-- PASS: elisacore run elisa_tests/core_libraries_save_data_dialog_pure_tests.elisa
-- PASS: elisacore run elisa_tests/core_libraries_web_browser_dialog_pure_tests.elisa
-- PASS: elisacore run elisa_tests/core_libraries_signin_dialog_pure_tests.elisa
-- PASS: elisacore run elisa_tests/core_libraries_playgo_pure_tests.elisa
-- PASS: elisacore run elisa_tests/core_libraries_ime_dialog_parity_tests.elisa

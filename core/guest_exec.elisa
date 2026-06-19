@@ -2353,6 +2353,10 @@ def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
             return
         ge_raw_breadcrumb("GE:SIGNAL_ENTRY_RAW\n", 20)
         ge_emergency_mark(GE_EV_SIGNAL_ENTRY_RAW, sig.u64().uintptr(), info.uintptr(), uctx.uintptr(), 0.uintptr())
+        fr_raw: ElisaGuestExecForkReport&? = ge_fork_report
+        if fr_raw != null:
+            fr_raw.signal <- sig.s32()
+            fr_raw.signal_uctx <- uctx.uintptr() if uctx != null else info.uintptr()
         static if PLATFORM_APPLE and ARCH_X86_64:
             can Unsafe.SegmentMutation, Segment.Host:
                 TLS_RestoreHostFsSelector()
@@ -2371,7 +2375,7 @@ def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
         if sig == GE_SIG_ILL and ge_try_handle_sse4a_sigill(uctx):
             return
         fault_thread: uintptr = !ge_pthread_self()
-        ge_signal_uctx <- (uctx.uintptr().cast[SignalContextPtr] if uctx != null else 0.uintptr().cast[SignalContextPtr])
+        ge_signal_uctx <- ((uctx.uintptr() if uctx != null else info.uintptr()).cast[SignalContextPtr])
         ge_signal_mctx <- ge_extract_mctx(uctx)
         ge_last_fault_address <- ge_siginfo_fault_addr(info)
         ge_signal_fault_addr_valid <- 1 if info != null else 0
@@ -2659,6 +2663,12 @@ def ge_jump_main_entry(params: mutable GuestEntryParams&, exit_func: uintptr) ->
     ef: mutable uintptr = exit_func
     if ef == 0.uintptr():
         ef <- ge_default_exit.cast[uintptr]
+    ge_prejump_rdi <- (&params).cast[void&].uintptr()
+    ge_prejump_rsp <- (&params).cast[void&].uintptr()
+    fr: ElisaGuestExecForkReport&? = ge_fork_report
+    if fr != null:
+        fr.prejump_rdi <- ge_prejump_rdi
+        fr.prejump_rsp <- ge_prejump_rsp
     static if PLATFORM_APPLE and ARCH_X86_64:
         guarded_exit_addr: uintptr = ge_guarded_exit.cast[uintptr]
         if ef == guarded_exit_addr:
@@ -2666,14 +2676,9 @@ def ge_jump_main_entry(params: mutable GuestEntryParams&, exit_func: uintptr) ->
     guest_fs_selector: mutable GuestFsSelector = 0.u32().cast[GuestFsSelector]
     static if PLATFORM_APPLE and ARCH_X86_64:
         guest_fs_selector <- TLS_PrepareTcbBase((!TLS_PrimaryTcbBase()).cast[void&?])
-    ge_prejump_rdi <- (&params).cast[void&].uintptr()
     ge_prejump_rsi <- ef
-    ge_prejump_rsp <- (&params).cast[void&].uintptr()
-    fr: ElisaGuestExecForkReport&? = ge_fork_report
     if fr != null:
-        fr.prejump_rdi <- ge_prejump_rdi
         fr.prejump_rsi <- ge_prejump_rsi
-        fr.prejump_rsp <- ge_prejump_rsp
     static if ARCH_X86_64:
         ElisaGuestExec_LoadOrbisFpStateAsm((&ge_orbis_mxcsr).cast[u32&].uintptr().cast[HostPtr[u32]], (&ge_orbis_fpucw).cast[u16&].uintptr().cast[HostPtr[u16]])
     can Unsafe.SegmentMutation, Segment.Host:
@@ -2768,6 +2773,8 @@ def ge_absorb_fork_report() -> void:
         ge_signal_rsi_valid <- fr.signal_rsi_valid
     if fr.signal_uctx != 0.uintptr():
         ge_signal_uctx <- fr.signal_uctx.cast[SignalContextPtr]
+    elif fr.signal != 0:
+        ge_signal_uctx <- ge_fork_report_addr.cast[SignalContextPtr]
     if fr.signal_mctx != 0.uintptr():
         ge_signal_mctx <- fr.signal_mctx.cast[MachineContextPtr]
     if fr.signal_fault_addr_valid != 0:

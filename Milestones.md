@@ -435,3 +435,27 @@ cd "/Users/torarinvikbjarko/Documents/Coding Projects/Go projects/Elisa-core/eli
 - Result: `passed=22 failed=2 selected=24`
 - What improved: CUSA unresolved imports are zero
 - Next blocker: Gate step failed: guest exec ABI smoke x64
+
+## 2026-06-19: Emulator Parity Gate Run
+
+- Date: 2026-06-19
+- Command run: `./emulator-cpp-parity --quick`
+- Result: `passed=7 failed=1 selected=8`
+- What improved: CUSA unresolved imports are zero
+- Next blocker: Gate step failed: elisacore test core-libraries-audio-parity-tests
+
+## 2026-06-19: Emulator Parity Gate Run
+
+- Date: 2026-06-19
+- Command run: `./emulator-cpp-parity --quick`
+- Result: `passed=9 failed=1 selected=10`
+- What improved: CUSA unresolved imports are zero
+- Next blocker: Gate step failed: guest exec ABI smoke x64
+
+## 2026-06-19: Emulator Parity Gate Run
+
+- Date: 2026-06-19
+- Command run: `./emulator-cpp-parity --quick`
+- Result: `passed=10 failed=1 selected=11`
+- What improved: CUSA unresolved imports are zero
+- Next blocker: Gate step failed: CUSA07399 x64 real execution lane
