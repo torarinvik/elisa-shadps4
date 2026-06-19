@@ -50,6 +50,420 @@ def savedata_core_is_initialized() -> bool:
 def savedata_core_set_terminated() -> void:
     g_savedata_initialized <- false
 
+const SAVE_MOUNT_MAX: usize = 16
+
+const SAVE_MOUNT_ROOT: static u8& = "/tmp/elisa_savedata/"
+
+struct SaveMount:
+    in_use: mutable bool
+    user_id: mutable int
+    mount_point: mutable static u8&?
+    host_dir: mutable static u8&?
+    sfo_path: mutable static u8&?
+    blocks: mutable u64
+    user_param: mutable u32
+    title: mutable static u8&?
+
+global mutable g_save_mounts: array[SaveMount, 16] = zeroed
+
+def savedata_core_terminate() -> u32:
+    if (not savedata_core_is_initialized()):
+        return SAVE_DATA_ERROR_NOT_INITIALIZED
+    for i in 0 ..< SAVE_MOUNT_MAX:
+        g_save_mounts[i] <- zeroed
+    savedata_core_set_terminated()
+    return SAVE_DATA_ERROR_OK
+
+def savedata_flush_sfo(slot: usize) -> bool:
+    if (not g_save_mounts[slot].in_use):
+        return false
+    path: u8&? = g_save_mounts[slot].sfo_path
+    if (path == null):
+        return false
+    ok: mutable bool = false
+    can Memory.Allocate, Abort.Panic:
+        sfo: mutable PsfFile = PsfFile_empty()
+        title: u8&? = g_save_mounts[slot].title
+        if (title != null):
+            Psf_AddString(sfo, "MAINTITLE", title.cast[static u8&], false)
+        Psf_AddInteger(sfo, "SAVEDATA_BLOCKS", g_save_mounts[slot].blocks.i32(), false)
+        Psf_AddInteger(sfo, "ACCOUNT_ID", g_save_mounts[slot].user_param.i32(), false)
+        bytes: darray[u8] = Psf_Encode(sfo)
+        ok <- fs_write_all(path.cast[static u8&], bytes)
+    return ok
+
+def savedata_load_sfo(slot: usize) -> bool:
+    path: u8&? = g_save_mounts[slot].sfo_path
+    if (path == null):
+        return false
+    if (not fs_path_exists(path.cast[static u8&])):
+        return false
+    ok: mutable bool = false
+    can Memory.Allocate, Abort.Panic:
+        bytes: darray[u8] = fs_read_all(path.cast[static u8&])
+        if (bytes.count > 0):
+            parsed: mutable PsfFile = Psf_Parse(bytes)
+            g_save_mounts[slot].blocks <- Psf_GetInteger(parsed, "SAVEDATA_BLOCKS").u64()
+            g_save_mounts[slot].user_param <- Psf_GetInteger(parsed, "ACCOUNT_ID").u32()
+            title: static u8& = Psf_GetString(parsed, "MAINTITLE")
+            if (runtime_strlen(title) > 0):
+                g_save_mounts[slot].title <- string_concat2(title, "")
+            ok <- true
+    return ok
+
+def savedata_mount_point_for_slot(slot: usize) -> static u8&:
+    out: mutable static u8& = "/savedata0"
+    out <- string_concat2("/savedata", savedata_usize_to_str(slot)) can Memory.Allocate, Abort.Panic
+    return out
+
+def savedata_usize_to_str(value: usize) -> static u8&:
+    with arena __auto_7817 as :
+        if (value == 0):
+            return "0"
+        digits: mutable array[u8, 24] = zeroed
+        n: mutable usize = value
+        count: mutable usize = 0
+        while (n > 0):
+            digits[count] <- (('0'.u8() + ((n % 10)).u8()))
+            n <- (n / 10)
+            count <- (count + 1)
+        out: mutable static u8& = "0"
+        can Memory.Allocate, Abort.Panic:
+            buf: mutable darray[u8] = []
+            for i in 0 ..< count:
+                buf.push(digits[((count - 1) - i)])
+            buf.push(0)
+            out <- (&buf[0]).cast[static u8&]
+        return out
+
+def savedata_find_by_mount_point(mp: u8&?) -> int:
+    if (mp == null):
+        return (-1)
+    needle: static u8& = mp.cast[static u8&]
+    for i in 0 ..< SAVE_MOUNT_MAX:
+        if g_save_mounts[i].in_use:
+            mpt: u8&? = g_save_mounts[i].mount_point
+            if ((mpt != null) and savedata_cstr_eq(mpt.cast[static u8&], needle)):
+                return i.int()
+    return (-1)
+
+def savedata_cstr_eq(a: static u8&, b: static u8&) -> bool:
+    i: mutable usize = 0
+    while ((a[i] != 0) and (b[i] != 0)):
+        if (a[i] != b[i]):
+            return false
+        i <- (i + 1)
+    return (a[i] == b[i])
+
+def savedata_mount_point(handle: int) -> u8&?:
+    if (not savedata_handle_valid(handle)):
+        return null
+    return g_save_mounts[handle.usize()].mount_point
+
+def savedata_mount(user_id: int, dirname: u8&?, blocks: u64) -> int:
+    if (not g_savedata_initialized):
+        return SAVE_DATA_ERROR_NOT_INITIALIZED.i32().int()
+    if (dirname == null):
+        return SAVE_DATA_ERROR_PARAMETER.i32().int()
+    slot: mutable int = (-1)
+    for i in 0 ..< SAVE_MOUNT_MAX:
+        if (not g_save_mounts[i].in_use):
+            slot <- i.int()
+            break
+    if (slot < 0):
+        return SAVE_DATA_ERROR_MOUNT_FULL.i32().int()
+    si: usize = slot.usize()
+    host_dir: mutable static u8&? = null
+    sfo_path: mutable static u8&? = null
+    mount_point: mutable static u8&? = null
+    can Memory.Allocate, Abort.Panic:
+        _ = fs_make_directory(SAVE_MOUNT_ROOT)
+        host_dir <- string_concat2(SAVE_MOUNT_ROOT, dirname.cast[static u8&])
+        _ = fs_make_directory(host_dir.cast[static u8&])
+        sfo_path <- string_concat2(host_dir.cast[static u8&], "/param.sfo")
+        mount_point <- savedata_mount_point_for_slot(si)
+    if (((host_dir == null) or (sfo_path == null)) or (mount_point == null)):
+        return SAVE_DATA_ERROR_INTERNAL.i32().int()
+    g_save_mounts[si] <- zeroed
+    g_save_mounts[si].in_use <- true
+    g_save_mounts[si].user_id <- user_id
+    g_save_mounts[si].mount_point <- mount_point
+    g_save_mounts[si].host_dir <- host_dir
+    g_save_mounts[si].sfo_path <- sfo_path
+    g_save_mounts[si].blocks <- blocks
+    g_save_mounts[si].user_param <- 0
+    g_save_mounts[si].title <- null
+    if (not savedata_load_sfo(si)):
+        _ = savedata_flush_sfo(si)
+    return slot
+
+def savedata_umount(handle: int) -> u32:
+    if (not savedata_handle_valid(handle)):
+        return SAVE_DATA_ERROR_NOT_MOUNTED
+    si: usize = handle.usize()
+    _ = savedata_flush_sfo(si)
+    g_save_mounts[si] <- zeroed
+    return SAVE_DATA_ERROR_OK
+
+def savedata_handle_valid(handle: int) -> bool:
+    if (handle < 0):
+        return false
+    if (handle.usize() >= SAVE_MOUNT_MAX):
+        return false
+    return g_save_mounts[handle.usize()].in_use
+
+def savedata_delete_dir(dirname: u8&?) -> u32:
+    if (not g_savedata_initialized):
+        return SAVE_DATA_ERROR_NOT_INITIALIZED
+    if (dirname == null):
+        return SAVE_DATA_ERROR_PARAMETER
+    host_dir: mutable static u8&? = null
+    host_dir <- string_concat2(SAVE_MOUNT_ROOT, dirname.cast[static u8&]) can Memory.Allocate, Abort.Panic
+    if (host_dir == null):
+        return SAVE_DATA_ERROR_INTERNAL
+    if (not fs_path_exists(host_dir.cast[static u8&])):
+        return SAVE_DATA_ERROR_NOT_FOUND
+    if fs_remove_tree(host_dir.cast[static u8&]):
+        return SAVE_DATA_ERROR_OK
+    return SAVE_DATA_ERROR_INTERNAL
+
+def savedata_get_mount_info(handle: int, out_blocks: mutable u64&, out_free_blocks: mutable u64&) -> u32:
+    if (not savedata_handle_valid(handle)):
+        return SAVE_DATA_ERROR_NOT_MOUNTED
+    si: usize = handle.usize()
+    out_blocks <- g_save_mounts[si].blocks
+    out_free_blocks <- g_save_mounts[si].blocks
+    return SAVE_DATA_ERROR_OK
+
+def savedata_set_param_title(handle: int, title: u8&?) -> u32:
+    if (not savedata_handle_valid(handle)):
+        return SAVE_DATA_ERROR_NOT_MOUNTED
+    if (title == null):
+        return SAVE_DATA_ERROR_PARAMETER
+    si: usize = handle.usize()
+    g_save_mounts[si].title <- string_concat2(title.cast[static u8&], "") can Memory.Allocate, Abort.Panic
+    _ = savedata_flush_sfo(si)
+    return SAVE_DATA_ERROR_OK
+
+def savedata_get_param_title(handle: int, out_title: mutable u8&, cap: u32, out_got_size: mutable u64&) -> u32:
+    if (not savedata_handle_valid(handle)):
+        return SAVE_DATA_ERROR_NOT_MOUNTED
+    si: usize = handle.usize()
+    title: u8&? = g_save_mounts[si].title
+    if (title == null):
+        out_got_size <- 0
+        return SAVE_DATA_ERROR_OK
+    src: static u8& = title.cast[static u8&]
+    n: usize = runtime_strlen(src)
+    out_got_size <- n.u64()
+    limit: mutable usize = n
+    if ((cap.usize() > 0) and (limit >= cap.usize())):
+        limit <- (cap.usize() - 1)
+    for i in 0 ..< limit:
+        out_title[i] <- src[i]
+    if (cap.usize() > 0):
+        out_title[limit] <- 0
+    return SAVE_DATA_ERROR_OK
+
+def savedata_set_param_user(handle: int, user_param: u32) -> u32:
+    if (not savedata_handle_valid(handle)):
+        return SAVE_DATA_ERROR_NOT_MOUNTED
+    si: usize = handle.usize()
+    g_save_mounts[si].user_param <- user_param
+    _ = savedata_flush_sfo(si)
+    return SAVE_DATA_ERROR_OK
+
+def savedata_get_param_user(handle: int, out_user_param: mutable u32&, out_got_size: mutable u64&) -> u32:
+    if (not savedata_handle_valid(handle)):
+        return SAVE_DATA_ERROR_NOT_MOUNTED
+    si: usize = handle.usize()
+    out_user_param <- g_save_mounts[si].user_param
+    out_got_size <- 4
+    return SAVE_DATA_ERROR_OK
+
+const ORBIS_DIRNAME_MAXSIZE: usize = 32
+
+const ORBIS_MOUNT_POINT_MAXSIZE: usize = 16
+
+const ORBIS_TITLE_MAXSIZE: usize = 128
+
+const SD_PARAM_ALL: u32 = 0
+
+const SD_PARAM_TITLE: u32 = 1
+
+const SD_PARAM_SUB_TITLE: u32 = 2
+
+const SD_PARAM_DETAIL: u32 = 3
+
+const SD_PARAM_USER_PARAM: u32 = 4
+
+const SD_PARAM_MTIME: u32 = 5
+
+const SD_PARAM_OFF_TITLE: usize = 0
+
+const SD_PARAM_OFF_SUBTITLE: usize = 128
+
+const SD_PARAM_OFF_DETAIL: usize = 256
+
+const SD_PARAM_OFF_USERPARAM: usize = 1280
+
+const SD_MOUNT_STATUS_CREATED: u32 = 1
+
+def abi_u32_at(base: void&, off: usize) -> u32:
+    p: u8& = base.cast[u8&]
+    out: mutable u32 = 0
+    for i in 0 ..< 4:
+        out <- (out | ((p[(off + i)].u32() << ((i * 8)).u32())))
+    return out
+
+def abi_u64_at(base: void&, off: usize) -> u64:
+    p: u8& = base.cast[u8&]
+    out: mutable u64 = 0
+    for i in 0 ..< 8:
+        out <- (out | ((p[(off + i)].u64() << ((i * 8)).u64())))
+    return out
+
+def abi_store_u32(base: mutable void&, off: usize, value: u32) -> void:
+    p: mutable u8& = base.cast[mutable u8&]
+    for i in 0 ..< 4:
+        p[(off + i)] <- ((((value >> ((i * 8)).u32())) & 0xFF)).u8()
+
+def abi_store_u64(base: mutable void&, off: usize, value: u64) -> void:
+    p: mutable u8& = base.cast[mutable u8&]
+    for i in 0 ..< 8:
+        p[(off + i)] <- ((((value >> ((i * 8)).u64())) & 0xFF)).u8()
+
+def abi_ptr_at(base: void&, off: usize) -> u8&?:
+    raw: u64 = abi_u64_at(base, off)
+    if (raw == 0):
+        return null
+    return raw.uintptr().cast[u8&]
+
+def abi_store_cstr(base: mutable void&, off: usize, src: static u8&, cap: usize) -> void:
+    p: mutable u8& = base.cast[mutable u8&]
+    n: usize = runtime_strlen(src)
+    limit: mutable usize = n
+    if ((cap > 0) and (limit >= cap)):
+        limit <- (cap - 1)
+    for i in 0 ..< limit:
+        p[(off + i)] <- src[i]
+    if (cap > 0):
+        p[(off + limit)] <- 0
+
+def savedata_neg_to_u32(v: int) -> u32:
+    return ((v & 0xFFFFFFFF)).u32()
+
+def savedata_abi_mount2(mount: void&?, result: void&?) -> u32:
+    if ((mount == null) or (result == null)):
+        return SAVE_DATA_ERROR_PARAMETER
+    m: void& = mount
+    user_id: u32 = abi_u32_at(m, 0)
+    dir_name: u8&? = abi_ptr_at(m, 8)
+    blocks: u64 = abi_u64_at(m, 16)
+    if (dir_name == null):
+        return SAVE_DATA_ERROR_PARAMETER
+    handle: int = savedata_mount(user_id.i32().int(), dir_name, blocks)
+    if (handle < 0):
+        return savedata_neg_to_u32(handle)
+    mp: u8&? = savedata_mount_point(handle)
+    res: mutable void& = result
+    if (mp != null):
+        abi_store_cstr(res, 0, mp.cast[static u8&], ORBIS_MOUNT_POINT_MAXSIZE)
+    abi_store_u64(res, 16, blocks)
+    abi_store_u32(res, 28, SD_MOUNT_STATUS_CREATED)
+    return SAVE_DATA_ERROR_OK
+
+def savedata_abi_mount(mount: void&?, result: void&?) -> u32:
+    if ((mount == null) or (result == null)):
+        return SAVE_DATA_ERROR_PARAMETER
+    m: void& = mount
+    user_id: u32 = abi_u32_at(m, 0)
+    dir_name: u8&? = abi_ptr_at(m, 16)
+    blocks: u64 = abi_u64_at(m, 32)
+    if (dir_name == null):
+        return SAVE_DATA_ERROR_PARAMETER
+    handle: int = savedata_mount(user_id.i32().int(), dir_name, blocks)
+    if (handle < 0):
+        return savedata_neg_to_u32(handle)
+    mp: u8&? = savedata_mount_point(handle)
+    res: mutable void& = result
+    if (mp != null):
+        abi_store_cstr(res, 0, mp.cast[static u8&], ORBIS_MOUNT_POINT_MAXSIZE)
+    abi_store_u64(res, 16, blocks)
+    abi_store_u32(res, 28, SD_MOUNT_STATUS_CREATED)
+    return SAVE_DATA_ERROR_OK
+
+def savedata_abi_delete(del: void&?) -> u32:
+    if (del == null):
+        return SAVE_DATA_ERROR_PARAMETER
+    d: void& = del
+    dir_name: u8&? = abi_ptr_at(d, 16)
+    if (dir_name == null):
+        return SAVE_DATA_ERROR_PARAMETER
+    return savedata_delete_dir(dir_name)
+
+def savedata_abi_umount(mount_point: void&?) -> u32:
+    if (mount_point == null):
+        return SAVE_DATA_ERROR_PARAMETER
+    handle: int = savedata_find_by_mount_point(mount_point.cast[u8&?])
+    if (handle < 0):
+        return SAVE_DATA_ERROR_NOT_MOUNTED
+    return savedata_umount(handle)
+
+def savedata_abi_get_mount_info(mount_point: void&?, info: void&?) -> u32:
+    if ((mount_point == null) or (info == null)):
+        return SAVE_DATA_ERROR_PARAMETER
+    handle: int = savedata_find_by_mount_point(mount_point.cast[u8&?])
+    if (handle < 0):
+        return SAVE_DATA_ERROR_NOT_MOUNTED
+    blocks: mutable u64 = 0
+    free_blocks: mutable u64 = 0
+    rc: u32 = savedata_get_mount_info(handle, blocks, free_blocks)
+    if (rc != SAVE_DATA_ERROR_OK):
+        return rc
+    inf: mutable void& = info
+    abi_store_u64(inf, 0, blocks)
+    abi_store_u64(inf, 8, free_blocks)
+    return SAVE_DATA_ERROR_OK
+
+def savedata_abi_set_param(mount_point: void&?, param_type: u32, buf: void&?, buf_size: usize) -> u32:
+    if ((mount_point == null) or (buf == null)):
+        return SAVE_DATA_ERROR_PARAMETER
+    handle: int = savedata_find_by_mount_point(mount_point.cast[u8&?])
+    if (handle < 0):
+        return SAVE_DATA_ERROR_NOT_MOUNTED
+    if (param_type == SD_PARAM_TITLE):
+        return savedata_set_param_title(handle, buf.cast[u8&?])
+    if (param_type == SD_PARAM_USER_PARAM):
+        b: void& = buf
+        return savedata_set_param_user(handle, abi_u32_at(b, 0))
+    return SAVE_DATA_ERROR_OK
+
+def savedata_abi_get_param(mount_point: void&?, param_type: u32, buf: void&?, buf_size: usize, got_size: void&?) -> u32:
+    if ((mount_point == null) or (buf == null)):
+        return SAVE_DATA_ERROR_PARAMETER
+    handle: int = savedata_find_by_mount_point(mount_point.cast[u8&?])
+    if (handle < 0):
+        return SAVE_DATA_ERROR_NOT_MOUNTED
+    if (param_type == SD_PARAM_TITLE):
+        gs: mutable u64 = 0
+        rc: u32 = savedata_get_param_title(handle, buf.cast[mutable u8&], buf_size.u32(), gs)
+        if (got_size != null):
+            g: mutable void& = got_size
+            abi_store_u64(g, 0, gs)
+        return rc
+    if (param_type == SD_PARAM_USER_PARAM):
+        up: mutable u32 = 0
+        us: mutable u64 = 0
+        rc: u32 = savedata_get_param_user(handle, up, us)
+        b: mutable void& = buf
+        abi_store_u32(b, 0, up)
+        if (got_size != null):
+            g: mutable void& = got_size
+            abi_store_u64(g, 0, 4)
+        return rc
+    return SAVE_DATA_ERROR_OK
+
 def sceSaveDataAbort() -> int:
     return 0
 
@@ -127,8 +541,7 @@ def sceSaveDataDebugTarget() -> int:
     return 0
 
 def sceSaveDataDelete(a0: void&?) -> int:
-    _ = a0
-    return 0
+    return savedata_abi_delete(a0).i32().int()
 
 def sceSaveDataDelete5() -> int:
     return 0
@@ -195,17 +608,10 @@ def sceSaveDataGetMountedSaveDataCount() -> int:
     return 0
 
 def sceSaveDataGetMountInfo(a0: void&?, a1: void&?) -> int:
-    _ = a0
-    _ = a1
-    return 0
+    return savedata_abi_get_mount_info(a0, a1).i32().int()
 
 def sceSaveDataGetParam(a0: void&?, a1: i64, a2: void&?, a3: i64, a4: void&?) -> int:
-    _ = a0
-    _ = a1
-    _ = a2
-    _ = a3
-    _ = a4
-    return 0
+    return savedata_abi_get_param(a0, a1.u32(), a2, a3.usize(), a4).i32().int()
 
 def sceSaveDataGetProgress(a0: void&?) -> int:
     if (not savedata_core_is_initialized()):
@@ -274,14 +680,10 @@ def sceSaveDataLoadIcon(a0: void&?, a1: void&?) -> int:
     return 0
 
 def sceSaveDataMount(a0: void&?, a1: void&?) -> int:
-    _ = a0
-    _ = a1
-    return 0
+    return savedata_abi_mount(a0, a1).i32().int()
 
 def sceSaveDataMount2(a0: void&?, a1: void&?) -> int:
-    _ = a0
-    _ = a1
-    return 0
+    return savedata_abi_mount2(a0, a1).i32().int()
 
 def sceSaveDataMount5() -> int:
     return 0
@@ -323,11 +725,7 @@ def sceSaveDataSetEventInfo() -> int:
     return 0
 
 def sceSaveDataSetParam(a0: void&?, a1: i64, a2: void&?, a3: i64) -> int:
-    _ = a0
-    _ = a1
-    _ = a2
-    _ = a3
-    return 0
+    return savedata_abi_set_param(a0, a1.u32(), a2, a3.usize()).i32().int()
 
 def sceSaveDataSetSaveDataLibraryUser() -> int:
     return 0
@@ -379,8 +777,7 @@ def sceSaveDataTransferringMount(a0: void&?, a1: void&?) -> int:
     return 0
 
 def sceSaveDataUmount(a0: void&?) -> int:
-    _ = a0
-    return 0
+    return savedata_abi_umount(a0).i32().int()
 
 def sceSaveDataUmountSys() -> int:
     return 0

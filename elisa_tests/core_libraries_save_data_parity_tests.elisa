@@ -85,3 +85,75 @@ def save_data_mount_param_umount_contracts() -> void:
 
         assert savedata_umount(handle) == SAVE_DATA_ERROR_OK
         assert sceSaveDataTerminate() == SAVE_DATA_OK
+
+# Full PS4-ABI path: build real Orbis structs in memory and drive the sceSaveData* entry
+# points, which decode them by byte offset (savedata_abi.elisa) and call the native core.
+@test
+def save_data_abi_struct_decode() -> void:
+    can Memory.Allocate, Abort.Panic:
+        assert sceSaveDataInitialize(null) == SAVE_DATA_OK
+
+        # OrbisSaveDataDirName: CString<32>.
+        dirname: mutable array[u8, 32] = zeroed
+        dn_src: static u8& = "ELISA_ABI_SLOT"
+        for i in 0..<runtime_strlen(dn_src):
+            dirname[i] <- dn_src[i]
+
+        # OrbisSaveDataMount2 (64 bytes): userId@0, dirName*@8, blocks@16, mountMode@24.
+        mount_buf: mutable array[u8, 64] = zeroed
+        result_buf: mutable array[u8, 64] = zeroed
+        mount_ref: mutable void& = (&mount_buf[0]).cast[mutable void&]
+        abi_store_u32(mount_ref, 0, 1)
+        abi_store_u64(mount_ref, 8, (&dirname[0]).uintptr().u64())
+        abi_store_u64(mount_ref, 16, 128)
+        abi_store_u32(mount_ref, 24, 0x2 | 0x4)  # RDWR | CREATE
+
+        assert sceSaveDataMount2((&mount_buf[0]).cast[void&?], (&result_buf[0]).cast[void&?]) == SAVE_DATA_OK
+        # result.mount_point begins "/savedata"; required_blocks@16==128; mount_status@28==1
+        assert result_buf[0] == '/'.u8()
+        assert result_buf[1] == 's'.u8()
+        result_ref: void& = (&result_buf[0]).cast[void&]
+        assert abi_u64_at(result_ref, 16) == 128
+        assert abi_u32_at(result_ref, 28) == 1
+
+        mp: void&? = (&result_buf[0]).cast[void&?]  # the mount point CString keys later calls
+
+        # SetParam(USER_PARAM=4) then GetParam back.
+        ubuf: mutable array[u8, 4] = zeroed
+        abi_store_u32((&ubuf[0]).cast[mutable void&], 0, 99)
+        assert sceSaveDataSetParam(mp, 4, (&ubuf[0]).cast[void&?], 4) == SAVE_DATA_OK
+        obuf: mutable array[u8, 4] = zeroed
+        gsize: mutable array[u8, 8] = zeroed
+        assert sceSaveDataGetParam(mp, 4, (&obuf[0]).cast[void&?], 4, (&gsize[0]).cast[void&?]) == SAVE_DATA_OK
+        assert abi_u32_at((&obuf[0]).cast[void&], 0) == 99
+        assert abi_u64_at((&gsize[0]).cast[void&], 0) == 4
+
+        # SetParam(TITLE=1) — a NUL-terminated guest string buffer.
+        tbuf: mutable array[u8, 32] = zeroed
+        t_src: static u8& = "ABI Title"
+        for i in 0..<runtime_strlen(t_src):
+            tbuf[i] <- t_src[i]
+        assert sceSaveDataSetParam(mp, 1, (&tbuf[0]).cast[void&?], 32) == SAVE_DATA_OK
+        tout: mutable array[u8, 64] = zeroed
+        tgsize: mutable array[u8, 8] = zeroed
+        assert sceSaveDataGetParam(mp, 1, (&tout[0]).cast[void&?], 64, (&tgsize[0]).cast[void&?]) == SAVE_DATA_OK
+        assert abi_u64_at((&tgsize[0]).cast[void&], 0) == 9
+        assert tout[0] == 'A'.u8()
+
+        # GetMountInfo (OrbisSaveDataMountInfo: blocks@0, freeBlocks@8).
+        info_buf: mutable array[u8, 48] = zeroed
+        assert sceSaveDataGetMountInfo(mp, (&info_buf[0]).cast[void&?]) == SAVE_DATA_OK
+        assert abi_u64_at((&info_buf[0]).cast[void&], 0) == 128
+
+        assert sceSaveDataUmount(mp) == SAVE_DATA_OK
+        # After umount the mount point no longer resolves.
+        assert sceSaveDataUmount(mp) != SAVE_DATA_OK
+
+        # sceSaveDataDelete removes the on-disk save dir (OrbisSaveDataDelete: dirName*@16).
+        del_buf: mutable array[u8, 64] = zeroed
+        abi_store_u64((&del_buf[0]).cast[mutable void&], 16, (&dirname[0]).uintptr().u64())
+        assert sceSaveDataDelete((&del_buf[0]).cast[void&?]) == SAVE_DATA_OK
+        # Deleting again reports NOT_FOUND (non-zero).
+        assert sceSaveDataDelete((&del_buf[0]).cast[void&?]) != SAVE_DATA_OK
+
+        assert sceSaveDataTerminate() == SAVE_DATA_OK

@@ -22,6 +22,7 @@ const SAVE_MOUNT_ROOT: static u8& = "/tmp/elisa_savedata/"
 struct SaveMount:
     in_use: mutable bool
     user_id: mutable int
+    mount_point: mutable static u8&?
     host_dir: mutable static u8&?
     sfo_path: mutable static u8&?
     blocks: mutable u64
@@ -84,6 +85,64 @@ def savedata_load_sfo(slot: usize) -> bool:
             ok <- true
     return ok
 
+# ---- mount points ("/savedataN", PS4 ABI key) ----
+
+# savedata_mount_point_for_slot builds the canonical mount-point string for a slot.
+def savedata_mount_point_for_slot(slot: usize) -> static u8&:
+    out: mutable static u8& = "/savedata0"
+    can Memory.Allocate, Abort.Panic:
+        out <- string_concat2("/savedata", savedata_usize_to_str(slot))
+    return out
+
+# savedata_usize_to_str renders a small usize as a decimal string (slots are 0..15).
+def savedata_usize_to_str(value: usize) -> static u8&:
+    if value == 0:
+        return "0"
+    # up to 20 decimal digits for a u64; build into a fixed buffer then copy.
+    digits: mutable array[u8, 24] = zeroed
+    n: mutable usize = value
+    count: mutable usize = 0
+    while n > 0:
+        digits[count] <- ('0'.u8() + (n % 10).u8())
+        n <- n / 10
+        count <- count + 1
+    out: mutable static u8& = "0"
+    can Memory.Allocate, Abort.Panic:
+        buf: mutable darray[u8] = []
+        # digits were produced least-significant first; reverse them.
+        for i in 0..<count:
+            buf.push(digits[count - 1 - i])
+        buf.push(0)
+        out <- (&buf[0]).cast[static u8&]
+    return out
+
+# savedata_find_by_mount_point returns the slot handle whose mount point equals `mp`,
+# or -1 if none is mounted there.
+def savedata_find_by_mount_point(mp: u8&?) -> int:
+    if mp == null:
+        return -1
+    needle: static u8& = mp.cast[static u8&]
+    for i in 0..<SAVE_MOUNT_MAX:
+        if g_save_mounts[i].in_use:
+            mpt: u8&? = g_save_mounts[i].mount_point
+            if mpt != null and savedata_cstr_eq(mpt.cast[static u8&], needle):
+                return i.int()
+    return -1
+
+# savedata_cstr_eq compares two NUL-terminated strings for equality.
+def savedata_cstr_eq(a: static u8&, b: static u8&) -> bool:
+    i: mutable usize = 0
+    while a[i] != 0 and b[i] != 0:
+        if a[i] != b[i]:
+            return false
+        i <- i + 1
+    return a[i] == b[i]
+
+def savedata_mount_point(handle: int) -> u8&?:
+    if not savedata_handle_valid(handle):
+        return null
+    return g_save_mounts[handle.usize()].mount_point
+
 # ---- mount / umount ----
 
 # savedata_mount creates (or reopens) the save directory `dirname` for `user_id`
@@ -104,16 +163,19 @@ def savedata_mount(user_id: int, dirname: u8&?, blocks: u64) -> int:
     si: usize = slot.usize()
     host_dir: mutable static u8&? = null
     sfo_path: mutable static u8&? = null
+    mount_point: mutable static u8&? = null
     can Memory.Allocate, Abort.Panic:
         _ = fs_make_directory(SAVE_MOUNT_ROOT)
         host_dir <- string_concat2(SAVE_MOUNT_ROOT, dirname.cast[static u8&])
         _ = fs_make_directory(host_dir.cast[static u8&])
         sfo_path <- string_concat2(host_dir.cast[static u8&], "/param.sfo")
-    if host_dir == null or sfo_path == null:
+        mount_point <- savedata_mount_point_for_slot(si)
+    if host_dir == null or sfo_path == null or mount_point == null:
         return SAVE_DATA_ERROR_INTERNAL.i32().int()
     g_save_mounts[si] <- zeroed
     g_save_mounts[si].in_use <- true
     g_save_mounts[si].user_id <- user_id
+    g_save_mounts[si].mount_point <- mount_point
     g_save_mounts[si].host_dir <- host_dir
     g_save_mounts[si].sfo_path <- sfo_path
     g_save_mounts[si].blocks <- blocks
@@ -139,6 +201,24 @@ def savedata_handle_valid(handle: int) -> bool:
     if handle.usize() >= SAVE_MOUNT_MAX:
         return false
     return g_save_mounts[handle.usize()].in_use
+
+# savedata_delete_dir removes the on-disk save directory `dirname` (and its param.sfo /
+# contents) for a not-currently-mounted save. Returns NOT_FOUND if it never existed.
+def savedata_delete_dir(dirname: u8&?) -> u32:
+    if not g_savedata_initialized:
+        return SAVE_DATA_ERROR_NOT_INITIALIZED
+    if dirname == null:
+        return SAVE_DATA_ERROR_PARAMETER
+    host_dir: mutable static u8&? = null
+    can Memory.Allocate, Abort.Panic:
+        host_dir <- string_concat2(SAVE_MOUNT_ROOT, dirname.cast[static u8&])
+    if host_dir == null:
+        return SAVE_DATA_ERROR_INTERNAL
+    if not fs_path_exists(host_dir.cast[static u8&]):
+        return SAVE_DATA_ERROR_NOT_FOUND
+    if fs_remove_tree(host_dir.cast[static u8&]):
+        return SAVE_DATA_ERROR_OK
+    return SAVE_DATA_ERROR_INTERNAL
 
 # ---- mount info ----
 
