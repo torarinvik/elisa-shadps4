@@ -155,10 +155,14 @@ def all_steps() -> list[Step]:
         compiler_test("core-libraries-signin-dialog-pure-tests", category="save-dialog-misc"),
         compiler_test("core-libraries-save-data-dialog-pure-tests", category="save-dialog-misc"),
         compiler_test("core-libraries-ime-dialog-parity-tests", category="save-dialog-misc"),
-        # playgo and save-data-parity still can't execute: playgo hits an umbrella/guest_exec link
-        # conflict, and save-data-parity needs a C test bridge for its c_savedata_test_* externs. They
-        # stay parse-only until that architectural work is done.
-        compiler_test_source("elisa_tests/core_libraries_save_data_parity_tests.elisa", category="save-dialog-misc"),
+        # save-data-parity now EXECUTES natively: the sceSaveData* entry points run on a
+        # dependency-free lifecycle guard (savedata_state.elisa) and the mount/param store runs on a
+        # host-backed native core (save_mount.elisa over common/sys_fs.elisa POSIX syscalls + PSF) —
+        # no C/C++ bridge. The native mount core itself is covered by save-data-native-mount-tests.
+        compiler_test("core-libraries-save-data-parity-tests", category="save-dialog-misc"),
+        compiler_test("save-data-native-mount-tests", category="save-dialog-misc"),
+        # playgo still can't execute: it hits an umbrella/guest_exec link conflict and stays
+        # parse-only until that architectural work is done.
         compiler_test_source("elisa_tests/core_libraries_playgo_pure_tests.elisa", category="save-dialog-misc"),
     ]
     if host_audio_backends_present():
@@ -970,7 +974,8 @@ def summarize_progress(
     lines.append(f"- current video/audio/input stage: graphics={len(queues['graphics_fallbacks'])} audio-input-service={len(queues['audio_input_service_fallbacks'])}")
     lines.append(f"- current save/dialog/misc fallback stage: save-dialog-misc={len(queues['save_dialog_misc_fallbacks'])}")
     lines.append("Save/Dialog/Misc parity test signals:")
-    lines.append(f"- save data parity tests: {'PASS' if step_passed(results, 'elisacore run elisa_tests/core_libraries_save_data_parity_tests.elisa') else 'FAIL'}")
+    lines.append(f"- save data parity tests: {'PASS' if step_passed(results, 'elisacore test core-libraries-save-data-parity-tests') else 'FAIL'}")
+    lines.append(f"- save data native mount tests: {'PASS' if step_passed(results, 'elisacore test save-data-native-mount-tests') else 'FAIL'}")
     lines.append(f"- save data dialog parity tests: {'PASS' if step_passed(results, 'elisacore test core-libraries-save-data-dialog-pure-tests') else 'FAIL'}")
     lines.append(f"- web browser dialog parity tests: {'PASS' if step_passed(results, 'elisacore test core-libraries-web-browser-dialog-pure-tests') else 'FAIL'}")
     lines.append(f"- signin dialog parity tests: {'PASS' if step_passed(results, 'elisacore test core-libraries-signin-dialog-pure-tests') else 'FAIL'}")

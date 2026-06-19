@@ -55,7 +55,8 @@ ELISA_FILES = [
     ROOT / "core/libraries/ime/ime.elisa",
     ROOT / "core/libraries/ime/ime_dialog.elisa",
     ROOT / "core/libraries/save_data/savedata.elisa",
-    ROOT / "core/libraries/save_data/savedata_ffi.elisa",
+    ROOT / "core/libraries/save_data/savedata_state.elisa",
+    ROOT / "core/libraries/save_data/save_mount.elisa",
     ROOT / "core/libraries/share_play/share_play.elisa",
     ROOT / "core/libraries/signin_dialog/signin_dialog.elisa",
     ROOT / "core/libraries/sysmodule/sysmodule_native.elisa",
@@ -65,7 +66,6 @@ ELISA_FILES = [
 
 BRIDGE_FILES = [
     ROOT / "core/libraries/libs_elisa_bridge.cpp",
-    ROOT / "core/libraries/save_data/savedata_elisa_bridge.cpp",
     ROOT / "core/libraries/sysmodule/sysmodule_elisa_bridge.cc",
     ROOT / "core/libraries/videoout/videoout_elisa_bridge.cpp",
 ]
@@ -122,15 +122,16 @@ INTERNAL_FILE_REQUIREMENTS: dict[str, list[str]] = {
         "core/libraries/ime/ime.elisa::ime_valid_text",
     ],
     "core/libraries/save_data/save_backup.cpp": [
-        "core/libraries/save_data/savedata.elisa::c_sceSaveDataMount2",
-        "core/libraries/save_data/savedata_elisa_bridge.cpp::SaveDataElisa_sceSaveDataMount2",
+        "core/libraries/save_data/savedata.elisa::sceSaveDataMount2",
+        "core/libraries/save_data/save_mount.elisa::savedata_mount",
     ],
     "core/libraries/save_data/save_instance.cpp": [
-        "core/libraries/save_data/savedata.elisa::c_sceSaveDataSetParam",
+        "core/libraries/save_data/savedata.elisa::sceSaveDataSetParam",
+        "core/libraries/save_data/save_mount.elisa::savedata_set_param_title",
     ],
     "core/libraries/save_data/save_memory.cpp": [
-        "core/libraries/save_data/savedata.elisa::c_sceSaveDataSetupSaveDataMemory",
-        "core/libraries/save_data/savedata.elisa::c_sceSaveDataSetSaveDataMemory",
+        "core/libraries/save_data/savedata.elisa::sceSaveDataSetupSaveDataMemory",
+        "core/libraries/save_data/savedata.elisa::sceSaveDataSetSaveDataMemory",
     ],
     "core/libraries/sysmodule/sysmodule_internal.cpp": [
         "core/libraries/sysmodule/sysmodule_native.elisa::c_sysmodule_load_module_internal",

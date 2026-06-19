@@ -3,9 +3,9 @@
 ## Summary
 
 - Total entries: `94`
-- MATCHED: `94`
+- MATCHED: `93`
 - MISMATCH_BEHAVIOR: `0`
-- MISSING_IN_ELISA: `0`
+- MISSING_IN_ELISA: `1`
 - UNTESTED_BEHAVIOR: `0`
 
 ## Entries
@@ -78,7 +78,7 @@
 | `sceSigninDialogTerminate` | `MATCHED` | `STUBBED_ORBIS_OK` | `STUBBED_ORBIS_OK` | elisa_tests/core_libraries_signin_dialog_pure_tests.elisa |
 | `sceSigninDialogUpdateStatus` | `MATCHED` | `OTHER` | `OTHER` | elisa_tests/core_libraries_signin_dialog_pure_tests.elisa |
 | `core/libraries/sysmodule/sysmodule_internal.cpp::internal` | `MATCHED` | `HOST_BACKED` | `HOST_BACKED` | - |
-| `core/libraries/videoout/driver.cpp::internal` | `MATCHED` | `HOST_BACKED` | `HOST_BACKED` | - |
+| `core/libraries/videoout/driver.cpp::internal` | `MISSING_IN_ELISA` | `HOST_BACKED` | `-` | - |
 | `sceVideoOutAddFlipEvent` | `MATCHED` | `HOST_BACKED` | `ERROR_GUARDED` | elisa_tests/core_libraries_videoout_ffi_bridge_tests.elisa |
 | `sceVideoOutAddVblankEvent` | `MATCHED` | `HOST_BACKED` | `ERROR_GUARDED` | elisa_tests/core_libraries_videoout_ffi_bridge_tests.elisa |
 | `sceVideoOutAdjustColor` | `MATCHED` | `HOST_BACKED` | `ERROR_GUARDED` | elisa_tests/core_libraries_videoout_ffi_bridge_tests.elisa |

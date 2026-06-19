@@ -1,78 +1,87 @@
-include "../core/libraries/kernel/lib_function_stub.elisa"
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# SaveData parity tests, fully NATIVE — no C/C++ bridge. The sceSaveData* entry
+# points (core/libraries/save_data/savedata.elisa) run on the dependency-free
+# lifecycle guard (savedata_state.elisa); the mount/param store runs on the
+# host-backed native core (save_mount.elisa over common/sys_fs.elisa + PSF).
+# This replaces the abandoned c_savedata_test_* / Libraries::SaveData::* path.
+
+include "../common/string_util.elisa"
+include "../common/types.elisa"
 include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../common/arch.elisa"
+include "../common/io_file.elisa"
+include "../core/file_format/binary.elisa"
+include "../core/file_format/psf.elisa"
+include "../common/sys_fs.elisa"
+include "../core/libraries/kernel/lib_function_stub.elisa"
+include "../core/libraries/save_data/savedata_error.elisa"
+include "../core/libraries/save_data/savedata_state.elisa"
+include "../core/libraries/save_data/save_mount.elisa"
 include "../core/libraries/save_data/savedata.elisa"
-include "../core/libraries/save_data/savedata_bridge_test_ffi.elisa"
 
 const SAVE_DATA_OK: int = 0
-const SAVE_DATA_PARAMETER: i32 = -2137063424  # 0x809F0000
-const SAVE_DATA_MOUNT_MODE_RDWR_CREATE: u32 = 0x2 | 0x4
+const SAVE_DATA_PARAMETER: int = -2137063424  # 0x809F0000 as i32
 
+# The sceSaveData* entry points guard on initialization exactly like shadPS4.
 @test
 def save_data_preinit_error_contracts() -> void:
     can Abort.Panic:
+        # Force a known un-initialized state for this test.
+        savedata_core_set_terminated()
         assert sceSaveDataClearProgress() != SAVE_DATA_OK
         assert sceSaveDataGetProgress(null) != SAVE_DATA_OK
         assert sceSaveDataTerminate() != SAVE_DATA_OK
 
+# The ~stub entry points return OK once initialized (matching shadPS4).
 @test
 def save_data_stubbed_ok_contracts() -> void:
     can Abort.Panic:
+        assert sceSaveDataInitialize(null) == SAVE_DATA_OK
         assert sceSaveDataDebug() == SAVE_DATA_OK
         assert sceSaveDataUpload() == SAVE_DATA_OK
         assert sceSaveDataDownload() == SAVE_DATA_OK
         assert sceSaveDataRegisterEventCallback() == SAVE_DATA_OK
         assert sceSaveDataUnregisterEventCallback() == SAVE_DATA_OK
         assert Func_02E4C4D201716422() == SAVE_DATA_OK
+        assert sceSaveDataTerminate() == SAVE_DATA_OK
 
+# GetProgress: NULL output pointer is a PARAMETER error; a real one is OK.
 @test
-def save_data_mount_param_umount_contracts() -> void:
+def save_data_get_progress_contracts() -> void:
     can Abort.Panic:
         assert sceSaveDataInitialize(null) == SAVE_DATA_OK
+        progress: mutable i64 = 0
+        assert sceSaveDataGetProgress((&progress).cast[void&?]) == SAVE_DATA_OK
+        assert sceSaveDataGetProgress(null) == SAVE_DATA_PARAMETER
+        assert sceSaveDataTerminate() == SAVE_DATA_OK
 
-        mount_point_buf: mutable array[u8, 64] = zeroed
-        mount_rc: int = c_savedata_test_mount2(1, "ELISA_PARITY_SLOT", SAVE_DATA_MOUNT_MODE_RDWR_CREATE, 128, mount_point_buf[0], 64)
-        assert mount_rc == SAVE_DATA_OK
+# Native mount/param/umount round-trip through the host-backed core.
+@test
+def save_data_mount_param_umount_contracts() -> void:
+    can Memory.Allocate, Abort.Panic:
+        assert sceSaveDataInitialize(null) == SAVE_DATA_OK
+
+        handle: int = savedata_mount(1, "ELISA_PARITY_SLOT", 128)
+        assert handle >= 0
 
         blocks: mutable u64 = 0
         free_blocks: mutable u64 = 0
-        assert c_savedata_test_get_mount_info(mount_point_buf[0], blocks, free_blocks) == SAVE_DATA_OK
-        assert blocks > 0
+        assert savedata_get_mount_info(handle, blocks, free_blocks) == SAVE_DATA_ERROR_OK
+        assert blocks == 128
 
-        assert c_savedata_test_set_param_title(mount_point_buf[0], "Elisa SaveData Parity") == SAVE_DATA_OK
-
+        assert savedata_set_param_title(handle, "Elisa SaveData Parity") == SAVE_DATA_ERROR_OK
         title_buf: mutable array[u8, 128] = zeroed
         got_size: mutable u64 = 0
-        assert c_savedata_test_get_param_title(mount_point_buf[0], title_buf[0], 128, got_size) == SAVE_DATA_OK
+        assert savedata_get_param_title(handle, title_buf[0], 128, got_size) == SAVE_DATA_ERROR_OK
         assert got_size > 0
 
-        assert c_savedata_test_set_param_user(mount_point_buf[0], 77) == SAVE_DATA_OK
+        assert savedata_set_param_user(handle, 77) == SAVE_DATA_ERROR_OK
         user_param: mutable u32 = 0
         user_size: mutable u64 = 0
-        assert c_savedata_test_get_param_user(mount_point_buf[0], user_param, user_size) == SAVE_DATA_OK
+        assert savedata_get_param_user(handle, user_param, user_size) == SAVE_DATA_ERROR_OK
         assert user_param == 77
 
-        assert c_savedata_test_umount(mount_point_buf[0]) == SAVE_DATA_OK
+        assert savedata_umount(handle) == SAVE_DATA_ERROR_OK
         assert sceSaveDataTerminate() == SAVE_DATA_OK
-
-def main() -> int:
-    if sceSaveDataInitialize(null) != SAVE_DATA_OK:
-        return 1
-
-    progress: mutable i64 = 0
-    if sceSaveDataGetProgress((&progress).cast[void&?]) != SAVE_DATA_OK:
-        return 2
-    if sceSaveDataGetProgress(null) != SAVE_DATA_PARAMETER:
-        return 3
-
-    mount_point_buf: mutable array[u8, 64] = zeroed
-    if c_savedata_test_mount2(1, "ELISA_PARITY_MAIN", SAVE_DATA_MOUNT_MODE_RDWR_CREATE, 128, mount_point_buf[0], 64) != SAVE_DATA_OK:
-        return 4
-    if c_savedata_test_set_param_user(mount_point_buf[0], 123) != SAVE_DATA_OK:
-        return 5
-    if c_savedata_test_umount(mount_point_buf[0]) != SAVE_DATA_OK:
-        return 6
-
-    if sceSaveDataTerminate() != SAVE_DATA_OK:
-        return 7
-
-    return 0
