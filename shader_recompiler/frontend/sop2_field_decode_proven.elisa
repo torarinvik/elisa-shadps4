@@ -1,0 +1,45 @@
+# Proof-of-concept: a GCN SOP2 (Scalar ALU, 2 operands) field decoder whose extracted fields carry
+# REFINEMENT contracts. Each field's bound is proven statically by the Elisa verifier (no per-decode
+# runtime check), and the decoded struct carries those bounds in its field types so downstream uses
+# (e.g. a register index) inherit them.
+#
+# SOP2 is a 32-bit encoding:
+#   bits [7:0]   SSRC0   operand selector (0-255)
+#   bits [15:8]  SSRC1   operand selector (0-255)
+#   bits [22:16] SDST    scalar dest SGPR (0-127)
+#   bits [29:23] OP      opcode within the SOP2 map (0-127)
+#   bits [31:30] = 0b10  (SOP2 encoding tag)
+
+law InRange(self: u32, lo: u32, hi: u32) = self >= lo and self <= hi
+
+type Src8    = u32 is InRange[0, 255]   # 8-bit operand selector
+type SgprIdx = u32 is InRange[0, 127]   # scalar GPR index
+type Sop2Op  = u32 is InRange[0, 127]   # SOP2 opcode
+
+def sop2_ssrc0(inst: u32) -> u32 is InRange[0, 255]:
+    return inst & 0xff
+
+def sop2_ssrc1(inst: u32) -> u32 is InRange[0, 255]:
+    return (inst >> 8) & 0xff
+
+def sop2_sdst(inst: u32) -> u32 is InRange[0, 127]:
+    return (inst >> 16) & 0x7f
+
+def sop2_op(inst: u32) -> u32 is InRange[0, 127]:
+    return (inst >> 23) & 0x7f
+
+# The decoded instruction carries the field invariants in its field types.
+struct Sop2Inst:
+    op: mutable u32 is InRange[0, 127]
+    sdst: mutable u32 is InRange[0, 127]
+    ssrc0: mutable u32 is InRange[0, 255]
+    ssrc1: mutable u32 is InRange[0, 255]
+
+# decode composes the proven extractors into the refined struct (no runtime checks).
+def decode_sop2(inst: u32) -> Sop2Inst:
+    return Sop2Inst(sop2_op(inst), sop2_sdst(inst), sop2_ssrc0(inst), sop2_ssrc1(inst))
+
+# a destination-register accessor whose index must be a valid SgprIdx — satisfied for free by the
+# decoded sdst field's refinement.
+def sop2_dest_index(d: Sop2Inst&) -> u32 is InRange[0, 127]:
+    return d.sdst
