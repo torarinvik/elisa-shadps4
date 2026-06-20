@@ -1,0 +1,55 @@
+# Proof-of-concept: a GCN VOP2 (Vector ALU, 2 operands) field decoder whose extracted fields carry
+# REFINEMENT contracts, plus a 256-entry VGPR register file indexed by the decoded fields with NO
+# runtime bounds check. Every index proof is discharged from the field/return/param refinement — the
+# decoder is the worked example of the refinement -> array-bounds bridge.
+#
+# VOP2 is a 32-bit encoding:
+#   bits [8:0]    SRC0   src0 operand selector (0-511: VGPR / SGPR / inline const)
+#   bits [16:9]   VSRC1  src1 VGPR (0-255)
+#   bits [24:17]  VDST   dest VGPR (0-255)
+#   bits [30:25]  OP     opcode within the VOP2 map (0-63)
+#   bit  [31]   = 0   (VOP2 encoding tag)
+
+law InRange(self: u32, lo: u32, hi: u32) = self >= lo and self <= hi
+
+type Src9    = u32 is InRange[0, 511]   # 9-bit src0 selector
+type VgprIdx = u32 is InRange[0, 255]   # vector GPR index
+type Vop2Op  = u32 is InRange[0, 63]    # VOP2 opcode
+
+def vop2_src0(inst: u32) -> u32 is InRange[0, 511]:
+    return inst & 0x1ff
+
+def vop2_vsrc1(inst: u32) -> u32 is InRange[0, 255]:
+    return (inst >> 9) & 0xff
+
+def vop2_vdst(inst: u32) -> u32 is InRange[0, 255]:
+    return (inst >> 17) & 0xff
+
+def vop2_op(inst: u32) -> u32 is InRange[0, 63]:
+    return (inst >> 25) & 0x3f
+
+# The decoded instruction carries the field invariants in its field types.
+struct Vop2Inst:
+    op: mutable u32 is InRange[0, 63]
+    vdst: mutable u32 is InRange[0, 255]
+    vsrc1: mutable u32 is InRange[0, 255]
+    src0: mutable u32 is InRange[0, 511]
+
+def decode_vop2(inst: u32) -> Vop2Inst:
+    return Vop2Inst(vop2_op(inst), vop2_vdst(inst), vop2_vsrc1(inst), vop2_src0(inst))
+
+# The 256-entry vector GPR file (one lane). A decoded VGPR index is in [0,255] by its refinement, so
+# reading/writing it needs NO runtime bounds check.
+def read_vsrc1(d: Vop2Inst&, vgprs: array[u32, 256]&) -> u32:
+    return vgprs[d.vsrc1]                 # field : InRange[0,255] -> in bounds, no check
+
+def write_vdst(d: Vop2Inst&, vgprs: mutable array[u32, 256]&, value: u32):
+    vgprs[d.vdst] <- value                # field : InRange[0,255] -> in bounds, no check
+
+# A 64-bit VOP2 op writes a VGPR PAIR {vdst, vdst+1}. The pair index must be EVEN-aligned and <= 254 so
+# vdst+1 stays in range — exactly the hardware alignment constraint. With the index narrowed to
+# InRange[0,254], BOTH `vgprs[idx]` and the AFFINE `vgprs[idx+1]` discharge with no check (the bridge
+# propagates the [0,254] interval to [1,255], still within array[u32,256]).
+def write_vdst_pair(idx: u32 is InRange[0, 254], vgprs: mutable array[u32, 256]&, lo: u32, hi: u32):
+    vgprs[idx] <- lo                      # idx     in [0,254] -> in bounds
+    vgprs[idx + 1] <- hi                  # idx+1   in [1,255] -> in bounds (affine propagation)
