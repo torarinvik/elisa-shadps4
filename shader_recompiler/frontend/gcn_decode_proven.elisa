@@ -1,0 +1,75 @@
+include "./std_decode.elisa"
+
+# A typed instruction-format firewall for the AMD GCN shader ISA, built on elisacore_std/decode
+# (docs/94). Raw 32-bit GCN words enter; the field accessors hand back values carrying PROVEN range
+# refinements, so the SGPR/VGPR register files index with NO runtime bounds check and downstream
+# code is range-/format-safe. Every refinement here discharges statically under -strict.
+#
+# This subsumes the narrow sop2_field_decode_proven / vop2_field_decode_proven POCs: the duplicated
+# `law InRange` and hand-rolled extractors are gone — the shared module provides `bits5..bits9`,
+# `sx16`, and the `InRange`/`SBounded` laws — and coverage extends to the scalar/vector formats the
+# main decoder handles. Field bit-ranges match decode.elisa's `_bit_extract_u32` calls exactly.
+
+# GCN operand/index refinement types, named on the shared module's laws.
+type SgprIdx = u32 is InRange[0, 127]    # 7-bit scalar GPR index (SGPR0..127)
+type Src8    = u32 is InRange[0, 255]    # 8-bit scalar operand selector
+type Src9    = u32 is InRange[0, 511]    # 9-bit vector operand selector
+type Vgpr8   = u32 is InRange[0, 255]    # 8-bit vector GPR index
+type Op5     = u32 is InRange[0, 31]     # 5-bit opcode (SOPK/SMRD)
+type Op6     = u32 is InRange[0, 63]     # 6-bit opcode (VOP2)
+type Op7     = u32 is InRange[0, 127]    # 7-bit opcode (SOP2)
+type Op8     = u32 is InRange[0, 255]    # 8-bit opcode (SOP1/VOPC)
+
+# --- SOP2 (Scalar ALU, 2 operands): ssrc0[7:0], ssrc1[15:8], sdst[22:16], op[29:23] -------------
+struct Sop2Inst:
+    op: mutable u32 is InRange[0, 127]
+    sdst: mutable u32 is InRange[0, 127]
+    ssrc0: mutable u32 is InRange[0, 255]
+    ssrc1: mutable u32 is InRange[0, 255]
+
+def decode_sop2(inst: u32) -> Sop2Inst:
+    return Sop2Inst(bits7(inst, 23), bits7(inst, 16), bits8(inst, 0), bits8(inst, 8))
+
+# --- SOP1 (Scalar ALU, 1 operand): ssrc0[7:0], op[15:8], sdst[22:16] ----------------------------
+struct Sop1Inst:
+    op: mutable u32 is InRange[0, 255]
+    sdst: mutable u32 is InRange[0, 127]
+    ssrc0: mutable u32 is InRange[0, 255]
+
+def decode_sop1(inst: u32) -> Sop1Inst:
+    return Sop1Inst(bits8(inst, 8), bits7(inst, 16), bits8(inst, 0))
+
+# --- SOPK (Scalar, 16-bit immediate): simm[15:0] (sign-extended), sdst[22:16], op[27:23] --------
+struct SopkInst:
+    op: mutable u32 is InRange[0, 31]
+    sdst: mutable u32 is InRange[0, 127]
+    simm: mutable i32 is SBounded[-32768, 32767]
+
+def decode_sopk(inst: u32) -> SopkInst:
+    return SopkInst(bits5(inst, 23), bits7(inst, 16), sx16(inst, 0))
+
+# --- VOP2 (Vector ALU, 2 operands): src0[8:0], vsrc1[16:9], vdst[24:17], op[30:25] --------------
+struct Vop2Inst:
+    op: mutable u32 is InRange[0, 63]
+    vdst: mutable u32 is InRange[0, 255]
+    src0: mutable u32 is InRange[0, 511]
+    vsrc1: mutable u32 is InRange[0, 255]
+
+def decode_vop2(inst: u32) -> Vop2Inst:
+    return Vop2Inst(bits6(inst, 25), bits8(inst, 17), bits9(inst, 0), bits8(inst, 9))
+
+# --- SMRD (Scalar memory read): sbase[14:9], sdst[21:15], op[26:22] -----------------------------
+struct SmrdInst:
+    op: mutable u32 is InRange[0, 31]
+    sdst: mutable u32 is InRange[0, 127]
+    sbase: mutable u32 is InRange[0, 63]
+
+def decode_smrd(inst: u32) -> SmrdInst:
+    return SmrdInst(bits5(inst, 22), bits7(inst, 15), bits6(inst, 9))
+
+# --- Register-file accessors: a decoded SGPR/VGPR index is in range BY ITS REFINEMENT, so the
+#     register file indexes with no runtime bounds check (the verifier discharges idx < N). ---------
+def read_sgpr(d: Sop2Inst&, sgprs: array[u32, 128]&) -> u32:
+    return sgprs[d.sdst]                 # d.sdst : InRange[0,127] -> in bounds, no check
+def write_vgpr(d: Vop2Inst&, vgprs: mutable array[u32, 256]&, value: u32) -> void:
+    vgprs[d.vdst] <- value               # d.vdst : InRange[0,255] -> in bounds, no check
