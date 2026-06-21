@@ -13,6 +13,39 @@ enum WindowSystemType:
     Wayland
     Metal
 
+# --- Window lifecycle typestate --------------------------------------------------------------
+# The SDL window has a strict lifecycle: it is constructed (Uninitialized), SDL is brought up and
+# the backing handle created (Created), the window is presented (Shown), and finally torn down
+# (Destroyed). Operating on a window in the wrong state — e.g. presenting before the handle exists,
+# or using a window after it is destroyed — is a use-after-free / null-handle class of bug in the
+# C++ original.
+#
+# We encode that lifecycle as a TYPESTATE. The canonical state lives in the WindowSDL.lifecycle
+# enum (runtime/documentation), and a parallel scalar STATE WITNESS is threaded through the
+# lifecycle functions so the refinement prover statically rejects out-of-order transitions under
+# -strict. The witness encodes the same four states as small integers.
+enum WindowLifecycle:
+    Uninitialized
+    Created
+    Shown
+    Destroyed
+
+# Scalar state-witness encoding (kept in lockstep with WindowLifecycle ordinals). The refinement
+# prover tracks scalar refinement facts through assignment and `is`-narrowing, which is what makes
+# the transitions statically checkable.
+const WINDOW_STATE_UNINITIALIZED: i64 = 0
+const WINDOW_STATE_CREATED: i64 = 1
+const WINDOW_STATE_SHOWN: i64 = 2
+const WINDOW_STATE_DESTROYED: i64 = 3
+
+# A window in any *live* state (Created or Shown) — the precondition for presenting / querying /
+# requesting input. Destroyed and Uninitialized windows fail this law, so any lifecycle function
+# that requires `is WindowLive` cannot be reached with a torn-down or not-yet-created handle.
+law WindowLive(self: i64) = self == WINDOW_STATE_CREATED or self == WINDOW_STATE_SHOWN
+
+# The window has been created (handle exists): the precondition for the Show transition.
+law WindowCreated(self: i64) = self == WINDOW_STATE_CREATED
+
 struct WindowSystemInfo:
     display_connection: mutable uintptr
     render_surface: mutable uintptr
@@ -28,6 +61,7 @@ struct WindowSDL:
     keyboard_grab: mutable int
     window_info: mutable WindowSystemInfo
     window: mutable heap void&?
+    lifecycle: mutable WindowLifecycle
 
 # Verbatim of the SDL-only core of WindowSDL::WindowSDL — sets the app-name hint, brings up the
 # video/audio subsystems, then creates the window through the SDL3 properties API. The platform
@@ -63,13 +97,71 @@ def WindowSDL_New(width: s32, height: s32, window_title: static u8&) -> WindowSD
         true,
         0,
         WindowSystemInfo(0.uintptr(), 0.uintptr(), 1.0, WindowSystemType.Headless),
-        null
+        null,
+        WindowLifecycle.Uninitialized
     )
 
 # Bring up SDL and create the backing window for an already-constructed WindowSDL. Verbatim of
 # the SDL-only body of WindowSDL::WindowSDL; call once from the emulator entrypoint.
 def WindowSDL_InitSDL(self: mutable WindowSDL&) -> void:
     self.window <- WindowSDL_CreateNativeWindow(self.width, self.height, self.title)
+    self.lifecycle <- WindowLifecycle.Created
+
+# --- Typestate transitions over the scalar state witness -------------------------------------
+# These functions are the verifiable surface of the lifecycle. Each consumes the current scalar
+# state witness, requires the transition's precondition as a refinement, and returns the next
+# state witness. Threading the witness (rather than only mutating the struct) is what gives the
+# refinement prover the scalar facts it tracks across assignment and `is`-narrowing — the struct
+# field is updated in lockstep for runtime/debug visibility.
+
+# Uninitialized -> Created. Brings up SDL and creates the backing handle for `self`, then yields
+# the Created witness. (Mirrors WindowSDL_InitSDL; callers that thread the witness use this.)
+def WindowSDL_TransitionCreate(self: mutable WindowSDL&) -> i64 is WindowCreated:
+    WindowSDL_InitSDL(self)
+    return WINDOW_STATE_CREATED
+
+# Created -> Shown. Requires a *created* window: `state` must satisfy WindowCreated, so this cannot
+# be reached from Uninitialized or Destroyed. Returns the Shown witness.
+def WindowSDL_TransitionShow(self: mutable WindowSDL&, state: i64 is WindowCreated) -> i64 is WindowLive:
+    self.is_shown <- true
+    self.lifecycle <- WindowLifecycle.Shown
+    return WINDOW_STATE_SHOWN
+
+# (Created|Shown) -> Destroyed. Requires a *live* window via WindowLive, so a window can only be
+# destroyed once and never from Uninitialized. Returns the Destroyed witness, which satisfies
+# neither WindowLive nor WindowCreated — any later transition/use is then a static error.
+def WindowSDL_TransitionDestroy(self: mutable WindowSDL&, state: i64 is WindowLive) -> i64:
+    self.is_open <- false
+    self.is_shown <- false
+    self.lifecycle <- WindowLifecycle.Destroyed
+    return WINDOW_STATE_DESTROYED
+
+# A use-site that demands a live window. Presenting/querying a destroyed or never-created window is
+# rejected at the call boundary by the WindowLive refinement.
+def WindowSDL_RequireLive(self: WindowSDL&, state: i64 is WindowLive) -> void:
+    _ = self
+    _ = state
+
+# Legal lifecycle, statically proven under -strict: Uninitialized -> Created -> Shown -> use ->
+# Destroy. Each `is`-guard narrows the scalar witness so the next transition's precondition
+# (WindowCreated for Show, WindowLive for use/destroy) is discharged statically — no runtime check
+# is inserted along this path.
+def WindowSDL_LifecycleDemo(self: mutable WindowSDL&) -> void:
+    st_created: i64 = WindowSDL_TransitionCreate(self)
+    if st_created is WindowCreated:
+        st_shown: i64 = WindowSDL_TransitionShow(self, st_created)
+        if st_shown is WindowLive:
+            WindowSDL_RequireLive(self, st_shown)
+            st_dead: i64 = WindowSDL_TransitionDestroy(self, st_shown)
+            _ = st_dead
+
+# Use-after-destroy is a STATIC ERROR under -strict. Passing the destroyed state witness
+# (WINDOW_STATE_DESTROYED == 3) to a use-site that requires `is WindowLive` is rejected at compile
+# time: `refinement "WindowLive" is violated: argument 1 does not satisfy it`. Uncomment the body
+# line below to see the error — it does not compile.
+def WindowSDL_IllegalUseAfterDestroy(self: WindowSDL&) -> void:
+    _ = self
+    # WindowSDL_RequireLive(self, WINDOW_STATE_DESTROYED)   # <-- compile error under -strict
 
 def WindowSDL_GetSDLWindow(self: WindowSDL&) -> mutable heap void&?:
     return self.window

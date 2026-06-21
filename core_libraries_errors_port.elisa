@@ -44,3 +44,85 @@ include "./core/libraries/videodec/videodec_error.elisa"
 include "./core/libraries/videoout/videoout_error.elisa"
 include "./core/libraries/vr_tracker/vr_tracker_error.elisa"
 include "./core/libraries/zlib/zlib_error.elisa"
+
+# ----------------------------------------------------------------------------
+# Typed-error dogfood slice (docs/101 error unions + error-set polymorphism).
+#
+# The PS4 ABI represents every failure as a negative i32 code returned in-band
+# (ORBIS_*_ERROR_*). That is the surface the emulator MUST present at the
+# library boundary. Internally, however, we can model the failure paths as
+# Elisa typed errors so the propagated error set is part of each function's
+# type, dropped failures are a compile error (must-consume), and the
+# int<->error translation happens exactly once at the boundary shim.
+#
+# This slice mirrors the real sceAppContent* validators (PARAMETER / NOT_FOUND
+# / BUSY / DRM_NO_ENTITLEMENT) from app_content.elisa.
+# ----------------------------------------------------------------------------
+
+error AppContentError:
+    Parameter
+    NotFound
+    Busy
+
+error DrmError:
+    NoEntitlement
+
+# Canonical ABI codes (mirrors core/libraries/app_content/app_content_error.elisa).
+const ERR_APPCONTENT_PARAMETER: i32 = -2133262335        # 0x80D90001
+const ERR_APPCONTENT_BUSY: i32 = -2133262334             # 0x80D90002
+const ERR_APPCONTENT_NOT_FOUND: i32 = -2133262333        # 0x80D90003
+const ERR_APPCONTENT_DRM_NO_ENTITLEMENT: i32 = -2133262332  # 0x80D90004
+
+# Validators raise typed errors instead of returning an int sentinel that a
+# caller could forget to check. The error set is in the signature.
+def appcontent_check_param_id(param_id: u32) -> u32 error[AppContentError]:
+    if param_id > 4:
+        raise AppContentError.Parameter
+    return param_id
+
+def appcontent_lookup_addcont(service_label: u32) -> u32 error[AppContentError]:
+    if service_label == 0:
+        raise AppContentError.NotFound
+    return try appcontent_check_param_id(service_label)
+
+def appcontent_require_entitlement(service_label: u32) -> u32 error[DrmError]:
+    if service_label == 0:
+        raise DrmError.NoEntitlement
+    return service_label
+
+# A function generic over WHICH failure path runs propagates the JOIN of both
+# callees' error sets -- the union AppContentError|DrmError is inferred into the
+# return type, order-independent. Forgetting to handle either is a type error.
+def appcontent_mount(service_label: u32) -> u32 error[AppContentError, DrmError]:
+    checked: u32 = try appcontent_lookup_addcont(service_label)
+    return try appcontent_require_entitlement(checked)
+
+# Boundary shims: this is the ONLY place the typed error collapses back to the
+# in-band ORBIS i32 code the PS4 ABI requires. The `try EXPR else FALLBACK` form
+# is the only error-union handling surface that currently parses (see the
+# FRICTION note below): per-variant discrimination via `match`/`catch` does not
+# yet work, so these shims fold any failure to a single representative code.
+# The must-consume rule still guarantees the result cannot be silently dropped.
+def sce_app_content_check_param_id(param_id: u32) -> i32:
+    ok_value: u32 = try appcontent_check_param_id(param_id) else 0xFFFFFFFF
+    if ok_value == 0xFFFFFFFF:
+        return ERR_APPCONTENT_PARAMETER
+    return 0
+
+def sce_app_content_mount(service_label: u32) -> i32:
+    ok_value: u32 = try appcontent_mount(service_label) else 0xFFFFFFFF
+    if ok_value == 0xFFFFFFFF:
+        return ERR_APPCONTENT_NOT_FOUND
+    return 0
+
+# FRICTION (docs/101 dogfood, reported upstream):
+#   1. error-set polymorphism via a bare type param -- `def f[R](..) -> T error[R]`
+#      with the set inferred from the body's `try` calls -- is NOT inferred:
+#      "unknown error set or variant R". Only concrete sets / explicit unions work.
+#   2. `match result:` rejects an error-union value ("got u32 | AppContentError")
+#      despite the diagnostic claiming error sets are matchable.
+#   3. `catch EXPR:` block (with `ok v:` / `Variant:` arms) does not parse at all,
+#      even though `catch` is a reserved keyword. So there is NO working surface
+#      form for per-variant discrimination of an error union -- only `try` (propagate)
+#      and `try .. else` (collapse-to-fallback, which loses the variant identity).
+#      This blocks mapping each typed variant to its distinct ORBIS_*_ERROR_* code.
