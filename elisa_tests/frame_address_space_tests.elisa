@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Dogfood for the interprocedural frame system (`changes`): a guest unmap/protect touches
+# only the range-tracking list and PRESERVES the entire reservation layout. The callee's
+# `changes self.mapped_ranges` frame lets a caller keep facts about the bookkeeping fields
+# (backing_fd, user_base, reservation sizes) across the call WITHOUT re-deriving them —
+# the modular-composition property that makes verified subsystems scale.
+
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../common/types.elisa"
+include "../core/address_space.elisa"
+
+# A caller asserts a fact about a field OUTSIDE the callee's `changes` set, calls the
+# frame-bounded AddressSpace_Unmap, and the fact survives the call. Proven statically:
+# AddressSpace_Unmap changes only self.mapped_ranges, so self.backing_fd is untouched.
+def unmap_preserves_backing_fd(self: mutable AddressSpace&, va: VAddr, sz: u64, fd: int) -> void:
+    requires self.backing_fd == fd
+    ensure self.backing_fd == fd
+    AddressSpace_Unmap(self, va, sz)
+
+# Same for AddressSpace_Protect over a different preserved field (the user reservation base).
+def protect_preserves_user_base(self: mutable AddressSpace&, va: VAddr, sz: u64, p: MemoryPermission, ub: VAddr) -> void:
+    requires self.user_base == ub
+    ensure self.user_base == ub
+    AddressSpace_Protect(self, va, sz, p)
+
+@test
+def frame_address_space_contracts_compile() -> void:
+    # The proof is static (the two functions above discharge at compile time under -strict);
+    # this @test just anchors the file as a runnable target.
+    can Abort.Panic:
+        if 1 != 1:
+            panic("unreachable")
