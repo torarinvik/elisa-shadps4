@@ -12,6 +12,49 @@ def km_check(condition: bool, message: static u8&) -> void:
         if not condition:
             panic(message)
 
+def km_ord_laws_region_key(a: PhysicalMemoryAreaBaseKey, b: PhysicalMemoryAreaBaseKey, c: PhysicalMemoryAreaBaseKey) -> bool:
+    total: bool = a.le(b) or b.le(a)
+    antisym: mutable bool = true
+    if a.le(b) and b.le(a):
+        antisym <- a.base == b.base
+    transitive: mutable bool = true
+    if a.le(b) and b.le(c):
+        transitive <- a.le(c)
+    return total and antisym and transitive
+
+def km_ord_laws_module_key(a: ModuleBaseKey, b: ModuleBaseKey, c: ModuleBaseKey) -> bool:
+    total: bool = a.le(b) or b.le(a)
+    antisym: mutable bool = true
+    if a.le(b) and b.le(a):
+        antisym <- a.base == b.base
+    transitive: mutable bool = true
+    if a.le(b) and b.le(c):
+        transitive <- a.le(c)
+    return total and antisym and transitive
+
+@test
+def kernel_memory_ord_base_key_laws_and_sorted_invariants() -> void:
+    can Abort.Panic, Segment.Host, Unsafe.SegmentMutation, Memory.Allocate:
+        km_check(km_ord_laws_region_key(PhysicalMemoryAreaBaseKey(0.uintptr()), PhysicalMemoryAreaBaseKey(0x1000.uintptr()), PhysicalMemoryAreaBaseKey(0x2000.uintptr())), "region base-key Ord laws should hold")
+        km_check(km_ord_laws_region_key(PhysicalMemoryAreaBaseKey(0x2000.uintptr()), PhysicalMemoryAreaBaseKey(0x1000.uintptr()), PhysicalMemoryAreaBaseKey(0x1000.uintptr())), "region base-key Ord laws should hold for equal tail")
+        km_check(km_ord_laws_module_key(ModuleBaseKey(0x800000000.uintptr()), ModuleBaseKey(0x801000000.uintptr()), ModuleBaseKey(0x802000000.uintptr())), "module base-key Ord laws should hold")
+
+        Memory_Reset()
+        mem: mutable MemoryManager& = Memory_Instance()
+        MemoryManager_SetupMemoryRegions(mem, ORBIS_KERNEL_FLEXIBLE_MEMORY_SIZE, true, true)
+        km_check(PhysicalMemoryArea_BaseKeysSorted(mem.dmem_areas), "initial dmem area table should be sorted")
+        MemoryManager_InsertDmemArea(mem, 1, PhysicalMemoryArea(0x1000.uintptr(), 0x1000, 0, PhysicalMemoryType_Free))
+        km_check(PhysicalMemoryArea_BaseKeysSorted(mem.dmem_areas), "inserted dmem area table should remain sorted")
+
+        linker: Linker = Linker_New()
+        km_check(Module_BaseKeysSorted(linker.modules), "empty module table should be sorted")
+        first: Module = Module_New("a.prx", "a.prx", 0x800000000.uintptr(), true)
+        second: Module = Module_New("b.prx", "b.prx", 0x801000000.uintptr(), true)
+        modules: mutable darray[Module] = []
+        modules.push(first)
+        modules.push(second)
+        km_check(Module_BaseKeysSorted(modules), "module table ordered by base should be sorted")
+
 @test
 def kernel_memory_mmap_protect_unmap_stateful_contracts() -> void:
     can Abort.Panic, Segment.Host, Unsafe.SegmentMutation:

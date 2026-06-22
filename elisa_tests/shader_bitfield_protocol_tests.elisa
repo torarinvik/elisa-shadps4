@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../shader_recompiler/frontend/gcn_decode_proven.elisa"
+include "../video_core/amdgpu/pm4_cmds.elisa"
+
+@test
+def shader_bitfield_refined_opcode_tables() -> void:
+    can Abort.Panic:
+        sop2_table: mutable u32[128] = zeroed
+        vop2_table: mutable u32[64] = zeroed
+        sop2_table[5] <- 1005
+        vop2_table[37] <- 2037
+
+        sop2_word: u32 = 5 << 23
+        vop2_word: u32 = 37 << 25
+        sop2: Sop2Inst = decode_sop2(sop2_word)
+        vop2: Vop2Inst = decode_vop2(vop2_word)
+
+        assert select_sop2_handler(sop2.op, sop2_table) == 1005
+        assert select_sop2_handler_from_field(sop2_word, sop2_table) == 1005
+        assert select_vop2_handler(vop2.op, vop2_table) == 2037
+
+@test
+def shader_bitfield_raw_opcode_keeps_guard() -> void:
+    can Abort.Panic:
+        table: mutable u32[128] = zeroed
+        table[127] <- 77
+
+        in_range_word: u32 = 127 << 23
+        out_of_range_word: u32 = 255 << 23
+
+        assert raw_opcode_table_lookup(in_range_word, table) == 77
+        assert raw_opcode_table_lookup(out_of_range_word, table) == 0
+
+@test
+def pm4_bitfield_header_extractors_are_refined() -> void:
+    can Abort.Panic:
+        header: u32 = PM4Type3Header_Pack(0x42, 0x1234, PM4ShaderType_ShaderCompute, PM4Predicate_PredEnable)
+
+        assert PM4Header_Type(header) == 3
+        assert PM4Type3Header_Type(header) == 3
+        assert PM4Type3Header_Opcode(header) == 0x42
+        assert PM4Type3Header_Count(header) == 0x1234
+
+@property
+def shader_bitfield_extract_never_out_of_range(word_i: i32) -> bool:
+    word: u32 = word_i.u32()
+    return bitfield_extract5(Bits5Field(23), word) <= 31 and bitfield_extract6(Bits6Field(25), word) <= 63 and bitfield_extract7(Bits7Field(16), word) <= 127 and bitfield_extract8(Bits8Field(8), word) <= 255 and bitfield_extract14(Bits14Field(16), word) <= 16383
