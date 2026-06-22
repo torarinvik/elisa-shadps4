@@ -61,5 +61,9 @@ RESIDUAL (characterized): a divergence localized to ONE specific power of two (e
 256 cases. The PAGE category densely covers all 4096-multiples (the emulator-relevant domain),
 so page-size/alignment-mask bugs are well covered; sub-page single-power divergences are not.
 Reinforces the strategic split: refinement TYPES (`Aligned[N]`) PROVE alignment for all inputs
-(no coverage gap); biased fuzzing is the best-effort falsification complement. A possible
-follow-up is to bias `k` toward common shifts (12/11/6/3) so specific small powers recur.
+(no coverage gap); biased fuzzing is the best-effort falsification complement.
+
+UPDATE — residual closed: the generator now biases the `1<<k` / `(1<<k)-1` shift `k` toward a
+common-shift set ({0,1,2,3,6,8,11,12,16,21,30,31,32,63}, clamped per width) ~75% of the time, so
+specific small powers recur within the case budget. A divergence localized to exactly `x == 2048`
+(`1<<11`) is now caught (case 66, shrunk to 2048), with determinism and broad coverage preserved.
