@@ -1,0 +1,80 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# E2 (protocol round, retry): exercise the contracted ByteReader protocol and its
+# reader-agnostic combinators across BOTH impls (FileFormatReader and SliceReader).
+
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../common/arch.elisa"
+include "../common/types.elisa"
+include "../common/logging/log.elisa"
+include "../common/string_util.elisa"
+include "../common/io_file.elisa"
+include "../core/file_format/binary.elisa"
+include "../core/file_format/byte_reader.elisa"
+
+# The same generic combinator drives both reader representations.
+
+@test
+def byte_reader_fileformat_u32_le() -> void:
+    can Abort.Panic, Memory.Allocate:
+        bytes: mutable darray[u8] = []
+        bytes.push(0x78)
+        bytes.push(0x56)
+        bytes.push(0x34)
+        bytes.push(0x12)
+        reader: mutable FileFormatReader = FileFormatReader_new(bytes)
+        assert br_read_u32_le(&reader) == 0x12345678
+
+@test
+def byte_reader_slice_u32_le_matches_fileformat() -> void:
+    can Abort.Panic, Memory.Allocate:
+        bytes: mutable darray[u8] = []
+        bytes.push(0xEF)
+        bytes.push(0xBE)
+        bytes.push(0xAD)
+        bytes.push(0xDE)
+
+        ff: mutable FileFormatReader = FileFormatReader_new(bytes)
+        sr: mutable SliceReader = SliceReader_new(bytes.view())
+
+        # Identical generic code path, two different reader structs.
+        assert br_read_u32_le(&ff) == 0xDEADBEEF
+        assert br_read_u32_le(&sr) == 0xDEADBEEF
+
+@test
+def byte_reader_be_and_remaining() -> void:
+    can Abort.Panic, Memory.Allocate:
+        bytes: mutable darray[u8] = []
+        bytes.push(0x12)
+        bytes.push(0x34)
+        sr: mutable SliceReader = SliceReader_new(bytes.view())
+        assert sr.br_remaining() == 2
+        assert br_read_u16_be(&sr) == 0x1234
+        assert sr.br_remaining() == 0
+
+@test
+def byte_reader_past_eof_is_total() -> void:
+    # Past-EOF reads must not trap for either impl — the operational bound holds.
+    can Abort.Panic, Memory.Allocate:
+        empty: mutable darray[u8] = []
+        ff: mutable FileFormatReader = FileFormatReader_new(empty)
+        sr: mutable SliceReader = SliceReader_new(empty.view())
+        assert br_read_u32_le(&ff) == 0
+        assert br_read_u32_le(&sr) == 0
+
+# Property: the two impls are observationally identical over arbitrary 4-byte words,
+# proving the generic combinator is reader-representation-independent.
+@property
+def fuzz_byte_reader_impls_agree_u32_le(seed: i32) -> bool:
+    can Abort.Panic, Memory.Allocate:
+        w: u32 = seed.u32()
+        bytes: mutable darray[u8] = []
+        bytes.push((w & 0xFF).u8())
+        bytes.push(((w >> 8) & 0xFF).u8())
+        bytes.push(((w >> 16) & 0xFF).u8())
+        bytes.push(((w >> 24) & 0xFF).u8())
+        ff: mutable FileFormatReader = FileFormatReader_new(bytes)
+        sr: mutable SliceReader = SliceReader_new(bytes.view())
+        return br_read_u32_le(&ff) == br_read_u32_le(&sr)
+    return false

@@ -1,0 +1,74 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# E2 (protocol round, retry): a contracted ByteReader protocol.
+#
+# The concrete `FileFormatReader` (binary.elisa) already reads bytes safely via the
+# operational `ff_can_read` guard. The protocol earns its place by letting ONE set of
+# reader-agnostic combinators (`br_read_u16_le`, `br_read_u32_le`, ...) serve more than
+# one reader representation through a mutating `mutable R&` receiver — exactly the
+# by-reference generic dispatch the earlier E2 decline could not express.
+#
+# Depends on FileFormatReader / ff_* from binary.elisa; the including translation unit
+# must pull in binary.elisa (and its common/* deps) before this file.
+
+protocol ByteReader:
+    # Bytes still available. A pure function of reader state.
+    def br_remaining(self: Self) -> usize
+    # Consume one byte, advancing the cursor. Past EOF this yields 0 and does not trap
+    # (the bound is operational, mirroring ff_read_u8); generic callers stay total.
+    def br_next_u8(self: mutable Self&) -> u8
+
+# --- impl 1: the production file-format reader ----------------------------------------
+
+impl ByteReader for FileFormatReader:
+    def br_remaining(self: Self) -> usize:
+        local: FileFormatReader = self
+        return ff_remaining(&local)
+    def br_next_u8(self: mutable Self&) -> u8:
+        return ff_read_u8(self)
+
+# --- impl 2: a zero-allocation fixed-window reader over a borrowed byte view -----------
+# Justifies the abstraction: a second representation (no darray, no offset-into-owned-data)
+# shares every combinator below without a line of per-reader code.
+
+struct SliceReader:
+    base: view[u8]
+    pos: mutable usize
+
+def SliceReader_new(bytes: view[u8]) -> SliceReader:
+    return SliceReader(bytes, 0)
+
+impl ByteReader for SliceReader:
+    def br_remaining(self: Self) -> usize:
+        if self.pos >= self.base.len:
+            return 0
+        return self.base.len - self.pos
+    def br_next_u8(self: mutable Self&) -> u8:
+        if self.pos >= self.base.len:
+            return 0
+        out: u8 = arena_da_view_get[u8](self.base, self.pos)
+        self.pos <- self.pos + 1
+        return out
+
+# --- reader-agnostic combinators (the payoff: written once, work for every impl) -------
+
+def br_read_u16_le[R: ByteReader](r: mutable R&) -> u16:
+    b0: u16 = r.br_next_u8().u16()
+    b1: u16 = r.br_next_u8().u16()
+    return b0 | (b1 << 8)
+
+def br_read_u16_be[R: ByteReader](r: mutable R&) -> u16:
+    b0: u16 = r.br_next_u8().u16()
+    b1: u16 = r.br_next_u8().u16()
+    return (b0 << 8) | b1
+
+def br_read_u32_le[R: ByteReader](r: mutable R&) -> u32:
+    lo: u32 = br_read_u16_le(r).u32()
+    hi: u32 = br_read_u16_le(r).u32()
+    return lo | (hi << 16)
+
+def br_read_u32_be[R: ByteReader](r: mutable R&) -> u32:
+    hi: u32 = br_read_u16_be(r).u32()
+    lo: u32 = br_read_u16_be(r).u32()
+    return (hi << 16) | lo
