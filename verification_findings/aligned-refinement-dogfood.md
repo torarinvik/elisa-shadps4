@@ -52,3 +52,24 @@ Three concrete gaps currently block that:
 The sound core (return-position constructors + var-decl-by-value + the cheap/SMT tiers) is
 landed and genuinely useful. Closing gap (1) would let the emulator's address-space API state
 page-alignment as an enforced precondition — directly retiring the E6 operational guard.
+
+## UPDATE — gaps (1) and (2) RESOLVED (compiler)
+The discharge sites now resolve a `type` alias to its underlying refinement predicates
+(`paramRefinementTypeExpr`) at parameter and return positions, and skip the broken synthetic
+`Pred(value)` runtime-check for builtin modular laws. Three independent agent attempts
+converged on the identical fix; merged to `work`. Verified:
+- alias-typed param **rejects** an unaligned argument under `-strict` (was vacuous);
+- **alignment-mismatch is sound**: a value typed `Aligned[2048]` does NOT satisfy an
+  `Aligned[4096]` parameter (rejected);
+- a refinement-returning call (`page_align_down(raw)`) **entails** the param refinement and
+  passes with no runtime check;
+- inline-`is` parameters no longer emit the spurious `undefined identifier "Aligned"`.
+
+Dogfooded in `elisa_tests/page_precondition_tests.elisa`: a typed fast-path
+`map_page_aligned(addr: PageAddr, size: PageAddr, …)` over the real `AddressSpace_Map` — an
+aligned caller compiles with no runtime guard, a misaligned caller is a COMPILE error. The
+guest-facing `AddressSpace_Map` keeps its runtime guard (the guest may request any address).
+This delivers the E6 design-note capability: alignment as a discharged precondition.
+
+Gap (3) (var-decl inline-`is` parse; refined-return fact into an untyped local) remains
+deferred (parser-level).

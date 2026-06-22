@@ -1,0 +1,36 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Dogfood: page-alignment as an ENFORCED PRECONDITION (alias-typed refinement param), now that
+# alias-typed refinements are checked at the parameter boundary. The guest-facing
+# AddressSpace_Map keeps its runtime guard (the guest may request any address), but a typed
+# fast-path can demand alignment in its TYPES — a misaligned caller is a COMPILE error, not a
+# runtime `return 0`. This is the capability the E6 design note wanted (alignment as a
+# discharged precondition rather than an operational guard).
+
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../common/types.elisa"
+include "../core/address_space.elisa"
+
+const PAGE_MASK: u64 = 0xFFFFFFFFFFFFF000
+
+type PageAddr = u64 is Aligned[4096]
+
+# Proven page-aligned constructor (cheap tier: low 12 bits cleared).
+def page_align_down(raw: u64) -> u64 is Aligned[4096]:
+    return raw & PAGE_MASK
+
+# Typed fast-path: alignment is guaranteed by the parameter types, so no runtime guard is
+# needed here. It forwards to the real guest-facing AddressSpace_Map (which still re-checks).
+def map_page_aligned(self: mutable AddressSpace&, addr: PageAddr, size: PageAddr, phys: PAddr, exec: bool) -> VAddr:
+    return AddressSpace_Map(self, addr.uintptr(), size, phys, exec)
+
+# GOOD caller: feeds aligned values — discharges at compile time, no runtime alignment check.
+def map_one_page(self: mutable AddressSpace&, raw: u64) -> VAddr:
+    return map_page_aligned(self, page_align_down(raw), 4096, 0.uintptr(), false)
+
+@test
+def page_precondition_compiles() -> void:
+    can Abort.Panic:
+        if (page_align_down(0xDEADBEEF) & 0xFFF) != 0:
+            panic("constructor not page-aligned")
