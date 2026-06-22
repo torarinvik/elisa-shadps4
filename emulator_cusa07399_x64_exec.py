@@ -295,12 +295,12 @@ def run_abi_lint(go: str, mode: str, strict: bool, verbose: bool) -> bool:
         "abi-lint",
         "emulator-cusa07399-x64-exec",
         "--project",
-        "../elisa-shad-ps4-from-scratch",
+        str(ROOT),
         "-target-triple",
         target_triple_for_host(),
         "--strict-contracts",
     ]
-    proc = run(cmd, cwd=COMPILER_DIR, timeout=120)
+    proc = run(cmd, cwd=COMPILER_DIR, timeout=600)
     if verbose or proc.returncode != 0:
         print(proc.stdout, end="")
     if proc.returncode == 0:
@@ -342,7 +342,7 @@ def main() -> int:
         "test",
         "emulator-cusa07399-x64-exec",
         "--project",
-        "../elisa-shad-ps4-from-scratch",
+        str(ROOT),
         "-target-triple",
         target_triple_for_host(),
     ]
