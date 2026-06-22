@@ -5,6 +5,23 @@
 
 include "./pm4_opcodes.elisa"
 
+law PM4FitsAt(self: usize, need: usize, cap: usize) = self + need <= cap
+
+const PM4WalkStatus_Ok: u32 = 0
+const PM4WalkStatus_TruncatedHeader: u32 = 1
+const PM4WalkStatus_TruncatedBody: u32 = 2
+const PM4WalkStatus_UnsupportedType: u32 = 3
+
+struct PM4PacketView:
+    ok: mutable bool
+    status: mutable u32
+    offset: mutable usize
+    next_offset: mutable usize
+    header: mutable u32
+    packet_type: mutable u32
+    opcode: mutable u32
+    body_dwords: mutable usize
+
 # PM4ShaderType
 const PM4ShaderType_ShaderGraphics: u32 = 0
 const PM4ShaderType_ShaderCompute:  u32 = 1
@@ -51,6 +68,71 @@ def PM4Type3Header_Pack(opcode: u32, num_words_min_one: u32, shader_type: u32, p
 # PM4Header type
 def PM4Header_Type(raw: u32) -> u32:
     return (raw >> 30) & 0x3
+
+def pm4_fits_at(self: usize, need: usize, cap: usize) -> bool:
+    return need <= cap and self <= cap - need
+
+def pm4_read_u32_le_bytes(buf: u8&, cap: usize, off: usize) -> u32:
+    if not pm4_fits_at(off, 4, cap):
+        return 0
+    out: mutable u32 = buf[off].u32()
+    out <- out | (buf[off + 1].u32() << 8)
+    out <- out | (buf[off + 2].u32() << 16)
+    out <- out | (buf[off + 3].u32() << 24)
+    return out
+
+def pm4_read_u32_le(buf: darray[u8]&, off: usize) -> u32:
+    if buf.count == 0:
+        return 0
+    return pm4_read_u32_le_bytes(buf[0], buf.count, off)
+
+def pm4_packet_body_dwords(header: u32) -> usize:
+    packet_type: u32 = PM4Header_Type(header)
+    if packet_type == 0:
+        return PM4Type0Header_NumWords(header).usize()
+    if packet_type == 3:
+        return (PM4Type3Header_Count(header) + 1).usize()
+    return 0
+
+def pm4_next_packet_bytes(buf: u8&, cap: usize, off: usize) -> PM4PacketView:
+    if not pm4_fits_at(off, 4, cap):
+        return PM4PacketView(false, PM4WalkStatus_TruncatedHeader, off, off, 0, 0, 0, 0)
+
+    header: u32 = pm4_read_u32_le_bytes(buf, cap, off)
+    packet_type: u32 = PM4Header_Type(header)
+    if packet_type != 0 and packet_type != 3:
+        return PM4PacketView(false, PM4WalkStatus_UnsupportedType, off, off + 4, header, packet_type, 0, 0)
+
+    body_dwords: usize = pm4_packet_body_dwords(header)
+    body_bytes: usize = body_dwords * 4
+    body_off: usize = off + 4
+    if not pm4_fits_at(body_off, body_bytes, cap):
+        return PM4PacketView(false, PM4WalkStatus_TruncatedBody, off, off, header, packet_type, PM4Type3Header_Opcode(header), body_dwords)
+
+    return PM4PacketView(true, PM4WalkStatus_Ok, off, body_off + body_bytes, header, packet_type, PM4Type3Header_Opcode(header), body_dwords)
+
+def pm4_next_packet(buf: darray[u8]&, off: usize) -> PM4PacketView:
+    if buf.count == 0:
+        return PM4PacketView(false, PM4WalkStatus_TruncatedHeader, off, off, 0, 0, 0, 0)
+    return pm4_next_packet_bytes(buf[0], buf.count, off)
+
+def PM4_WalkNeverTrapsBytes(buf: u8&, cap: usize) -> bool:
+    off: mutable usize = 0
+    steps: mutable usize = 0
+    while off < cap and steps <= cap:
+        packet: PM4PacketView = pm4_next_packet_bytes(buf, cap, off)
+        if not packet.ok:
+            return true
+        if packet.next_offset <= off:
+            return false
+        off <- packet.next_offset
+        steps <- steps + 1
+    return true
+
+def PM4_WalkNeverTraps(buf: darray[u8]&) -> bool:
+    if buf.count == 0:
+        return true
+    return PM4_WalkNeverTrapsBytes(buf[0], buf.count)
 
 # ContextControlEnable
 def ContextControlEnable_EnableSingleCntxConfigReg(raw: u32) -> bool:

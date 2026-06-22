@@ -1,0 +1,162 @@
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../common/arch.elisa"
+include "../common/types.elisa"
+include "../common/logging/log.elisa"
+include "../common/string_util.elisa"
+include "../common/io_file.elisa"
+include "../common/aes.elisa"
+include "../core/file_format/binary.elisa"
+
+struct TrophyKeySet:
+    ReleaseTrophyKey: mutable darray[u8]
+
+struct AllKeys:
+    TrophyKeySet: mutable TrophyKeySet
+
+struct KeyManager:
+    keys: mutable AllKeys
+
+def KeyManager_GetInstance() -> heap KeyManager&:
+    out: mutable heap KeyManager& = zeroed
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = (&scratch_arena).cast[mutable Arena&]
+        out <- arena_alloc(owner, size_of(KeyManager)).cast[mutable heap KeyManager&]
+    out.keys <- AllKeys(TrophyKeySet([]))
+    return out
+
+def fs_exists(path: static u8&) -> bool:
+    _ = path
+    return false
+
+def fs_is_directory(path: static u8&) -> bool:
+    _ = path
+    return false
+
+def fs_directory_entries(path: static u8&) -> darray[static u8&]:
+    _ = path
+    return []
+
+def fs_join(left: static u8&, right: static u8&) -> static u8&:
+    _ = left
+    return right
+
+def fs_create_directory(path: static u8&) -> void:
+    _ = path
+
+include "../core/file_format/trp.elisa"
+
+def trp_test_push_zeroes(out: mutable darray[u8]&, count: usize) -> void:
+    for i in 0..<count:
+        ff_push_u8(out, 0)
+
+def trp_test_push_cstr32(out: mutable darray[u8]&, value: static u8&) -> void:
+    for i in 0..<runtime_strlen(value):
+        ff_push_u8(out, value[i])
+    ff_push_u8(out, 0)
+    trp_test_push_zeroes(out, 32 - runtime_strlen(value) - 1)
+
+def trp_test_push_header(out: mutable darray[u8]&, entry_num: u32, entry_size: u32, file_size: u64) -> void:
+    ff_push_u32_be(out, TRP_MAGIC)
+    ff_push_u32_be(out, 1)
+    ff_push_u32_be(out, ((file_size >> 32) & 0xFFFFFFFF).u32())
+    ff_push_u32_be(out, (file_size & 0xFFFFFFFF).u32())
+    ff_push_u32_be(out, entry_num)
+    ff_push_u32_be(out, entry_size)
+    ff_push_u32_be(out, 0)
+    trp_test_push_zeroes(out, TRP_DIGEST_SIZE)
+    ff_push_u32_be(out, 0)
+    trp_test_push_zeroes(out, 44)
+
+def trp_test_push_entry(out: mutable darray[u8]&, name: static u8&, pos: u64, len: u64, flag: u32) -> void:
+    trp_test_push_cstr32(out, name)
+    ff_push_u32_be(out, ((pos >> 32) & 0xFFFFFFFF).u32())
+    ff_push_u32_be(out, (pos & 0xFFFFFFFF).u32())
+    ff_push_u32_be(out, ((len >> 32) & 0xFFFFFFFF).u32())
+    ff_push_u32_be(out, (len & 0xFFFFFFFF).u32())
+    ff_push_u32_be(out, flag)
+    trp_test_push_zeroes(out, 12)
+
+def trp_test_fuzz_byte(seed: i32, index: usize) -> u8:
+    mixed: mutable u32 = seed.u32() ^ (index.u32() * 0x9e3779b1)
+    mixed <- mixed ^ (mixed >> 16)
+    mixed <- mixed * 0x85ebca6b
+    mixed <- mixed ^ (mixed >> 13)
+    return (mixed & 0xFF).u8()
+
+def trp_test_make_adversarial_buffer(seed: i32) -> darray[u8]:
+    out: mutable darray[u8] = []
+    len: usize = ((seed.u32() & 0xFF) + 1).usize()
+    for i in 0..<len:
+        ff_push_u8(out, trp_test_fuzz_byte(seed, i))
+    if len >= TRP_HEADER_SIZE:
+        out[0] <- 0xDC
+        out[1] <- 0xA2
+        out[2] <- 0x4D
+        out[3] <- 0
+        out[16] <- trp_test_fuzz_byte(seed, 16)
+        out[17] <- trp_test_fuzz_byte(seed, 17)
+        out[18] <- trp_test_fuzz_byte(seed, 18)
+        out[19] <- trp_test_fuzz_byte(seed, 19)
+        out[20] <- trp_test_fuzz_byte(seed, 20)
+        out[21] <- trp_test_fuzz_byte(seed, 21)
+        out[22] <- trp_test_fuzz_byte(seed, 22)
+        out[23] <- trp_test_fuzz_byte(seed, 23)
+    return out
+
+@test
+def trp_parser_golden_png_and_xml_entries() -> void:
+    can Abort.Panic, Memory.Allocate:
+        bytes: mutable darray[u8] = []
+        trp_test_push_header(bytes, 2, TRP_ENTRY_SIZE.u32(), 0x160)
+        trp_test_push_entry(bytes, "ICON0.PNG", 0x120, 0x20, TRP_ENTRY_FLAG_PNG)
+        trp_test_push_entry(bytes, "TROPESFM.XML", 0x140, 0x20, TRP_ENTRY_FLAG_ENCRYPTED_XML)
+
+        parsed: TrpFile = Trp_Parse(bytes)
+        assert parsed.valid
+        assert parsed.header.version == 1
+        assert parsed.header.file_size == 0x160
+        assert parsed.entries.count == 2
+        assert Trp_IsPngEntry(parsed.entries[0])
+        assert Trp_IsEncryptedXmlEntry(parsed.entries[1])
+        assert string_slice_eq(parsed.entries[0].entry_name, 0, runtime_strlen("ICON0.PNG"), "ICON0.PNG") == 1
+        assert parsed.entries[0].entry_pos == 0x120
+        assert parsed.entries[1].entry_len == 0x20
+
+@test
+def trp_parser_rejects_entry_stride_smaller_than_layout() -> void:
+    can Abort.Panic, Memory.Allocate:
+        bytes: mutable darray[u8] = []
+        trp_test_push_header(bytes, 1, (TRP_ENTRY_SIZE - 1).u32(), 0x100)
+        trp_test_push_entry(bytes, "ICON0.PNG", 0x80, 0x20, TRP_ENTRY_FLAG_PNG)
+
+        parsed: TrpFile = Trp_Parse(bytes)
+        assert not parsed.valid
+        assert parsed.entries.count == 0
+
+@test
+def trp_parser_rejects_truncated_entry_table() -> void:
+    can Abort.Panic, Memory.Allocate:
+        bytes: mutable darray[u8] = []
+        trp_test_push_header(bytes, 2, TRP_ENTRY_SIZE.u32(), 0x100)
+        trp_test_push_entry(bytes, "ICON0.PNG", 0x80, 0x20, TRP_ENTRY_FLAG_PNG)
+
+        parsed: TrpFile = Trp_Parse(bytes)
+        assert not parsed.valid
+        assert parsed.entries.count == 1
+
+@test
+def trp_entry_data_rejects_out_of_range_slice() -> void:
+    can Abort.Panic, Memory.Allocate:
+        data: mutable darray[u8] = []
+        for i in 0..<16:
+            ff_push_u8(data, i.u8())
+        entry: TrpEntry = TrpEntry("DATA.BIN", 12, 8, TRP_ENTRY_FLAG_PNG)
+        slice: darray[u8] = Trp_ReadEntryData(data, entry)
+        assert slice.count == 0
+
+@test
+def trp_parser_fuzz_samples_never_trap() -> void:
+    can Abort.Panic, Memory.Allocate:
+        for seed in 0..<64:
+            parsed: TrpFile = Trp_Parse(trp_test_make_adversarial_buffer(seed.i32()))
+            assert parsed.valid or not parsed.valid

@@ -61,12 +61,21 @@ def Trp_ReadEntry(reader: mutable FileFormatReader&) -> TrpEntry:
     _ = ff_skip(reader, 12)
     return entry
 
+def Trp_AddOffsetWithin(data: darray[u8], base: usize, extra: usize) -> usize:
+    if base > data.count:
+        return data.count
+    if extra > data.count - base:
+        return data.count
+    return base + extra
+
 def Trp_Parse(data: darray[u8]) -> TrpFile:
     if data.count < TRP_HEADER_SIZE:
         return TrpFile_empty()
     reader: mutable FileFormatReader = FileFormatReader_new(data)
     header: TrpHeader = Trp_ReadHeader(reader)
     if header.magic != TRP_MAGIC:
+        return TrpFile(header, [], false)
+    if header.entry_size < TRP_ENTRY_SIZE.u32():
         return TrpFile(header, [], false)
 
     entries: mutable darray[TrpEntry] = []
@@ -75,14 +84,17 @@ def Trp_Parse(data: darray[u8]) -> TrpFile:
         owner: mutable Arena& = (&scratch_arena).cast[mutable Arena&]
         i: mutable u32 = 0
         while i < header.entry_num and valid:
-            if not ff_can_read(reader, header.entry_size.usize()):
+            entry_start: usize = reader.offset
+            entry_next: usize = Trp_AddOffsetWithin(data, entry_start, header.entry_size.usize())
+            if entry_next == data.count and header.entry_size.usize() > data.count - entry_start:
+                valid <- false
+            elif not ff_can_read(reader, TRP_ENTRY_SIZE):
                 valid <- false
             else:
-                entry_start: usize = reader.offset
                 entry: TrpEntry = Trp_ReadEntry(reader)
                 in owner:
                     entries.push(entry)
-                reader.offset <- entry_start + header.entry_size.usize()
+                reader.offset <- entry_next
             i <- i + 1
     return TrpFile(header, entries, valid)
 
@@ -138,6 +150,9 @@ def Trp_SelectFile(trophy_path: static u8&, index: int) -> static u8&:
 def Trp_ReadEntryData(data: darray[u8], entry: TrpEntry&) -> darray[u8]:
     reader: mutable FileFormatReader = FileFormatReader_new(data)
     if entry.entry_pos.usize() > data.count:
+        return []
+    end: usize = Trp_AddOffsetWithin(data, entry.entry_pos.usize(), entry.entry_len.usize())
+    if end == data.count and entry.entry_len.usize() > data.count - entry.entry_pos.usize():
         return []
     reader.offset <- entry.entry_pos.usize()
     return ff_read_bytes(reader, entry.entry_len.usize())

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../core/libraries/save_data/save_instance.elisa"
 
 const ORACLE_PSF_MAGIC: u32 = 0x00505346
 const ORACLE_PSF_VERSION_1_1: u32 = 0x00000101
@@ -20,6 +21,9 @@ const ORACLE_ET_SCE_DYNEXEC: u16 = 0xfe10
 const ORACLE_EM_X86_64: u16 = 62
 const ORACLE_EV_CURRENT: u32 = 1
 const ORACLE_ELF_PHDR_SIZE: usize = 56
+const ORACLE_PM4_IT_SET_CONTEXT_REG: u32 = 0x69
+const ORACLE_PM4_SHADER_COMPUTE: u32 = 1
+const ORACLE_PM4_PRED_ENABLE: u32 = 1
 
 struct OraclePsfEntry:
     key: mutable static u8&
@@ -60,6 +64,14 @@ struct OracleElfHeader:
     e_phoff: mutable u64
     e_phentsize: mutable u16
     e_phnum: mutable u16
+
+struct OracleSavedataParams:
+    account_id_lo: mutable u32
+    account_id_hi: mutable u32
+    attribute: mutable u32
+    title_id: mutable static u8&
+    category: mutable static u8&
+    user_param: mutable u32
 
 def oracle_push_u8(out: mutable darray[u8]&, value: u8) -> void:
     can Memory.Allocate, Abort.Panic:
@@ -184,6 +196,9 @@ def oracle_entry_integer(key: static u8&, value: i32) -> OraclePsfEntry:
 def oracle_entry_binary(key: static u8&, value: darray[u8], max_len: u32) -> OraclePsfEntry:
     return OraclePsfEntry(key, ORACLE_PSF_FMT_BINARY, max_len, value, "", 0)
 
+def oracle_savedata_params_new(account_id_lo: u32, account_id_hi: u32, attribute: u32, title_id: static u8&, category: static u8&, user_param: u32) -> OracleSavedataParams:
+    return OracleSavedataParams(account_id_lo, account_id_hi, attribute, title_id, category, user_param)
+
 def oracle_psf_add(psf: mutable OraclePsf&, entry: OraclePsfEntry) -> void:
     can Memory.Allocate, Abort.Panic:
         in perm:
@@ -282,6 +297,55 @@ def oracle_psf_find(psf: OraclePsf&, key: static u8&) -> usize:
             return i
     return psf.entries.count
 
+def oracle_savedata_params_encode(params: OracleSavedataParams) -> OraclePsf:
+    account: mutable darray[u8] = []
+    oracle_push_u32_le(account, params.account_id_lo)
+    oracle_push_u32_le(account, params.account_id_hi)
+    psf: mutable OraclePsf = OraclePsf([], true)
+    oracle_psf_add(psf, oracle_entry_binary(SaveParam_AccountId(), account, 8))
+    oracle_psf_add(psf, oracle_entry_integer(SaveParam_Attribute(), params.attribute.i32()))
+    oracle_psf_add(psf, oracle_entry_string(SaveParam_TitleId(), params.title_id, 16))
+    oracle_psf_add(psf, oracle_entry_string(SaveParam_Category(), params.category, 4))
+    oracle_psf_add(psf, oracle_entry_integer("USER_PARAM", params.user_param.i32()))
+    return psf
+
+def oracle_savedata_params_decode(psf: OraclePsf&) -> OracleSavedataParams:
+    account: darray[u8] = psf.entries[oracle_psf_find(psf, SaveParam_AccountId())].binary_value
+    return oracle_savedata_params_new(
+        oracle_u32_le(account, 0),
+        oracle_u32_le(account, 4),
+        psf.entries[oracle_psf_find(psf, SaveParam_Attribute())].integer_value.u32(),
+        psf.entries[oracle_psf_find(psf, SaveParam_TitleId())].string_value,
+        psf.entries[oracle_psf_find(psf, SaveParam_Category())].string_value,
+        psf.entries[oracle_psf_find(psf, "USER_PARAM")].integer_value.u32())
+
+def oracle_pm4_type0_pack(base: u32, count: u32) -> u32:
+    return (base & 0xFFFF) | ((count & 0x3FFF) << 16)
+
+def oracle_pm4_header_type(raw: u32) -> u32:
+    return (raw >> 30) & 0x3
+
+def oracle_pm4_type0_base(raw: u32) -> u32:
+    return raw & 0xFFFF
+
+def oracle_pm4_type0_count(raw: u32) -> u32:
+    return (raw >> 16) & 0x3FFF
+
+def oracle_pm4_type3_pack(opcode: u32, count: u32, shader_type: u32, predicate: u32) -> u32:
+    return (predicate & 1) | ((shader_type & 1) << 1) | ((opcode & 0xFF) << 8) | ((count & 0x3FFF) << 16) | (3 << 30)
+
+def oracle_pm4_type3_opcode(raw: u32) -> u32:
+    return (raw >> 8) & 0xFF
+
+def oracle_pm4_type3_count(raw: u32) -> u32:
+    return (raw >> 16) & 0x3FFF
+
+def oracle_pm4_type3_shader_type(raw: u32) -> u32:
+    return (raw >> 1) & 0x1
+
+def oracle_pm4_type3_predicate(raw: u32) -> u32:
+    return raw & 0x1
+
 def oracle_tiny_elf_bytes() -> darray[u8]:
     out: mutable darray[u8] = []
     oracle_push_u8(out, 0x7f)
@@ -349,6 +413,61 @@ def boot_oracle_psf_roundtrip_synthesized_valid_entries() -> void:
         assert parsed.entries[2].integer_value == 0x12345678.i32()
         assert parsed.entries[3].binary_value.count == 8
         assert parsed.entries[3].binary_value[0] == 0x88 and parsed.entries[3].binary_value[7] == 0x11
+
+@property
+def boot_oracle_savedata_params_roundtrip_property(seed: i32) -> bool:
+    can Abort.Panic, Memory.Allocate:
+        lo: u32 = (0x10203040.u32() ^ seed.u32())
+        hi: u32 = (0x55667788.u32() + (seed.u32() & 0xFF))
+        params: OracleSavedataParams = oracle_savedata_params_new(lo, hi, 0x80, "CUSA00001", "gd", seed.u32() & 0xFFFF)
+        encoded_psf: OraclePsf = oracle_savedata_params_encode(params)
+        parsed_psf: OraclePsf = oracle_psf_parse(oracle_psf_encode(encoded_psf))
+        parsed: OracleSavedataParams = oracle_savedata_params_decode(parsed_psf)
+        return parsed_psf.valid and parsed.account_id_lo == lo and parsed.account_id_hi == hi and parsed.attribute == 0x80 and oracle_static_eq(parsed.title_id, "CUSA00001") and oracle_static_eq(parsed.category, "gd") and parsed.user_param == (seed.u32() & 0xFFFF)
+
+@test
+def boot_oracle_savedata_params_golden_vector_fields() -> void:
+    can Abort.Panic, Memory.Allocate:
+        params: OracleSavedataParams = oracle_savedata_params_new(0x89ABCDEF, 0x01234567, 0x40, "CUSA90001", "gd", 0x13579BDF)
+        encoded_psf: OraclePsf = oracle_savedata_params_encode(params)
+        parsed_psf: OraclePsf = oracle_psf_parse(oracle_psf_encode(encoded_psf))
+        parsed: OracleSavedataParams = oracle_savedata_params_decode(parsed_psf)
+        assert parsed_psf.valid
+        assert parsed.account_id_lo == 0x89ABCDEF
+        assert parsed.account_id_hi == 0x01234567
+        assert parsed.attribute == 0x40
+        assert oracle_static_eq(parsed.title_id, "CUSA90001")
+        assert oracle_static_eq(parsed.category, "gd")
+        assert parsed.user_param == 0x13579BDF
+
+@property
+def boot_oracle_pm4_type3_header_roundtrip_property(seed: i32) -> bool:
+    can Abort.Panic:
+        opcode: u32 = seed.u32() & 0xFF
+        count: u32 = (seed.u32() >> 4) & 0x3FFF
+        shader_type: u32 = (seed.u32() >> 18) & 0x1
+        predicate: u32 = (seed.u32() >> 19) & 0x1
+        raw: u32 = oracle_pm4_type3_pack(opcode, count, shader_type, predicate)
+        actual_words: u32 = (oracle_pm4_type3_count(raw) + 1) & 0x3FFF
+        expected_words: u32 = (count + 1) & 0x3FFF
+        return oracle_pm4_header_type(raw) == 3 and oracle_pm4_type3_opcode(raw) == opcode and oracle_pm4_type3_count(raw) == count and oracle_pm4_type3_shader_type(raw) == shader_type and oracle_pm4_type3_predicate(raw) == predicate and actual_words == expected_words
+
+@test
+def boot_oracle_pm4_golden_vector_fields() -> void:
+    can Abort.Panic:
+        raw3: u32 = oracle_pm4_type3_pack(ORACLE_PM4_IT_SET_CONTEXT_REG, 3, ORACLE_PM4_SHADER_COMPUTE, ORACLE_PM4_PRED_ENABLE)
+        assert raw3 == 0xC0036903
+        assert oracle_pm4_header_type(raw3) == 3
+        assert oracle_pm4_type3_opcode(raw3) == ORACLE_PM4_IT_SET_CONTEXT_REG
+        assert oracle_pm4_type3_count(raw3) == 3
+        assert oracle_pm4_type3_shader_type(raw3) == ORACLE_PM4_SHADER_COMPUTE
+        assert oracle_pm4_type3_predicate(raw3) == ORACLE_PM4_PRED_ENABLE
+        raw0: u32 = oracle_pm4_type0_pack(0x1234, 0x20)
+        assert raw0 == 0x00201234
+        assert oracle_pm4_header_type(raw0) == 0
+        assert oracle_pm4_type0_base(raw0) == 0x1234
+        assert oracle_pm4_type0_count(raw0) == 0x20
+        assert oracle_pm4_type0_count(raw0) + 1 == 0x21
 
 @test
 def boot_oracle_psf_golden_vector_fields() -> void:

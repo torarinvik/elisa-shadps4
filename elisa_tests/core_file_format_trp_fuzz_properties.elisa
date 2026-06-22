@@ -1,0 +1,79 @@
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../common/arch.elisa"
+include "../common/types.elisa"
+include "../common/logging/log.elisa"
+include "../common/string_util.elisa"
+include "../common/io_file.elisa"
+include "../common/aes.elisa"
+include "../core/file_format/binary.elisa"
+
+struct TrophyKeySet:
+    ReleaseTrophyKey: mutable darray[u8]
+
+struct AllKeys:
+    TrophyKeySet: mutable TrophyKeySet
+
+struct KeyManager:
+    keys: mutable AllKeys
+
+def KeyManager_GetInstance() -> heap KeyManager&:
+    out: mutable heap KeyManager& = zeroed
+    can Memory.Allocate, Abort.Panic:
+        owner: mutable Arena& = (&scratch_arena).cast[mutable Arena&]
+        out <- arena_alloc(owner, size_of(KeyManager)).cast[mutable heap KeyManager&]
+    out.keys <- AllKeys(TrophyKeySet([]))
+    return out
+
+def fs_exists(path: static u8&) -> bool:
+    _ = path
+    return false
+
+def fs_is_directory(path: static u8&) -> bool:
+    _ = path
+    return false
+
+def fs_directory_entries(path: static u8&) -> darray[static u8&]:
+    _ = path
+    return []
+
+def fs_join(left: static u8&, right: static u8&) -> static u8&:
+    _ = left
+    return right
+
+def fs_create_directory(path: static u8&) -> void:
+    _ = path
+
+include "../core/file_format/trp.elisa"
+
+def trp_property_fuzz_byte(seed: i32, index: usize) -> u8:
+    mixed: mutable u32 = seed.u32() ^ (index.u32() * 0x9e3779b1)
+    mixed <- mixed ^ (mixed >> 16)
+    mixed <- mixed * 0x85ebca6b
+    mixed <- mixed ^ (mixed >> 13)
+    return (mixed & 0xFF).u8()
+
+def trp_property_adversarial_buffer(seed: i32) -> darray[u8]:
+    out: mutable darray[u8] = []
+    len: usize = ((seed.u32() & 0xFF) + 1).usize()
+    for i in 0..<len:
+        ff_push_u8(out, trp_property_fuzz_byte(seed, i))
+    if len >= TRP_HEADER_SIZE:
+        out[0] <- 0xDC
+        out[1] <- 0xA2
+        out[2] <- 0x4D
+        out[3] <- 0
+        out[16] <- trp_property_fuzz_byte(seed, 16)
+        out[17] <- trp_property_fuzz_byte(seed, 17)
+        out[18] <- trp_property_fuzz_byte(seed, 18)
+        out[19] <- trp_property_fuzz_byte(seed, 19)
+        out[20] <- trp_property_fuzz_byte(seed, 20)
+        out[21] <- trp_property_fuzz_byte(seed, 21)
+        out[22] <- trp_property_fuzz_byte(seed, 22)
+        out[23] <- trp_property_fuzz_byte(seed, 23)
+    return out
+
+@property
+def trp_parse_never_traps(seed: i32) -> bool:
+    can Memory.Allocate, Abort.Panic:
+        parsed: TrpFile = Trp_Parse(trp_property_adversarial_buffer(seed))
+        return parsed.valid or not parsed.valid

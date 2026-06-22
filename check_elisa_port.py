@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -10,6 +11,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_COMPILER_DIR = ROOT.parent / "compiler"
+REQUIRED_VERIFICATION_TARGETS = [
+    "boot-decoder-oracle-tests",
+    "psf-property-tests",
+    "psf-fuzz-properties",
+    "core-loader-bounds-tests",
+]
+DISCOVERABLE_VERIFICATION_TARGETS = [
+    "trp-property-tests",
+    "trp-fuzz-properties",
+    "video-core-amdgpu-pm4-decode-tests",
+]
 
 
 def rel(path: Path) -> str:
@@ -36,6 +48,57 @@ def run_step(name: str, cmd: list[str], cwd: Path, verbose: bool) -> bool:
     print(f"FAIL {name}", file=sys.stderr)
     print("command: " + " ".join(cmd), file=sys.stderr)
     return False
+
+
+def project_targets() -> dict[str, object]:
+    project_file = ROOT / "project.json"
+    with project_file.open("r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    targets = data.get("targets", {})
+    if not isinstance(targets, dict):
+        return {}
+    return targets
+
+
+def run_verification_targets(verbose: bool) -> bool:
+    targets = project_targets()
+    candidates = REQUIRED_VERIFICATION_TARGETS + [
+        target for target in DISCOVERABLE_VERIFICATION_TARGETS if target in targets
+    ]
+    missing = [target for target in REQUIRED_VERIFICATION_TARGETS if target not in targets]
+    discoverable_missing = [
+        target for target in DISCOVERABLE_VERIFICATION_TARGETS if target not in targets
+    ]
+
+    ok = True
+    ran = 0
+    for target in candidates:
+        if target not in targets:
+            continue
+        ran += 1
+        ok = run_step(
+            f"elisac verification target {target}",
+            ["elisac", "test", target, "--project", str(ROOT)],
+            ROOT,
+            verbose,
+        ) and ok
+
+    print("Verification target gate summary:")
+    print(f"- configured required targets: {len(REQUIRED_VERIFICATION_TARGETS)}")
+    print(f"- verification targets run: {ran}")
+    if missing:
+        print("- required targets not included because they do not exist: " + ", ".join(missing))
+        ok = False
+    else:
+        print("- required targets not included because they do not exist: none")
+    if discoverable_missing:
+        print(
+            "- A2/A3 discoverable targets not included because they do not exist: "
+            + ", ".join(discoverable_missing)
+        )
+    else:
+        print("- A2/A3 discoverable targets not included because they do not exist: none")
+    return ok
 
 
 def lowered_sources() -> list[Path]:
@@ -82,6 +145,7 @@ def main() -> int:
     )
     parser.add_argument("--skip-bridges", action="store_true", help="Skip C++ bridge syntax checks")
     parser.add_argument("--skip-ledger", action="store_true", help="Skip parity ledger checks")
+    parser.add_argument("--skip-verification-targets", action="store_true", help="Skip elisac verification target gate")
     parser.add_argument("--skip-lowering", action="store_true", help="Skip Elisa lowering checks")
     parser.add_argument(
         "--check-lowered-drift",
@@ -175,6 +239,9 @@ def main() -> int:
             ROOT,
             args.verbose,
         ) and ok
+
+    if not args.skip_verification_targets:
+        ok = run_verification_targets(args.verbose) and ok
 
     if not args.skip_lowering:
         if not (compiler_dir / "go.mod").exists():

@@ -1,0 +1,140 @@
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../video_core/amdgpu/pm4_cmds.elisa"
+
+def pm4_test_push_u32_le(out: mutable darray[u8]&, value: u32) -> void:
+    can Memory.Allocate, Abort.Panic:
+        out.push((value & 0xff).u8())
+        out.push(((value >> 8) & 0xff).u8())
+        out.push(((value >> 16) & 0xff).u8())
+        out.push(((value >> 24) & 0xff).u8())
+
+def pm4_test_store_u32_le(out: mutable u8&, off: usize, value: u32) -> void:
+    out[off] <- (value & 0xff).u8()
+    out[off + 1] <- ((value >> 8) & 0xff).u8()
+    out[off + 2] <- ((value >> 16) & 0xff).u8()
+    out[off + 3] <- ((value >> 24) & 0xff).u8()
+
+def pm4_test_fuzz_word(seed: i32, index: usize) -> u32:
+    mixed: mutable u32 = seed.u32() ^ (index.u32() * 0x9e3779b9)
+    mixed <- mixed ^ (mixed >> 16)
+    mixed <- mixed * 0x85ebca6b
+    mixed <- mixed ^ (mixed >> 13)
+    mixed <- mixed * 0xc2b2ae35
+    return mixed ^ (mixed >> 16)
+
+def synth_adversarial_pm4(seed: i32) -> darray[u8]:
+    out: mutable darray[u8] = []
+    mode: u32 = seed.u32() & 7
+    if mode == 0:
+        return out
+    if mode == 1:
+        can Memory.Allocate, Abort.Panic:
+            out.push(0xc0)
+            out.push(0xff)
+        return out
+    if mode == 2:
+        can Memory.Allocate, Abort.Panic:
+            pm4_test_push_u32_le(out, PM4Type3Header_Pack(PM4ItOpcode_Nop, 3, 0, 0))
+            out.push(0)
+            out.push(1)
+        return out
+    if mode == 3:
+        can Memory.Allocate, Abort.Panic:
+            pm4_test_push_u32_le(out, 1 << 30)
+        return out
+    if mode == 4:
+        can Memory.Allocate, Abort.Panic:
+            pm4_test_push_u32_le(out, PM4Type3Header_Pack(PM4ItOpcode_Nop, 0x3fff, 0, 0))
+        return out
+
+    count: usize = ((seed.u32() >> 3) & 15).usize() + 1
+    can Memory.Allocate, Abort.Panic:
+        pm4_test_push_u32_le(out, PM4Type3Header_Pack(PM4ItOpcode_Nop, (count - 1).u32(), 0, 0))
+        for i in 0..<count:
+            pm4_test_push_u32_le(out, pm4_test_fuzz_word(seed, i))
+        if mode == 6:
+            pm4_test_push_u32_le(out, PM4Type3Header_Pack(PM4ItOpcode_SetShReg, 1, 0, 0))
+            pm4_test_push_u32_le(out, 0x2c00)
+            pm4_test_push_u32_le(out, 0x12345678)
+    return out
+
+def synth_adversarial_pm4_bytes(seed: i32, out: mutable u8&) -> usize:
+    mode: u32 = seed.u32() & 7
+    if mode == 0:
+        return 0
+    if mode == 1:
+        out[0] <- 0xc0
+        out[1] <- 0xff
+        return 2
+    if mode == 2:
+        pm4_test_store_u32_le(out, 0, PM4Type3Header_Pack(PM4ItOpcode_Nop, 3, 0, 0))
+        out[4] <- 0
+        out[5] <- 1
+        return 6
+    if mode == 3:
+        pm4_test_store_u32_le(out, 0, 1 << 30)
+        return 4
+    if mode == 4:
+        pm4_test_store_u32_le(out, 0, PM4Type3Header_Pack(PM4ItOpcode_Nop, 0x3fff, 0, 0))
+        return 4
+
+    count: usize = ((seed.u32() >> 3) & 15).usize() + 1
+    pm4_test_store_u32_le(out, 0, PM4Type3Header_Pack(PM4ItOpcode_Nop, (count - 1).u32(), 0, 0))
+    for i in 0..<count:
+        pm4_test_store_u32_le(out, 4 + (i * 4), pm4_test_fuzz_word(seed, i))
+    if mode == 6:
+        next: usize = 4 + (count * 4)
+        pm4_test_store_u32_le(out, next, PM4Type3Header_Pack(PM4ItOpcode_SetShReg, 1, 0, 0))
+        pm4_test_store_u32_le(out, next + 4, 0x2c00)
+        pm4_test_store_u32_le(out, next + 8, 0x12345678)
+        return next + 12
+    return 4 + (count * 4)
+
+@test
+def pm4_next_packet_rejects_malformed_without_advancing() -> void:
+    can Abort.Panic, Memory.Allocate:
+        truncated: mutable darray[u8] = []
+        pm4_test_push_u32_le(truncated, PM4Type3Header_Pack(PM4ItOpcode_Nop, 4, 0, 0))
+        result: PM4PacketView = pm4_next_packet(truncated, 0)
+        assert not result.ok
+        assert result.status == PM4WalkStatus_TruncatedBody
+        assert result.next_offset == 0
+
+        bad_type: mutable darray[u8] = []
+        pm4_test_push_u32_le(bad_type, 1 << 30)
+        bad: PM4PacketView = pm4_next_packet(bad_type, 0)
+        assert not bad.ok
+        assert bad.status == PM4WalkStatus_UnsupportedType
+
+@test
+def pm4_next_packet_accepts_well_formed_type3() -> void:
+    can Abort.Panic, Memory.Allocate:
+        buf: mutable darray[u8] = []
+        pm4_test_push_u32_le(buf, PM4Type3Header_Pack(PM4ItOpcode_Nop, 1, 0, 0))
+        pm4_test_push_u32_le(buf, 0x11111111)
+        pm4_test_push_u32_le(buf, 0x22222222)
+
+        result: PM4PacketView = pm4_next_packet(buf, 0)
+        assert result.ok
+        assert result.status == PM4WalkStatus_Ok
+        assert result.next_offset == buf.count
+        assert result.packet_type == 3
+        assert result.opcode == PM4ItOpcode_Nop
+        assert result.body_dwords == 2
+
+@test
+def pm4_max_count_header_is_not_empty() -> void:
+    can Abort.Panic, Memory.Allocate:
+        buf: mutable darray[u8] = []
+        pm4_test_push_u32_le(buf, PM4Type3Header_Pack(PM4ItOpcode_Nop, 0x3fff, 0, 0))
+        result: PM4PacketView = pm4_next_packet(buf, 0)
+        assert not result.ok
+        assert result.status == PM4WalkStatus_TruncatedBody
+        assert result.body_dwords == 0x4000
+
+@property
+def pm4_walk_never_traps(seed: i32) -> bool:
+    can Abort.Panic:
+        buf: mutable array[u8, 80] = zeroed
+        len: usize = synth_adversarial_pm4_bytes(seed, buf[0])
+        return PM4_WalkNeverTrapsBytes(buf[0], len)

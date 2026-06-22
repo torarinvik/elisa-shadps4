@@ -50,18 +50,21 @@ def ge_sysctl_flag(name: u8&) -> s32:
 
 def ge_host_native_x64_runnable() -> s32:
     ensure result == 0 or result == 1
-    if ge_native_x64_runnable_cache == 0 or ge_native_x64_runnable_cache == 1:
-        return ge_native_x64_runnable_cache
-    result: mutable s32 = 1
+    if ge_native_x64_runnable_cache == 0:
+        return 0
+    if ge_native_x64_runnable_cache == 1:
+        return 1
     apple_silicon_hw: s32 = ge_sysctl_flag("hw.optional.arm64")
     translated: s32 = ge_sysctl_flag("sysctl.proc_translated")
     if apple_silicon_hw == 1 and translated == 0:
         # Apple Silicon hardware, running natively (not under Rosetta): this build is
         # the arm64 interpreter masquerading as an x86_64 target — guest exec traps.
-        result <- 0
+        trusted Global:
+            ge_native_x64_runnable_cache <- 0
+        return 0
     trusted Global:
-        ge_native_x64_runnable_cache <- result
-    return result
+        ge_native_x64_runnable_cache <- 1
+    return 1
 
 def c_GuestExec_IsSupported() -> s32:
     static if PLATFORM_WINDOWS:
@@ -98,6 +101,7 @@ def c_GuestExec_HostMode() -> static u8&?:
         return "unknown"
 
 def c_GuestExec_HostCanRunX64Subprocess() -> s32:
+    ensure result == 0 or result == 1
     static if ARCH_X86_64:
         return 1
     static elif PLATFORM_APPLE and ARCH_ARM64:
@@ -122,7 +126,9 @@ def c_GuestExec_HostCanRunX64Subprocess() -> s32:
         status: int = pclose(proc.cast[void&])
         if status != 0:
             return 0
-        return has_x64
+        if has_x64 == 1:
+            return 1
+        return 0
     static else:
         return 0
 
@@ -5017,10 +5023,10 @@ def GuestExec_HostCanRunX64Subprocess() -> bool:
 
 def GuestExec_SpawnX64Subprocess(path: u8&?, argv: static u8&?&?) -> s32:
     ensure result >= -1
-    result: s32 = c_GuestExec_SpawnX64Subprocess(path, argv)
-    if result < -1:
+    raw_status: s32 = c_GuestExec_SpawnX64Subprocess(path, argv)
+    if raw_status < -1:
         return -1
-    return result
+    return raw_status
 
 def GuestExec_AeroLibFallbackStubAddress() -> uintptr:
     return c_GuestExec_AeroLibFallbackStubAddress()
