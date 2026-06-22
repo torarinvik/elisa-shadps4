@@ -35,7 +35,14 @@ erased `model_end`, which does not exist at runtime.
 - Breaks only when a function carrying a ghost-referencing contract clause is codegen'd for a
   non-strict/`-emit test` build.
 
-### Recommended follow-up (compiler)
+### UPDATE — RESOLVED (compiler)
+Ghost-field-referencing `requires`/`ensure` clauses are now proof-only: kept for static discharge,
+stripped from the codegen-visible contract set after all discharge runs (`exprReferencesGhostField`
++ `stripGhostFieldContractsForRuntime`, mirroring the ghost-invariant split). `ghost_model_tests.elisa`
+now runs under `-emit test` (passed=1) AND proves under `-strict -smt`. Soundness preserved: a false
+ghost refinement is still rejected under `-strict`; a non-ghost `ensure` is still runtime-checked.
+
+### Original recommended follow-up (now done)
 Mirror the invariant treatment for contract clauses: a `requires`/`ensure` clause that references a
 ghost field is PROOF-ONLY — keep it for static discharge, but strip it from the codegen-visible
 `FuncDecl.EnsureValues`/`Requires` (post-discharge) so no runtime check is emitted. Add an
