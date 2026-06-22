@@ -40,41 +40,67 @@ const SD_MOUNT_STATUS_CREATED: u32 = 1
 
 # ---- raw pointer read/write at byte offsets ----
 
-def abi_u32_at(base: void&, off: usize) -> u32:
-    p: u8& = base.cast[u8&]
+law FitsAt(self: usize, need: usize, cap: usize) = self + need <= cap
+
+struct AbiView:
+    base: void&
+    size: usize
+
+struct MutableAbiView:
+    base: mutable void&
+    size: usize
+
+def abi_view(base: void&, size: usize) -> AbiView:
+    return AbiView{base: base, size: size}
+
+def abi_mut_view(base: mutable void&, size: usize) -> MutableAbiView:
+    return MutableAbiView{base: base, size: size}
+
+def abi_u32_at(v: AbiView, off: usize) -> u32:
+    if off + 4 > v.size:
+        return 0
+    p: u8& = v.base.cast[u8&]
     out: mutable u32 = 0
     for i in 0..<4:
         out <- out | (p[off + i].u32() << (i * 8).u32())
     return out
 
-def abi_u64_at(base: void&, off: usize) -> u64:
-    p: u8& = base.cast[u8&]
+def abi_u64_at(v: AbiView, off: usize) -> u64:
+    if off + 8 > v.size:
+        return 0
+    p: u8& = v.base.cast[u8&]
     out: mutable u64 = 0
     for i in 0..<8:
         out <- out | (p[off + i].u64() << (i * 8).u64())
     return out
 
-def abi_store_u32(base: mutable void&, off: usize, value: u32) -> void:
-    p: mutable u8& = base.cast[mutable u8&]
+def abi_store_u32(v: MutableAbiView, off: usize, value: u32) -> void:
+    if off + 4 > v.size:
+        return
+    p: mutable u8& = v.base.cast[mutable u8&]
     for i in 0..<4:
         p[off + i] <- ((value >> (i * 8).u32()) & 0xFF).u8()
 
-def abi_store_u64(base: mutable void&, off: usize, value: u64) -> void:
-    p: mutable u8& = base.cast[mutable u8&]
+def abi_store_u64(v: MutableAbiView, off: usize, value: u64) -> void:
+    if off + 8 > v.size:
+        return
+    p: mutable u8& = v.base.cast[mutable u8&]
     for i in 0..<8:
         p[off + i] <- ((value >> (i * 8).u64()) & 0xFF).u8()
 
 # abi_ptr_at loads an 8-byte pointer field; null when zero.
-def abi_ptr_at(base: void&, off: usize) -> u8&?:
-    raw: u64 = abi_u64_at(base, off)
+def abi_ptr_at(v: AbiView, off: usize) -> u8&?:
+    raw: u64 = abi_u64_at(v, off)
     if raw == 0:
         return null
     return raw.uintptr().cast[u8&]
 
 # abi_store_cstr writes a NUL-terminated string into a fixed `cap`-byte CString field at
 # `off`, truncating to cap-1 chars + NUL.
-def abi_store_cstr(base: mutable void&, off: usize, src: static u8&, cap: usize) -> void:
-    p: mutable u8& = base.cast[mutable u8&]
+def abi_store_cstr(v: MutableAbiView, off: usize, src: static u8&, cap: usize) -> void:
+    if off + cap > v.size:
+        return
+    p: mutable u8& = v.base.cast[mutable u8&]
     n: usize = runtime_strlen(src)
     limit: mutable usize = n
     if cap > 0 and limit >= cap:
@@ -96,9 +122,10 @@ def savedata_abi_mount2(mount: void&?, result: void&?) -> u32:
     if mount == null or result == null:
         return SAVE_DATA_ERROR_PARAMETER
     m: void& = mount
-    user_id: u32 = abi_u32_at(m, 0)
-    dir_name: u8&? = abi_ptr_at(m, 8)
-    blocks: u64 = abi_u64_at(m, 16)
+    mv: AbiView = abi_view(m, 64)
+    user_id: u32 = abi_u32_at(mv, 0)
+    dir_name: u8&? = abi_ptr_at(mv, 8)
+    blocks: u64 = abi_u64_at(mv, 16)
     if dir_name == null:
         return SAVE_DATA_ERROR_PARAMETER
     handle: int = savedata_mount(user_id.i32().int(), dir_name, blocks)
@@ -106,10 +133,11 @@ def savedata_abi_mount2(mount: void&?, result: void&?) -> u32:
         return savedata_neg_to_u32(handle)
     mp: u8&? = savedata_mount_point(handle)
     res: mutable void& = result
+    rv: MutableAbiView = abi_mut_view(res, 64)
     if mp != null:
-        abi_store_cstr(res, 0, mp.cast[static u8&], ORBIS_MOUNT_POINT_MAXSIZE)
-    abi_store_u64(res, 16, blocks)         # required_blocks
-    abi_store_u32(res, 28, SD_MOUNT_STATUS_CREATED)
+        abi_store_cstr(rv, 0, mp.cast[static u8&], ORBIS_MOUNT_POINT_MAXSIZE)
+    abi_store_u64(rv, 16, blocks)         # required_blocks
+    abi_store_u32(rv, 28, SD_MOUNT_STATUS_CREATED)
     return SAVE_DATA_ERROR_OK
 
 # savedata_abi_mount decodes an OrbisSaveDataMount (v1) + writes an OrbisSaveDataMountResult.
@@ -119,9 +147,10 @@ def savedata_abi_mount(mount: void&?, result: void&?) -> u32:
     if mount == null or result == null:
         return SAVE_DATA_ERROR_PARAMETER
     m: void& = mount
-    user_id: u32 = abi_u32_at(m, 0)
-    dir_name: u8&? = abi_ptr_at(m, 16)
-    blocks: u64 = abi_u64_at(m, 32)
+    mv: AbiView = abi_view(m, 48)
+    user_id: u32 = abi_u32_at(mv, 0)
+    dir_name: u8&? = abi_ptr_at(mv, 16)
+    blocks: u64 = abi_u64_at(mv, 32)
     if dir_name == null:
         return SAVE_DATA_ERROR_PARAMETER
     handle: int = savedata_mount(user_id.i32().int(), dir_name, blocks)
@@ -129,10 +158,11 @@ def savedata_abi_mount(mount: void&?, result: void&?) -> u32:
         return savedata_neg_to_u32(handle)
     mp: u8&? = savedata_mount_point(handle)
     res: mutable void& = result
+    rv: MutableAbiView = abi_mut_view(res, 64)
     if mp != null:
-        abi_store_cstr(res, 0, mp.cast[static u8&], ORBIS_MOUNT_POINT_MAXSIZE)
-    abi_store_u64(res, 16, blocks)
-    abi_store_u32(res, 28, SD_MOUNT_STATUS_CREATED)
+        abi_store_cstr(rv, 0, mp.cast[static u8&], ORBIS_MOUNT_POINT_MAXSIZE)
+    abi_store_u64(rv, 16, blocks)
+    abi_store_u32(rv, 28, SD_MOUNT_STATUS_CREATED)
     return SAVE_DATA_ERROR_OK
 
 # savedata_abi_delete decodes an OrbisSaveDataDelete and removes the save directory.
@@ -141,7 +171,8 @@ def savedata_abi_delete(del: void&?) -> u32:
     if del == null:
         return SAVE_DATA_ERROR_PARAMETER
     d: void& = del
-    dir_name: u8&? = abi_ptr_at(d, 16)
+    dv: AbiView = abi_view(d, 24)
+    dir_name: u8&? = abi_ptr_at(dv, 16)
     if dir_name == null:
         return SAVE_DATA_ERROR_PARAMETER
     return savedata_delete_dir(dir_name)
@@ -163,16 +194,19 @@ def savedata_abi_dir_name_search(cond: void&?, result: void&?) -> u32:
     if cond == null or result == null:
         return SAVE_DATA_ERROR_PARAMETER
     c: void& = cond
-    key: u32 = abi_u32_at(c, 24)
-    order: u32 = abi_u32_at(c, 28)
+    cv: AbiView = abi_view(c, 32)
+    key: u32 = abi_u32_at(cv, 24)
+    order: u32 = abi_u32_at(cv, 28)
     if key > SD_SORTKEY_MAX or order > SD_SORTORDER_DESCENT:
         return SAVE_DATA_ERROR_PARAMETER
-    dir_name: u8&? = abi_ptr_at(c, 16)
+    dir_name: u8&? = abi_ptr_at(cv, 16)
     res: mutable void& = result
-    capacity: u32 = abi_u32_at(res, 16)
-    dir_names: u8&? = abi_ptr_at(res, 8)
-    params: u8&? = abi_ptr_at(res, 24)
-    infos: u8&? = abi_ptr_at(res, 32)
+    rv_ro: AbiView = abi_view(res, 40)
+    rv: MutableAbiView = abi_mut_view(res, 64)
+    capacity: u32 = abi_u32_at(rv_ro, 16)
+    dir_names: u8&? = abi_ptr_at(rv_ro, 8)
+    params: u8&? = abi_ptr_at(rv_ro, 24)
+    infos: u8&? = abi_ptr_at(rv_ro, 32)
     can Memory.Allocate, Abort.Panic:
         hits: mutable darray[SaveSearchHit] = savedata_search(dir_name)
         # DESCENT reverses the (ascending) name order.
@@ -182,23 +216,26 @@ def savedata_abi_dir_name_search(cond: void&?, result: void&?) -> u32:
         max_count: mutable u32 = total
         if max_count > capacity:
             max_count <- capacity
-        abi_store_u32(res, 0, total)       # hitNum
-        abi_store_u32(res, 20, max_count)  # setNum
+        abi_store_u32(rv, 0, total)       # hitNum
+        abi_store_u32(rv, 20, max_count)  # setNum
         for i in 0..<max_count.usize():
             hit: SaveSearchHit = hits[i]
             if dir_names != null:
                 dn: mutable void& = dir_names.cast[mutable void&]
-                abi_store_cstr(dn, i * SD_DIRNAME_STRIDE, hit.name, ORBIS_DIRNAME_MAXSIZE)
+                dnv: MutableAbiView = abi_mut_view(dn, capacity.usize() * SD_DIRNAME_STRIDE)
+                abi_store_cstr(dnv, i * SD_DIRNAME_STRIDE, hit.name, ORBIS_DIRNAME_MAXSIZE)
             if params != null:
                 pv: mutable void& = params.cast[mutable void&]
+                pvv: MutableAbiView = abi_mut_view(pv, capacity.usize() * SD_PARAM_STRIDE)
                 base: usize = i * SD_PARAM_STRIDE
-                abi_store_cstr(pv, base + SD_PARAM_OFF_TITLE, hit.title, ORBIS_TITLE_MAXSIZE)
-                abi_store_u32(pv, base + SD_PARAM_OFF_USERPARAM, hit.user_param)
+                abi_store_cstr(pvv, base + SD_PARAM_OFF_TITLE, hit.title, ORBIS_TITLE_MAXSIZE)
+                abi_store_u32(pvv, base + SD_PARAM_OFF_USERPARAM, hit.user_param)
             if infos != null:
                 iv: mutable void& = infos.cast[mutable void&]
+                ivv: MutableAbiView = abi_mut_view(iv, capacity.usize() * SD_SEARCHINFO_STRIDE)
                 base: usize = i * SD_SEARCHINFO_STRIDE
-                abi_store_u64(iv, base + 0, hit.blocks)
-                abi_store_u64(iv, base + 8, hit.free_blocks)
+                abi_store_u64(ivv, base + 0, hit.blocks)
+                abi_store_u64(ivv, base + 8, hit.free_blocks)
     return SAVE_DATA_ERROR_OK
 
 # savedata_abi_umount decodes an OrbisSaveDataMountPoint and releases the slot.
@@ -223,8 +260,9 @@ def savedata_abi_get_mount_info(mount_point: void&?, info: void&?) -> u32:
     if rc != SAVE_DATA_ERROR_OK:
         return rc
     inf: mutable void& = info
-    abi_store_u64(inf, 0, blocks)
-    abi_store_u64(inf, 8, free_blocks)
+    iv: MutableAbiView = abi_mut_view(inf, 16)
+    abi_store_u64(iv, 0, blocks)
+    abi_store_u64(iv, 8, free_blocks)
     return SAVE_DATA_ERROR_OK
 
 # savedata_abi_set_param reads a param value from a guest buffer and stores it.
@@ -238,7 +276,10 @@ def savedata_abi_set_param(mount_point: void&?, param_type: u32, buf: void&?, bu
         return savedata_set_param_title(handle, buf.cast[u8&?])
     if param_type == SD_PARAM_USER_PARAM:
         b: void& = buf
-        return savedata_set_param_user(handle, abi_u32_at(b, 0))
+        if buf_size < 4:
+            return SAVE_DATA_ERROR_PARAMETER
+        bv: AbiView = abi_view(b, buf_size)
+        return savedata_set_param_user(handle, abi_u32_at(bv, 0))
     return SAVE_DATA_ERROR_OK
 
 # savedata_abi_get_param writes a param value into a guest buffer, reporting got size.
@@ -253,16 +294,21 @@ def savedata_abi_get_param(mount_point: void&?, param_type: u32, buf: void&?, bu
         rc: u32 = savedata_get_param_title(handle, buf.cast[mutable u8&], buf_size.u32(), gs)
         if got_size != null:
             g: mutable void& = got_size
-            abi_store_u64(g, 0, gs)
+            gv: MutableAbiView = abi_mut_view(g, 8)
+            abi_store_u64(gv, 0, gs)
         return rc
     if param_type == SD_PARAM_USER_PARAM:
         up: mutable u32 = 0
         us: mutable u64 = 0
         rc: u32 = savedata_get_param_user(handle, up, us)
         b: mutable void& = buf
-        abi_store_u32(b, 0, up)
+        if buf_size < 4:
+            return SAVE_DATA_ERROR_PARAMETER
+        bv: MutableAbiView = abi_mut_view(b, buf_size)
+        abi_store_u32(bv, 0, up)
         if got_size != null:
             g: mutable void& = got_size
-            abi_store_u64(g, 0, 4)
+            gv: MutableAbiView = abi_mut_view(g, 8)
+            abi_store_u64(gv, 0, 4)
         return rc
     return SAVE_DATA_ERROR_OK

@@ -1,0 +1,128 @@
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../common/arch.elisa"
+include "../common/types.elisa"
+include "../common/logging/log.elisa"
+include "../common/string_util.elisa"
+include "../common/io_file.elisa"
+include "../core/file_format/binary.elisa"
+include "../core/file_format/psf.elisa"
+
+def psf_test_push_zeroes(out: mutable darray[u8]&, count: usize) -> void:
+    for i in 0..<count:
+        ff_push_u8(out, 0)
+
+def psf_test_push_cstr(out: mutable darray[u8]&, value: static u8&) -> void:
+    for i in 0..<runtime_strlen(value):
+        ff_push_u8(out, value[i])
+    ff_push_u8(out, 0)
+
+def psf_test_fuzz_byte(seed: i32, index: usize) -> u8:
+    mixed: mutable u32 = seed.u32() ^ (index.u32() * 0x45d9f3b)
+    mixed <- mixed ^ (mixed >> 16)
+    mixed <- mixed * 0x45d9f3b
+    mixed <- mixed ^ (mixed >> 16)
+    return (mixed & 0xFF).u8()
+
+def psf_test_make_adversarial_buffer(seed: i32) -> darray[u8]:
+    out: mutable darray[u8] = []
+    len: usize = ((seed.u32() & 0x7F) + 1).usize()
+    for i in 0..<len:
+        ff_push_u8(out, psf_test_fuzz_byte(seed, i))
+    if len >= PSF_HEADER_SIZE:
+        out[0] <- 0
+        out[1] <- 0x50
+        out[2] <- 0x53
+        out[3] <- 0x46
+        out[4] <- 0x01
+        out[5] <- 0x01
+        out[6] <- 0
+        out[7] <- 0
+        out[16] <- psf_test_fuzz_byte(seed, 16)
+        out[17] <- psf_test_fuzz_byte(seed, 17)
+        out[18] <- psf_test_fuzz_byte(seed, 18)
+        out[19] <- psf_test_fuzz_byte(seed, 19)
+    return out
+
+@test
+def psf_parser_text_integer_behavior_unchanged() -> void:
+    can Abort.Panic, Memory.Allocate:
+        bytes: mutable darray[u8] = []
+        ff_push_u32_be(bytes, PSF_MAGIC)
+        ff_push_u32_le(bytes, PSF_VERSION_1_1)
+        ff_push_u32_le(bytes, 0x34)
+        ff_push_u32_le(bytes, 0x43)
+        ff_push_u32_le(bytes, 2)
+        ff_push_u16_le(bytes, 0)
+        ff_push_u16_be(bytes, PSF_ENTRY_FMT_TEXT)
+        ff_push_u32_le(bytes, 5)
+        ff_push_u32_le(bytes, 12)
+        ff_push_u32_le(bytes, 0)
+        ff_push_u16_le(bytes, 9)
+        ff_push_u16_be(bytes, PSF_ENTRY_FMT_INTEGER)
+        ff_push_u32_le(bytes, 4)
+        ff_push_u32_le(bytes, 4)
+        ff_push_u32_le(bytes, 12)
+        psf_test_push_cstr(bytes, "TITLE_ID")
+        psf_test_push_cstr(bytes, "COUNT")
+        psf_test_push_cstr(bytes, "ABCD")
+        psf_test_push_zeroes(bytes, 7)
+        ff_push_u32_le(bytes, 42)
+
+        parsed: PsfFile = Psf_Parse(bytes)
+        assert parsed.valid
+        assert parsed.entries.count == 2
+        assert string_slice_eq(Psf_GetString(parsed, "TITLE_ID"), 0, 4, "ABCD") == 1
+        assert Psf_GetInteger(parsed, "COUNT") == 42
+
+@test
+def psf_parser_roundtrip_behavior_unchanged() -> void:
+    can Abort.Panic, Memory.Allocate:
+        psf: mutable PsfFile = PsfFile_empty()
+        Psf_AddString(psf, "TITLE_ID", "ABCD")
+        Psf_AddInteger(psf, "COUNT", 42)
+        parsed: PsfFile = Psf_Parse(Psf_Encode(psf))
+        assert parsed.valid
+        assert parsed.entries.count == 2
+        assert string_slice_eq(Psf_GetString(parsed, "TITLE_ID"), 0, 4, "ABCD") == 1
+        assert Psf_GetInteger(parsed, "COUNT") == 42
+
+@test
+def psf_parser_rejects_truncated_index_table() -> void:
+    can Abort.Panic, Memory.Allocate:
+        bytes: mutable darray[u8] = []
+        ff_push_u32_be(bytes, PSF_MAGIC)
+        ff_push_u32_le(bytes, PSF_VERSION_1_1)
+        ff_push_u32_le(bytes, PSF_HEADER_SIZE.u32())
+        ff_push_u32_le(bytes, PSF_HEADER_SIZE.u32())
+        ff_push_u32_le(bytes, 1)
+
+        parsed: PsfFile = Psf_Parse(bytes)
+        assert not parsed.valid
+        assert parsed.entries.count == 0
+
+@test
+def psf_parser_rejects_out_of_range_key_and_data_offsets() -> void:
+    can Abort.Panic, Memory.Allocate:
+        bytes: mutable darray[u8] = []
+        ff_push_u32_be(bytes, PSF_MAGIC)
+        ff_push_u32_le(bytes, PSF_VERSION_1_1)
+        ff_push_u32_le(bytes, 0xFFFFFFFF)
+        ff_push_u32_le(bytes, 0xFFFFFFFF)
+        ff_push_u32_le(bytes, 1)
+        ff_push_u16_le(bytes, 0xFFFF)
+        ff_push_u16_be(bytes, PSF_ENTRY_FMT_INTEGER)
+        ff_push_u32_le(bytes, 4)
+        ff_push_u32_le(bytes, 4)
+        ff_push_u32_le(bytes, 0xFFFFFFFF)
+        psf_test_push_zeroes(bytes, 4)
+
+        parsed: PsfFile = Psf_Parse(bytes)
+        assert not parsed.valid
+        assert parsed.entries.count == 0
+
+@test
+def psf_parser_fuzz_samples_never_trap() -> void:
+    can Abort.Panic, Memory.Allocate:
+        for seed in 0..<64:
+            parsed: PsfFile = Psf_Parse(psf_test_make_adversarial_buffer(seed.i32()))
+            assert parsed.valid or not parsed.valid

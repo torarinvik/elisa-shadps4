@@ -90,8 +90,28 @@ def kernel_memory_invalid_pointer_ordering_and_direct_flexible_maps() -> void:
         km_check(posix_munmap(null, 0x4000) == -1, "posix munmap should map failure to -1")
 
 @test
-def kernel_memory_direct_alloc_and_query_contracts() -> void:
+def kernel_memory_region_math_rejects_overflow_and_aliasing() -> void:
     can Abort.Panic, Segment.Host, Unsafe.SegmentMutation:
+        Memory_Reset()
+        mem: mutable MemoryManager& = Memory_Instance()
+        base: VAddr = 0x800000000.uintptr()
+        mapped: mutable VAddr = 0.uintptr()
+
+        km_check(AddressSpace_PageAligned(base.u64()), "test base should be 4KB aligned")
+        km_check(AddressSpace_PageAligned(0x4000), "test len should be 4KB aligned")
+        km_check(AddressSpace_WithinReservation(base.u64(), 0x4000, AddressSpace_SystemReservedMin.u64(), AddressSpace_SystemReservedSize), "reserved test range should be within system-reserved")
+        km_check(not AddressSpace_WithinReservation(0xfffffffffffff000, 0x4000, AddressSpace_SystemReservedMin.u64(), AddressSpace_SystemReservedSize), "overflowing range should not be within reservation")
+        km_check(AddressSpace_RangesOverlap(base.u64(), 0x4000, (base + 0x2000.uintptr()).u64(), 0x4000), "intersecting ranges should overlap")
+        km_check(not AddressSpace_RangesOverlap(base.u64(), 0x4000, (base + 0x4000.uintptr()).u64(), 0x4000), "touching ranges should not overlap")
+
+        km_check(MemoryManager_MapMemory(mem, mapped, base, 0x4000, MemoryProt_CpuReadWrite, MemoryMapFlags_NoFlags, VMAType_Reserved, "reserved", false, 0.uintptr(), 0x4000) == 0, "first map should succeed")
+        km_check(mapped == base, "fixed map should preserve requested address")
+        km_check(MemoryManager_MapMemory(mem, mapped, base + 0x2000.uintptr(), 0x4000, MemoryProt_CpuReadWrite, MemoryMapFlags_NoOverwrite, VMAType_Reserved, "overlap", false, 0.uintptr(), 0x4000) == -1, "no-overwrite map should reject overlap")
+        km_check(MemoryManager_MapMemory(mem, mapped, 0xfffffffffffff000.uintptr(), 0x4000, MemoryProt_CpuReadWrite, MemoryMapFlags_NoFlags, VMAType_Reserved, "overflow", false, 0.uintptr(), 0x4000) == -1, "map should reject overflowing virtual range")
+
+@test
+def kernel_memory_direct_alloc_and_query_contracts() -> void:
+    can Memory.Allocate, Abort.Panic, Segment.Host, Unsafe.SegmentMutation:
         Memory_Reset()
         MemoryManager_SetupMemoryRegions(Memory_Instance(), ORBIS_KERNEL_FLEXIBLE_MEMORY_SIZE, true, true)
 

@@ -1,0 +1,41 @@
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../common/arch.elisa"
+include "../common/types.elisa"
+include "../common/logging/log.elisa"
+include "../common/string_util.elisa"
+include "../common/io_file.elisa"
+include "../core/file_format/binary.elisa"
+include "../core/file_format/psf.elisa"
+
+def psf_property_fuzz_byte(seed: i32, index: usize) -> u8:
+    mixed: mutable u32 = seed.u32() ^ (index.u32() * 0x45d9f3b)
+    mixed <- mixed ^ (mixed >> 16)
+    mixed <- mixed * 0x45d9f3b
+    mixed <- mixed ^ (mixed >> 16)
+    return (mixed & 0xFF).u8()
+
+def psf_property_adversarial_buffer(seed: i32) -> darray[u8]:
+    out: mutable darray[u8] = []
+    len: usize = ((seed.u32() & 0x7F) + 1).usize()
+    for i in 0..<len:
+        ff_push_u8(out, psf_property_fuzz_byte(seed, i))
+    if len >= PSF_HEADER_SIZE:
+        out[0] <- 0
+        out[1] <- 0x50
+        out[2] <- 0x53
+        out[3] <- 0x46
+        out[4] <- 0x01
+        out[5] <- 0x01
+        out[6] <- 0
+        out[7] <- 0
+        out[16] <- psf_property_fuzz_byte(seed, 16)
+        out[17] <- psf_property_fuzz_byte(seed, 17)
+        out[18] <- psf_property_fuzz_byte(seed, 18)
+        out[19] <- psf_property_fuzz_byte(seed, 19)
+    return out
+
+@property
+def psf_parse_never_traps(seed: i32) -> bool:
+    can Memory.Allocate, Abort.Panic:
+        parsed: PsfFile = Psf_Parse(psf_property_adversarial_buffer(seed))
+        return parsed.valid or not parsed.valid

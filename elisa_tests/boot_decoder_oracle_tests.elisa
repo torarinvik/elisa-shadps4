@@ -1,0 +1,467 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+
+const ORACLE_PSF_MAGIC: u32 = 0x00505346
+const ORACLE_PSF_VERSION_1_1: u32 = 0x00000101
+const ORACLE_PSF_HEADER_SIZE: usize = 0x14
+const ORACLE_PSF_RAW_ENTRY_SIZE: usize = 0x10
+const ORACLE_PSF_FMT_BINARY: u16 = 0x0004
+const ORACLE_PSF_FMT_TEXT: u16 = 0x0204
+const ORACLE_PSF_FMT_INTEGER: u16 = 0x0404
+
+const ORACLE_PT_LOAD: u32 = 0x1
+const ORACLE_PT_SCE_DYNLIBDATA: u32 = 0x61000000
+const ORACLE_PF_EXEC: u32 = 0x1
+const ORACLE_PF_WRITE: u32 = 0x2
+const ORACLE_PF_READ: u32 = 0x4
+const ORACLE_ET_SCE_DYNEXEC: u16 = 0xfe10
+const ORACLE_EM_X86_64: u16 = 62
+const ORACLE_EV_CURRENT: u32 = 1
+const ORACLE_ELF_PHDR_SIZE: usize = 56
+
+struct OraclePsfEntry:
+    key: mutable static u8&
+    fmt: mutable u16
+    max_len: mutable u32
+    binary_value: mutable darray[u8]
+    string_value: mutable static u8&
+    integer_value: mutable i32
+
+struct OraclePsf:
+    entries: mutable darray[OraclePsfEntry]
+    valid: mutable bool
+
+struct OraclePhdr:
+    p_type: mutable u32
+    p_flags: mutable u32
+    p_offset: mutable u64
+    p_vaddr: mutable u64
+    p_paddr: mutable u64
+    p_filesz: mutable u64
+    p_memsz: mutable u64
+    p_align: mutable u64
+
+struct OracleElfHeader:
+    magic0: mutable u8
+    magic1: mutable u8
+    magic2: mutable u8
+    magic3: mutable u8
+    ei_class: mutable u8
+    ei_data: mutable u8
+    ei_version: mutable u8
+    ei_osabi: mutable u8
+    ei_abiversion: mutable u8
+    e_type: mutable u16
+    e_machine: mutable u16
+    e_version: mutable u32
+    e_entry: mutable u64
+    e_phoff: mutable u64
+    e_phentsize: mutable u16
+    e_phnum: mutable u16
+
+def oracle_push_u8(out: mutable darray[u8]&, value: u8) -> void:
+    can Memory.Allocate, Abort.Panic:
+        in perm:
+            out.push(value)
+
+def oracle_push_zeroes(out: mutable darray[u8]&, count: usize) -> void:
+    for i in 0..<count:
+        oracle_push_u8(out, 0)
+
+def oracle_push_cstr(out: mutable darray[u8]&, value: static u8&) -> void:
+    for i in 0..<runtime_strlen(value):
+        oracle_push_u8(out, value[i])
+    oracle_push_u8(out, 0)
+
+def oracle_push_bytes(out: mutable darray[u8]&, value: darray[u8]) -> void:
+    for i in 0..<value.count:
+        oracle_push_u8(out, value[i])
+
+def oracle_push_u16_le(out: mutable darray[u8]&, value: u16) -> void:
+    oracle_push_u8(out, (value & 0xFF).u8())
+    oracle_push_u8(out, ((value >> 8) & 0xFF).u8())
+
+def oracle_push_u16_be(out: mutable darray[u8]&, value: u16) -> void:
+    oracle_push_u8(out, ((value >> 8) & 0xFF).u8())
+    oracle_push_u8(out, (value & 0xFF).u8())
+
+def oracle_push_u32_le(out: mutable darray[u8]&, value: u32) -> void:
+    for i in 0..<4:
+        oracle_push_u8(out, ((value >> (i * 8).u32()) & 0xFF).u8())
+
+def oracle_push_u32_be(out: mutable darray[u8]&, value: u32) -> void:
+    oracle_push_u8(out, ((value >> 24) & 0xFF).u8())
+    oracle_push_u8(out, ((value >> 16) & 0xFF).u8())
+    oracle_push_u8(out, ((value >> 8) & 0xFF).u8())
+    oracle_push_u8(out, (value & 0xFF).u8())
+
+def oracle_push_u64_le(out: mutable darray[u8]&, value: u64) -> void:
+    for i in 0..<8:
+        oracle_push_u8(out, ((value >> (i * 8).u64()) & 0xFF).u8())
+
+def oracle_u16_le(data: darray[u8]&, off: usize) -> u16:
+    return (data[off].u16() | (data[off + 1].u16() << 8)).u16()
+
+def oracle_u16_be(data: darray[u8]&, off: usize) -> u16:
+    return ((data[off].u16() << 8) | data[off + 1].u16()).u16()
+
+def oracle_u32_le(data: darray[u8]&, off: usize) -> u32:
+    return data[off].u32() | (data[off + 1].u32() << 8) | (data[off + 2].u32() << 16) | (data[off + 3].u32() << 24)
+
+def oracle_u32_be(data: darray[u8]&, off: usize) -> u32:
+    return (data[off].u32() << 24) | (data[off + 1].u32() << 16) | (data[off + 2].u32() << 8) | data[off + 3].u32()
+
+def oracle_u64_le(data: darray[u8]&, off: usize) -> u64:
+    out: mutable u64 = 0
+    for i in 0..<8:
+        out <- out | (data[off + i].u64() << (i * 8).u64())
+    return out
+
+def oracle_store_u32(base: mutable void&, off: usize, value: u32) -> void:
+    p: mutable u8& = base.cast[mutable u8&]
+    for i in 0..<4:
+        p[off + i] <- ((value >> (i * 8).u32()) & 0xFF).u8()
+
+def oracle_store_u64(base: mutable void&, off: usize, value: u64) -> void:
+    p: mutable u8& = base.cast[mutable u8&]
+    for i in 0..<8:
+        p[off + i] <- ((value >> (i * 8).u64()) & 0xFF).u8()
+
+def oracle_load_u32(base: void&, off: usize) -> u32:
+    p: u8& = base.cast[u8&]
+    return p[off].u32() | (p[off + 1].u32() << 8) | (p[off + 2].u32() << 16) | (p[off + 3].u32() << 24)
+
+def oracle_load_u64(base: void&, off: usize) -> u64:
+    p: u8& = base.cast[u8&]
+    out: mutable u64 = 0
+    for i in 0..<8:
+        out <- out | (p[off + i].u64() << (i * 8).u64())
+    return out
+
+def oracle_bytes_match_cstr(data: darray[u8]&, off: usize, value: static u8&) -> bool:
+    if off + runtime_strlen(value) >= data.count:
+        return false
+    for i in 0..<runtime_strlen(value):
+        if data[off + i] != value[i]:
+            return false
+    return data[off + runtime_strlen(value)] == 0
+
+def oracle_cstr_at(data: darray[u8]&, off: usize) -> static u8&:
+    if oracle_bytes_match_cstr(data, off, "TITLE_ID"):
+        return "TITLE_ID"
+    if oracle_bytes_match_cstr(data, off, "CATEGORY"):
+        return "CATEGORY"
+    if oracle_bytes_match_cstr(data, off, "USER_PARAM"):
+        return "USER_PARAM"
+    if oracle_bytes_match_cstr(data, off, "ACCOUNT_ID"):
+        return "ACCOUNT_ID"
+    if oracle_bytes_match_cstr(data, off, "ATTRIBUTE"):
+        return "ATTRIBUTE"
+    if oracle_bytes_match_cstr(data, off, "CUSA00001"):
+        return "CUSA00001"
+    if oracle_bytes_match_cstr(data, off, "CUSA90001"):
+        return "CUSA90001"
+    if oracle_bytes_match_cstr(data, off, "gd"):
+        return "gd"
+    return ""
+
+def oracle_static_eq(a: static u8&, b: static u8&) -> bool:
+    if runtime_strlen(a) != runtime_strlen(b):
+        return false
+    for i in 0..<runtime_strlen(a):
+        if a[i] != b[i]:
+            return false
+    return true
+
+def oracle_entry_string(key: static u8&, value: static u8&, max_len: u32) -> OraclePsfEntry:
+    return OraclePsfEntry(key, ORACLE_PSF_FMT_TEXT, max_len, [], value, 0)
+
+def oracle_entry_integer(key: static u8&, value: i32) -> OraclePsfEntry:
+    return OraclePsfEntry(key, ORACLE_PSF_FMT_INTEGER, 4, [], "", value)
+
+def oracle_entry_binary(key: static u8&, value: darray[u8], max_len: u32) -> OraclePsfEntry:
+    return OraclePsfEntry(key, ORACLE_PSF_FMT_BINARY, max_len, value, "", 0)
+
+def oracle_psf_add(psf: mutable OraclePsf&, entry: OraclePsfEntry) -> void:
+    can Memory.Allocate, Abort.Panic:
+        in perm:
+            psf.entries.push(entry)
+
+def oracle_psf_encode(psf: OraclePsf&) -> darray[u8]:
+    out: mutable darray[u8] = []
+    oracle_push_u32_be(out, ORACLE_PSF_MAGIC)
+    oracle_push_u32_le(out, ORACLE_PSF_VERSION_1_1)
+    oracle_push_u32_le(out, 0)
+    oracle_push_u32_le(out, 0)
+    oracle_push_u32_le(out, psf.entries.count.u32())
+    for i in 0..<psf.entries.count:
+        oracle_push_zeroes(out, ORACLE_PSF_RAW_ENTRY_SIZE)
+
+    key_table_offset: u32 = out.count.u32()
+    for i in 0..<psf.entries.count:
+        entry: OraclePsfEntry = psf.entries[i]
+        raw_pos: usize = ORACLE_PSF_HEADER_SIZE + i * ORACLE_PSF_RAW_ENTRY_SIZE
+        key_offset: u16 = (out.count.u32() - key_table_offset).u16()
+        out[raw_pos] <- (key_offset & 0xFF).u8()
+        out[raw_pos + 1] <- ((key_offset >> 8) & 0xFF).u8()
+        out[raw_pos + 2] <- ((entry.fmt >> 8) & 0xFF).u8()
+        out[raw_pos + 3] <- (entry.fmt & 0xFF).u8()
+        oracle_push_cstr(out, entry.key)
+
+    data_table_offset: u32 = out.count.u32()
+    out[8] <- (key_table_offset & 0xFF).u8()
+    out[9] <- ((key_table_offset >> 8) & 0xFF).u8()
+    out[12] <- (data_table_offset & 0xFF).u8()
+    out[13] <- ((data_table_offset >> 8) & 0xFF).u8()
+
+    for i in 0..<psf.entries.count:
+        while (out.count & 3) != 0:
+            oracle_push_u8(out, 0)
+        entry: OraclePsfEntry = psf.entries[i]
+        raw_pos: usize = ORACLE_PSF_HEADER_SIZE + i * ORACLE_PSF_RAW_ENTRY_SIZE
+        data_offset: u32 = out.count.u32() - data_table_offset
+        param_len: mutable u32 = 0
+        if entry.fmt == ORACLE_PSF_FMT_TEXT:
+            param_len <- (runtime_strlen(entry.string_value) + 1).u32()
+            oracle_push_cstr(out, entry.string_value)
+        elif entry.fmt == ORACLE_PSF_FMT_INTEGER:
+            param_len <- 4
+            oracle_push_u32_le(out, entry.integer_value.u32())
+        else:
+            param_len <- entry.binary_value.count.u32()
+            oracle_push_bytes(out, entry.binary_value)
+        out[raw_pos + 4] <- (param_len & 0xFF).u8()
+        out[raw_pos + 5] <- ((param_len >> 8) & 0xFF).u8()
+        out[raw_pos + 8] <- (entry.max_len & 0xFF).u8()
+        out[raw_pos + 9] <- ((entry.max_len >> 8) & 0xFF).u8()
+        out[raw_pos + 12] <- (data_offset & 0xFF).u8()
+        out[raw_pos + 13] <- ((data_offset >> 8) & 0xFF).u8()
+    return out
+
+def oracle_psf_parse(data: darray[u8]) -> OraclePsf:
+    out: mutable OraclePsf = OraclePsf([], false)
+    if data.count < ORACLE_PSF_HEADER_SIZE:
+        return out
+    if oracle_u32_be(data, 0) != ORACLE_PSF_MAGIC or oracle_u32_le(data, 4) != ORACLE_PSF_VERSION_1_1:
+        return out
+    key_table: usize = oracle_u32_le(data, 8).usize()
+    data_table: usize = oracle_u32_le(data, 12).usize()
+    count: u32 = oracle_u32_le(data, 16)
+    out.valid <- true
+    i: mutable u32 = 0
+    while i < count and out.valid:
+        raw: usize = ORACLE_PSF_HEADER_SIZE + i.usize() * ORACLE_PSF_RAW_ENTRY_SIZE
+        if raw + ORACLE_PSF_RAW_ENTRY_SIZE > data.count:
+            out.valid <- false
+        else:
+            key_off: usize = oracle_u16_le(data, raw).usize()
+            fmt: u16 = oracle_u16_be(data, raw + 2)
+            param_len: u32 = oracle_u32_le(data, raw + 4)
+            max_len: u32 = oracle_u32_le(data, raw + 8)
+            data_off: usize = data_table + oracle_u32_le(data, raw + 12).usize()
+            key: static u8& = oracle_cstr_at(data, key_table + key_off)
+            if fmt == ORACLE_PSF_FMT_TEXT:
+                oracle_psf_add(out, oracle_entry_string(key, oracle_cstr_at(data, data_off), max_len))
+            elif fmt == ORACLE_PSF_FMT_INTEGER:
+                oracle_psf_add(out, oracle_entry_integer(key, oracle_u32_le(data, data_off).i32()))
+            elif fmt == ORACLE_PSF_FMT_BINARY:
+                b: mutable darray[u8] = []
+                for j in 0..<param_len.usize():
+                    oracle_push_u8(b, data[data_off + j])
+                oracle_psf_add(out, oracle_entry_binary(key, b, max_len))
+            else:
+                out.valid <- false
+        i <- i + 1
+    return out
+
+def oracle_psf_find(psf: OraclePsf&, key: static u8&) -> usize:
+    for i in 0..<psf.entries.count:
+        if oracle_static_eq(psf.entries[i].key, key):
+            return i
+    return psf.entries.count
+
+def oracle_tiny_elf_bytes() -> darray[u8]:
+    out: mutable darray[u8] = []
+    oracle_push_u8(out, 0x7f)
+    oracle_push_u8(out, 'E'.u8())
+    oracle_push_u8(out, 'L'.u8())
+    oracle_push_u8(out, 'F'.u8())
+    oracle_push_u8(out, 2)
+    oracle_push_u8(out, 1)
+    oracle_push_u8(out, 1)
+    oracle_push_u8(out, 0x09)
+    oracle_push_u8(out, 0)
+    oracle_push_zeroes(out, 7)
+    oracle_push_u16_le(out, ORACLE_ET_SCE_DYNEXEC)
+    oracle_push_u16_le(out, ORACLE_EM_X86_64)
+    oracle_push_u32_le(out, ORACLE_EV_CURRENT)
+    oracle_push_u64_le(out, 0x400000)
+    oracle_push_u64_le(out, 0x40)
+    oracle_push_u64_le(out, 0)
+    oracle_push_u32_le(out, 0)
+    oracle_push_u16_le(out, 64)
+    oracle_push_u16_le(out, ORACLE_ELF_PHDR_SIZE.u16())
+    oracle_push_u16_le(out, 2)
+    oracle_push_u16_le(out, 0)
+    oracle_push_u16_le(out, 0)
+    oracle_push_u16_le(out, 0)
+    oracle_push_phdr(out, ORACLE_PT_LOAD, ORACLE_PF_READ | ORACLE_PF_EXEC, 0x200, 0x400000, 0x30, 0x1000, 0x4000)
+    oracle_push_phdr(out, ORACLE_PT_SCE_DYNLIBDATA, ORACLE_PF_READ | ORACLE_PF_WRITE, 0x300, 0x401000, 0x40, 0x40, 0x10)
+    return out
+
+def oracle_push_phdr(out: mutable darray[u8]&, ptype: u32, flags: u32, offset: u64, vaddr: u64, filesz: u64, memsz: u64, align: u64) -> void:
+    oracle_push_u32_le(out, ptype)
+    oracle_push_u32_le(out, flags)
+    oracle_push_u64_le(out, offset)
+    oracle_push_u64_le(out, vaddr)
+    oracle_push_u64_le(out, vaddr)
+    oracle_push_u64_le(out, filesz)
+    oracle_push_u64_le(out, memsz)
+    oracle_push_u64_le(out, align)
+
+def oracle_decode_elf_header(data: darray[u8]&) -> OracleElfHeader:
+    return OracleElfHeader(data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8], oracle_u16_le(data, 16), oracle_u16_le(data, 18), oracle_u32_le(data, 20), oracle_u64_le(data, 24), oracle_u64_le(data, 32), oracle_u16_le(data, 54), oracle_u16_le(data, 56))
+
+def oracle_decode_phdr(data: darray[u8]&, off: usize) -> OraclePhdr:
+    return OraclePhdr(oracle_u32_le(data, off), oracle_u32_le(data, off + 4), oracle_u64_le(data, off + 8), oracle_u64_le(data, off + 16), oracle_u64_le(data, off + 24), oracle_u64_le(data, off + 32), oracle_u64_le(data, off + 40), oracle_u64_le(data, off + 48))
+
+def oracle_is_ps4_elf(h: OracleElfHeader) -> bool:
+    return h.magic0 == 0x7f and h.magic1 == 'E'.u8() and h.magic2 == 'L'.u8() and h.magic3 == 'F'.u8() and h.ei_class == 2 and h.ei_data == 1 and h.ei_version == 1 and h.ei_osabi == 0x09 and h.ei_abiversion == 0 and h.e_type == ORACLE_ET_SCE_DYNEXEC and h.e_machine == ORACLE_EM_X86_64 and h.e_version == ORACLE_EV_CURRENT and h.e_phentsize == ORACLE_ELF_PHDR_SIZE.u16()
+
+@test
+def boot_oracle_psf_roundtrip_synthesized_valid_entries() -> void:
+    can Abort.Panic, Memory.Allocate:
+        account: mutable darray[u8] = []
+        oracle_push_u32_le(account, 0x55667788)
+        oracle_push_u32_le(account, 0x11223344)
+        psf: mutable OraclePsf = OraclePsf([], true)
+        oracle_psf_add(psf, oracle_entry_string("TITLE_ID", "CUSA00001", 12))
+        oracle_psf_add(psf, oracle_entry_string("CATEGORY", "gd", 4))
+        oracle_psf_add(psf, oracle_entry_integer("USER_PARAM", 0x12345678.i32()))
+        oracle_psf_add(psf, oracle_entry_binary("ACCOUNT_ID", account, 8))
+        parsed: OraclePsf = oracle_psf_parse(oracle_psf_encode(psf))
+        assert parsed.valid
+        assert parsed.entries.count == psf.entries.count
+        assert oracle_static_eq(parsed.entries[0].key, "TITLE_ID")
+        assert oracle_static_eq(parsed.entries[0].string_value, "CUSA00001")
+        assert parsed.entries[2].integer_value == 0x12345678.i32()
+        assert parsed.entries[3].binary_value.count == 8
+        assert parsed.entries[3].binary_value[0] == 0x88 and parsed.entries[3].binary_value[7] == 0x11
+
+@test
+def boot_oracle_psf_golden_vector_fields() -> void:
+    can Abort.Panic, Memory.Allocate:
+        bytes: mutable darray[u8] = []
+        oracle_push_u32_be(bytes, ORACLE_PSF_MAGIC)
+        oracle_push_u32_le(bytes, ORACLE_PSF_VERSION_1_1)
+        oracle_push_u32_le(bytes, 0x44)
+        oracle_push_u32_le(bytes, 0x62)
+        oracle_push_u32_le(bytes, 3)
+        oracle_push_u16_le(bytes, 0)
+        oracle_push_u16_be(bytes, ORACLE_PSF_FMT_TEXT)
+        oracle_push_u32_le(bytes, 10)
+        oracle_push_u32_le(bytes, 12)
+        oracle_push_u32_le(bytes, 0)
+        oracle_push_u16_le(bytes, 9)
+        oracle_push_u16_be(bytes, ORACLE_PSF_FMT_INTEGER)
+        oracle_push_u32_le(bytes, 4)
+        oracle_push_u32_le(bytes, 4)
+        oracle_push_u32_le(bytes, 12)
+        oracle_push_u16_le(bytes, 19)
+        oracle_push_u16_be(bytes, ORACLE_PSF_FMT_BINARY)
+        oracle_push_u32_le(bytes, 8)
+        oracle_push_u32_le(bytes, 8)
+        oracle_push_u32_le(bytes, 16)
+        oracle_push_cstr(bytes, "TITLE_ID")
+        oracle_push_cstr(bytes, "ATTRIBUTE")
+        oracle_push_cstr(bytes, "ACCOUNT_ID")
+        oracle_push_cstr(bytes, "CUSA90001")
+        oracle_push_zeroes(bytes, 2)
+        oracle_push_u32_le(bytes, 0x80)
+        oracle_push_u32_le(bytes, 0x55667788)
+        oracle_push_u32_le(bytes, 0x11223344)
+        psf: OraclePsf = oracle_psf_parse(bytes)
+        assert psf.valid
+        assert psf.entries.count == 3
+        assert oracle_static_eq(psf.entries[oracle_psf_find(psf, "TITLE_ID")].string_value, "CUSA90001")
+        assert psf.entries[oracle_psf_find(psf, "ATTRIBUTE")].integer_value == 0x80
+        account: darray[u8] = psf.entries[oracle_psf_find(psf, "ACCOUNT_ID")].binary_value
+        assert account[0] == 0x88 and account[1] == 0x77 and account[2] == 0x66 and account[3] == 0x55
+        assert account[4] == 0x44 and account[5] == 0x33 and account[6] == 0x22 and account[7] == 0x11
+
+@test
+def boot_oracle_savedata_mount2_golden_64b_layout() -> void:
+    can Abort.Panic:
+        dirname: mutable array[u8, 32] = zeroed
+        for i in 0..<runtime_strlen("ORACLE_SAVE"):
+            dirname[i] <- "ORACLE_SAVE"[i]
+        mount_buf: mutable array[u8, 64] = zeroed
+        mount_ref: mutable void& = (&mount_buf[0]).cast[mutable void&]
+        oracle_store_u32(mount_ref, 0, 0x10203040)
+        oracle_store_u64(mount_ref, 8, (&dirname[0]).uintptr().u64())
+        oracle_store_u64(mount_ref, 16, 0x123)
+        oracle_store_u32(mount_ref, 24, 0x6)
+        assert oracle_load_u32((&mount_buf[0]).cast[void&], 0) == 0x10203040
+        assert oracle_load_u64((&mount_buf[0]).cast[void&], 16) == 0x123
+        assert oracle_load_u32((&mount_buf[0]).cast[void&], 24) == 0x6
+        assert mount_buf[4] == 0 and mount_buf[5] == 0 and mount_buf[6] == 0 and mount_buf[7] == 0
+        for i in 28..<64:
+            assert mount_buf[i] == 0
+
+@test
+def boot_oracle_savedata_mount2_store_roundtrip_synthesized_valid() -> void:
+    can Abort.Panic:
+        buf: mutable array[u8, 64] = zeroed
+        b: mutable void& = (&buf[0]).cast[mutable void&]
+        oracle_store_u32(b, 0, 7)
+        oracle_store_u64(b, 16, 4096)
+        oracle_store_u32(b, 24, 0x6)
+        assert oracle_load_u32((&buf[0]).cast[void&], 0) == 7
+        assert oracle_load_u64((&buf[0]).cast[void&], 16) == 4096
+        assert oracle_load_u32((&buf[0]).cast[void&], 24) == 0x6
+        oracle_store_u64(b, 16, 8192)
+        assert oracle_load_u64((&buf[0]).cast[void&], 16) == 8192
+
+@test
+def boot_oracle_elf_golden_vector_fields() -> void:
+    can Abort.Panic, Memory.Allocate:
+        bytes: darray[u8] = oracle_tiny_elf_bytes()
+        h: OracleElfHeader = oracle_decode_elf_header(bytes)
+        assert oracle_is_ps4_elf(h)
+        assert h.e_entry == 0x400000
+        assert h.e_phoff == 0x40
+        assert h.e_phnum == 2
+        ph0: OraclePhdr = oracle_decode_phdr(bytes, 0x40)
+        assert ph0.p_type == ORACLE_PT_LOAD
+        assert ph0.p_flags == (ORACLE_PF_READ | ORACLE_PF_EXEC)
+        assert ph0.p_offset == 0x200
+        assert ph0.p_vaddr == 0x400000
+        assert ph0.p_filesz == 0x30
+        assert ph0.p_memsz == 0x1000
+        assert ph0.p_align == 0x4000
+        ph1: OraclePhdr = oracle_decode_phdr(bytes, 0x40 + ORACLE_ELF_PHDR_SIZE)
+        assert ph1.p_type == ORACLE_PT_SCE_DYNLIBDATA
+        assert ph1.p_flags == (ORACLE_PF_READ | ORACLE_PF_WRITE)
+        assert ph1.p_offset == 0x300
+        assert ph1.p_vaddr == 0x401000
+        assert ph1.p_filesz == 0x40
+        assert ph1.p_memsz == 0x40
+        assert ph1.p_align == 0x10
+
+@test
+def boot_oracle_phdr_roundtrip_synthesized_valid() -> void:
+    can Abort.Panic, Memory.Allocate:
+        bytes: darray[u8] = oracle_tiny_elf_bytes()
+        ph0: OraclePhdr = oracle_decode_phdr(bytes, 0x40)
+        ph1: OraclePhdr = oracle_decode_phdr(bytes, 0x40 + ORACLE_ELF_PHDR_SIZE)
+        encoded: mutable darray[u8] = []
+        header_bytes: darray[u8] = oracle_tiny_elf_bytes()
+        for i in 0..<0x40:
+            oracle_push_u8(encoded, header_bytes[i])
+        oracle_push_phdr(encoded, ph0.p_type, ph0.p_flags, ph0.p_offset, ph0.p_vaddr, ph0.p_filesz, ph0.p_memsz, ph0.p_align)
+        oracle_push_phdr(encoded, ph1.p_type, ph1.p_flags, ph1.p_offset, ph1.p_vaddr, ph1.p_filesz, ph1.p_memsz, ph1.p_align)
+        assert encoded.count == bytes.count
+        for i in 0..<bytes.count:
+            assert encoded[i] == bytes[i]

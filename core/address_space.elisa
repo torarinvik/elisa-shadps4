@@ -84,6 +84,26 @@ def AddressSpace_ResetArena() -> void:
 def AddressSpace_MapFailed() -> uintptr:
     return (0 - 1).uintptr()
 
+def AddressSpace_PageAligned(value: u64) -> bool:
+    return (value & 0xFFF) == 0
+
+def AddressSpace_RangeNoOverflow(base: u64, size: u64) -> bool:
+    return base + size >= base
+
+def AddressSpace_WithinReservation(addr: u64, len: u64, base: u64, cap: u64) -> bool:
+    return addr >= base and addr + len >= addr and base + cap >= base and addr + len <= base + cap
+
+def AddressSpace_RangesOverlap(a_base: u64, a_size: u64, b_base: u64, b_size: u64) -> bool:
+    if a_size == 0 or b_size == 0:
+        return false
+    if not AddressSpace_RangeNoOverflow(a_base, a_size) or not AddressSpace_RangeNoOverflow(b_base, b_size):
+        return true
+    return a_base < b_base + b_size and b_base < a_base + a_size
+
+def AddressSpace_InAnyReservation(self: AddressSpace&, addr: VAddr, len: u64) -> bool:
+    a: u64 = addr.u64()
+    return AddressSpace_WithinReservation(a, len, self.system_managed_base.u64(), self.system_managed_size) or AddressSpace_WithinReservation(a, len, self.system_reserved_base.u64(), self.system_reserved_size) or AddressSpace_WithinReservation(a, len, self.user_base.u64(), self.user_size)
+
 struct AddressRange:
     begin: mutable VAddr
     size: mutable u64
@@ -195,8 +215,7 @@ def AddressSpace_UserVirtualSize(self: AddressSpace&) -> u64:
 def AddressSpace_OverlapsAppleGpuReservedRange(begin: VAddr, size: u64) -> bool:
     if size == 0:
         return false
-    end_addr: VAddr = begin + size.uintptr()
-    return begin < AddressSpace_AppleGpuReservedEnd and AddressSpace_AppleGpuReservedStart < end_addr
+    return AddressSpace_RangesOverlap(begin.u64(), size, AddressSpace_AppleGpuReservedStart.u64(), (AddressSpace_AppleGpuReservedEnd - AddressSpace_AppleGpuReservedStart).u64())
 
 # Faithful translation of AddressSpace::Map -> Impl::Map.
 # prot is derived as in AddressSpace::Map (exec ? RWX : RW); the backing/anonymous
@@ -206,9 +225,13 @@ def AddressSpace_Map(self: mutable AddressSpace&, virtual_addr: VAddr, size: u64
     AddressSpace_EnsureReserved(self)
     if size == 0:
         return 0.uintptr()
+    if not AddressSpace_PageAligned(virtual_addr.u64()) or not AddressSpace_PageAligned(size):
+        return 0.uintptr()
     target: mutable VAddr = virtual_addr
     if target == 0.uintptr():
         target <- AddressSpace_ChooseNextSystemManaged(self, size)
+    if not AddressSpace_InAnyReservation(self, target, size):
+        return 0.uintptr()
     result: mutable VAddr = target
     static if PLATFORM_APPLE and ARCH_X86_64:
         prot: mutable int = PROT_READ | PROT_WRITE
@@ -239,9 +262,13 @@ def AddressSpace_MapFile(self: mutable AddressSpace&, virtual_addr: VAddr, size:
     AddressSpace_EnsureReserved(self)
     if size == 0:
         return 0.uintptr()
+    if not AddressSpace_PageAligned(virtual_addr.u64()) or not AddressSpace_PageAligned(size):
+        return 0.uintptr()
     target: mutable VAddr = virtual_addr
     if target == 0.uintptr():
         target <- AddressSpace_ChooseNextSystemManaged(self, size)
+    if not AddressSpace_InAnyReservation(self, target, size):
+        return 0.uintptr()
     result: mutable VAddr = target
     static if PLATFORM_APPLE and ARCH_X86_64:
         posix_prot: int = AddressSpace_ToPosixProt(prot)
@@ -318,12 +345,16 @@ def AddressSpace_GetUsableRegions(self: AddressSpace&) -> darray[AddressRange]:
 
 def AddressSpace_ChooseNextSystemManaged(self: mutable AddressSpace&, size: u64) -> VAddr:
     if self.mapped_ranges.count == 0:
+        if AddressSpace_WithinReservation(self.system_managed_base.u64(), size, self.system_managed_base.u64(), self.system_managed_size):
+            return self.system_managed_base
         return self.system_managed_base
     last_end: mutable VAddr = self.system_managed_base
     for i in 0..<self.mapped_ranges.count:
-        end_addr: VAddr = self.mapped_ranges[i].begin + self.mapped_ranges[i].size.uintptr()
+        if not AddressSpace_WithinReservation(self.mapped_ranges[i].begin.u64(), self.mapped_ranges[i].size, self.system_managed_base.u64(), self.system_managed_size):
+            continue
+        end_addr: VAddr = (self.mapped_ranges[i].begin.u64() + self.mapped_ranges[i].size).uintptr()
         if end_addr > last_end:
             last_end <- end_addr
-    if last_end + size.uintptr() <= self.system_managed_base + self.system_managed_size.uintptr():
+    if AddressSpace_WithinReservation(last_end.u64(), size, self.system_managed_base.u64(), self.system_managed_size):
         return last_end
     return self.system_managed_base

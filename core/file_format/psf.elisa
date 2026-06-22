@@ -81,6 +81,15 @@ def Psf_ReadHeader(reader: mutable FileFormatReader&) -> PsfHeader:
 def Psf_ReadRawEntry(reader: mutable FileFormatReader&) -> PsfRawEntry:
     return PsfRawEntry(ff_read_u16_le(reader), ff_read_u16_be(reader), ff_read_u32_le(reader), ff_read_u32_le(reader), ff_read_u32_le(reader))
 
+def Psf_AddOffsetWithin(data: darray[u8], base: u32, extra: u32) -> usize:
+    base_offset: usize = base.usize()
+    extra_offset: usize = extra.usize()
+    if base_offset > data.count:
+        return data.count
+    if extra_offset > data.count - base_offset:
+        return data.count
+    return base_offset + extra_offset
+
 def Psf_Parse(data: darray[u8]) -> PsfFile:
     if data.count < PSF_HEADER_SIZE:
         return PsfFile_empty()
@@ -95,28 +104,42 @@ def Psf_Parse(data: darray[u8]) -> PsfFile:
     valid: mutable bool = true
     can Memory.Allocate, Abort.Panic:
         owner: mutable Arena& = &scratch_arena
+        raw_reader: mutable FileFormatReader = FileFormatReader_new(data)
+        _ = ff_seek(raw_reader, PSF_HEADER_SIZE)
         i: mutable u32 = 0
         while i < header.index_table_entries and valid:
-            raw_offset: usize = PSF_HEADER_SIZE + i.usize() * PSF_RAW_ENTRY_SIZE
-            if raw_offset + PSF_RAW_ENTRY_SIZE > data.count:
+            if not ff_can_read(raw_reader, PSF_RAW_ENTRY_SIZE):
                 valid <- false
             else:
-                raw_reader: mutable FileFormatReader = FileFormatReader_new(data)
-                raw_reader.offset <- raw_offset
                 raw: PsfRawEntry = Psf_ReadRawEntry(raw_reader)
-                key: static u8& = ff_read_cstr_at(data, header.key_table_offset.usize() + raw.key_offset.usize())
-                data_offset: usize = header.data_table_offset.usize() + raw.data_offset.usize()
+                key_offset: usize = Psf_AddOffsetWithin(data, header.key_table_offset, raw.key_offset.u32())
+                data_offset: usize = Psf_AddOffsetWithin(data, header.data_table_offset, raw.data_offset)
                 value_reader: mutable FileFormatReader = FileFormatReader_new(data)
-                value_reader.offset <- data_offset
-                if raw.param_fmt == PSF_ENTRY_FMT_BINARY:
-                    in owner:
-                        entries.push(PsfEntry_binary(key, ff_read_bytes(value_reader, raw.param_len.usize()), raw.param_max_len))
+                if key_offset >= data.count:
+                    valid <- false
+                elif not ff_seek(value_reader, data_offset):
+                    valid <- false
+                elif raw.param_fmt == PSF_ENTRY_FMT_BINARY:
+                    if not ff_can_read(value_reader, raw.param_len.usize()):
+                        valid <- false
+                    else:
+                        key: static u8& = ff_read_cstr_at(data, key_offset)
+                        in owner:
+                            entries.push(PsfEntry_binary(key, ff_read_bytes(value_reader, raw.param_len.usize()), raw.param_max_len))
                 elif raw.param_fmt == PSF_ENTRY_FMT_TEXT:
-                    in owner:
-                        entries.push(PsfEntry_string(key, ff_read_cstr_at(data, data_offset), raw.param_max_len))
+                    if not ff_can_read(value_reader, raw.param_len.usize()):
+                        valid <- false
+                    else:
+                        key: static u8& = ff_read_cstr_at(data, key_offset)
+                        in owner:
+                            entries.push(PsfEntry_string(key, ff_read_cstr_at(data, data_offset), raw.param_max_len))
                 elif raw.param_fmt == PSF_ENTRY_FMT_INTEGER:
-                    in owner:
-                        entries.push(PsfEntry_integer(key, ff_read_u32_le(value_reader).i32()))
+                    if not ff_can_read(value_reader, 4):
+                        valid <- false
+                    else:
+                        key: static u8& = ff_read_cstr_at(data, key_offset)
+                        in owner:
+                            entries.push(PsfEntry_integer(key, ff_read_u32_le(value_reader).i32()))
                 else:
                     valid <- false
             i <- i + 1

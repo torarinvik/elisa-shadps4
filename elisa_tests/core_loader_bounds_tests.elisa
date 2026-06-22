@@ -1,0 +1,83 @@
+include "../common/streq.elisa"
+include "../core/loader/elf.elisa"
+
+def assert(condition: bool) -> void:
+    if not condition:
+        can Abort.Panic:
+            panic("assertion failed")
+
+def LoaderBounds_U64AddNoOverflow(a: u64, b: u64) -> bool:
+    return a <= (0xffffffffffffffff - b)
+
+def LoaderBounds_TableOffsetByIndex(table_offset: u64, table_total_size: u64, entry_size: u64, index: u32, record_size: u64, data_len: u64, out_offset: mutable u64&) -> bool:
+    out_offset <- 0
+    if entry_size == 0:
+        return false
+    if record_size > entry_size:
+        return false
+    if index.u64() >= (table_total_size / entry_size):
+        return false
+    if index.u64() > (0xffffffffffffffff / entry_size):
+        return false
+    index_offset: u64 = index.u64() * entry_size
+    if not LoaderBounds_U64AddNoOverflow(index_offset, record_size):
+        return false
+    if index_offset + record_size > table_total_size:
+        return false
+    if not LoaderBounds_U64AddNoOverflow(table_offset, index_offset):
+        return false
+    offset: u64 = table_offset + index_offset
+    if not LoaderBounds_U64AddNoOverflow(offset, record_size):
+        return false
+    if offset + record_size > data_len:
+        return false
+    out_offset <- offset
+    return true
+
+def segmap_random_phdrs(seed: i32) -> bool:
+    phdr: mutable elf_program_header = zeroed
+    seg: mutable self_segment_header = zeroed
+    mixed: u64 = seed.u64() * 0x9e3779b97f4a7c15
+    phdr.p_offset <- mixed
+    phdr.p_filesz <- 0xffffffffffffffff - (mixed >> 1)
+    seg.file_offset <- mixed >> 3
+    mapped: mutable u64 = 0
+    candidate: u64 = mixed + 17
+    if Elf_FileOffsetMapsToSelfSegment(candidate, phdr, seg, mapped):
+        return candidate >= phdr.p_offset and mapped >= seg.file_offset
+    return true
+
+@test
+def loader_rejects_wrapped_self_segment_span() -> void:
+    can Abort.Panic:
+        phdr: mutable elf_program_header = zeroed
+        seg: mutable self_segment_header = zeroed
+        phdr.p_offset <- 0xfffffffffffffff0
+        phdr.p_filesz <- 0x40
+        seg.file_offset <- 0x100
+        mapped: mutable u64 = 0
+        assert not Elf_FileOffsetMapsToSelfSegment(0xfffffffffffffff8, phdr, seg, mapped)
+
+@test
+def loader_maps_self_segment_offset_without_underflow() -> void:
+    can Abort.Panic:
+        phdr: mutable elf_program_header = zeroed
+        seg: mutable self_segment_header = zeroed
+        phdr.p_offset <- 0x200
+        phdr.p_filesz <- 0x80
+        seg.file_offset <- 0x1000
+        mapped: mutable u64 = 0
+        assert not Elf_FileOffsetMapsToSelfSegment(0x1ff, phdr, seg, mapped)
+        assert Elf_FileOffsetMapsToSelfSegment(0x220, phdr, seg, mapped)
+        assert mapped == 0x1020
+
+@test
+def loader_dynamic_table_index_bounds() -> void:
+    can Abort.Panic:
+        offset: mutable u64 = 0
+        assert LoaderBounds_TableOffsetByIndex(16, 48, 24, 1, 24, 80, offset)
+        assert offset == 40
+        assert not LoaderBounds_TableOffsetByIndex(16, 48, 24, 2, 24, 80, offset)
+        assert not LoaderBounds_TableOffsetByIndex(0xfffffffffffffff0, 48, 24, 0, 24, 80, offset)
+        assert segmap_random_phdrs(1)
+        assert segmap_random_phdrs(-77)

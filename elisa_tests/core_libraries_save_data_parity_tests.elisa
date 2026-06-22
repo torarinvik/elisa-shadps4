@@ -103,30 +103,33 @@ def save_data_abi_struct_decode() -> void:
         mount_buf: mutable array[u8, 64] = zeroed
         result_buf: mutable array[u8, 64] = zeroed
         mount_ref: mutable void& = (&mount_buf[0]).cast[mutable void&]
-        abi_store_u32(mount_ref, 0, 1)
-        abi_store_u64(mount_ref, 8, (&dirname[0]).uintptr().u64())
-        abi_store_u64(mount_ref, 16, 128)
-        abi_store_u32(mount_ref, 24, 0x2 | 0x4)  # RDWR | CREATE
+        mount_view: MutableAbiView = abi_mut_view(mount_ref, 64)
+        abi_store_u32(mount_view, 0, 1)
+        abi_store_u64(mount_view, 8, (&dirname[0]).uintptr().u64())
+        abi_store_u64(mount_view, 16, 128)
+        abi_store_u32(mount_view, 24, 0x2 | 0x4)  # RDWR | CREATE
 
         assert sceSaveDataMount2((&mount_buf[0]).cast[void&?], (&result_buf[0]).cast[void&?]) == SAVE_DATA_OK
         # result.mount_point begins "/savedata"; required_blocks@16==128; mount_status@28==1
         assert result_buf[0] == '/'.u8()
         assert result_buf[1] == 's'.u8()
         result_ref: void& = (&result_buf[0]).cast[void&]
-        assert abi_u64_at(result_ref, 16) == 128
-        assert abi_u32_at(result_ref, 28) == 1
+        result_view: AbiView = abi_view(result_ref, 64)
+        assert abi_u64_at(result_view, 16) == 128
+        assert abi_u32_at(result_view, 28) == 1
 
         mp: void&? = (&result_buf[0]).cast[void&?]  # the mount point CString keys later calls
 
         # SetParam(USER_PARAM=4) then GetParam back.
         ubuf: mutable array[u8, 4] = zeroed
-        abi_store_u32((&ubuf[0]).cast[mutable void&], 0, 99)
+        ubuf_view: MutableAbiView = abi_mut_view((&ubuf[0]).cast[mutable void&], 4)
+        abi_store_u32(ubuf_view, 0, 99)
         assert sceSaveDataSetParam(mp, 4, (&ubuf[0]).cast[void&?], 4) == SAVE_DATA_OK
         obuf: mutable array[u8, 4] = zeroed
         gsize: mutable array[u8, 8] = zeroed
         assert sceSaveDataGetParam(mp, 4, (&obuf[0]).cast[void&?], 4, (&gsize[0]).cast[void&?]) == SAVE_DATA_OK
-        assert abi_u32_at((&obuf[0]).cast[void&], 0) == 99
-        assert abi_u64_at((&gsize[0]).cast[void&], 0) == 4
+        assert abi_u32_at(abi_view((&obuf[0]).cast[void&], 4), 0) == 99
+        assert abi_u64_at(abi_view((&gsize[0]).cast[void&], 8), 0) == 4
 
         # SetParam(TITLE=1) — a NUL-terminated guest string buffer.
         tbuf: mutable array[u8, 32] = zeroed
@@ -137,13 +140,13 @@ def save_data_abi_struct_decode() -> void:
         tout: mutable array[u8, 64] = zeroed
         tgsize: mutable array[u8, 8] = zeroed
         assert sceSaveDataGetParam(mp, 1, (&tout[0]).cast[void&?], 64, (&tgsize[0]).cast[void&?]) == SAVE_DATA_OK
-        assert abi_u64_at((&tgsize[0]).cast[void&], 0) == 9
+        assert abi_u64_at(abi_view((&tgsize[0]).cast[void&], 8), 0) == 9
         assert tout[0] == 'A'.u8()
 
         # GetMountInfo (OrbisSaveDataMountInfo: blocks@0, freeBlocks@8).
         info_buf: mutable array[u8, 48] = zeroed
         assert sceSaveDataGetMountInfo(mp, (&info_buf[0]).cast[void&?]) == SAVE_DATA_OK
-        assert abi_u64_at((&info_buf[0]).cast[void&], 0) == 128
+        assert abi_u64_at(abi_view((&info_buf[0]).cast[void&], 48), 0) == 128
 
         assert sceSaveDataUmount(mp) == SAVE_DATA_OK
         # After umount the mount point no longer resolves.
@@ -151,7 +154,7 @@ def save_data_abi_struct_decode() -> void:
 
         # sceSaveDataDelete removes the on-disk save dir (OrbisSaveDataDelete: dirName*@16).
         del_buf: mutable array[u8, 64] = zeroed
-        abi_store_u64((&del_buf[0]).cast[mutable void&], 16, (&dirname[0]).uintptr().u64())
+        abi_store_u64(abi_mut_view((&del_buf[0]).cast[mutable void&], 64), 16, (&dirname[0]).uintptr().u64())
         assert sceSaveDataDelete((&del_buf[0]).cast[void&?]) == SAVE_DATA_OK
         # Deleting again reports NOT_FOUND (non-zero).
         assert sceSaveDataDelete((&del_buf[0]).cast[void&?]) != SAVE_DATA_OK
@@ -178,7 +181,7 @@ def save_data_abi_dir_name_search() -> void:
 
         # OrbisSaveDataDirNameSearchCond (userId@0; dirName null = all; key/order 0).
         cond: mutable array[u8, 64] = zeroed
-        abi_store_u32((&cond[0]).cast[mutable void&], 0, 1)
+        abi_store_u32(abi_mut_view((&cond[0]).cast[mutable void&], 64), 0, 1)
 
         # Caller-provided output arrays (capacity 2).
         dirnames: mutable array[u8, 64] = zeroed    # 2 * CString<32>
@@ -186,21 +189,23 @@ def save_data_abi_dir_name_search() -> void:
         infos: mutable array[u8, 96] = zeroed       # 2 * OrbisSaveDataSearchInfo(48)
         result: mutable array[u8, 64] = zeroed
         rmut: mutable void& = (&result[0]).cast[mutable void&]
-        abi_store_u32(rmut, 16, 2)                                          # dirNamesNum
-        abi_store_u64(rmut, 8, (&dirnames[0]).uintptr().u64())             # dirNames*
-        abi_store_u64(rmut, 24, (&params[0]).uintptr().u64())             # params*
-        abi_store_u64(rmut, 32, (&infos[0]).uintptr().u64())             # infos*
+        rview: MutableAbiView = abi_mut_view(rmut, 64)
+        abi_store_u32(rview, 16, 2)                                          # dirNamesNum
+        abi_store_u64(rview, 8, (&dirnames[0]).uintptr().u64())             # dirNames*
+        abi_store_u64(rview, 24, (&params[0]).uintptr().u64())             # params*
+        abi_store_u64(rview, 32, (&infos[0]).uintptr().u64())             # infos*
 
         assert sceSaveDataDirNameSearch((&cond[0]).cast[void&?], (&result[0]).cast[void&?]) == SAVE_DATA_OK
         rref: void& = (&result[0]).cast[void&]
-        assert abi_u32_at(rref, 0) == 2    # hitNum
-        assert abi_u32_at(rref, 20) == 2   # setNum
+        rread: AbiView = abi_view(rref, 64)
+        assert abi_u32_at(rread, 0) == 2    # hitNum
+        assert abi_u32_at(rread, 20) == 2   # setNum
 
         # Sorted ascending: "SAVE_A" (idx 0) then "SAVE_B" (idx 1, stride 32).
         assert dirnames[5] == 'A'.u8()
         assert dirnames[32 + 5] == 'B'.u8()
         # infos[0].blocks == 128 (SAVE_A); params[0].title begins "Alpha".
-        assert abi_u64_at((&infos[0]).cast[void&], 0) == 128
+        assert abi_u64_at(abi_view((&infos[0]).cast[void&], 96), 0) == 128
         assert params[0] == 'A'.u8()
 
         assert sceSaveDataTerminate() == SAVE_DATA_OK

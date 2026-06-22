@@ -186,15 +186,13 @@ def MemoryManager_IsValidGpuMapping(self: MemoryManager&, virtual_addr: VAddr, s
 def VirtualMemoryArea_Contains(self: VirtualMemoryArea&, addr: VAddr, size: u64) -> bool:
     if addr < self.base:
         return false
+    if not AddressSpace_RangeNoOverflow(addr.u64(), size) or not AddressSpace_RangeNoOverflow(self.base.u64(), self.size):
+        return false
     offset: u64 = (addr - self.base).u64()
     return offset <= self.size and size <= (self.size - offset)
 
 def VirtualMemoryArea_Overlaps(self: VirtualMemoryArea&, addr: VAddr, size: u64) -> bool:
-    if size == 0 or self.size == 0:
-        return false
-    a_end: VAddr = addr + size.uintptr()
-    b_end: VAddr = self.base + self.size.uintptr()
-    return addr < b_end and self.base < a_end
+    return AddressSpace_RangesOverlap(addr.u64(), size, self.base.u64(), self.size)
 
 def MemoryProt_NormalizeCpu(prot: MemoryProt) -> MemoryProt:
     normalized: mutable MemoryProt = prot
@@ -378,6 +376,8 @@ def MemoryManager_Allocate(self: mutable MemoryManager&, search_start: PAddr, se
             if area.dma_type != PhysicalMemoryType_Free:
                 continue
             area_start: u64 = area.base.u64()
+            if not AddressSpace_RangeNoOverflow(area_start, area.size):
+                continue
             area_end: u64 = area_start + area.size
             min_start: mutable u64 = search_start.u64()
             if min_start < area_start:
@@ -385,7 +385,11 @@ def MemoryManager_Allocate(self: mutable MemoryManager&, search_start: PAddr, se
             alloc_start: mutable u64 = min_start
             remainder: u64 = alloc_start % align
             if remainder != 0:
+                if not AddressSpace_RangeNoOverflow(alloc_start, align - remainder):
+                    continue
                 alloc_start <- alloc_start + (align - remainder)
+            if not AddressSpace_RangeNoOverflow(alloc_start, size):
+                continue
             alloc_end: u64 = alloc_start + size
             limit_end: mutable u64 = search_end.u64()
             if limit_end > area_end:
@@ -419,11 +423,15 @@ def MemoryManager_DirectQueryAvailable(self: MemoryManager&, search_start: PAddr
         if area.dma_type != PhysicalMemoryType_Free:
             continue
         area_base: u64 = area.base.u64()
+        if not AddressSpace_RangeNoOverflow(area_base, area.size):
+            continue
         area_end: u64 = area_base + area.size
         aligned_base: mutable u64 = area_base
         if alignment > 0:
             rem: u64 = area_base % alignment
             if rem != 0:
+                if not AddressSpace_RangeNoOverflow(area_base, alignment - rem):
+                    continue
                 aligned_base <- area_base + (alignment - rem)
         alignment_size: u64 = aligned_base - area_base
         remaining_size: mutable u64 = 0
@@ -438,6 +446,9 @@ def MemoryManager_DirectQueryAvailable(self: MemoryManager&, search_start: PAddr
             if alignment > 0:
                 rem2: u64 = ss % alignment
                 if rem2 != 0:
+                    if not AddressSpace_RangeNoOverflow(ss, alignment - rem2):
+                        remaining_size <- 0
+                        continue
                     aligned_base <- ss + (alignment - rem2)
                 else:
                     aligned_base <- ss
@@ -469,6 +480,8 @@ def MemoryManager_DirectMemoryType(self: MemoryManager&, addr: PAddr, type_out: 
     for i in 0..<self.dmem_areas.count:
         area: PhysicalMemoryArea = self.dmem_areas[i]
         area_base: u64 = area.base.u64()
+        if not AddressSpace_RangeNoOverflow(area_base, area.size):
+            continue
         area_end: u64 = area_base + area.size
         if a >= area_base and a < area_end:
             if area.dma_type == PhysicalMemoryType_Free:
@@ -484,6 +497,8 @@ def MemoryManager_MarkDirectMapped(self: mutable MemoryManager&, phys_addr: PAdd
     if size == 0:
         return false
     mark_start: u64 = phys_addr.u64()
+    if not AddressSpace_RangeNoOverflow(mark_start, size):
+        return false
     mark_end: u64 = mark_start + size
     if mark_end <= mark_start:
         return false
@@ -492,6 +507,8 @@ def MemoryManager_MarkDirectMapped(self: mutable MemoryManager&, phys_addr: PAdd
         for i in 0..<self.dmem_areas.count:
             area: PhysicalMemoryArea = self.dmem_areas[i]
             area_start: u64 = area.base.u64()
+            if not AddressSpace_RangeNoOverflow(area_start, area.size):
+                continue
             area_end: u64 = area_start + area.size
             if mark_start < area_start or mark_end > area_end:
                 continue
@@ -524,6 +541,12 @@ def MemoryManager_MapMemory(self: mutable MemoryManager&, out_addr: mutable VAdd
     ensure result == 0 or result == -1
     _ = validate_dmem
     _ = alignment
+    if size == 0 or not AddressSpace_PageAligned(virtual_addr.u64()) or not AddressSpace_PageAligned(size):
+        out_addr <- 0.uintptr()
+        return -1
+    if virtual_addr != 0.uintptr() and not AddressSpace_InAnyReservation(self.address_space, virtual_addr, size):
+        out_addr <- 0.uintptr()
+        return -1
     if (flags & MemoryMapFlags_NoOverwrite) != 0 and MemoryManager_OverlapsMappedArea(self, virtual_addr, size, false):
         out_addr <- 0.uintptr()
         return -1
@@ -586,6 +609,12 @@ def MemoryManager_MapRollback(self: mutable MemoryManager&, txn: MapTxn) -> void
 def MemoryManager_MapFile(self: mutable MemoryManager&, out_addr: mutable VAddr&, virtual_addr: VAddr, size: u64, prot: MemoryProt, flags: MemoryMapFlags, fd: s32, phys_addr: s64) -> s32:
     ensure result == 0 or result == -1
     _ = flags
+    if size == 0 or not AddressSpace_PageAligned(virtual_addr.u64()) or not AddressSpace_PageAligned(size):
+        out_addr <- 0.uintptr()
+        return -1
+    if virtual_addr != 0.uintptr() and not AddressSpace_InAnyReservation(self.address_space, virtual_addr, size):
+        out_addr <- 0.uintptr()
+        return -1
     effective_prot: MemoryProt = MemoryProt_NormalizeCpu(prot)
     txn: MapTxn = MemoryManager_MapFileBegin((&self).cast[mutable MemoryManager&], virtual_addr, size, effective_prot, fd, phys_addr)
     mapped: VAddr = txn.mapped

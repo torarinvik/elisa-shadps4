@@ -494,6 +494,24 @@ def Elf_LoadSegmentBytes(self: mutable Elf&, out: mutable darray[u8]&, base: usi
         raise ElfError.ShortRead
     return
 
+def Elf_U64AddNoOverflow(a: u64, b: u64) -> bool:
+    return a <= (0xffffffffffffffff - b)
+
+def Elf_FileOffsetMapsToSelfSegment(file_offset: u64, phdr: elf_program_header&, seg: self_segment_header&, out_mapped_offset: mutable u64&) -> bool:
+    out_mapped_offset <- 0
+    if not Elf_U64AddNoOverflow(phdr.p_offset, phdr.p_filesz):
+        return false
+    segment_end: u64 = phdr.p_offset + phdr.p_filesz
+    if file_offset < phdr.p_offset:
+        return false
+    if file_offset >= segment_end:
+        return false
+    delta: u64 = file_offset - phdr.p_offset
+    if not Elf_U64AddNoOverflow(seg.file_offset, delta):
+        return false
+    out_mapped_offset <- seg.file_offset + delta
+    return true
+
 def Elf_SeekSegment(self: mutable Elf&, file_offset: u64) -> void error[ElfError]:
     if not self.is_self:
         if self.f.Seek(file_offset.i64()):
@@ -506,8 +524,8 @@ def Elf_SeekSegment(self: mutable Elf&, file_offset: u64) -> void error[ElfError
             phdr_id: u32 = SelfSegment_GetId(seg)
             if phdr_id.usize() < self.program_headers.count:
                 phdr: elf_program_header& = &self.program_headers[phdr_id.usize()]
-                if file_offset >= phdr.p_offset and file_offset < (phdr.p_offset + phdr.p_filesz):
-                    mapped_off: u64 = (file_offset - phdr.p_offset) + seg.file_offset
+                mapped_off: mutable u64 = 0
+                if Elf_FileOffsetMapsToSelfSegment(file_offset, phdr, seg, mapped_off):
                     if self.f.Seek(mapped_off.i64()):
                         return
                     raise ElfError.SeekFailed
