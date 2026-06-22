@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# E6 (protocol round, retry): the VM-reservation capstone.
+#   Piece 1 — refined associated-type DEFAULT in a protocol decl              (Gap #2, fixed)
+#   Piece 2 — protocol inheritance + generic dispatch of a `mutable M&`
+#             receiver to a protocol method                                   (Gap #4, fixed)
+#   Piece 3 — the address no-overflow law discharged STATICALLY from a
+#             refined window bound (affine tier, no SMT, holds under -strict)
+#
+# See verification_findings/E6-fit.md for the two follow-up findings this surfaced
+# (Gap #5 backend value-self dispatch; the boolean-postcondition prover gap).
+
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../common/types.elisa"
+include "../core/address_space.elisa"
+include "../core/vm_reservation_protocol.elisa"
+
+# Generic mapping driver over ANY MapTarget, through a mutating `mutable M&` receiver.
+def map_all[M: MapTarget](m: mutable M&, count: u64) -> u64:
+    i: mutable u64 = 0
+    while i < count:
+        _ = m.record_mapping(0x400000, 0x1000)
+        i <- i + 1
+    return m.res_cap()
+
+@test
+def vm_generic_dispatch_through_ref() -> void:
+    can Abort.Panic:
+        r: mutable WindowReservation = WindowReservation_new(0x400000, 0x1000)
+        # res_cap reached generically through `mutable M&`
+        assert map_count(&r) == 0x1000
+        assert map_all(&r, 3) == 0x1000
+        assert r.mapped_count == 3
+
+@test
+def vm_no_overflow_window_end() -> void:
+    can Abort.Panic:
+        # Proven postcondition: result >= addr (no wraparound), discharged from the
+        # VmCap refinements — exercised here at the extremes of the window bound.
+        assert vm_window_end(0, 0) == 0
+        assert vm_window_end(0x400000, 0x1000) == 0x401000
+        assert vm_window_end(VM_RES_CAP_MAX, VM_RES_CAP_MAX) >= VM_RES_CAP_MAX
+
+@test
+def vm_range_end_monotone() -> void:
+    can Abort.Panic:
+        assert vm_range_end(0x10000, 0x20000) == 0x30000
+        assert vm_range_end(VM_RES_CAP_MAX, 0) == VM_RES_CAP_MAX
+
+# Property: the proven no-overflow law holds for arbitrary in-window operands — the
+# runtime can never observe a wrap, matching what the verifier proved statically.
+@property
+def fuzz_vm_window_end_never_wraps(seed: i32) -> bool:
+    addr: u64 = (seed.u64() & 0xFFFFFFFF) % (VM_RES_CAP_MAX + 1)
+    len: u64 = (seed.u64() >> 16) % (VM_RES_CAP_MAX + 1)
+    return vm_window_end(addr, len) >= addr

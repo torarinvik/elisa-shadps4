@@ -1,0 +1,84 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# E6 (protocol round, retry): the VM-reservation capstone — refined associated-type
+# defaults + generic mutable protocol methods with frame conditions + the address
+# no-overflow proof obligation. Depends on the address-space predicates in
+# core/address_space.elisa (pull in core/memory.elisa before this file).
+#
+# Three things this exercises, two of which were prior compiler gaps now fixed:
+#   1. refined associated-type DEFAULT in a protocol decl                  (Gap #2, fixed)
+#   2. generic dispatch of a mutating `changes` protocol method via `M&`   (Gap #4, fixed)
+#   3. discharging the `addr + len >= addr` no-overflow law from a Bounded
+#      refinement on the reservation window                               (verification crux)
+
+# PS4 user reservation never exceeds 2^44 bytes; bounding the window magnitude is what
+# makes the no-overflow arithmetic provable rather than a runtime check.
+const VM_RES_CAP_MAX: u64 = 0x100000000000
+
+# Refinement predicates are user-declared laws (same convention as E1's `law InRange`
+# over u32). This is the u64 magnitude-bound law backing the reservation window type.
+law VmInRange(self: u64, lo: u64, hi: u64) = self >= lo and self <= hi
+
+# The refined window-magnitude type, declared once (the proven E1 alias pattern).
+type VmCap = u64 is VmInRange[0, 0x100000000000]
+
+protocol Reservation:
+    # Refined associated-type DEFAULT: an impl that omits `Cap` inherits the refined
+    # window type. (Previously a hard parser error — Gap #2.)
+    type Cap = VmCap
+    def res_base(self: Self&) -> u64
+    def res_cap(self: Self&) -> u64
+
+protocol MapTarget: Reservation:
+    # Mutating method carrying a FRAME CONDITION: it may touch only `mapped_count`.
+    # Page-alignment is deliberately NOT a `requires`: `(addr & 0xFFF) == 0` is a modular
+    # predicate, outside the affine/InRange refinement vocabulary, so as a precondition it
+    # would be an undischargeable obligation at every call site. It is guarded operationally
+    # in the impl instead (mirroring AddressSpace_Map), and only the provable `changes`
+    # frame rides on the signature.
+    def record_mapping(self: mutable Self&, addr: u64, len: u64) -> bool
+        changes self.mapped_count
+
+struct WindowReservation:
+    base: u64
+    cap: VmCap
+    mapped_count: mutable u64
+
+def WindowReservation_new(base: u64, cap: VmCap) -> WindowReservation:
+    return WindowReservation(base, cap, 0)
+
+# A single impl of the derived protocol provides BOTH the derived method and the
+# inherited Reservation methods (no separate `impl Reservation` — that's the coherence
+# model for protocol inheritance). `self: mutable Self&` in the impl now resolves to the
+# concrete receiver (the Self-in-impl fix).
+impl MapTarget for WindowReservation:
+    def res_base(self: Self&) -> u64:
+        return self.base
+    def res_cap(self: Self&) -> u64:
+        return self.cap
+    def record_mapping(self: mutable Self&, addr: u64, len: u64) -> bool changes self.mapped_count:
+        # operational alignment guard (modular predicate — not a static precondition)
+        if not AddressSpace_PageAligned(addr):
+            return false
+        self.mapped_count <- self.mapped_count + 1
+        return true
+
+# Generic over ANY MapTarget — the receiver is `mutable M&`, the dispatch path that
+# was broken pre-fix ("field access requires struct type, got M").
+def map_count[M: MapTarget](m: mutable M&) -> u64:
+    return m.res_cap()
+
+# --- Piece 3: the no-overflow proof obligation -----------------------------------------
+# Both operands are VmCap (refined VmInRange[0, 2^44]); their sum is at most 2^45, which is
+# far below U64_MAX, so `addr + len` cannot wrap: the no-overflow law `addr + len >= addr`
+# holds. These postconditions are discharged STATICALLY from the refinements alone — NO
+# runtime guard in the body — at the affine tier (verified under -strict, no SMT required).
+def vm_window_end(addr: VmCap, len: VmCap) -> u64:
+    ensure result >= addr
+    return addr + len
+
+# AddressSpace_RangeNoOverflow's no-wrap core, as a proven integer postcondition.
+def vm_range_end(base: VmCap, size: VmCap) -> u64:
+    ensure result >= base
+    return base + size
