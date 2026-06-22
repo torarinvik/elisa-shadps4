@@ -1,0 +1,44 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Dogfood for the @differential oracle harness: check the emulator's address-space
+# predicates against INDEPENDENTLY-computed reference specs over fuzzed inputs. Each
+# reference is a structurally different computation of the same fact, so a real bug in
+# either side would surface as a shrunk diverging input rather than silently agreeing.
+
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../common/types.elisa"
+include "../core/address_space.elisa"
+
+const U64_MAX: u64 = 0xFFFFFFFFFFFFFFFF
+
+# Reference spec for page-alignment: modulo, vs the implementation's bitmask `& 0xFFF`.
+def ref_page_aligned(value: u64) -> bool:
+    return (value % 4096) == 0
+
+@differential
+def diff_page_aligned(value: u64) -> bool:
+    return AddressSpace_PageAligned(value) == ref_page_aligned(value)
+
+# Reference spec for no-overflow: "size fits in the headroom above base" (no-wrap test),
+# vs the implementation's wraparound test `base + size >= base`. Different computations.
+def ref_range_no_overflow(base: u64, size: u64) -> bool:
+    return size <= U64_MAX - base
+
+@differential
+def diff_range_no_overflow(base: u64, size: u64) -> bool:
+    return AddressSpace_RangeNoOverflow(base, size) == ref_range_no_overflow(base, size)
+
+# Non-vacuous alignment differential (workaround for the sparse-domain finding): construct the
+# candidate so ~half the fuzzed inputs are page-aligned and half are not, making both branches
+# of AddressSpace_PageAligned reachable. `cand` is a multiple of 4096 when `value` is even, and
+# an (odd) multiple of 2048 when `value` is odd — so a `% 2048`-vs-`% 4096` reference bug would
+# diverge on ~50% of inputs and be caught immediately.
+def ref_page_aligned_dense(value: u64) -> bool:
+    cand: u64 = ((value >> 1) << 12) | ((value & 1) << 11)
+    return (cand % 4096) == 0
+
+@differential
+def diff_page_aligned_dense(value: u64) -> bool:
+    cand: u64 = ((value >> 1) << 12) | ((value & 1) << 11)
+    return AddressSpace_PageAligned(cand) == ref_page_aligned_dense(value)
