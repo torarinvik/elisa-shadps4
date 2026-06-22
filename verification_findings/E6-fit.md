@@ -61,3 +61,13 @@ Implemented: `core/vm_reservation_protocol.elisa` + `elisa_tests/vm_reservation_
   operational guard inside `record_mapping`, mirroring the real `AddressSpace_Map`.
 
 See `verification_findings/PENDING_TARGETS/E6-vm-reservation-protocol.md`.
+
+---
+
+## UPDATE (2026-06-22, later): Gap #5 FIXED — value-self accessors now work
+
+The backend autoderef gap (Gap #5) is fixed compiler-side (`emitCallArg` now
+auto-dereferences a reference argument fed to a by-value struct parameter, mirroring the
+existing autoref direction). The E6 accessors are now declared with the natural by-value
+`self: Self` and dispatch correctly through the generic `mutable M&` receiver — the
+`self: Self&` workaround has been removed. Capstone still 4/4.
