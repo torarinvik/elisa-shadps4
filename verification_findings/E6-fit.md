@@ -55,6 +55,14 @@ Implemented: `core/vm_reservation_protocol.elisa` + `elisa_tests/vm_reservation_
   not substitute the returned comparison expression into the `result == true` obligation
   and then discharge the underlying inequality. Prefer the integer-postcondition phrasing.
 
+  RESOLVED (compiler, `normalizeBoolLiteralEnsure`): the verification engine now folds a
+  literal-comparison postcondition to the bare predicate before discharge (`result == true`
+  / `!= false` -> `result`; `result == false` / `!= true` -> `not result`), so the boolean
+  form routes through the same lane as bare `ensure result`. The capstone now ships the
+  natural boolean phrasing `vm_range_no_overflow` (`ensure result == true` over `return base
+  + size >= base`) and it discharges under `-smt` from the VmCap refinements. Both phrasings
+  are now first-class; the integer form still also proves at the affine tier (no -smt).
+
 - **(design note)** Page-alignment `(addr & 0xFFF) == 0` is a MODULAR predicate, outside
   the affine/InRange refinement vocabulary, so it cannot be a `requires` (would be an
   undischargeable obligation at every call site — the E5 anti-pattern). It stays an

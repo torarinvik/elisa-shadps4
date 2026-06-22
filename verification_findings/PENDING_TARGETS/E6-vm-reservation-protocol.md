@@ -33,3 +33,13 @@ and the third (the no-overflow proof) discharges at the affine tier from the ref
 2. Prover-modeling gap: a no-overflow law as a BOOLEAN postcondition (`ensure result ==
    true` over `base+size >= base`) does not discharge even under -smt, while the INTEGER
    form (`ensure result >= base`) discharges at the affine tier. Prefer integer phrasing.
+
+   RESOLVED (compiler): `normalizeBoolLiteralEnsure` in the verification engine now folds a
+   literal-comparison postcondition to the bare predicate it means — `result == true` /
+   `result != false` -> `result`, `result == false` / `result != true` -> `not result` —
+   before discharge, routing it through the same lane that already proved bare `ensure
+   result`. The capstone now carries the natural boolean form `vm_range_no_overflow`
+   (`ensure result == true` over `return base + size >= base`), which discharges under -smt
+   from the VmCap refinements (verified: `-emit semantic -strict -smt` EXIT=0, 0 undischarged).
+   Soundness preserved: an unsatisfiable literal postcondition still declines with a
+   counterexample (the rewrite is a pure logical identity, asserting nothing extra).
