@@ -21,6 +21,16 @@ DISCOVERABLE_VERIFICATION_TARGETS = [
     "trp-property-tests",
     "trp-fuzz-properties",
     "video-core-amdgpu-pm4-decode-tests",
+    "emulator-renderer-first-frame-capture",
+    "core-file-format-pfs-property-tests",
+    "core-file-format-playgo-property-tests",
+    "core-file-format-npbind-property-tests",
+    "savedata-param-oracle-tests",
+    "core-libraries-np-parity-tests",
+    # NOTE: core-libraries-pad-tests / core-libraries-audio-parity-tests are intentionally NOT listed
+    # yet — they transitively compile module.elisa, whose Module_AlignUp `ensure result >= value` is a
+    # genuine u64 overflow (value=2^64-1) the wrap model rightly refuses. They go green once AlignUp
+    # gets a source-side no-overflow `requires` (+ the requires-WP-threading prover gap).
 ]
 
 

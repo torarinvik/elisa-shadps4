@@ -1,0 +1,151 @@
+# SPDX-FileCopyrightText: Copyright 2025-2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../common/arch.elisa"
+include "../common/types.elisa"
+include "../common/logging/log.elisa"
+include "../common/string_util.elisa"
+include "../common/io_file.elisa"
+include "../core/file_format/binary.elisa"
+include "../core/file_format/npbind.elisa"
+
+def npbind_test_fuzz_byte(seed: i32, index: usize) -> u8:
+    mixed: mutable u32 = seed.u32() ^ (index.u32() * 0x9e3779b1)
+    mixed <- mixed ^ (mixed >> 16)
+    mixed <- mixed * 0x85ebca6b
+    mixed <- mixed ^ (mixed >> 13)
+    return (mixed & 0xFF).u8()
+
+def npbind_test_push_zeroes(out: mutable darray[u8]&, count: usize) -> void:
+    for i in 0..<count:
+        ff_push_u8(out, 0)
+
+def npbind_test_make_adversarial_buffer(seed: i32) -> darray[u8]:
+    out: mutable darray[u8] = []
+    len: usize = ((seed.u32() & 0xFF) + 1).usize()
+    for i in 0..<len:
+        ff_push_u8(out, npbind_test_fuzz_byte(seed, i))
+    if len >= NPBIND_HEADER_SIZE:
+        # Plant valid magic BE: 0xD294A018
+        out[0] <- 0xD2
+        out[1] <- 0x94
+        out[2] <- 0xA0
+        out[3] <- 0x18
+    return out
+
+def npbind_test_push_entry(out: mutable darray[u8]&, entry_type: u16, data: darray[u8]) -> void:
+    ff_push_u16_be(out, entry_type)
+    ff_push_u16_be(out, data.count.u16())
+    for i in 0..<data.count:
+        ff_push_u8(out, data[i])
+
+def npbind_test_make_npcommid_bytes(id: static u8&) -> darray[u8]:
+    out: mutable darray[u8] = []
+    len: usize = runtime_strlen(id)
+    for i in 0..<len:
+        ff_push_u8(out, id[i])
+    return out
+
+def npbind_test_build_minimal_valid(num_entries: u64) -> darray[u8]:
+    out: mutable darray[u8] = []
+    # magic BE 0xD294A018
+    ff_push_u32_be(out, NPBIND_MAGIC)
+    # version
+    ff_push_u32_be(out, 1)
+    # file_size (placeholder)
+    ff_push_u32_be(out, 0)
+    ff_push_u32_be(out, 0)
+    # entry_size
+    ff_push_u32_be(out, 0)
+    ff_push_u32_be(out, 0)
+    # num_entries
+    ff_push_u32_be(out, ((num_entries >> 32) & 0xFFFFFFFF).u32())
+    ff_push_u32_be(out, (num_entries & 0xFFFFFFFF).u32())
+    # 0x60 bytes reserved
+    npbind_test_push_zeroes(out, 0x60)
+    return out
+
+@test
+def npbind_parser_valid_header_no_entries_accepted() -> void:
+    can Abort.Panic, Memory.Allocate:
+        bytes: darray[u8] = npbind_test_build_minimal_valid(0)
+        assert bytes.count >= NPBIND_HEADER_SIZE
+        parsed: NpBindFile = NpBind_Parse(bytes)
+        assert parsed.valid
+        assert parsed.header.magic == NPBIND_MAGIC
+        assert parsed.bodies.count == 0
+
+@test
+def npbind_parser_rejects_truncated_header() -> void:
+    can Abort.Panic, Memory.Allocate:
+        bytes: mutable darray[u8] = []
+        for i in 0..<(NPBIND_HEADER_SIZE - 1):
+            ff_push_u8(bytes, 0)
+        parsed: NpBindFile = NpBind_Parse(bytes)
+        assert not parsed.valid
+
+@test
+def npbind_parser_rejects_wrong_magic() -> void:
+    can Abort.Panic, Memory.Allocate:
+        bytes: darray[u8] = npbind_test_build_minimal_valid(0)
+        bad_bytes: mutable darray[u8] = bytes
+        bad_bytes[0] <- 0xFF
+        parsed: NpBindFile = NpBind_Parse(bad_bytes)
+        assert not parsed.valid
+
+@test
+def npbind_parser_entry_truncated_body_rejected() -> void:
+    can Abort.Panic, Memory.Allocate:
+        bytes: mutable darray[u8] = npbind_test_build_minimal_valid(1)
+        # Only 8 bytes of body (header expects 16 before reading entries)
+        for i in 0..<8:
+            ff_push_u8(bytes, 0)
+        parsed: NpBindFile = NpBind_Parse(bytes)
+        assert not parsed.valid
+
+@test
+def npbind_parser_valid_single_entry_accepted() -> void:
+    can Abort.Panic, Memory.Allocate:
+        bytes: mutable darray[u8] = npbind_test_build_minimal_valid(1)
+        # npcommid entry: type=1, 12 bytes "NPWR00001_00"
+        np_id: darray[u8] = npbind_test_make_npcommid_bytes("NPWR00001_00")
+        npbind_test_push_entry(bytes, 1, np_id)
+        # trophy entry: type=2, 0 bytes
+        npbind_test_push_entry(bytes, 2, [])
+        # unk1: type=3, 0 bytes
+        npbind_test_push_entry(bytes, 3, [])
+        # unk2: type=4, 0 bytes
+        npbind_test_push_entry(bytes, 4, [])
+        # padding to NPBIND_BODY_PADDING = 0x98 remaining after entries
+        npbind_test_push_zeroes(bytes, NPBIND_BODY_PADDING)
+        # digest at end
+        npbind_test_push_zeroes(bytes, NPBIND_DIGEST_SIZE)
+        parsed: NpBindFile = NpBind_Parse(bytes)
+        assert parsed.valid
+        assert parsed.bodies.count == 1
+        assert runtime_strlen(NpBind_GetNpCommId(parsed, 0)) == 12
+
+@test
+def npbind_parser_entry_with_oversized_data_rejected() -> void:
+    can Abort.Panic, Memory.Allocate:
+        bytes: mutable darray[u8] = npbind_test_build_minimal_valid(1)
+        # npcommid entry: type=1, size=0xFF but only 4 bytes follow
+        ff_push_u16_be(bytes, 1)
+        ff_push_u16_be(bytes, 0xFF)
+        npbind_test_push_zeroes(bytes, 4)
+        parsed: NpBindFile = NpBind_Parse(bytes)
+        assert not parsed.valid
+
+@test
+def npbind_parser_fuzz_samples_never_trap() -> void:
+    can Abort.Panic, Memory.Allocate:
+        for seed in 0..<64:
+            parsed: NpBindFile = NpBind_Parse(npbind_test_make_adversarial_buffer(seed.i32()))
+            assert parsed.valid or not parsed.valid
+
+@property
+def npbind_parse_never_traps(seed: i32) -> bool:
+    can Memory.Allocate, Abort.Panic:
+        parsed: NpBindFile = NpBind_Parse(npbind_test_make_adversarial_buffer(seed))
+        return parsed.valid or not parsed.valid

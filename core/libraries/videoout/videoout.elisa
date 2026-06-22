@@ -248,6 +248,96 @@ def videoout_artifact_first_frame_candidate_emitted() -> bool:
 def videoout_artifact_event_emitted() -> bool:
     return g_videoout_artifact_event_emitted
 
+# ---- Presenter state accessors (read the last flipped frame) ----
+
+def videoout_present_count() -> u64:
+    return g_videoout_presenter_state.present_count
+
+def videoout_last_present_addr() -> u64:
+    return g_videoout_presenter_state.last_present_addr
+
+def videoout_last_present_width() -> u32:
+    return g_videoout_presenter_state.last_present_width
+
+def videoout_last_present_height() -> u32:
+    return g_videoout_presenter_state.last_present_height
+
+def videoout_last_present_format() -> u32:
+    return g_videoout_presenter_state.last_present_format
+
+# videoout_capture_present_ppm reads the most-recently-flipped guest framebuffer
+# (recorded by videoout_process_flip in g_videoout_presenter_state) and serializes
+# it as a binary PPM (P6) byte buffer. This is the real first-frame readout: pixels
+# come from the guest buffer address that the flip path presented, not from a stub.
+#
+# Only A8R8G8B8 / A8B8G8R8 SRGB (32 bpp) sources are decoded; other formats return an
+# empty buffer. A zero present address (blank/black flip) also returns empty.
+def videoout_capture_present_ppm(out: mutable darray[u8]&) -> bool:
+    can Memory.Allocate, Abort.Panic:
+        addr: u64 = g_videoout_presenter_state.last_present_addr
+        width: u32 = g_videoout_presenter_state.last_present_width
+        height: u32 = g_videoout_presenter_state.last_present_height
+        format: u32 = g_videoout_presenter_state.last_present_format
+        if addr == 0 or width == 0 or height == 0:
+            return false
+        is_rgb: bool = format == SCE_VIDEO_OUT_PIXEL_FORMAT_A8R8G8B8_SRGB
+        is_bgr: bool = format == SCE_VIDEO_OUT_PIXEL_FORMAT_A8B8G8R8_SRGB
+        if not (is_rgb or is_bgr):
+            return false
+
+        # ASCII PPM header: "P6\n<w> <h>\n255\n"
+        header: cstr = "P6\n"
+        _videoout_ppm_push_cstr(out, header)
+        _videoout_ppm_push_u32(out, width)
+        out.push(0x20)
+        _videoout_ppm_push_u32(out, height)
+        out.push(0x0A)
+        _videoout_ppm_push_cstr(out, "255\n")
+
+        pixels: u32& = addr.uintptr().cast[u32&]
+        total: usize = (width.usize()) * (height.usize())
+        i: mutable usize = 0
+        while i < total:
+            px: u32 = pixels[i]
+            # A8R8G8B8: bytes in memory little-endian = B,G,R,A; channel layout R=bits16-23
+            r: mutable u8 = ((px >> 16) & 0xFF).u8()
+            g: u8 = ((px >> 8) & 0xFF).u8()
+            b: mutable u8 = (px & 0xFF).u8()
+            if is_bgr:
+                # A8B8G8R8: R in low bits, B in high bits -> swap
+                tmp: u8 = r
+                r <- b
+                b <- tmp
+            out.push(r)
+            out.push(g)
+            out.push(b)
+            i <- i + 1
+        return true
+
+def _videoout_ppm_push_cstr(out: mutable darray[u8]&, s: cstr) -> void:
+    can Memory.Allocate, Abort.Panic:
+        p: u8& = s.cast[u8&]
+        i: mutable usize = 0
+        while p[i] != 0:
+            out.push(p[i])
+            i <- i + 1
+
+def _videoout_ppm_push_u32(out: mutable darray[u8]&, value: u32) -> void:
+    can Memory.Allocate, Abort.Panic:
+        if value == 0:
+            out.push(0x30)
+            return
+        digits: mutable array[u8, 10] = zeroed
+        n: mutable u32 = value
+        count: mutable usize = 0
+        while n > 0:
+            digits[count] <- (0x30 + (n % 10)).u8()
+            n <- n / 10
+            count <- count + 1
+        while count > 0:
+            count <- count - 1
+            out.push(digits[count])
+
 def videoout_is_port_open(handle: i64) -> bool:
     return videoout_is_valid_handle(handle) and g_videoout_is_open
 

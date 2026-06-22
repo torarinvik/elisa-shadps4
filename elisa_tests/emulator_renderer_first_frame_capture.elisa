@@ -1,0 +1,96 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# E1 first-frame capture: drive a real flip of a painted guest framebuffer through
+# the videoout submit/flip lifecycle, then read the presented buffer back out of
+# guest memory and serialize it to a PPM (P6). This proves the first frame is real
+# end-to-end: pixels originate in a guest-visible buffer, travel through
+# sceVideoOutRegisterBuffers + sceVideoOutSubmitFlip + the vblank flip pump, and are
+# recovered from the presenter's last_present_addr -- no stub frame is fabricated.
+
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../core/libraries/videoout/videoout.elisa"
+include "../core/libraries/videoout/videoout_error.elisa"
+include "../common/string_util.elisa"
+include "../common/sys_fs.elisa"
+
+const FF_W: usize = 8
+const FF_H: usize = 4
+
+# Deterministic test pattern: pack a recognizable A8R8G8B8 gradient.
+def ff_make_pixel(x: usize, y: usize) -> u32:
+    r: u32 = ((x * 32) & 0xFF).u32()
+    g: u32 = ((y * 64) & 0xFF).u32()
+    b: u32 = (((x + y) * 16) & 0xFF).u32()
+    a: u32 = 0xFF
+    return (a << 24) | (r << 16) | (g << 8) | b
+
+@test
+def emulator_renderer_first_frame_capture_real_buffer() -> void:
+    can Memory.Allocate, Abort.Panic:
+        _ = sceVideoOutClose(1)
+        videoout_reset_port_state()
+
+        # Paint a real framebuffer in guest-visible memory.
+        framebuffer: mutable array[u32, 32] = zeroed   # FF_W * FF_H
+        y: mutable usize = 0
+        while y < FF_H:
+            x: mutable usize = 0
+            while x < FF_W:
+                framebuffer[y * FF_W + x] <- ff_make_pixel(x, y)
+                x <- x + 1
+            y <- y + 1
+
+        handle: int = sceVideoOutOpen(0, 0, 0, null)
+        assert handle == 1
+
+        attr: mutable VideoOutBufferAttribute = zeroed
+        sceVideoOutSetBufferAttribute((&attr).cast[void&?], 0x80000000, 0, 0, FF_W.i64(), FF_H.i64(), FF_W.i64())
+
+        addresses: mutable array[u64, 1] = zeroed
+        addresses[0] <- (&framebuffer[0]).cast[void&].uintptr().u64()
+
+        group_index: int = sceVideoOutRegisterBuffers(handle.i64(), 0, (&addresses[0]).cast[void&?], 1, (&attr).cast[void&?])
+        assert group_index == 0
+
+        # Submit + present the flip.
+        assert sceVideoOutSubmitFlip(handle.i64(), 0, 1, 0x1234) == ORBIS_OK
+        assert sceVideoOutWaitVblank(handle.i64()) == ORBIS_OK
+        assert videoout_artifact_first_frame_candidate_emitted()
+        assert videoout_present_count() >= 1
+
+        # The presenter must point at our painted buffer.
+        assert videoout_last_present_addr() == addresses[0]
+        assert videoout_last_present_width() == FF_W.u32()
+        assert videoout_last_present_height() == FF_H.u32()
+
+        # Capture the presented frame to a PPM byte buffer.
+        ppm: mutable darray[u8] = []
+        assert videoout_capture_present_ppm(ppm)
+        assert ppm.count > 15
+
+        # Header sanity: "P6\n"
+        assert ppm[0] == 0x50   # 'P'
+        assert ppm[1] == 0x36   # '6'
+        assert ppm[2] == 0x0A
+
+        # Body size = header + 3 bytes/pixel.
+        expected_body: usize = FF_W * FF_H * 3
+        assert ppm.count > expected_body
+
+        # Verify a couple of round-tripped pixels at the tail of the buffer.
+        body_start: usize = ppm.count - expected_body
+        # pixel (0,0): r=0,g=0,b=0
+        assert ppm[body_start] == 0
+        assert ppm[body_start + 1] == 0
+        assert ppm[body_start + 2] == 0
+        # pixel (1,0): r=32, g=0, b=16
+        assert ppm[body_start + 3] == 32
+        assert ppm[body_start + 4] == 0
+        assert ppm[body_start + 5] == 16
+
+        # Persist the real first frame to disk as evidence.
+        wrote: bool = fs_write_all("verification_findings/first_frame.ppm", ppm)
+        assert wrote
+
+        assert sceVideoOutClose(handle.i64()) == ORBIS_OK

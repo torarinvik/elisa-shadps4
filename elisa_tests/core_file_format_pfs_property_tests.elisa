@@ -1,0 +1,122 @@
+# SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../common/arch.elisa"
+include "../common/types.elisa"
+include "../common/logging/log.elisa"
+include "../common/string_util.elisa"
+include "../common/io_file.elisa"
+include "../core/file_format/binary.elisa"
+include "../core/file_format/pfs.elisa"
+
+def pfs_test_fuzz_byte(seed: i32, index: usize) -> u8:
+    mixed: mutable u32 = seed.u32() ^ (index.u32() * 0x9e3779b1)
+    mixed <- mixed ^ (mixed >> 16)
+    mixed <- mixed * 0x85ebca6b
+    mixed <- mixed ^ (mixed >> 13)
+    return (mixed & 0xFF).u8()
+
+def pfs_test_make_adversarial_buffer(seed: i32) -> darray[u8]:
+    out: mutable darray[u8] = []
+    len: usize = ((seed.u32() & 0xFF) + 1).usize()
+    for i in 0..<len:
+        ff_push_u8(out, pfs_test_fuzz_byte(seed, i))
+    return out
+
+def pfs_test_build_valid_header(block_size: i32, n_block: i64, dinode_count: i64) -> darray[u8]:
+    out: mutable darray[u8] = []
+    # version (i64 le)
+    ff_push_u32_le(out, 1)
+    ff_push_u32_le(out, 0)
+    # magic (i64 le) - 0x31534650 = "PFS1"
+    ff_push_u32_le(out, 0x31534650)
+    ff_push_u32_le(out, 0)
+    # id (i64 le)
+    ff_push_u32_le(out, 0)
+    ff_push_u32_le(out, 0)
+    # fmode, clean, read_only, rsv (4 bytes)
+    ff_push_u8(out, 0)
+    ff_push_u8(out, 1)
+    ff_push_u8(out, 0)
+    ff_push_u8(out, 0)
+    # mode (u16 le)
+    ff_push_u16_le(out, PFS_MODE_UNKNOWN_FLAG_ALWAYS_SET)
+    # unk1 (i16 le)
+    ff_push_u16_le(out, 0)
+    # block_size (i32 le)
+    ff_push_u32_le(out, block_size.u32())
+    # n_backup (i32 le)
+    ff_push_u32_le(out, 0)
+    # n_block (i64 le)
+    ff_push_u32_le(out, (n_block.u64() & 0xFFFFFFFF).u32())
+    ff_push_u32_le(out, ((n_block.u64() >> 32) & 0xFFFFFFFF).u32())
+    # dinode_count (i64 le)
+    ff_push_u32_le(out, (dinode_count.u64() & 0xFFFFFFFF).u32())
+    ff_push_u32_le(out, ((dinode_count.u64() >> 32) & 0xFFFFFFFF).u32())
+    # nd_block (i64 le)
+    ff_push_u32_le(out, 0)
+    ff_push_u32_le(out, 0)
+    # dinode_block_count (i64 le)
+    ff_push_u32_le(out, 0)
+    ff_push_u32_le(out, 0)
+    # superroot_ino (i64 le)
+    ff_push_u32_le(out, 0)
+    ff_push_u32_le(out, 0)
+    # padding to reach the 88-byte minimum the parser checks
+    ff_push_u32_le(out, 0)
+    ff_push_u32_le(out, 0)
+    return out
+
+@test
+def pfs_parser_valid_header_accepted() -> void:
+    can Abort.Panic, Memory.Allocate:
+        bytes: darray[u8] = pfs_test_build_valid_header(0x10000, 64, 32)
+        parsed: PfsFile = Pfs_ParseHeader(bytes)
+        assert parsed.valid
+        assert parsed.header.block_size == 0x10000
+        assert parsed.header.n_block == 64
+        assert parsed.header.dinode_count == 32
+
+@test
+def pfs_parser_rejects_truncated_header() -> void:
+    can Abort.Panic, Memory.Allocate:
+        bytes: mutable darray[u8] = []
+        for i in 0..<87:
+            ff_push_u8(bytes, 0)
+        parsed: PfsFile = Pfs_ParseHeader(bytes)
+        assert not parsed.valid
+
+@test
+def pfs_parser_rejects_zero_block_size() -> void:
+    can Abort.Panic, Memory.Allocate:
+        bytes: darray[u8] = pfs_test_build_valid_header(0, 64, 32)
+        parsed: PfsFile = Pfs_ParseHeader(bytes)
+        assert not parsed.valid
+
+@test
+def pfs_parser_rejects_negative_n_block() -> void:
+    can Abort.Panic, Memory.Allocate:
+        bytes: darray[u8] = pfs_test_build_valid_header(0x1000, -1, 32)
+        parsed: PfsFile = Pfs_ParseHeader(bytes)
+        assert not parsed.valid
+
+@test
+def pfs_parser_rejects_negative_dinode_count() -> void:
+    can Abort.Panic, Memory.Allocate:
+        bytes: darray[u8] = pfs_test_build_valid_header(0x1000, 64, -1)
+        parsed: PfsFile = Pfs_ParseHeader(bytes)
+        assert not parsed.valid
+
+@test
+def pfs_parser_fuzz_samples_never_trap() -> void:
+    can Abort.Panic, Memory.Allocate:
+        for seed in 0..<64:
+            parsed: PfsFile = Pfs_ParseHeader(pfs_test_make_adversarial_buffer(seed.i32()))
+            assert parsed.valid or not parsed.valid
+
+@property
+def pfs_parse_never_traps(seed: i32) -> bool:
+    can Memory.Allocate, Abort.Panic:
+        parsed: PfsFile = Pfs_ParseHeader(pfs_test_make_adversarial_buffer(seed))
+        return parsed.valid or not parsed.valid

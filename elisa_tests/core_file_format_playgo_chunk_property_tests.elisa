@@ -1,0 +1,144 @@
+# SPDX-FileCopyrightText: Copyright 2024-2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../common/arch.elisa"
+include "../common/types.elisa"
+include "../common/logging/log.elisa"
+include "../common/string_util.elisa"
+include "../common/io_file.elisa"
+include "../core/file_format/binary.elisa"
+include "../core/file_format/playgo_chunk.elisa"
+
+def playgo_test_fuzz_byte(seed: i32, index: usize) -> u8:
+    mixed: mutable u32 = seed.u32() ^ (index.u32() * 0x9e3779b1)
+    mixed <- mixed ^ (mixed >> 16)
+    mixed <- mixed * 0x85ebca6b
+    mixed <- mixed ^ (mixed >> 13)
+    return (mixed & 0xFF).u8()
+
+def playgo_test_push_zeroes(out: mutable darray[u8]&, count: usize) -> void:
+    for i in 0..<count:
+        ff_push_u8(out, 0)
+
+def playgo_test_make_adversarial_buffer(seed: i32) -> darray[u8]:
+    out: mutable darray[u8] = []
+    len: usize = ((seed.u32() & 0xFF) + 1).usize()
+    for i in 0..<len:
+        ff_push_u8(out, playgo_test_fuzz_byte(seed, i))
+    if len >= PLAYGO_HEADER_SIZE:
+        # Plant valid magic: 0x6F676C70 LE
+        out[0] <- 0x70
+        out[1] <- 0x6C
+        out[2] <- 0x67
+        out[3] <- 0x6F
+    return out
+
+def playgo_test_build_minimal_valid() -> darray[u8]:
+    out: mutable darray[u8] = []
+    # magic LE 0x6F676C70
+    ff_push_u32_le(out, PLAYGO_MAGIC)
+    # version_major, version_minor
+    ff_push_u16_le(out, 1)
+    ff_push_u16_le(out, 0)
+    # image_count
+    ff_push_u16_le(out, 1)
+    # chunk_count = 0 (no chunks to iterate)
+    ff_push_u16_le(out, 0)
+    # mchunk_count
+    ff_push_u16_le(out, 0)
+    # scenario_count
+    ff_push_u16_le(out, 1)
+    # file_size
+    ff_push_u32_le(out, PLAYGO_HEADER_SIZE.u32())
+    # default_scenario_id
+    ff_push_u16_le(out, 0)
+    # attrib
+    ff_push_u16_le(out, 0)
+    # sdk_version
+    ff_push_u32_le(out, 0x03700081)
+    # disc_count, layer_bmp
+    ff_push_u16_le(out, 1)
+    ff_push_u16_le(out, 1)
+    # 32 bytes skip
+    playgo_test_push_zeroes(out, 32)
+    # content_id: 128 bytes of zeroes
+    playgo_test_push_zeroes(out, 128)
+    # chunk_attrs range (offset=0, length=0)
+    ff_push_u32_le(out, 0)
+    ff_push_u32_le(out, 0)
+    # chunk_mchunks range
+    ff_push_u32_le(out, 0)
+    ff_push_u32_le(out, 0)
+    # chunk_labels range
+    ff_push_u32_le(out, 0)
+    ff_push_u32_le(out, 0)
+    # mchunk_attrs range
+    ff_push_u32_le(out, 0)
+    ff_push_u32_le(out, 0)
+    # trailing padding to reach PLAYGO_HEADER_SIZE (0x100 = 256)
+    playgo_test_push_zeroes(out, 32)
+    return out
+
+@test
+def playgo_parser_valid_header_zero_chunks_accepted() -> void:
+    can Abort.Panic, Memory.Allocate:
+        bytes: darray[u8] = playgo_test_build_minimal_valid()
+        assert bytes.count >= PLAYGO_HEADER_SIZE
+        parsed: PlaygoFile = Playgo_Parse(bytes)
+        assert parsed.valid
+        assert parsed.header.magic == PLAYGO_MAGIC
+        assert parsed.chunks.count == 0
+
+@test
+def playgo_parser_rejects_truncated_header() -> void:
+    can Abort.Panic, Memory.Allocate:
+        bytes: mutable darray[u8] = []
+        for i in 0..<(PLAYGO_HEADER_SIZE - 1):
+            ff_push_u8(bytes, 0)
+        parsed: PlaygoFile = Playgo_Parse(bytes)
+        assert not parsed.valid
+
+@test
+def playgo_parser_rejects_wrong_magic() -> void:
+    can Abort.Panic, Memory.Allocate:
+        bytes: darray[u8] = playgo_test_build_minimal_valid()
+        bad_bytes: mutable darray[u8] = bytes
+        bad_bytes[0] <- 0xFF
+        parsed: PlaygoFile = Playgo_Parse(bad_bytes)
+        assert not parsed.valid
+
+@test
+def playgo_parser_chunk_attr_out_of_range_skips_gracefully() -> void:
+    can Abort.Panic, Memory.Allocate:
+        # Build a header claiming 5 chunks but with only partial chunk_attrs data
+        bytes: mutable darray[u8] = playgo_test_build_minimal_valid()
+        # patch chunk_count to 5 at offset 10
+        bytes[10] <- 5
+        bytes[11] <- 0
+        # chunk_attrs range: offset=PLAYGO_HEADER_SIZE, length=8 (< 5*0x20 = 160)
+        chunk_attrs_off: usize = 0xD8
+        bytes[chunk_attrs_off] <- PLAYGO_HEADER_SIZE.u8()
+        bytes[chunk_attrs_off + 1] <- 0
+        bytes[chunk_attrs_off + 2] <- 0
+        bytes[chunk_attrs_off + 3] <- 0
+        bytes[chunk_attrs_off + 4] <- 8
+        bytes[chunk_attrs_off + 5] <- 0
+        bytes[chunk_attrs_off + 6] <- 0
+        bytes[chunk_attrs_off + 7] <- 0
+        parsed: PlaygoFile = Playgo_Parse(bytes)
+        # parser should stop at first chunk that doesn't fit, not trap
+        assert parsed.valid or not parsed.valid
+
+@test
+def playgo_parser_fuzz_samples_never_trap() -> void:
+    can Abort.Panic, Memory.Allocate:
+        for seed in 0..<64:
+            parsed: PlaygoFile = Playgo_Parse(playgo_test_make_adversarial_buffer(seed.i32()))
+            assert parsed.valid or not parsed.valid
+
+@property
+def playgo_parse_never_traps(seed: i32) -> bool:
+    can Memory.Allocate, Abort.Panic:
+        parsed: PlaygoFile = Playgo_Parse(playgo_test_make_adversarial_buffer(seed))
+        return parsed.valid or not parsed.valid

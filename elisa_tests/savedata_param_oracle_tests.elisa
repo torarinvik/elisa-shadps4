@@ -1,0 +1,251 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# E4 — OrbisSaveDataParam ABI oracle: round-trip @property + golden vector @tests for
+# all param fields: title@0, subTitle@128, detail@256, userParam@1280(u32), mtime@1288(s64).
+#
+# Tests encode a param struct into a 1296-byte guest buffer using the abi_store_* helpers,
+# then decode it back using abi_*_at helpers and assert field identity.  A separate
+# set of tests drives the live savedata_set/get_param_* functions through a real mount slot.
+
+include "../common/string_util.elisa"
+include "../common/types.elisa"
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+include "../common/arch.elisa"
+include "../common/io_file.elisa"
+include "../core/file_format/binary.elisa"
+include "../core/file_format/psf.elisa"
+include "../common/sys_fs.elisa"
+include "../core/libraries/kernel/lib_function_stub.elisa"
+include "../core/libraries/save_data/savedata_error.elisa"
+include "../core/libraries/save_data/savedata_state.elisa"
+include "../core/libraries/save_data/save_mount.elisa"
+include "../core/libraries/save_data/savedata_abi.elisa"
+include "../core/libraries/save_data/savedata.elisa"
+
+# ---- buffer helpers (local to this test) ----
+
+def param_oracle_cstr_eq(buf: u8&, off: usize, expected: static u8&) -> bool:
+    n: usize = runtime_strlen(expected)
+    for i in 0..<n:
+        if buf[off + i] != expected[i]:
+            return false
+    return buf[off + n] == 0
+
+# ---- round-trip @property: encode then decode all five fields ----
+
+@property
+def param_oracle_full_roundtrip_property(seed: i32) -> bool:
+    can Abort.Panic, Memory.Allocate:
+        # Build a 1296-byte Orbis param buffer.
+        param_buf: mutable array[u8, 1296] = zeroed
+        pb: mutable void& = (&param_buf[0]).cast[mutable void&]
+        pv: MutableAbiView = abi_mut_view(pb, 1296)
+
+        # title@0 CString<128>
+        title_src: static u8& = "Oracle Title"
+        abi_store_cstr(pv, 0, title_src, 128)
+
+        # subTitle@128 CString<128>
+        sub_src: static u8& = "Oracle Sub"
+        abi_store_cstr(pv, 128, sub_src, 128)
+
+        # detail@256 CString<1024>
+        detail_src: static u8& = "Oracle Detail Text"
+        abi_store_cstr(pv, 256, detail_src, 1024)
+
+        # userParam@1280 u32 — seed-derived
+        user_param: u32 = seed.u32() & 0xFFFF
+        abi_store_u32(pv, 1280, user_param)
+
+        # mtime@1288 s64 — seed-derived
+        mtime_val: s64 = (0x1234567890.s64() ^ seed.s64())
+        abi_store_s64(pv, 1288, mtime_val)
+
+        # Decode back via read-only view.
+        rp: void& = (&param_buf[0]).cast[void&]
+        rv: AbiView = abi_view(rp, 1296)
+
+        decoded_up: u32 = abi_u32_at(rv, 1280)
+        decoded_mt: s64 = abi_s64_at(rv, 1288)
+        title_ok: bool = param_oracle_cstr_eq(&param_buf[0], 0, title_src)
+        sub_ok: bool = param_oracle_cstr_eq(&param_buf[0], 128, sub_src)
+        detail_ok: bool = param_oracle_cstr_eq(&param_buf[0], 256, detail_src)
+
+        return title_ok and sub_ok and detail_ok and decoded_up == user_param and decoded_mt == mtime_val
+
+# ---- golden vector: known exact byte offsets and field values ----
+
+@test
+def param_oracle_golden_vector_offsets() -> void:
+    can Abort.Panic:
+        param_buf: mutable array[u8, 1296] = zeroed
+        pb: mutable void& = (&param_buf[0]).cast[mutable void&]
+        pv: MutableAbiView = abi_mut_view(pb, 1296)
+
+        # title@0
+        abi_store_cstr(pv, 0, "Parity Title", 128)
+        # subTitle@128
+        abi_store_cstr(pv, 128, "Parity Sub", 128)
+        # detail@256
+        abi_store_cstr(pv, 256, "Parity Detail", 1024)
+        # userParam@1280
+        abi_store_u32(pv, 1280, 0xDEADBEEF)
+        # mtime@1288
+        abi_store_s64(pv, 1288, 0x7FFFFFFF12345678.s64())
+
+        rp: void& = (&param_buf[0]).cast[void&]
+        rv: AbiView = abi_view(rp, 1296)
+
+        # title first byte 'P', subTitle at offset 128, detail at 256
+        assert param_buf[0] == 'P'.u8()
+        assert param_buf[128] == 'P'.u8()
+        assert param_buf[256] == 'P'.u8()
+
+        # userParam
+        assert abi_u32_at(rv, 1280) == 0xDEADBEEF
+
+        # mtime
+        assert abi_s64_at(rv, 1288) == 0x7FFFFFFF12345678.s64()
+
+        # verify NUL termination on all three cstrings
+        assert param_buf[runtime_strlen("Parity Title")] == 0
+        assert param_buf[128 + runtime_strlen("Parity Sub")] == 0
+        assert param_buf[256 + runtime_strlen("Parity Detail")] == 0
+
+        # reserved gap between userParam and mtime: offset 1284..1287 (4 bytes padding)
+        # (no padding required by spec at 1284 but ensure store didn't bleed into prior field)
+        assert abi_u32_at(rv, 1276) == 0   # 4 bytes before userParam must be zero
+
+# ---- golden vector: mtime stores as little-endian s64 ----
+
+@test
+def param_oracle_mtime_little_endian() -> void:
+    can Abort.Panic:
+        buf: mutable array[u8, 8] = zeroed
+        bv: MutableAbiView = abi_mut_view((&buf[0]).cast[mutable void&], 8)
+        abi_store_s64(bv, 0, 0x0102030405060708.s64())
+        # little-endian: byte 0 = 0x08, byte 7 = 0x01
+        assert buf[0] == 0x08
+        assert buf[1] == 0x07
+        assert buf[2] == 0x06
+        assert buf[3] == 0x05
+        assert buf[4] == 0x04
+        assert buf[5] == 0x03
+        assert buf[6] == 0x02
+        assert buf[7] == 0x01
+        rv: AbiView = abi_view((&buf[0]).cast[void&], 8)
+        assert abi_s64_at(rv, 0) == 0x0102030405060708.s64()
+
+# ---- golden vector: negative mtime round-trips correctly ----
+
+@test
+def param_oracle_mtime_negative_roundtrip() -> void:
+    can Abort.Panic:
+        buf: mutable array[u8, 8] = zeroed
+        bv: MutableAbiView = abi_mut_view((&buf[0]).cast[mutable void&], 8)
+        neg: s64 = (-1).s64()
+        abi_store_s64(bv, 0, neg)
+        # -1 encodes as all-0xFF in little-endian
+        for i in 0..<8:
+            assert buf[i] == 0xFF
+        rv: AbiView = abi_view((&buf[0]).cast[void&], 8)
+        assert abi_s64_at(rv, 0) == neg
+
+# ---- live mount round-trip: set/get detail and mtime through a real slot ----
+
+@test
+def param_oracle_live_detail_mtime_roundtrip() -> void:
+    can Memory.Allocate, Abort.Panic:
+        assert sceSaveDataInitialize(null) == 0
+
+        handle: int = savedata_mount(1, "ELISA_ORACLE_E4", 64)
+        assert handle >= 0
+
+        # set DETAIL
+        detail_src: static u8& = "Live Detail E4"
+        assert savedata_set_param_detail(handle, (&detail_src[0]).cast[u8&?]) == SAVE_DATA_ERROR_OK
+
+        detail_out: mutable array[u8, 1024] = zeroed
+        got_detail: mutable u64 = 0
+        assert savedata_get_param_detail(handle, detail_out[0], 1024, got_detail) == SAVE_DATA_ERROR_OK
+        assert got_detail == runtime_strlen(detail_src).u64()
+        assert detail_out[0] == 'L'.u8()
+
+        # set MTIME
+        mtime_set: s64 = 1719100000.s64()
+        assert savedata_set_param_mtime(handle, mtime_set) == SAVE_DATA_ERROR_OK
+
+        mtime_out: mutable s64 = 0
+        mtime_sz: mutable u64 = 0
+        assert savedata_get_param_mtime(handle, mtime_out, mtime_sz) == SAVE_DATA_ERROR_OK
+        assert mtime_out == mtime_set
+        assert mtime_sz == 8
+
+        assert savedata_umount(handle) == SAVE_DATA_ERROR_OK
+
+        # remount to verify persistence through sfo
+        handle2: int = savedata_mount(1, "ELISA_ORACLE_E4", 64)
+        assert handle2 >= 0
+
+        detail_out2: mutable array[u8, 1024] = zeroed
+        got_detail2: mutable u64 = 0
+        assert savedata_get_param_detail(handle2, detail_out2[0], 1024, got_detail2) == SAVE_DATA_ERROR_OK
+        assert got_detail2 == runtime_strlen(detail_src).u64()
+
+        mtime_out2: mutable s64 = 0
+        mtime_sz2: mutable u64 = 0
+        assert savedata_get_param_mtime(handle2, mtime_out2, mtime_sz2) == SAVE_DATA_ERROR_OK
+        assert mtime_out2 == mtime_set
+
+        assert savedata_umount(handle2) == SAVE_DATA_ERROR_OK
+
+        # cleanup
+        _ = fs_remove_tree("/tmp/elisa_savedata/ELISA_ORACLE_E4")
+        assert sceSaveDataTerminate() == 0
+
+# ---- live ABI path: SD_PARAM_DETAIL and SD_PARAM_MTIME via sceSaveDataSetParam/GetParam ----
+
+@test
+def param_oracle_abi_set_get_detail_mtime() -> void:
+    can Memory.Allocate, Abort.Panic:
+        assert sceSaveDataInitialize(null) == 0
+
+        # Mount via native API
+        handle: int = savedata_mount(1, "ELISA_ORACLE_ABI_E4", 64)
+        assert handle >= 0
+        mp_ptr: u8&? = savedata_mount_point(handle)
+        assert mp_ptr != null
+        mp_void: void&? = mp_ptr.cast[void&?]
+
+        # SetParam DETAIL (type=3)
+        detail_buf: mutable array[u8, 64] = zeroed
+        d_src: static u8& = "ABI Detail"
+        for i in 0..<runtime_strlen(d_src):
+            detail_buf[i] <- d_src[i]
+        assert sceSaveDataSetParam(mp_void, 3, (&detail_buf[0]).cast[void&?], 64) == 0
+
+        # GetParam DETAIL back
+        detail_out: mutable array[u8, 1024] = zeroed
+        gsize_buf: mutable array[u8, 8] = zeroed
+        assert sceSaveDataGetParam(mp_void, 3, (&detail_out[0]).cast[void&?], 1024, (&gsize_buf[0]).cast[void&?]) == 0
+        assert detail_out[0] == 'A'.u8()
+
+        # SetParam MTIME (type=5)
+        mtime_buf: mutable array[u8, 8] = zeroed
+        mbv: MutableAbiView = abi_mut_view((&mtime_buf[0]).cast[mutable void&], 8)
+        abi_store_s64(mbv, 0, 9876543210.s64())
+        assert sceSaveDataSetParam(mp_void, 5, (&mtime_buf[0]).cast[void&?], 8) == 0
+
+        # GetParam MTIME back
+        mtime_out_buf: mutable array[u8, 8] = zeroed
+        gsize_buf2: mutable array[u8, 8] = zeroed
+        assert sceSaveDataGetParam(mp_void, 5, (&mtime_out_buf[0]).cast[void&?], 8, (&gsize_buf2[0]).cast[void&?]) == 0
+        mtime_rv: AbiView = abi_view((&mtime_out_buf[0]).cast[void&], 8)
+        assert abi_s64_at(mtime_rv, 0) == 9876543210.s64()
+
+        assert savedata_umount(handle) == SAVE_DATA_ERROR_OK
+
+        # cleanup
+        _ = fs_remove_tree("/tmp/elisa_savedata/ELISA_ORACLE_ABI_E4")
+        assert sceSaveDataTerminate() == 0
