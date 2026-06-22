@@ -71,5 +71,21 @@ aligned caller compiles with no runtime guard, a misaligned caller is a COMPILE 
 guest-facing `AddressSpace_Map` keeps its runtime guard (the guest may request any address).
 This delivers the E6 design-note capability: alignment as a discharged precondition.
 
-Gap (3) (var-decl inline-`is` parse; refined-return fact into an untyped local) remains
-deferred (parser-level).
+## UPDATE 2 — gap (3) RESOLVED (and was partly a misdiagnosis)
+The "var-decl inline-`is` doesn't parse" half was NOT a parser limitation: inline refinement on
+a var-decl always parsed. The real blocker was that `aligned` was a vestigial reserved keyword
+(`TOKEN_ALIGNED`, never referenced by parser/grammar/AST) colliding with the natural identifier —
+the dogfood just happened to name its local `aligned`. The keyword was removed; `aligned` is now
+an ordinary identifier.
+
+The genuine "fact lost through a local binding" half is also fixed: a refinement now flows through
+local bindings. A refined-return initializer discharges a refined local by contract entailment
+(`aligned: u64 is Aligned[4096] = page_align_down(raw)` proves), and an immutable refinement-typed
+local/param then satisfies a same-predicate parameter with no runtime re-check
+(`map_page_aligned(self, aligned, …)`). Soundness preserved: a MUTABLE refined local (reassignable)
+is not trusted, and an UNTYPED local does NOT inherit the initializer's refinement (the refinement
+must be on the binding).
+
+Dogfooded in `elisa_tests/page_precondition_tests.elisa::map_one_page_via_local`. The
+alignment-as-types story is now complete end-to-end on real emulator code: return-position
+constructors, parameter preconditions, AND named local bindings.
