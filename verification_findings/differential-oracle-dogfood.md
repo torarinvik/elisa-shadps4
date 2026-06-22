@@ -44,3 +44,22 @@ while preserving broad coverage. This mirrors how mature property-based fuzzers 
 `frequency`, proptest's int strategies) seed boundary values. Until then, author differentials
 so the interesting domain is reachable (e.g. generate an aligned value as `(raw << 12)` inside
 the body rather than testing `raw` directly).
+
+## UPDATE — boundary-biased generation LANDED (compiler)
+The `@property`/`@differential` generator now draws ~50% from a structured edge-case set per
+integer type (0/1/2, MAX/MAX-1/MAX-k, `1<<k`, `(1<<k)-1`, page `n<<12`, page±1), deterministic
+and shrink-compatible. Dogfooded back on the address-space differentials:
+- The CORRECT `diff_page_aligned` (`AddressSpace_PageAligned` vs `% 4096`) now passes
+  NON-VACUOUSLY — page-aligned inputs are actually exercised (previously never were).
+- A realistic page-domain bug — impl masking `& 0x1FFF` (8192) instead of `& 0xFFF` (4096),
+  i.e. diverging on odd multiples of 4096 — is now CAUGHT at case 18 (shrunk to an odd 4096
+  multiple). The whole class of "wrong alignment mask / wrong page size" bugs is now reachable.
+
+RESIDUAL (characterized): a divergence localized to ONE specific power of two (e.g. exactly
+`2048 == 1<<11`, or odd-multiples-of-2048 from a `%4096→%2048` bug) is still diluted — the
+`1<<k` category spreads probability across all 64 widths, so any single power appears <1× per
+256 cases. The PAGE category densely covers all 4096-multiples (the emulator-relevant domain),
+so page-size/alignment-mask bugs are well covered; sub-page single-power divergences are not.
+Reinforces the strategic split: refinement TYPES (`Aligned[N]`) PROVE alignment for all inputs
+(no coverage gap); biased fuzzing is the best-effort falsification complement. A possible
+follow-up is to bias `k` toward common shifts (12/11/6/3) so specific small powers recur.
