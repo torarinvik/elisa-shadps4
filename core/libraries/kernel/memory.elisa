@@ -43,6 +43,8 @@ def KernelMemory_Is16KBAligned(value: u64) -> bool:
 def KernelMemory_AlignUp(value: u64, alignment: u64) -> u64:
     # Rounds up to a multiple of alignment: never moves backwards, and the result
     # is a true multiple (guarded against alignment==0, which is the identity).
+    # The sum value+alignment must not wrap u64 for the round-up math to be sound.
+    requires value + alignment <= 0xFFFFFFFFFFFFFFFF
     ensure result >= value
     ensure alignment == 0 or (result % alignment) == 0
     if alignment == 0:
@@ -168,7 +170,13 @@ def KernelMemory_MapFlexible(addr_in_out: mutable void&?&, len: u64, prot: int, 
 def KernelMemory_PosixMmapImpl(addr: void&?, len: u64, prot: int, flags: int, fd: int, phys_addr: i64) -> void&?:
     if len == 0:
         return KERNEL_MEMORY_MMAP_FAILED.cast[void&?]
+    # K2: len + page-size must not wrap u64 (only len==0 was checked above).
+    if len > 0xFFFFFFFFFFFFFFFF - KERNEL_MEMORY_PAGE_SIZE:
+        return KERNEL_MEMORY_MMAP_FAILED.cast[void&?]
     vaddr: u64 = addr.cast[u64]
+    # K1: guest-supplied address; vaddr + page-size must not wrap u64.
+    if vaddr > 0xFFFFFFFFFFFFFFFF - KERNEL_MEMORY_PAGE_SIZE:
+        return KERNEL_MEMORY_MMAP_FAILED.cast[void&?]
     aligned_addr: VAddr = KernelMemory_AlignUp(vaddr, KERNEL_MEMORY_PAGE_SIZE).uintptr()
     aligned_size: u64 = KernelMemory_AlignUp(len, KERNEL_MEMORY_PAGE_SIZE)
     map_flags: MemoryMapFlags = flags.u32()
@@ -647,7 +655,16 @@ def sceKernelConfiguredFlexibleMemorySize(sizeOut: mutable u64&) -> int:
 def sceKernelMprotect(addr: void&?, size: u64, prot: int) -> int:
     in_addr: u64 = addr.cast[u64]
     aligned_addr: VAddr = KernelMemory_AlignDown(in_addr, KERNEL_MEMORY_PAGE_SIZE).uintptr()
-    aligned_size: u64 = KernelMemory_AlignUp(size + in_addr - aligned_addr.u64(), KERNEL_MEMORY_PAGE_SIZE)
+    # K3: size + in_addr must not wrap, and the resulting page-span argument plus
+    # the page size must not wrap for the AlignUp round-up to stay sound. The
+    # subtraction (in_addr - aligned_addr) is in [0, page_size) since aligned_addr
+    # is AlignDown(in_addr), so guarding the additions suffices.
+    if not Module_U64AddNoOverflow(size, in_addr):
+        return ORBIS_KERNEL_ERROR_EINVAL
+    span: u64 = size + in_addr - aligned_addr.u64()
+    if span > 0xFFFFFFFFFFFFFFFF - KERNEL_MEMORY_PAGE_SIZE:
+        return ORBIS_KERNEL_ERROR_EINVAL
+    aligned_size: u64 = KernelMemory_AlignUp(span, KERNEL_MEMORY_PAGE_SIZE)
     if aligned_size == 0:
         return ORBIS_OK
     result: s32 = MemoryManager_Protect(Memory_Instance(), aligned_addr, aligned_size, prot.u32())

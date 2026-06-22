@@ -27,10 +27,12 @@ DISCOVERABLE_VERIFICATION_TARGETS = [
     "core-file-format-npbind-property-tests",
     "savedata-param-oracle-tests",
     "core-libraries-np-parity-tests",
-    # NOTE: core-libraries-pad-tests / core-libraries-audio-parity-tests are intentionally NOT listed
-    # yet — they transitively compile module.elisa, whose Module_AlignUp `ensure result >= value` is a
-    # genuine u64 overflow (value=2^64-1) the wrap model rightly refuses. They go green once AlignUp
-    # gets a source-side no-overflow `requires` (+ the requires-WP-threading prover gap).
+    "shader-recompiler-real-spirv-tests",
+    # Newly green: the Module_AlignUp u64-overflow that blocked these is now excluded by a source-side
+    # `requires value + alignment <= U64_MAX` (E1) honored by the entry-requires overflow threading (C1),
+    # so the obligation degrades from refuted (hard error) to a sound debug-gated warning.
+    "core-libraries-pad-tests",
+    "core-libraries-audio-parity-tests",
 ]
 
 

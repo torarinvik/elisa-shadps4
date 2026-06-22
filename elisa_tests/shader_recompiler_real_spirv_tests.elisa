@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: Copyright 2026 shadPS4 Emulator Project
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+# Asserts the shader recompiler bridge emits REAL (non-envelope) SPIR-V for the
+# embedded black-frame fragment shader, driven through the full pure-Elisa
+# pipeline (decode -> CFG -> ASL -> SPIR-V assembler). Distinct from
+# shader_recompiler_recompiler_tests.elisa, which only requires "envelope OR
+# real"; here we require REAL and validate the assembled module structurally.
+
+include "../shader_recompiler/recompiler_backend.elisa"
+include "../../compiler/runtime/elisacore_std/elisacore_runtime.elisa"
+
+# Standard SPIR-V word decode helpers (header layout is fixed).
+const REALSPIRV_TEST_MAGIC: u32 = 0x07230203
+const REALSPIRV_TEST_OP_ENTRY_POINT: u32 = 15
+
+
+def _realspirv_test_opcode_of(word: u32) -> u32:
+    return word & 0xFFFF
+
+
+def _realspirv_test_wordcount_of(word: u32) -> u32:
+    return (word >> 16) & 0xFFFF
+
+
+# The gnmdriver embedded ps0 black-frame fragment shader.
+@test
+def real_spirv_black_frame_fixture_emits_real_module() -> void:
+    can Abort.Panic, Memory.Allocate:
+        code_words: mutable u32[8] = [
+            0xbeeb03ff,  # s_mov_b32 vcc_hi, $0x00000003
+            0x00000003,  # immediate operand
+            0x7e000280,  # v_mov_b32 v0, 0
+            0x5e000100,  # v_cvt_pkrtz_f16_f32 v0, v0, v0
+            0xbf800000,  # s_nop
+            0xf8001c0f,  # exp mrt0, v0, v0 compr vm done
+            0x00000000,  # exp operand
+            0xbf810000   # s_endpgm
+        ]
+        metadata: mutable ShaderRecompilerTranslateMetadata = ShaderRecompilerTranslateMetadata(
+            ELISA_RECOMPILER_STAGE_FRAGMENT.u32(),
+            ELISA_RECOMPILER_LOGICAL_STAGE_FRAGMENT.u32()
+        )
+        out_program: mutable void&? = null
+        rc: int = ShaderRecompiler_TranslateProgramViaFfi(code_words[0], 8, metadata, out_program)
+        assert rc == ELISA_RECOMPILER_BRIDGE_OK
+        assert out_program != null
+
+        # The headline acceptance: this fixture took the REAL SPIR-V path.
+        payload_kind: u32 = elisa_shader_recompiler_program_payload_kind(out_program)
+        assert payload_kind == ELISA_RECOMPILER_PAYLOAD_KIND_REAL_SPIRV
+        assert elisa_shader_recompiler_program_real_spirv_status(out_program) == ELISA_RECOMPILER_REAL_SPIRV_SUCCEEDED
+        assert elisa_shader_recompiler_program_status(out_program) == ELISA_RECOMPILER_PROGRAM_STATUS_TRANSLATED
+        assert elisa_shader_recompiler_program_diagnostic_code(out_program) == ELISA_RECOMPILER_DIAGNOSTIC_NONE
+
+        # --- Structural validation of the assembled SPIR-V module. ---
+        word_count: u64 = elisa_shader_recompiler_program_output_word_count(out_program)
+        # A real module (header + capability + memory model + entry point +
+        # types + function) is far larger than the 12-word envelope.
+        assert word_count > 12
+        assert elisa_shader_recompiler_program_output_byte_size(out_program) == word_count * 4
+
+        # Header word 0 = magic, word 3 = bound (must be a plausible, nonzero id
+        # upper bound), word 4 = schema (reserved 0).
+        assert elisa_shader_recompiler_program_output_word_at(out_program, 0) == REALSPIRV_TEST_MAGIC
+        bound: u32 = elisa_shader_recompiler_program_output_word_at(out_program, 3)
+        assert bound > 1
+        assert bound.u64() < word_count   # bound is an id count, smaller than the stream
+        assert elisa_shader_recompiler_program_output_word_at(out_program, 4) == 0
+
+        # Walk the instruction stream (past the 5-word header) and confirm every
+        # instruction has a nonzero word count (parses) and that an OpEntryPoint
+        # is present -- proof this is a real shader module, not a flat envelope.
+        saw_entry_point: mutable bool = false
+        i: mutable u64 = 5
+        while i < word_count:
+            head: u32 = elisa_shader_recompiler_program_output_word_at(out_program, i)
+            op: u32 = _realspirv_test_opcode_of(head)
+            wc: u32 = _realspirv_test_wordcount_of(head)
+            assert wc >= 1            # zero-length instruction would be malformed
+            if op == REALSPIRV_TEST_OP_ENTRY_POINT:
+                saw_entry_point <- true
+            i <- i + wc.u64()
+        assert i == word_count        # instruction lengths tile the stream exactly
+        assert saw_entry_point
+
+        # Output hash is computed over the real bytes.
+        assert elisa_shader_recompiler_program_output_hash(out_program) != 0
+
+        ShaderRecompiler_FreeProgramViaFfi(out_program)
+
+
+# An unsupported shader (opcode outside the supported set) must DECLINE cleanly
+# to the deterministic envelope -- proving the fallback is intact (no regression).
+@test
+def real_spirv_unsupported_opcode_falls_back_to_envelope() -> void:
+    can Abort.Panic, Memory.Allocate:
+        # A single VALU op the real path does not model (v_add_f32-ish encoding);
+        # decode will yield an opcode outside the supported set, forcing decline.
+        code_words: mutable u32[2] = [
+            0x06000300,  # VOP2 (unsupported by the minimal real path)
+            0xbf810000   # s_endpgm
+        ]
+        metadata: mutable ShaderRecompilerTranslateMetadata = ShaderRecompilerTranslateMetadata(
+            ELISA_RECOMPILER_STAGE_FRAGMENT.u32(),
+            ELISA_RECOMPILER_LOGICAL_STAGE_FRAGMENT.u32()
+        )
+        out_program: mutable void&? = null
+        rc: int = ShaderRecompiler_TranslateProgramViaFfi(code_words[0], 2, metadata, out_program)
+        assert rc == ELISA_RECOMPILER_BRIDGE_OK
+        assert out_program != null
+
+        payload_kind: u32 = elisa_shader_recompiler_program_payload_kind(out_program)
+        assert payload_kind == ELISA_RECOMPILER_PAYLOAD_KIND_SPIRV_ENVELOPE
+        assert elisa_shader_recompiler_program_real_spirv_status(out_program) == ELISA_RECOMPILER_REAL_SPIRV_NOT_REQUESTED
+        assert elisa_shader_recompiler_program_output_word_count(out_program) == 12
+        assert elisa_shader_recompiler_program_output_word_at(out_program, 0) == REALSPIRV_TEST_MAGIC
+        ShaderRecompiler_FreeProgramViaFfi(out_program)

@@ -135,24 +135,67 @@ def c_GuestExec_HostCanRunX64Subprocess() -> s32:
 # Trusted boundary: this is the Apple subprocess handoff used when an arm64 host
 # cannot execute guest x86_64 code in-process. The production C++ lane uses
 # posix_spawn with an x86_64 architecture preference and an owned NUL-terminated
-# argv vector; this Elisa port keeps the same observable contract and delegates
-# the arch selection to /usr/bin/arch for the current gate smoke.
+# argv vector; this Elisa port keeps the same observable contract via a real
+# fork + execv of /usr/bin/arch -x86_64 <path> [args...], blocking-waiting the
+# child and returning its WEXITSTATUS so genuine guest x86_64 code runs under
+# Rosetta on an arm64 host. Null-path and Rosetta-unavailable guards preserved.
+@link_name(execv)
+extern ge_execv(path: static u8&, argv: static u8&?&) -> int
+@link_name(fork)
+extern ge_spawn_fork() -> int
+@link_name(waitpid)
+extern ge_spawn_waitpid(pid: int, status: mutable int&, options: int) -> int
+
 def ge_spawn_x64_subprocess(path: u8&?, argv: static u8&?&?) -> s32:
     ensure result >= -1
     if path == null:
         return -1
     if c_GuestExec_HostCanRunX64Subprocess() != 1:
         return -1
-    if streq(path.cast[static u8&], "/usr/bin/true") == 1:
-        status: int = system("/usr/bin/arch -x86_64 /usr/bin/true")
-        if status == 0:
-            return 0
-        return 1
-    if streq(path.cast[static u8&], "/usr/bin/false") == 1:
-        status: int = system("/usr/bin/arch -x86_64 /usr/bin/false")
-        if status == 0:
-            return 0
-        return 1
+    # Build argv: ["/usr/bin/arch", "-x86_64", path, <user argv[1..]...>, NULL].
+    # User argv[0] is the guest program name and is replaced by `path`, matching
+    # execv conventions; remaining user args are forwarded verbatim.
+    spawn_argv: mutable static u8&?[64] = zeroed
+    spawn_argv[0] <- "/usr/bin/arch"
+    spawn_argv[1] <- "-x86_64"
+    spawn_argv[2] <- path.cast[static u8&?]
+    n: mutable usize = 3
+    if argv != null:
+        ua: static u8&?& = argv.cast[static u8&?&]
+        ui: mutable usize = 1
+        while ui < 60:
+            entry: static u8&? = ua[ui]
+            if entry == null:
+                ui <- 60
+            else:
+                spawn_argv[n] <- entry
+                n <- n + 1
+                ui <- ui + 1
+    spawn_argv[n] <- null
+    child: int = ge_spawn_fork()
+    if child < 0:
+        return -1
+    if child == 0:
+        # Child: exec /usr/bin/arch under x86_64. On failure, exit 127.
+        ge_execv("/usr/bin/arch".cast[static u8&], (&spawn_argv[0]).cast[static u8&?&])
+        ge_exit_now(127)
+        return -1
+    status: mutable int = 0
+    waited: int = ge_spawn_waitpid(child, (&status).cast[mutable int&], 0)
+    if waited != child:
+        return -1
+    if ge_wif_exited(status):
+        code: int = ge_wexitstatus(status) & 0xff
+        out: s32 = code.s32()
+        if out < 0:
+            return -1
+        return out
+    if ge_wif_signaled(status):
+        sig: int = (128 + (ge_wtermsig(status) & 0x7f))
+        sout: s32 = sig.s32()
+        if sout < 0:
+            return -1
+        return sout
     return -1
 
 def c_GuestExec_SpawnX64Subprocess(path: u8&?, argv: static u8&?&?) -> s32:

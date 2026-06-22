@@ -2185,7 +2185,12 @@ def Linker_AllocateTlsForThread(self: mutable Linker&, is_primary: bool) -> uint
     # block as a host pointer. So we host-malloc the block; the %fs:0 -> LdtPage
     # .tcb indirection already lets the TCB live at any (even >4GB) host address.
     _ = is_primary
-    tls_aligned_size: usize = Module_AlignUp(self.static_tls_size.u64(), 0x20).usize()
+    # L1: static_tls_size is a u32, so widening to u64 yields a value <= 2^32-1 and
+    # +0x20 cannot wrap; make the bound explicit so the AlignUp precondition holds.
+    tls_size_u64: mutable u64 = self.static_tls_size.u64()
+    if tls_size_u64 > 0xFFFFFFFFFFFFFFFF - 0x20:
+        tls_size_u64 <- 0xFFFFFFFFFFFFFFFF - 0x20
+    tls_aligned_size: usize = Module_AlignUp(tls_size_u64, 0x20).usize()
     total_tls_size: usize = tls_aligned_size + 0x40
     raw: mutable heap void&? = malloc(total_tls_size)
     if raw == null:
@@ -2262,10 +2267,19 @@ def Linker_NextModuleBase(self: Linker&) -> VAddr:
     base: mutable u64 = MODULE_LOAD_BASE
     i: mutable usize = 0
     while i < self.modules.count:
-        module_end: u64 = self.modules[i].base_virtual_addr.u64() + self.modules[i].aligned_base_size + MODULE_TRAMPOLINE_SIZE
-        if module_end > base:
-            base <- module_end
+        # L2: the running module_end accumulation can itself overflow u64; skip any
+        # module whose end would wrap so the AlignUp argument stays bounded.
+        m_base: u64 = self.modules[i].base_virtual_addr.u64()
+        m_size: u64 = self.modules[i].aligned_base_size
+        if Module_U64AddNoOverflow(m_base, m_size) and Module_U64AddNoOverflow(m_base + m_size, MODULE_TRAMPOLINE_SIZE):
+            module_end: u64 = m_base + m_size + MODULE_TRAMPOLINE_SIZE
+            if module_end > base:
+                base <- module_end
         i <- i + 1
+    # The AlignUp argument (base) must leave room for MODULE_BLOCK_ALIGN; bases are
+    # well below u64-max in practice, but cap defensively so the round-up is sound.
+    if base > 0xFFFFFFFFFFFFFFFF - MODULE_BLOCK_ALIGN:
+        base <- 0xFFFFFFFFFFFFFFFF - MODULE_BLOCK_ALIGN
     return Module_AlignUp(base, MODULE_BLOCK_ALIGN).uintptr()
 
 def Linker_LoadModuleFromHost(self: mutable Linker&, guest_name: static u8&, host_name: static u8&, is_dynamic: bool) -> s32 can[Memory.Allocate, Abort.Panic]:

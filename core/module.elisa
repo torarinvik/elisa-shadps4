@@ -705,6 +705,8 @@ def Module_DecodeEhFrame(self: mutable Module&) -> void:
 def Module_AlignUp(value: u64, alignment: u64) -> u64:
     # Rounds up to a multiple of alignment: never moves backwards, and the result
     # is a true multiple (guarded against alignment==0, which is the identity).
+    # The sum value+alignment must not wrap u64 for the round-up math to be sound.
+    requires value + alignment <= 0xFFFFFFFFFFFFFFFF
     ensure result >= value
     ensure alignment == 0 or (result % alignment) == 0
     if alignment == 0:
@@ -712,6 +714,12 @@ def Module_AlignUp(value: u64, alignment: u64) -> u64:
     return ((value + alignment - 1) / alignment) * alignment
 
 def Module_GetAlignedProgramHeaderSize(phdr: elf_program_header&) -> u64:
+    # p_align is an UNBOUNDED ELF field (attacker-controlled); p_memsz + p_align can
+    # wrap u64. When it would, the round-up is meaningless — fall back to the raw
+    # (already non-wrapping) p_memsz so the AlignUp `requires` is always satisfied.
+    # (M1/M2/M3/M4 all route through here, so this single guard discharges them.)
+    if phdr.p_memsz > 0xFFFFFFFFFFFFFFFF - phdr.p_align:
+        return phdr.p_memsz
     return Module_AlignUp(phdr.p_memsz, phdr.p_align)
 
 def Module_U64AddNoOverflow(a: u64, b: u64) -> bool:
@@ -845,6 +853,10 @@ def Module_PrepareLoadImage(self: mutable Module&, elf: mutable Elf&) -> void:
     self.image_virtual_base <- min_vaddr
     self.image_virtual_size <- 0
     self.base_size <- base_size
+    # M5: base_size is an accumulated max-end, not capped; ensure base_size +
+    # MODULE_BLOCK_ALIGN cannot wrap before the round-up.
+    if base_size > 0xFFFFFFFFFFFFFFFF - MODULE_BLOCK_ALIGN:
+        base_size <- 0xFFFFFFFFFFFFFFFF - MODULE_BLOCK_ALIGN
     self.aligned_base_size <- Module_AlignUp(base_size, MODULE_BLOCK_ALIGN)
     if max_vaddr > min_vaddr:
         self.image_virtual_size <- max_vaddr - min_vaddr
