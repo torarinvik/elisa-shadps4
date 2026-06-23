@@ -1005,21 +1005,35 @@ def Module_ReadRelocationAt(self: Module&, offset: usize) -> elf_relocation:
     rel.rel_addend <- Module_ReadI64At(self, offset + 16)
     return rel
 
-def Module_ImageOffsetForVirtualAddress(self: Module&, addr: u64, out_offset: mutable usize&) -> bool:
+# Map a guest virtual address to a byte offset into self.image, proving the
+# full [offset, offset + width) span lies inside the image before returning.
+# Single validated entry point shared by both the u64 read and write paths so
+# the fixed-width access loop can never index out of self.image. Returns false
+# (the existing failure signal) on a VA below the mapped range or a span that
+# would over-/under-run the image, rather than silently touching OOB memory.
+def Module_ImageOffsetForSpan(self: Module&, addr: u64, width: u64, out_offset: mutable usize&) -> bool:
+    out_offset <- 0
     local: mutable u64 = addr
     if local >= self.base_virtual_addr.u64():
         local <- local - self.base_virtual_addr.u64()
+    # VA-in-range precondition: the address must land at or above the image's
+    # virtual base, otherwise the offset would be negative (underflow).
     if local < self.image_virtual_base:
         return false
     image_offset: u64 = local - self.image_virtual_base
-    if not Module_DynamicDataRangeInBounds(image_offset, 8, self.image.count.u64()):
+    # Bounds predicate: image_offset + width <= self.image.count (overflow-safe).
+    if not Module_DynamicDataRangeInBounds(image_offset, width, self.image.count.u64()):
         return false
     out_offset <- image_offset.usize()
     return true
 
+def Module_ImageOffsetForVirtualAddress(self: Module&, addr: u64, out_offset: mutable usize&) -> bool:
+    return Module_ImageOffsetForSpan(self, addr, 8, out_offset)
+
 def Module_WriteImageU64(self: mutable Module&, addr: u64, value: u64) -> bool:
     offset: mutable usize = 0
-    if not Module_ImageOffsetForVirtualAddress(self, addr, offset):
+    # Validate the full 8-byte span up front; on refusal leave the image untouched.
+    if not Module_ImageOffsetForSpan(self, addr, 8, offset):
         return false
     for i in 0..<8:
         self.image[offset + i] <- ((value >> (i.u64() * 8)) & 0xff).u8()
@@ -1027,7 +1041,8 @@ def Module_WriteImageU64(self: mutable Module&, addr: u64, value: u64) -> bool:
 
 def Module_ReadImageU64(self: Module&, addr: u64) -> u64:
     offset: mutable usize = 0
-    if not Module_ImageOffsetForVirtualAddress(self, addr, offset):
+    # Validate the full 8-byte span up front; refuse with 0 if it would over-read.
+    if not Module_ImageOffsetForSpan(self, addr, 8, offset):
         return 0
     value: mutable u64 = 0
     for i in 0..<8:
