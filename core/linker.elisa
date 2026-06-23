@@ -670,55 +670,66 @@ const ORBIS_MEM_PARAM_MIN_SIZE_FLEXIBLE: u64 = 24
 const ORBIS_MEM_PARAM_MIN_SIZE_EXTENDED_1: u64 = 32
 const ORBIS_MEM_PARAM_MIN_SIZE_EXTENDED_2: u64 = 48
 
-# Read the proc_param `size` field (offset 0). The declared size bounds every
-# other field access below.
-def Linker_ProcParamSize(memory: mutable MemoryManager&, proc_param: VAddr) -> u64:
-    can Memory.Allocate:
-        return MemoryManager_ReadU64(memory, proc_param + ORBIS_PROC_PARAM_OFF_SIZE.uintptr())
+# Typed guest-memory overlays (docs/107, Elisa-core). A `GuestVAddr[L]` carrier
+# whose L is one of these layouts checks every `base.field[mem]` access against
+# the declared field offsets/widths, and `requires size >= N` turns each runtime
+# under-size guard into a COMPILE obligation: the access must be dominated by a
+# size guard (`if base.size[mem] < N: return …` or `if base.size[mem] >= N:`),
+# which the accessors below provide inline. The reads lower byte-for-byte to the
+# previous `MemoryManager_ReadU64(mem, base + offset)` calls, so behavior is
+# identical; the overlay only adds the static offset/width/size checking and
+# single-sources the field offsets with the OrbisProcParam/OrbisKernelMemParam
+# struct layouts declared above.
+layout ProcParamOverlay size 72:
+    0 size: u64
+    64 mem_param: u64 requires size >= 72
+
+layout MemParamOverlay size 48:
+    0 size: u64
+    16 flexible_memory_size: u64 requires size >= 24
+    24 extended_memory_1: u64 requires size >= 32
+    40 extended_memory_2: u64 requires size >= 48
 
 # Read proc_param.sdk_version (offset 16, u64) through the module image reader.
 # The original call site read this field with no size guard (it only treated a
 # zero result as "absent"), so this accessor mirrors that: no size argument, no
-# bounds check beyond the named offset.
+# bounds check beyond the named offset. (It uses the module IMAGE reader, not the
+# MemoryManager overlay, so it stays a raw offset read.)
 def Linker_ProcParamSdkVersion(module: Module, proc_param: VAddr) -> u64:
     return Module_ReadImageU64(module, proc_param.u64() + ORBIS_PROC_PARAM_OFF_SDK_VERSION)
 
-# Read proc_param.mem_param pointer (offset 64). Returns 0 unless the declared
-# size covers the pointer (size >= 72), matching the old `< 72` guard.
-def Linker_ProcParamMemParam(memory: mutable MemoryManager&, proc_param: VAddr, proc_param_size: u64) -> u64:
-    if proc_param_size < ORBIS_PROC_PARAM_MIN_SIZE_MEM_PARAM:
-        return 0
+# Read proc_param.mem_param pointer (offset 64). Returns 0 unless the runtime
+# `size` field covers the pointer (size >= 72), matching the old `< 72` guard —
+# the guard now discharges the field's `requires size >= 72` overlay obligation.
+def Linker_ProcParamMemParam(memory: mutable MemoryManager&, proc_param: GuestVAddr[ProcParamOverlay]) -> u64:
     can Memory.Allocate:
-        return MemoryManager_ReadU64(memory, proc_param + ORBIS_PROC_PARAM_OFF_MEM_PARAM.uintptr())
-
-# Read the mem_param `size` field (offset 0).
-def Linker_MemParamSize(memory: mutable MemoryManager&, mem_param: VAddr) -> u64:
-    can Memory.Allocate:
-        return MemoryManager_ReadU64(memory, mem_param + ORBIS_MEM_PARAM_OFF_SIZE.uintptr())
+        if proc_param.size[memory] < ORBIS_PROC_PARAM_MIN_SIZE_MEM_PARAM:
+            return 0
+        return proc_param.mem_param[memory]
 
 # Read mem_param.flexible_memory_size pointer (offset 16). Returns 0 unless the
-# declared size covers the field (size >= 24), matching the old `< 24` guard.
-def Linker_MemParamFlexibleSizePtr(memory: mutable MemoryManager&, mem_param: VAddr, mem_param_size: u64) -> u64:
-    if mem_param_size < ORBIS_MEM_PARAM_MIN_SIZE_FLEXIBLE:
-        return 0
+# runtime size covers the field (size >= 24), matching the old `< 24` guard.
+def Linker_MemParamFlexibleSizePtr(memory: mutable MemoryManager&, mem_param: GuestVAddr[MemParamOverlay]) -> u64:
     can Memory.Allocate:
-        return MemoryManager_ReadU64(memory, mem_param + ORBIS_MEM_PARAM_OFF_FLEXIBLE_MEMORY_SIZE.uintptr())
+        if mem_param.size[memory] < ORBIS_MEM_PARAM_MIN_SIZE_FLEXIBLE:
+            return 0
+        return mem_param.flexible_memory_size[memory]
 
 # Read mem_param.extended_memory_1 pointer (offset 24). Returns 0 unless the
-# declared size covers the field (size >= 32), matching the old `< 32` guard.
-def Linker_MemParamExtendedMemory1Ptr(memory: mutable MemoryManager&, mem_param: VAddr, mem_param_size: u64) -> u64:
-    if mem_param_size < ORBIS_MEM_PARAM_MIN_SIZE_EXTENDED_1:
-        return 0
+# runtime size covers the field (size >= 32), matching the old `< 32` guard.
+def Linker_MemParamExtendedMemory1Ptr(memory: mutable MemoryManager&, mem_param: GuestVAddr[MemParamOverlay]) -> u64:
     can Memory.Allocate:
-        return MemoryManager_ReadU64(memory, mem_param + ORBIS_MEM_PARAM_OFF_EXTENDED_MEMORY_1.uintptr())
+        if mem_param.size[memory] < ORBIS_MEM_PARAM_MIN_SIZE_EXTENDED_1:
+            return 0
+        return mem_param.extended_memory_1[memory]
 
 # Read mem_param.extended_memory_2 pointer (offset 40). Returns 0 unless the
-# declared size covers the field (size >= 48), matching the old `< 48` guard.
-def Linker_MemParamExtendedMemory2Ptr(memory: mutable MemoryManager&, mem_param: VAddr, mem_param_size: u64) -> u64:
-    if mem_param_size < ORBIS_MEM_PARAM_MIN_SIZE_EXTENDED_2:
-        return 0
+# runtime size covers the field (size >= 48), matching the old `< 48` guard.
+def Linker_MemParamExtendedMemory2Ptr(memory: mutable MemoryManager&, mem_param: GuestVAddr[MemParamOverlay]) -> u64:
     can Memory.Allocate:
-        return MemoryManager_ReadU64(memory, mem_param + ORBIS_MEM_PARAM_OFF_EXTENDED_MEMORY_2.uintptr())
+        if mem_param.size[memory] < ORBIS_MEM_PARAM_MIN_SIZE_EXTENDED_2:
+            return 0
+        return mem_param.extended_memory_2[memory]
 
 def Linker_GetCompiledSdkVersion(self: Linker&) -> u32:
     if self.modules.count == 0:
@@ -736,20 +747,19 @@ def Linker_GetFlexibleMemorySize(self: Linker&) -> u64:
     if self.modules.count == 0:
         return ORBIS_KERNEL_FLEXIBLE_MEMORY_SIZE
     module: Module = self.modules[0]
-    proc_param: VAddr = module.proc_param_virtual_addr
-    if proc_param == 0.uintptr():
+    proc_param_addr: VAddr = module.proc_param_virtual_addr
+    if proc_param_addr == 0.uintptr():
         return ORBIS_KERNEL_FLEXIBLE_MEMORY_SIZE
     memory: mutable MemoryManager& = Memory_Instance()
     can Memory.Allocate:
-        proc_param_size: u64 = Linker_ProcParamSize(memory, proc_param)
-        # mem_param pointer at +64 requires proc_param size >= 72.
-        mem_param: u64 = Linker_ProcParamMemParam(memory, proc_param, proc_param_size)
-        if mem_param == 0:
+        proc_param: GuestVAddr[ProcParamOverlay] = proc_param_addr.cast[GuestVAddr[ProcParamOverlay]]
+        # mem_param pointer at +64 requires proc_param size >= 72 (checked inside).
+        mem_param_val: u64 = Linker_ProcParamMemParam(memory, proc_param)
+        if mem_param_val == 0:
             return ORBIS_KERNEL_FLEXIBLE_MEMORY_SIZE
-        mem_param_addr: VAddr = mem_param.uintptr()
-        mem_param_size: u64 = Linker_MemParamSize(memory, mem_param_addr)
-        # flexible_memory_size pointer at +16 requires mem_param size >= 24.
-        flexible_size_ptr: u64 = Linker_MemParamFlexibleSizePtr(memory, mem_param_addr, mem_param_size)
+        mem_param: GuestVAddr[MemParamOverlay] = mem_param_val.uintptr().cast[GuestVAddr[MemParamOverlay]]
+        # flexible_memory_size pointer at +16 requires mem_param size >= 24 (checked inside).
+        flexible_size_ptr: u64 = Linker_MemParamFlexibleSizePtr(memory, mem_param)
         if flexible_size_ptr == 0:
             return ORBIS_KERNEL_FLEXIBLE_MEMORY_SIZE
         requested: u64 = MemoryManager_ReadU64(memory, flexible_size_ptr.uintptr())
@@ -769,22 +779,21 @@ def Linker_GetUseExtendedMemory1(self: Linker&) -> bool:
     if self.modules.count == 0:
         return true
     module: Module = self.modules[0]
-    proc_param: VAddr = module.proc_param_virtual_addr
-    if proc_param == 0.uintptr():
+    proc_param_addr: VAddr = module.proc_param_virtual_addr
+    if proc_param_addr == 0.uintptr():
         return true
     memory: mutable MemoryManager& = Memory_Instance()
     can Memory.Allocate:
-        proc_param_size: u64 = Linker_ProcParamSize(memory, proc_param)
-        # mem_param pointer at +64 requires proc_param size >= 72.
-        mem_param: u64 = Linker_ProcParamMemParam(memory, proc_param, proc_param_size)
-        if mem_param == 0:
+        proc_param: GuestVAddr[ProcParamOverlay] = proc_param_addr.cast[GuestVAddr[ProcParamOverlay]]
+        # mem_param pointer at +64 requires proc_param size >= 72 (checked inside).
+        mem_param_val: u64 = Linker_ProcParamMemParam(memory, proc_param)
+        if mem_param_val == 0:
             return false
-        mem_param_addr: VAddr = mem_param.uintptr()
-        mem_param_size: u64 = Linker_MemParamSize(memory, mem_param_addr)
+        mem_param: GuestVAddr[MemParamOverlay] = mem_param_val.uintptr().cast[GuestVAddr[MemParamOverlay]]
         # extended_memory_1 pointer at +24 requires mem_param size >= 32; an
         # under-size struct yields a null pointer, and Linker_ReadMemParamFlag
         # maps null -> false, matching the old `< 32 -> return false` guard.
-        extended_memory_1: u64 = Linker_MemParamExtendedMemory1Ptr(memory, mem_param_addr, mem_param_size)
+        extended_memory_1: u64 = Linker_MemParamExtendedMemory1Ptr(memory, mem_param)
         return Linker_ReadMemParamFlag(memory, extended_memory_1)
 
 def Linker_GetUseExtendedMemory2(self: Linker&) -> bool:
@@ -793,22 +802,21 @@ def Linker_GetUseExtendedMemory2(self: Linker&) -> bool:
     if self.modules.count == 0:
         return true
     module: Module = self.modules[0]
-    proc_param: VAddr = module.proc_param_virtual_addr
-    if proc_param == 0.uintptr():
+    proc_param_addr: VAddr = module.proc_param_virtual_addr
+    if proc_param_addr == 0.uintptr():
         return true
     memory: mutable MemoryManager& = Memory_Instance()
     can Memory.Allocate:
-        proc_param_size: u64 = Linker_ProcParamSize(memory, proc_param)
-        # mem_param pointer at +64 requires proc_param size >= 72.
-        mem_param: u64 = Linker_ProcParamMemParam(memory, proc_param, proc_param_size)
-        if mem_param == 0:
+        proc_param: GuestVAddr[ProcParamOverlay] = proc_param_addr.cast[GuestVAddr[ProcParamOverlay]]
+        # mem_param pointer at +64 requires proc_param size >= 72 (checked inside).
+        mem_param_val: u64 = Linker_ProcParamMemParam(memory, proc_param)
+        if mem_param_val == 0:
             return false
-        mem_param_addr: VAddr = mem_param.uintptr()
-        mem_param_size: u64 = Linker_MemParamSize(memory, mem_param_addr)
+        mem_param: GuestVAddr[MemParamOverlay] = mem_param_val.uintptr().cast[GuestVAddr[MemParamOverlay]]
         # extended_memory_2 pointer at +40 requires mem_param size >= 48; an
         # under-size struct yields a null pointer, and Linker_ReadMemParamFlag
         # maps null -> false, matching the old `< 48 -> return false` guard.
-        extended_memory_2: u64 = Linker_MemParamExtendedMemory2Ptr(memory, mem_param_addr, mem_param_size)
+        extended_memory_2: u64 = Linker_MemParamExtendedMemory2Ptr(memory, mem_param)
         return Linker_ReadMemParamFlag(memory, extended_memory_2)
 
 def Linker_GetModule(self: mutable Linker&, index: s32) -> mutable Module&?:

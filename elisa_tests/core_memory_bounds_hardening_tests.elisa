@@ -168,39 +168,53 @@ def linker_param_accessors_refuse_undersized_declared_size() -> void:
         mem: mutable MemoryManager& = Memory_Instance()
 
         # proc_param struct backing: mem_param pointer lives at +64 (needs size >= 72).
-        proc_param: VAddr = 0x800010000.uintptr()
+        # The accessors now read the runtime `size` field (offset 0) themselves via the
+        # ProcParamOverlay, so the test SEEDS that field rather than passing a synthetic
+        # size argument — exercising the real size-read + overlay path.
+        proc_param_addr: VAddr = 0x800010000.uintptr()
         proc_backing: mutable darray[u8] = []
         for _ in 0..<0x80:
             can Unsafe.AssumeProgress:
                 proc_backing.push(0)
-        mem.mapped_bytes.push(MappedMemoryBytes(proc_param, 0x80, proc_backing))
-        mb_check(MemoryManager_WriteU64(mem, proc_param + ORBIS_PROC_PARAM_OFF_MEM_PARAM.uintptr(), 0x800020000), "seed proc_param.mem_param pointer")
+        mem.mapped_bytes.push(MappedMemoryBytes(proc_param_addr, 0x80, proc_backing))
+        mb_check(MemoryManager_WriteU64(mem, proc_param_addr + ORBIS_PROC_PARAM_OFF_MEM_PARAM.uintptr(), 0x800020000), "seed proc_param.mem_param pointer")
+        proc_param: GuestVAddr[ProcParamOverlay] = proc_param_addr.cast[GuestVAddr[ProcParamOverlay]]
 
-        # Declared size too small to cover the +64 pointer -> refuse with 0.
-        mb_check(Linker_ProcParamMemParam(mem, proc_param, 71) == 0, "proc_param.mem_param must refuse when declared size < 72")
-        mb_check(Linker_ProcParamMemParam(mem, proc_param, 0) == 0, "proc_param.mem_param must refuse when declared size is 0")
-        # Declared size large enough -> the seeded pointer is returned.
-        mb_check(Linker_ProcParamMemParam(mem, proc_param, 72) == 0x800020000, "proc_param.mem_param must return the pointer when declared size >= 72")
+        # Runtime size too small to cover the +64 pointer -> refuse with 0.
+        mb_check(MemoryManager_WriteU64(mem, proc_param_addr + ORBIS_PROC_PARAM_OFF_SIZE.uintptr(), 71), "seed proc_param.size = 71")
+        mb_check(Linker_ProcParamMemParam(mem, proc_param) == 0, "proc_param.mem_param must refuse when runtime size < 72")
+        mb_check(MemoryManager_WriteU64(mem, proc_param_addr + ORBIS_PROC_PARAM_OFF_SIZE.uintptr(), 0), "seed proc_param.size = 0")
+        mb_check(Linker_ProcParamMemParam(mem, proc_param) == 0, "proc_param.mem_param must refuse when runtime size is 0")
+        # Runtime size large enough -> the seeded pointer is returned.
+        mb_check(MemoryManager_WriteU64(mem, proc_param_addr + ORBIS_PROC_PARAM_OFF_SIZE.uintptr(), 72), "seed proc_param.size = 72")
+        mb_check(Linker_ProcParamMemParam(mem, proc_param) == 0x800020000, "proc_param.mem_param must return the pointer when runtime size >= 72")
 
         # mem_param struct backing with pointer fields at +16/+24/+40.
-        mem_param: VAddr = 0x800020000.uintptr()
+        mem_param_addr: VAddr = 0x800020000.uintptr()
         mem_backing: mutable darray[u8] = []
         for _ in 0..<0x80:
             can Unsafe.AssumeProgress:
                 mem_backing.push(0)
-        mem.mapped_bytes.push(MappedMemoryBytes(mem_param, 0x80, mem_backing))
-        mb_check(MemoryManager_WriteU64(mem, mem_param + ORBIS_MEM_PARAM_OFF_FLEXIBLE_MEMORY_SIZE.uintptr(), 0x111), "seed mem_param.flexible_memory_size ptr")
-        mb_check(MemoryManager_WriteU64(mem, mem_param + ORBIS_MEM_PARAM_OFF_EXTENDED_MEMORY_1.uintptr(), 0x222), "seed mem_param.extended_memory_1 ptr")
-        mb_check(MemoryManager_WriteU64(mem, mem_param + ORBIS_MEM_PARAM_OFF_EXTENDED_MEMORY_2.uintptr(), 0x333), "seed mem_param.extended_memory_2 ptr")
+        mem.mapped_bytes.push(MappedMemoryBytes(mem_param_addr, 0x80, mem_backing))
+        mb_check(MemoryManager_WriteU64(mem, mem_param_addr + ORBIS_MEM_PARAM_OFF_FLEXIBLE_MEMORY_SIZE.uintptr(), 0x111), "seed mem_param.flexible_memory_size ptr")
+        mb_check(MemoryManager_WriteU64(mem, mem_param_addr + ORBIS_MEM_PARAM_OFF_EXTENDED_MEMORY_1.uintptr(), 0x222), "seed mem_param.extended_memory_1 ptr")
+        mb_check(MemoryManager_WriteU64(mem, mem_param_addr + ORBIS_MEM_PARAM_OFF_EXTENDED_MEMORY_2.uintptr(), 0x333), "seed mem_param.extended_memory_2 ptr")
+        mem_param: GuestVAddr[MemParamOverlay] = mem_param_addr.cast[GuestVAddr[MemParamOverlay]]
 
         # flexible_memory_size at +16 needs size >= 24.
-        mb_check(Linker_MemParamFlexibleSizePtr(mem, mem_param, 23) == 0, "mem_param.flexible ptr must refuse when declared size < 24")
-        mb_check(Linker_MemParamFlexibleSizePtr(mem, mem_param, 24) == 0x111, "mem_param.flexible ptr must return value when declared size >= 24")
+        mb_check(MemoryManager_WriteU64(mem, mem_param_addr + ORBIS_MEM_PARAM_OFF_SIZE.uintptr(), 23), "seed mem_param.size = 23")
+        mb_check(Linker_MemParamFlexibleSizePtr(mem, mem_param) == 0, "mem_param.flexible ptr must refuse when runtime size < 24")
+        mb_check(MemoryManager_WriteU64(mem, mem_param_addr + ORBIS_MEM_PARAM_OFF_SIZE.uintptr(), 24), "seed mem_param.size = 24")
+        mb_check(Linker_MemParamFlexibleSizePtr(mem, mem_param) == 0x111, "mem_param.flexible ptr must return value when runtime size >= 24")
 
         # extended_memory_1 at +24 needs size >= 32.
-        mb_check(Linker_MemParamExtendedMemory1Ptr(mem, mem_param, 31) == 0, "mem_param.extended_1 ptr must refuse when declared size < 32")
-        mb_check(Linker_MemParamExtendedMemory1Ptr(mem, mem_param, 32) == 0x222, "mem_param.extended_1 ptr must return value when declared size >= 32")
+        mb_check(MemoryManager_WriteU64(mem, mem_param_addr + ORBIS_MEM_PARAM_OFF_SIZE.uintptr(), 31), "seed mem_param.size = 31")
+        mb_check(Linker_MemParamExtendedMemory1Ptr(mem, mem_param) == 0, "mem_param.extended_1 ptr must refuse when runtime size < 32")
+        mb_check(MemoryManager_WriteU64(mem, mem_param_addr + ORBIS_MEM_PARAM_OFF_SIZE.uintptr(), 32), "seed mem_param.size = 32")
+        mb_check(Linker_MemParamExtendedMemory1Ptr(mem, mem_param) == 0x222, "mem_param.extended_1 ptr must return value when runtime size >= 32")
 
         # extended_memory_2 at +40 needs size >= 48.
-        mb_check(Linker_MemParamExtendedMemory2Ptr(mem, mem_param, 47) == 0, "mem_param.extended_2 ptr must refuse when declared size < 48")
-        mb_check(Linker_MemParamExtendedMemory2Ptr(mem, mem_param, 48) == 0x333, "mem_param.extended_2 ptr must return value when declared size >= 48")
+        mb_check(MemoryManager_WriteU64(mem, mem_param_addr + ORBIS_MEM_PARAM_OFF_SIZE.uintptr(), 47), "seed mem_param.size = 47")
+        mb_check(Linker_MemParamExtendedMemory2Ptr(mem, mem_param) == 0, "mem_param.extended_2 ptr must refuse when runtime size < 48")
+        mb_check(MemoryManager_WriteU64(mem, mem_param_addr + ORBIS_MEM_PARAM_OFF_SIZE.uintptr(), 48), "seed mem_param.size = 48")
+        mb_check(Linker_MemParamExtendedMemory2Ptr(mem, mem_param) == 0x333, "mem_param.extended_2 ptr must return value when runtime size >= 48")
