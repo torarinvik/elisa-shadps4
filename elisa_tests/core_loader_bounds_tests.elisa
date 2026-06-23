@@ -71,6 +71,118 @@ def loader_maps_self_segment_offset_without_underflow() -> void:
         assert Elf_FileOffsetMapsToSelfSegment(0x220, phdr, seg, mapped)
         assert mapped == 0x1020
 
+# --- Truncated/malformed-ELF refusal coverage ---------------------------------
+#
+# Elf_Open's hardened bounds checks (Elf_RangeFits / Elf_TableFits) all raise
+# ElfError.Truncated when a header/table would read past EOF. Elf_Open itself
+# requires a real on-disk IOFile (it calls IOFile(file_name, ...) and seeks),
+# so a pure in-memory ELF fixture is not reachable from this test seam without
+# writing a temp file. Instead we pin the exact predicates Elf_Open delegates
+# each refusal to, exercising them with the same operand shapes Elf_Open feeds
+# at each hardened site. A `false` result from the predicate is precisely the
+# condition that makes Elf_Open `raise ElfError.Truncated`; a `true` result is
+# the path where it proceeds to read.
+#
+# GAP (documented, not faked): the end-to-end Elf_Open -> raise ElfError.Truncated
+# control flow (open file, catch the error union) is NOT covered here because it
+# needs a real IOFile fixture; this coverage is at the predicate seam only.
+
+# Sizes mirror the structs Elf_Open validates (see core/loader/elf.elisa).
+def LoaderBounds_SelfHeaderSize() -> u64:
+    return size_of(self_header).u64()
+
+def LoaderBounds_ElfHeaderSize() -> u64:
+    return size_of(elf_header).u64()
+
+def LoaderBounds_PhdrStride() -> u64:
+    return size_of(elf_program_header).u64()
+
+def LoaderBounds_ShdrStride() -> u64:
+    return size_of(elf_section_header).u64()
+
+def LoaderBounds_SelfSegStride() -> u64:
+    return size_of(self_segment_header).u64()
+
+@test
+def loader_truncated_self_header_refused() -> void:
+    # Site: Elf_Open's first guard, Elf_RangeFits(file_size, 0, size_of(self_header)).
+    # A file shorter than the self_header must be refused (-> raise Truncated).
+    can Abort.Panic:
+        hdr: u64 = LoaderBounds_SelfHeaderSize()
+        # Full header present: accepted.
+        assert Elf_RangeFits(hdr, 0, hdr)
+        # One byte short: refused.
+        assert not Elf_RangeFits(hdr - 1, 0, hdr)
+        # Empty file: refused.
+        assert not Elf_RangeFits(0, 0, hdr)
+
+@test
+def loader_truncated_before_elf_header_refused() -> void:
+    # Site: Elf_RangeFits(file_size, elf_header_pos, size_of(elf_header)).
+    # The elf_header sits right after the self header (or at 0 for a plain ELF).
+    can Abort.Panic:
+        ehsz: u64 = LoaderBounds_ElfHeaderSize()
+        pos: u64 = LoaderBounds_SelfHeaderSize()
+        # File large enough to hold the elf_header at `pos`: accepted.
+        assert Elf_RangeFits(pos + ehsz, pos, ehsz)
+        # File ends one byte before the elf_header completes: refused.
+        assert not Elf_RangeFits(pos + ehsz - 1, pos, ehsz)
+        # File ends exactly at the header start (no header bytes): refused.
+        assert not Elf_RangeFits(pos, pos, ehsz)
+
+@test
+def loader_phdr_table_past_eof_refused() -> void:
+    # Site: Elf_TableFits(file_size, ph_start, e_phnum, e_phentsize).
+    can Abort.Panic:
+        stride: u64 = LoaderBounds_PhdrStride()
+        ph_start: u64 = 0x100
+        # 3 entries that fit exactly: accepted.
+        assert Elf_TableFits(ph_start + (3 * stride), ph_start, 3, stride)
+        # Same table, file one byte short of the table end: refused.
+        assert not Elf_TableFits(ph_start + (3 * stride) - 1, ph_start, 3, stride)
+        # Oversized phnum so count*stride runs past EOF: refused.
+        assert not Elf_TableFits(ph_start + (3 * stride), ph_start, 4, stride)
+        # Pathological count whose count*stride overflows u64: refused (no over-read).
+        assert not Elf_TableFits(0xffffffffffffffff, ph_start, 0xffffffffffffffff, stride)
+
+@test
+def loader_shdr_table_past_eof_refused() -> void:
+    # Site: Elf_TableFits(file_size, sh_start, e_shnum, e_shentsize).
+    can Abort.Panic:
+        stride: u64 = LoaderBounds_ShdrStride()
+        sh_start: u64 = 0x400
+        # Table fits exactly: accepted.
+        assert Elf_TableFits(sh_start + (2 * stride), sh_start, 2, stride)
+        # File truncated mid-table: refused.
+        assert not Elf_TableFits(sh_start + stride, sh_start, 2, stride)
+        # count*stride overflow: refused.
+        assert not Elf_TableFits(0xffffffffffffffff, sh_start, 0x8000000000000000, stride)
+
+@test
+def loader_self_segment_table_past_eof_refused() -> void:
+    # Site: Elf_TableFits(file_size, size_of(self_header), segment_count, size_of(self_segment_header)).
+    can Abort.Panic:
+        stride: u64 = LoaderBounds_SelfSegStride()
+        base: u64 = LoaderBounds_SelfHeaderSize()
+        # All declared segments fit: accepted.
+        assert Elf_TableFits(base + (4 * stride), base, 4, stride)
+        # Declared segment_count overruns the file: refused.
+        assert not Elf_TableFits(base + (2 * stride), base, 4, stride)
+
+@test
+def loader_table_offset_addition_overflow_refused() -> void:
+    # Site: Elf_U64AddNoOverflow(elf_header_pos, e_phoff/e_shoff) guards the
+    # ph_start/sh_start additions before Elf_TableFits ever runs. A wrapping
+    # offset must be refused so the start address can't alias into the file.
+    can Abort.Panic:
+        # Normal small offset: no overflow.
+        assert Elf_U64AddNoOverflow(0x40, 0x100)
+        # e_phoff/e_shoff that would wrap when added to the header position: refused.
+        assert not Elf_U64AddNoOverflow(0x40, 0xffffffffffffffff)
+        # Mul-overflow guard used inside Elf_TableFits.
+        assert Elf_U64MulNoOverflow(3, LoaderBounds_PhdrStride())
+        assert not Elf_U64MulNoOverflow(0xffffffffffffffff, 2)
+
 @test
 def loader_dynamic_table_index_bounds() -> void:
     can Abort.Panic:
