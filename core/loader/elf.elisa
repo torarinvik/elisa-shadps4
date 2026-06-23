@@ -13,6 +13,7 @@ error ElfError:
     NotElf
     SeekFailed
     ShortRead
+    Truncated
 
 # The buffers grown while parsing an ELF/SELF (segment bytes, program/section
 # headers, self segments) outlive the individual append calls and live as long
@@ -421,11 +422,18 @@ def Elf_Open(self: mutable Elf&, file_name: static u8&) -> void error[ElfError]:
     self.f <- IOFile(file_name, FileAccessMode.Read)
     if not self.f.IsOpen():
         raise ElfError.FileNotOpen
+    file_size: u64 = self.f.GetSize()
+    if not Elf_RangeFits(file_size, 0, size_of(self_header).u64()):
+        raise ElfError.Truncated
     self.self <- Elf_ReadSelfHeader(self.f)
     self.is_self <- Elf_IsSelfFile((&self).cast[Elf&])
     if not self.is_self:
         _ = self.f.Seek(0)
     else:
+        # Self segment headers immediately follow the self_header. Validate the
+        # whole table fits before reading any fixed-stride entry.
+        if not Elf_TableFits(file_size, size_of(self_header).u64(), self.self.segment_count.u64(), size_of(self_segment_header).u64()):
+            raise ElfError.Truncated
         i: mutable u16 = 0
         while i < self.self.segment_count:
             seg: self_segment_header = Elf_ReadSelfSegmentHeader(self.f)
@@ -433,11 +441,18 @@ def Elf_Open(self: mutable Elf&, file_name: static u8&) -> void error[ElfError]:
                 self.self_segments.push(seg)
             i <- i + 1
     elf_header_pos: i64 = self.f.Tell()
+    if elf_header_pos < 0 or not Elf_RangeFits(file_size, elf_header_pos.u64(), size_of(elf_header).u64()):
+        raise ElfError.Truncated
     self.elf_header_value <- Elf_ReadElfHeader(self.f)
     if not Elf_IsElfFile((&self).cast[Elf&]):
         raise ElfError.NotElf
     if self.elf_header_value.e_phoff > 0 and self.elf_header_value.e_phnum > 0:
-        _ = self.f.Seek(elf_header_pos + self.elf_header_value.e_phoff.i64())
+        if not Elf_U64AddNoOverflow(elf_header_pos.u64(), self.elf_header_value.e_phoff):
+            raise ElfError.Truncated
+        ph_start: u64 = elf_header_pos.u64() + self.elf_header_value.e_phoff
+        if not Elf_TableFits(file_size, ph_start, self.elf_header_value.e_phnum.u64(), self.elf_header_value.e_phentsize.u64()):
+            raise ElfError.Truncated
+        _ = self.f.Seek(ph_start.i64())
         i: mutable u16 = 0
         while i < self.elf_header_value.e_phnum:
             phdr: elf_program_header = Elf_ReadProgramHeader(self.f)
@@ -445,7 +460,12 @@ def Elf_Open(self: mutable Elf&, file_name: static u8&) -> void error[ElfError]:
                 self.program_headers.push(phdr)
             i <- i + 1
     if self.elf_header_value.e_shoff > 0 and self.elf_header_value.e_shnum > 0:
-        _ = self.f.Seek(elf_header_pos + self.elf_header_value.e_shoff.i64())
+        if not Elf_U64AddNoOverflow(elf_header_pos.u64(), self.elf_header_value.e_shoff):
+            raise ElfError.Truncated
+        sh_start: u64 = elf_header_pos.u64() + self.elf_header_value.e_shoff
+        if not Elf_TableFits(file_size, sh_start, self.elf_header_value.e_shnum.u64(), self.elf_header_value.e_shentsize.u64()):
+            raise ElfError.Truncated
+        _ = self.f.Seek(sh_start.i64())
         i: mutable u16 = 0
         while i < self.elf_header_value.e_shnum:
             shdr: elf_section_header = Elf_ReadSectionHeader(self.f)
@@ -462,6 +482,10 @@ def Elf_Open(self: mutable Elf&, file_name: static u8&) -> void error[ElfError]:
         header_size <- header_size + (self.elf_header_value.e_shnum.u64() * self.elf_header_value.e_shentsize.u64())
         header_size <- (header_size + 15) & (~15)
         if self.elf_header_value.e_ehsize.u64() >= (header_size + size_of(elf_program_id_header).u64()):
+            # The program-id header is read at `header_size`; validate that the
+            # whole struct lies within the file before reading it.
+            if not Elf_RangeFits(file_size, header_size, size_of(elf_program_id_header).u64()):
+                raise ElfError.Truncated
             _ = self.f.Seek(header_size.i64())
             # Explicit [T]: generic inference does not flow through the auto-ref
             # of the field argument, so bind T at the call site.
@@ -496,6 +520,26 @@ def Elf_LoadSegmentBytes(self: mutable Elf&, out: mutable darray[u8]&, base: usi
 
 def Elf_U64AddNoOverflow(a: u64, b: u64) -> bool:
     return a <= (0xffffffffffffffff - b)
+
+def Elf_U64MulNoOverflow(a: u64, b: u64) -> bool:
+    if a == 0 or b == 0:
+        return true
+    return a <= (0xffffffffffffffff / b)
+
+# Validates that a `width`-byte read starting at `offset` lies fully within a
+# `file_size`-byte file. Written as subtraction so neither side can overflow:
+# `offset + width <= file_size`  rewritten as  `offset <= file_size - width`.
+def Elf_RangeFits(file_size: u64, offset: u64, width: u64) -> bool:
+    if width > file_size:
+        return false
+    return offset <= (file_size - width)
+
+# Validates that a table of `count` entries, each `stride` bytes, starting at
+# `offset`, lies fully within the file. Refuses on any count*stride overflow.
+def Elf_TableFits(file_size: u64, offset: u64, count: u64, stride: u64) -> bool:
+    if not Elf_U64MulNoOverflow(count, stride):
+        return false
+    return Elf_RangeFits(file_size, offset, count * stride)
 
 def Elf_FileOffsetMapsToSelfSegment(file_offset: u64, phdr: elf_program_header&, seg: self_segment_header&, out_mapped_offset: mutable u64&) -> bool:
     out_mapped_offset <- 0
