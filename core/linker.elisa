@@ -1305,16 +1305,39 @@ def Linker_LoadDependencyClosure(self: mutable Linker&) -> void can[Unsafe.Segme
         self.relocated_all_imports <- false
     ge_emergency_mark(GE_EV_DEP_CLOSURE_END, initial_count.uintptr(), self.modules.count.uintptr(), 0.uintptr(), 0.uintptr())
 
-def Linker_WriteU16LE(out: mutable u8&, offset: usize, value: u16) -> void:
+# Marker kind for a machine-code emit that would write past the end of a thunk
+# buffer. Raw u32 kind (GE_EV_* live in guest_exec.elisa); the payload carries the
+# offending offset, the write width, and the buffer length so a fault is
+# self-describing. Distinct from the relocation/HLE markers above.
+const LINKER_EV_THUNK_EMIT_OOB: u32 = 0x544B4F42  # 'TKOB'
+
+# Bounds-checked little-endian immediate writers for the HLE thunk generators.
+# `len` is the length of the destination buffer; the write is refused (and a
+# self-describing emergency marker is raised) unless the whole `width`-byte field
+# fits, i.e. `offset + width <= len`. The `offset > len` pre-check makes the
+# `len - offset` usize subtraction wrap-free, and `len - offset >= width` then
+# proves every indexed store below is in range. Returns true iff the field was
+# fully written; callers MUST abort thunk creation on false so a wrong offset can
+# never corrupt adjacent storage nor leave a half-formed thunk. On the success
+# path the emitted bytes are byte-identical to a direct indexed store.
+def Linker_WriteU16LE(out: mutable u8&, len: usize, offset: usize, value: u16) -> bool:
+    if offset > len or (len - offset) < 2:
+        ge_emergency_mark(LINKER_EV_THUNK_EMIT_OOB, offset.uintptr(), 2.uintptr(), len.uintptr(), value.u64().uintptr())
+        return false
     out[offset] <- (value & 0xff).u8()
     out[offset + 1] <- ((value >> 8) & 0xff).u8()
+    return true
 
-def Linker_WriteU64LE(out: mutable u8&, offset: usize, value: u64) -> void:
+def Linker_WriteU64LE(out: mutable u8&, len: usize, offset: usize, value: u64) -> bool:
+    if offset > len or (len - offset) < 8:
+        ge_emergency_mark(LINKER_EV_THUNK_EMIT_OOB, offset.uintptr(), 8.uintptr(), len.uintptr(), value.uintptr())
+        return false
     i: mutable usize = 0
     while i < 8:
         shift: u64 = (i.u64() * 8)
         out[offset + i] <- ((value >> shift) & 0xff).u8()
         i <- i + 1
+    return true
 
 def Linker_UseNativeHleBoundaryThunk() -> bool:
     static if PLATFORM_APPLE and ARCH_X86_64:
@@ -1620,6 +1643,14 @@ def Linker_CreateNativeHleBoundaryThunk(target: u64, symbol_name: static u8&?) -
         gs_extra: u64 = 9 if linker_restore_host_gs else 0
         thunk_size: u64 = 174 + gs_extra
         full: mutable u8[183] = zeroed
+        # Accumulates the result of every bounds-checked immediate emit below. If a
+        # hardcoded offset ever stops fitting `full` (e.g. after a layout/size edit)
+        # the checked writer refuses the store and flips this false; we then bail via
+        # the same `return target` failure path used for allocation/publish errors,
+        # so a bad offset can never corrupt stack/heap past `full` nor ship a
+        # half-formed thunk. On the success path it stays true and the emitted bytes
+        # are byte-identical to the previous direct-store codegen.
+        emit_ok: mutable bool = true
         # Capture the guest return address before touching the thunk stack.
         # At thunk entry, (%rsp) is the return PC pushed by the guest call.
         # movq (%rsp), %r11
@@ -1630,28 +1661,28 @@ def Linker_CreateNativeHleBoundaryThunk(target: u64, symbol_name: static u8&?) -
         # movabs $ge_runtime_hle_guest_return_addr, %r10; movq %r11, (%r10)
         full[4] <- 0x49
         full[5] <- 0xBA
-        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 6, (&ge_runtime_hle_guest_return_addr).cast[void&].uintptr().u64())
+        emit_ok <- emit_ok and Linker_WriteU64LE((&full[0]).cast[mutable u8&], 183, 6, (&ge_runtime_hle_guest_return_addr).cast[void&].uintptr().u64())
         full[14] <- 0x4D
         full[15] <- 0x89
         full[16] <- 0x1A
         # movabs $ge_runtime_hle_guest_rsp, %r10; movq %rsp, (%r10)
         full[17] <- 0x49
         full[18] <- 0xBA
-        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 19, (&ge_runtime_hle_guest_rsp).cast[void&].uintptr().u64())
+        emit_ok <- emit_ok and Linker_WriteU64LE((&full[0]).cast[mutable u8&], 183, 19, (&ge_runtime_hle_guest_rsp).cast[void&].uintptr().u64())
         full[27] <- 0x49
         full[28] <- 0x89
         full[29] <- 0x22
         # movabs $ge_runtime_hle_guest_rbp, %r10; movq %rbp, (%r10)
         full[30] <- 0x49
         full[31] <- 0xBA
-        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 32, (&ge_runtime_hle_guest_rbp).cast[void&].uintptr().u64())
+        emit_ok <- emit_ok and Linker_WriteU64LE((&full[0]).cast[mutable u8&], 183, 32, (&ge_runtime_hle_guest_rbp).cast[void&].uintptr().u64())
         full[40] <- 0x49
         full[41] <- 0x89
         full[42] <- 0x2A
         # movabs $ge_runtime_hle_guest_rdi, %r10; movq %rdi, (%r10)
         full[43] <- 0x49
         full[44] <- 0xBA
-        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 45, (&ge_runtime_hle_guest_rdi).cast[void&].uintptr().u64())
+        emit_ok <- emit_ok and Linker_WriteU64LE((&full[0]).cast[mutable u8&], 183, 45, (&ge_runtime_hle_guest_rdi).cast[void&].uintptr().u64())
         full[53] <- 0x49
         full[54] <- 0x89
         full[55] <- 0x3A
@@ -1660,31 +1691,31 @@ def Linker_CreateNativeHleBoundaryThunk(target: u64, symbol_name: static u8&?) -
         # "wrong callee / corrupted call frame" without a debugger.
         full[56] <- 0x49
         full[57] <- 0xBA
-        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 58, (&ge_runtime_hle_guest_rsi).cast[void&].uintptr().u64())
+        emit_ok <- emit_ok and Linker_WriteU64LE((&full[0]).cast[mutable u8&], 183, 58, (&ge_runtime_hle_guest_rsi).cast[void&].uintptr().u64())
         full[66] <- 0x49
         full[67] <- 0x89
         full[68] <- 0x32
         full[69] <- 0x49
         full[70] <- 0xBA
-        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 71, (&ge_runtime_hle_guest_rdx).cast[void&].uintptr().u64())
+        emit_ok <- emit_ok and Linker_WriteU64LE((&full[0]).cast[mutable u8&], 183, 71, (&ge_runtime_hle_guest_rdx).cast[void&].uintptr().u64())
         full[79] <- 0x49
         full[80] <- 0x89
         full[81] <- 0x12
         full[82] <- 0x49
         full[83] <- 0xBA
-        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 84, (&ge_runtime_hle_guest_rcx).cast[void&].uintptr().u64())
+        emit_ok <- emit_ok and Linker_WriteU64LE((&full[0]).cast[mutable u8&], 183, 84, (&ge_runtime_hle_guest_rcx).cast[void&].uintptr().u64())
         full[92] <- 0x49
         full[93] <- 0x89
         full[94] <- 0x0A
         full[95] <- 0x49
         full[96] <- 0xBA
-        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 97, (&ge_runtime_hle_guest_r8).cast[void&].uintptr().u64())
+        emit_ok <- emit_ok and Linker_WriteU64LE((&full[0]).cast[mutable u8&], 183, 97, (&ge_runtime_hle_guest_r8).cast[void&].uintptr().u64())
         full[105] <- 0x4D
         full[106] <- 0x89
         full[107] <- 0x02
         full[108] <- 0x49
         full[109] <- 0xBA
-        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 110, (&ge_runtime_hle_guest_r9).cast[void&].uintptr().u64())
+        emit_ok <- emit_ok and Linker_WriteU64LE((&full[0]).cast[mutable u8&], 183, 110, (&ge_runtime_hle_guest_r9).cast[void&].uintptr().u64())
         full[118] <- 0x4D
         full[119] <- 0x89
         full[120] <- 0x0A
@@ -1701,7 +1732,7 @@ def Linker_CreateNativeHleBoundaryThunk(target: u64, symbol_name: static u8&?) -
         full[127] <- 0x66
         full[128] <- 0x41
         full[129] <- 0xBA
-        Linker_WriteU16LE((&full[0]).cast[mutable u8&], 130, (!host_selector).u16())
+        emit_ok <- emit_ok and Linker_WriteU16LE((&full[0]).cast[mutable u8&], 183, 130, (!host_selector).u16())
         full[132] <- 0x66
         full[133] <- 0x41
         full[134] <- 0x8E
@@ -1712,7 +1743,7 @@ def Linker_CreateNativeHleBoundaryThunk(target: u64, symbol_name: static u8&?) -
             full[136] <- 0x66
             full[137] <- 0x41
             full[138] <- 0xBA
-            Linker_WriteU16LE((&full[0]).cast[mutable u8&], 139, linker_host_gs_selector)
+            emit_ok <- emit_ok and Linker_WriteU16LE((&full[0]).cast[mutable u8&], 183, 139, linker_host_gs_selector)
             full[141] <- 0x66
             full[142] <- 0x41
             full[143] <- 0x8E
@@ -1721,7 +1752,7 @@ def Linker_CreateNativeHleBoundaryThunk(target: u64, symbol_name: static u8&?) -
         # movabs $target, %r11; call *%r11
         full[t] <- 0x49
         full[t + 1] <- 0xBB
-        Linker_WriteU64LE((&full[0]).cast[mutable u8&], (t + 2).u64(), target)
+        emit_ok <- emit_ok and Linker_WriteU64LE((&full[0]).cast[mutable u8&], 183, (t + 2).u64(), target)
         full[t + 10] <- 0x41
         full[t + 11] <- 0xFF
         full[t + 12] <- 0xD3
@@ -1730,7 +1761,7 @@ def Linker_CreateNativeHleBoundaryThunk(target: u64, symbol_name: static u8&?) -
         # prevents host prologues/epilogues from accidentally skipping guest code.
         full[t + 13] <- 0x49
         full[t + 14] <- 0xBB
-        Linker_WriteU64LE((&full[0]).cast[mutable u8&], (t + 15).u64(), (&ge_runtime_hle_guest_return_addr).cast[void&].uintptr().u64())
+        emit_ok <- emit_ok and Linker_WriteU64LE((&full[0]).cast[mutable u8&], 183, (t + 15).u64(), (&ge_runtime_hle_guest_return_addr).cast[void&].uintptr().u64())
         full[t + 23] <- 0x4D
         full[t + 24] <- 0x8B
         full[t + 25] <- 0x1B
@@ -1747,6 +1778,11 @@ def Linker_CreateNativeHleBoundaryThunk(target: u64, symbol_name: static u8&?) -
         full[t + 35] <- 0x8E
         full[t + 36] <- 0xE2
         full[t + 37] <- 0xC3
+        # If any immediate emit was refused as out-of-range, the buffer is not a
+        # valid thunk -- bail through the same failure path as an allocation error
+        # rather than publish corrupt machine code.
+        if not emit_ok:
+            return target
         thunk: VAddr = GuestExec_AllocateRegion(4096, 5)
         if thunk == 0.uintptr():
             return target
@@ -1786,6 +1822,11 @@ def Linker_SymbolNamePtr(symbol_name: static u8&?) -> u64:
 def Linker_CreateHleRecorderPrefix(real_thunk: u64, sym_ptr: u64, target: u64) -> u64:
     static if PLATFORM_APPLE and ARCH_X86_64:
         stub: mutable u8[159] = zeroed
+        # See Linker_CreateNativeHleBoundaryThunk: every bounds-checked immedate emit
+        # ANDs into emit_ok; a refused store flips it false and we bail via the
+        # existing `return 0` failure path before publishing, so a wrong offset can
+        # never overrun `stub`. Success-path bytes are byte-identical to before.
+        emit_ok: mutable bool = true
         idx_addr: u64 = (&linker_hle_call_ring_index).cast[void&].uintptr().u64()
         ring_addr: u64 = (&linker_hle_call_ring[0]).cast[void&].uintptr().u64()
         target_ring_addr: u64 = (&linker_hle_call_target_ring[0]).cast[void&].uintptr().u64()
@@ -1798,7 +1839,7 @@ def Linker_CreateHleRecorderPrefix(real_thunk: u64, sym_ptr: u64, target: u64) -
         # movabs $&index, %r10 ; mov (%r10), %rax
         stub[1] <- 0x49
         stub[2] <- 0xBA
-        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 3, idx_addr)
+        emit_ok <- emit_ok and Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 159, 3, idx_addr)
         stub[11] <- 0x49
         stub[12] <- 0x8B
         stub[13] <- 0x02
@@ -1812,11 +1853,11 @@ def Linker_CreateHleRecorderPrefix(real_thunk: u64, sym_ptr: u64, target: u64) -
         # movabs $&ring, %r11
         stub[20] <- 0x49
         stub[21] <- 0xBB
-        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 22, ring_addr)
+        emit_ok <- emit_ok and Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 159, 22, ring_addr)
         # movabs $sym_ptr, %r10
         stub[30] <- 0x49
         stub[31] <- 0xBA
-        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 32, sym_ptr)
+        emit_ok <- emit_ok and Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 159, 32, sym_ptr)
         # mov %r10, (%r11,%rax,8)
         stub[40] <- 0x4D
         stub[41] <- 0x89
@@ -1825,11 +1866,11 @@ def Linker_CreateHleRecorderPrefix(real_thunk: u64, sym_ptr: u64, target: u64) -
         # movabs $&target_ring, %r11
         stub[44] <- 0x49
         stub[45] <- 0xBB
-        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 46, target_ring_addr)
+        emit_ok <- emit_ok and Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 159, 46, target_ring_addr)
         # movabs $target, %r10
         stub[54] <- 0x49
         stub[55] <- 0xBA
-        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 56, target)
+        emit_ok <- emit_ok and Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 159, 56, target)
         # mov %r10, (%r11,%rax,8)
         stub[64] <- 0x4D
         stub[65] <- 0x89
@@ -1838,7 +1879,7 @@ def Linker_CreateHleRecorderPrefix(real_thunk: u64, sym_ptr: u64, target: u64) -
         # movabs $&return_ring, %r11
         stub[68] <- 0x49
         stub[69] <- 0xBB
-        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 70, return_ring_addr)
+        emit_ok <- emit_ok and Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 159, 70, return_ring_addr)
         # mov 8(%rsp), %r10 -- return PC below the saved %rax
         stub[78] <- 0x4C
         stub[79] <- 0x8B
@@ -1857,7 +1898,7 @@ def Linker_CreateHleRecorderPrefix(real_thunk: u64, sym_ptr: u64, target: u64) -
         # movabs $&rdi_ring, %r11 ; mov %rdi, (%r11,%rax,8)
         stub[87] <- 0x49
         stub[88] <- 0xBB
-        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 89, rdi_ring_addr)
+        emit_ok <- emit_ok and Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 159, 89, rdi_ring_addr)
         stub[97] <- 0x49
         stub[98] <- 0x89
         stub[99] <- 0x3C
@@ -1865,7 +1906,7 @@ def Linker_CreateHleRecorderPrefix(real_thunk: u64, sym_ptr: u64, target: u64) -
         # movabs $&rsi_ring, %r11 ; mov %rsi, (%r11,%rax,8)
         stub[101] <- 0x49
         stub[102] <- 0xBB
-        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 103, rsi_ring_addr)
+        emit_ok <- emit_ok and Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 159, 103, rsi_ring_addr)
         stub[111] <- 0x49
         stub[112] <- 0x89
         stub[113] <- 0x34
@@ -1873,7 +1914,7 @@ def Linker_CreateHleRecorderPrefix(real_thunk: u64, sym_ptr: u64, target: u64) -
         # movabs $&rdx_ring, %r11 ; mov %rdx, (%r11,%rax,8)
         stub[115] <- 0x49
         stub[116] <- 0xBB
-        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 117, rdx_ring_addr)
+        emit_ok <- emit_ok and Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 159, 117, rdx_ring_addr)
         stub[125] <- 0x49
         stub[126] <- 0x89
         stub[127] <- 0x14
@@ -1885,7 +1926,7 @@ def Linker_CreateHleRecorderPrefix(real_thunk: u64, sym_ptr: u64, target: u64) -
         # movabs $&index, %r11 ; mov %rax, (%r11)
         stub[132] <- 0x49
         stub[133] <- 0xBB
-        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 134, idx_addr)
+        emit_ok <- emit_ok and Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 159, 134, idx_addr)
         stub[142] <- 0x49
         stub[143] <- 0x89
         stub[144] <- 0x03
@@ -1894,10 +1935,13 @@ def Linker_CreateHleRecorderPrefix(real_thunk: u64, sym_ptr: u64, target: u64) -
         # movabs $real_thunk, %r11 ; jmp *%r11
         stub[146] <- 0x49
         stub[147] <- 0xBB
-        Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 148, real_thunk)
+        emit_ok <- emit_ok and Linker_WriteU64LE((&stub[0]).cast[mutable u8&], 159, 148, real_thunk)
         stub[156] <- 0x41
         stub[157] <- 0xFF
         stub[158] <- 0xE3
+        # Refuse to publish a stub whose immediate emits did not all land in range.
+        if not emit_ok:
+            return 0
         prefix: VAddr = GuestExec_AllocateRegion(4096, 5)
         if prefix == 0.uintptr():
             return 0
