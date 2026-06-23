@@ -1,0 +1,206 @@
+# Regression coverage for the three bounds-hardening landings on this branch:
+#   1. core/memory.elisa  — MemoryManager_BackingOffset gates the guest
+#      read/write loops so an out-of-range addr/width refuses safely
+#      (writers -> false, readers -> 0) instead of indexing past the backing.
+#   2. core/module.elisa  — Module_ImageOffsetForSpan / Module_WriteImageU64 /
+#      Module_ReadImageU64 refuse an out-of-image relocation span (write ->
+#      false, read -> 0) while an in-image span round-trips.
+#   3. core/linker.elisa  — the proc_param/mem_param accessors return the safe
+#      fallback (0) when the struct's declared `size` is too small to cover the
+#      field, and the real value when it is large enough.
+#
+# These assert SAFE REFUSAL on the malformed/out-of-range paths and that
+# adjacent state is left untouched — the exact fault classes the hardening
+# closed, which the general suite only covers implicitly by passing.
+include "../core/memory.elisa"
+include "../core/module.elisa"
+include "../core/linker.elisa"
+
+
+def mb_check(condition: bool, message: static u8&) -> void:
+    can Abort.Panic, Segment.Host, Unsafe.SegmentMutation:
+        if not condition:
+            panic(message)
+
+
+# --- 1. memory.elisa: MemoryManager_BackingOffset refusal ---------------------
+
+# Pin the exact refusal arithmetic of MemoryManager_BackingOffset against a
+# hand-built short-buffer backing. The bound is the ACTUAL buffer length
+# (entry.bytes.count), so a width that runs past the last byte must return -1.
+@test
+def memory_backing_offset_refuses_out_of_range_span() -> void:
+    can Abort.Panic, Segment.Host, Unsafe.SegmentMutation, Memory.Allocate:
+        base: VAddr = 0x800000000.uintptr()
+        # An 8-byte backing buffer (bytes.count == 8), nominal size 8.
+        bytes: mutable darray[u8] = []
+        for _ in 0..<8:
+            can Unsafe.AssumeProgress:
+                bytes.push(0xAB)
+        entry: MappedMemoryBytes = MappedMemoryBytes(base, 8, bytes)
+
+        # In-range: a u64 read covering exactly [base, base+8) lands at offset 0.
+        mb_check(MemoryManager_BackingOffset(entry, base, 8) == 0, "in-range 8-byte span should resolve to offset 0")
+        # In-range: a single byte at the last addressable position.
+        mb_check(MemoryManager_BackingOffset(entry, base + 7.uintptr(), 1) == 7, "last byte should resolve to offset 7")
+
+        # addr below the backing base must refuse (no negative offset / underflow).
+        mb_check(MemoryManager_BackingOffset(entry, base - 1.uintptr(), 1) < 0, "addr below base must refuse")
+        # offset in range but width runs one byte past the buffer must refuse.
+        mb_check(MemoryManager_BackingOffset(entry, base + 1.uintptr(), 8) < 0, "span overrunning the buffer tail must refuse")
+        # offset itself past the buffer must refuse.
+        mb_check(MemoryManager_BackingOffset(entry, base + 9.uintptr(), 1) < 0, "addr past the buffer must refuse")
+
+
+# Drive the public Read/Write u64 path end to end: an in-range access round-trips
+# a value, an out-of-range access refuses (write -> false, read -> 0), and the
+# refusal leaves the adjacent in-range bytes untouched.
+@test
+def memory_read_write_u64_refuses_out_of_range_and_preserves_neighbour() -> void:
+    can Abort.Panic, Segment.Host, Unsafe.SegmentMutation, Memory.Allocate:
+        Memory_Reset()
+        mem: mutable MemoryManager& = Memory_Instance()
+        base: VAddr = 0x800000000.uintptr()
+        # A two-qword backing: [base, base+16). The backing byte buffer MUST be a
+        # local darray that outlives every access below and be pushed inline (not
+        # grown inside a helper) — a helper-grown darray is freed on return, which
+        # is a region-escape the runtime traps. (MemoryManager_AddBacking grows the
+        # buffer inside the global memory_arena, which is only valid once a real
+        # guest load has set that arena up — not reachable from this pure seam.)
+        backing: mutable darray[u8] = []
+        for _ in 0..<16:
+            can Unsafe.AssumeProgress:
+                backing.push(0)
+        mem.mapped_bytes.push(MappedMemoryBytes(base, 16, backing))
+
+        # In-range write/read round-trips at both qwords.
+        mb_check(MemoryManager_WriteU64(mem, base, 0x1122334455667788), "in-range write at base should succeed")
+        mb_check(MemoryManager_ReadU64(mem, base) == 0x1122334455667788, "in-range read at base should round-trip")
+        mb_check(MemoryManager_WriteU64(mem, base + 8.uintptr(), 0xDEADBEEFCAFEF00D), "in-range write at base+8 should succeed")
+        mb_check(MemoryManager_ReadU64(mem, base + 8.uintptr()) == 0xDEADBEEFCAFEF00D, "in-range read at base+8 should round-trip")
+
+        # Out-of-range u64 at base+16 has no covering backing -> write refuses
+        # (returns false), read refuses (returns 0). No backing index resolves.
+        mb_check(not MemoryManager_WriteU64(mem, base + 16.uintptr(), 0xFFFFFFFFFFFFFFFF), "u64 write past the backing must return false")
+        mb_check(MemoryManager_ReadU64(mem, base + 16.uintptr()) == 0, "u64 read past the backing must return 0")
+
+        # A u64 that straddles the backing tail (base+12, last 4 bytes outside)
+        # must also refuse rather than partially write.
+        mb_check(not MemoryManager_WriteU64(mem, base + 12.uintptr(), 0x0101010101010101), "u64 write straddling the backing tail must return false")
+
+        # The refused writes must have left the adjacent in-range qwords intact.
+        mb_check(MemoryManager_ReadU64(mem, base) == 0x1122334455667788, "neighbour qword at base must be untouched by refused writes")
+        mb_check(MemoryManager_ReadU64(mem, base + 8.uintptr()) == 0xDEADBEEFCAFEF00D, "neighbour qword at base+8 must be untouched by refused writes")
+
+        # Single-byte read/write share the same gate.
+        mb_check(MemoryManager_WriteU8(mem, base, 0x5A), "in-range u8 write should succeed")
+        mb_check(MemoryManager_ReadU8(mem, base) == 0x5A, "in-range u8 read should round-trip")
+        mb_check(not MemoryManager_WriteU8(mem, base + 16.uintptr(), 0x99), "u8 write past the backing must return false")
+        mb_check(MemoryManager_ReadU8(mem, base + 16.uintptr()) == 0, "u8 read past the backing must return 0")
+
+
+# --- 2. module.elisa: image relocation span refusal ---------------------------
+
+@test
+def module_image_u64_refuses_out_of_image_relocation_span() -> void:
+    can Abort.Panic, Segment.Host, Unsafe.SegmentMutation, Memory.Allocate:
+        mod: mutable Module = Module_New("t.prx", "t.prx", 0x800000000.uintptr(), true)
+        # Give the module a 16-byte image at image_virtual_base 0 (so the image
+        # virtual address equals base_virtual_addr + offset).
+        mod.image_virtual_base <- 0
+        in_image: mutable darray[u8] = []
+        for _ in 0..<16:
+            can Unsafe.AssumeProgress:
+                in_image.push(0)
+        mod.image <- in_image
+
+        base: u64 = mod.base_virtual_addr.u64()
+
+        # In-image relocation span: write then read back the full qword at the
+        # first and last in-bounds qword.
+        mb_check(Module_WriteImageU64(mod, base, 0x0102030405060708), "in-image write at image base should succeed")
+        mb_check(Module_ReadImageU64(mod, base) == 0x0102030405060708, "in-image read at image base should round-trip")
+        mb_check(Module_WriteImageU64(mod, base + 8, 0x1112131415161718), "in-image write at base+8 should succeed")
+        mb_check(Module_ReadImageU64(mod, base + 8) == 0x1112131415161718, "in-image read at base+8 should round-trip")
+
+        # Below the image virtual base: the offset would underflow -> refuse.
+        below: mutable usize = 999
+        mb_check(not Module_ImageOffsetForSpan(mod, base - 8, 8, below), "span below the image base must refuse")
+
+        # A qword whose span runs past the 16-byte image (base+12 -> needs 20)
+        # must refuse: span helper returns false, write returns false, read 0.
+        past_offset: mutable usize = 999
+        mb_check(not Module_ImageOffsetForSpan(mod, base + 12, 8, past_offset), "span overrunning the image tail must refuse")
+        mb_check(not Module_WriteImageU64(mod, base + 12, 0xFFFFFFFFFFFFFFFF), "image write overrunning the tail must return false")
+        mb_check(Module_ReadImageU64(mod, base + 12) == 0, "image read overrunning the tail must return 0")
+
+        # A qword fully past the image must refuse too.
+        mb_check(not Module_WriteImageU64(mod, base + 16, 0xAAAAAAAAAAAAAAAA), "image write fully past the image must return false")
+        mb_check(Module_ReadImageU64(mod, base + 16) == 0, "image read fully past the image must return 0")
+
+        # The refused writes left the in-bounds qwords untouched.
+        mb_check(Module_ReadImageU64(mod, base) == 0x0102030405060708, "image qword at base must be untouched by refused writes")
+        mb_check(Module_ReadImageU64(mod, base + 8) == 0x1112131415161718, "image qword at base+8 must be untouched by refused writes")
+
+
+# --- 3. linker.elisa: proc_param / mem_param size-guarded accessors -----------
+
+# The mem_param/proc_param pointer accessors take the declared struct `size` as
+# an argument and refuse (return 0) when it cannot cover the requested field.
+# These guards are directly callable, so we test them at that exact seam:
+# build a MemoryManager backing that holds a real pointer value at each field
+# offset, then assert the accessor returns 0 for an undersized declared size and
+# the stored pointer once the declared size is large enough.
+#
+# NOTE on the seam: Linker_ProcParamSize / Linker_MemParamSize themselves are
+# thin MemoryManager_ReadU64 wrappers with no size argument (the `size` field is
+# what bounds the OTHER fields), so the size-guard refusal lives entirely in the
+# *Ptr / *MemParam accessors below — that is where this test drives it.
+#
+# The backings are seeded INLINE with local darrays (same constraint as the
+# memory round-trip test: a helper-grown or arena-grown backing buffer is freed
+# on return / not set up in this pure seam, so we build the buffer locally and
+# push it onto mem.mapped_bytes directly).
+@test
+def linker_param_accessors_refuse_undersized_declared_size() -> void:
+    can Abort.Panic, Segment.Host, Unsafe.SegmentMutation, Memory.Allocate:
+        Memory_Reset()
+        mem: mutable MemoryManager& = Memory_Instance()
+
+        # proc_param struct backing: mem_param pointer lives at +64 (needs size >= 72).
+        proc_param: VAddr = 0x800010000.uintptr()
+        proc_backing: mutable darray[u8] = []
+        for _ in 0..<0x80:
+            can Unsafe.AssumeProgress:
+                proc_backing.push(0)
+        mem.mapped_bytes.push(MappedMemoryBytes(proc_param, 0x80, proc_backing))
+        mb_check(MemoryManager_WriteU64(mem, proc_param + ORBIS_PROC_PARAM_OFF_MEM_PARAM.uintptr(), 0x800020000), "seed proc_param.mem_param pointer")
+
+        # Declared size too small to cover the +64 pointer -> refuse with 0.
+        mb_check(Linker_ProcParamMemParam(mem, proc_param, 71) == 0, "proc_param.mem_param must refuse when declared size < 72")
+        mb_check(Linker_ProcParamMemParam(mem, proc_param, 0) == 0, "proc_param.mem_param must refuse when declared size is 0")
+        # Declared size large enough -> the seeded pointer is returned.
+        mb_check(Linker_ProcParamMemParam(mem, proc_param, 72) == 0x800020000, "proc_param.mem_param must return the pointer when declared size >= 72")
+
+        # mem_param struct backing with pointer fields at +16/+24/+40.
+        mem_param: VAddr = 0x800020000.uintptr()
+        mem_backing: mutable darray[u8] = []
+        for _ in 0..<0x80:
+            can Unsafe.AssumeProgress:
+                mem_backing.push(0)
+        mem.mapped_bytes.push(MappedMemoryBytes(mem_param, 0x80, mem_backing))
+        mb_check(MemoryManager_WriteU64(mem, mem_param + ORBIS_MEM_PARAM_OFF_FLEXIBLE_MEMORY_SIZE.uintptr(), 0x111), "seed mem_param.flexible_memory_size ptr")
+        mb_check(MemoryManager_WriteU64(mem, mem_param + ORBIS_MEM_PARAM_OFF_EXTENDED_MEMORY_1.uintptr(), 0x222), "seed mem_param.extended_memory_1 ptr")
+        mb_check(MemoryManager_WriteU64(mem, mem_param + ORBIS_MEM_PARAM_OFF_EXTENDED_MEMORY_2.uintptr(), 0x333), "seed mem_param.extended_memory_2 ptr")
+
+        # flexible_memory_size at +16 needs size >= 24.
+        mb_check(Linker_MemParamFlexibleSizePtr(mem, mem_param, 23) == 0, "mem_param.flexible ptr must refuse when declared size < 24")
+        mb_check(Linker_MemParamFlexibleSizePtr(mem, mem_param, 24) == 0x111, "mem_param.flexible ptr must return value when declared size >= 24")
+
+        # extended_memory_1 at +24 needs size >= 32.
+        mb_check(Linker_MemParamExtendedMemory1Ptr(mem, mem_param, 31) == 0, "mem_param.extended_1 ptr must refuse when declared size < 32")
+        mb_check(Linker_MemParamExtendedMemory1Ptr(mem, mem_param, 32) == 0x222, "mem_param.extended_1 ptr must return value when declared size >= 32")
+
+        # extended_memory_2 at +40 needs size >= 48.
+        mb_check(Linker_MemParamExtendedMemory2Ptr(mem, mem_param, 47) == 0, "mem_param.extended_2 ptr must refuse when declared size < 48")
+        mb_check(Linker_MemParamExtendedMemory2Ptr(mem, mem_param, 48) == 0x333, "mem_param.extended_2 ptr must return value when declared size >= 48")
