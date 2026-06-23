@@ -147,7 +147,7 @@ def threads_attr_write_slot(slot: mutable void&?&?, attr: PthreadAttr&?) -> bool
         slot[0] <- null
     else:
         # Out-pointer write of the caller's attr handle; pointee lifetime is the caller's.
-        trusted Unsafe.StaleRef:
+        can Unsafe.StaleRef:
             slot[0] <- attr.uintptr().cast[void&?]
     return true
 
@@ -291,7 +291,7 @@ def posix_pthread_attr_getstack(attr: void&?&?, stackaddr: mutable void&?&, stac
     if pattr == null:
         return POSIX_EINVAL
     # Out-pointer write of the attr's stored stack address (caller/guest memory).
-    trusted Unsafe.StaleRef:
+    can Unsafe.StaleRef:
         stackaddr[0] <- pattr.stackaddr_attr
     stacksize <- pattr.stacksize_attr
     return 0
@@ -302,7 +302,7 @@ def posix_pthread_attr_setstack(attr: mutable void&?&?, stackaddr: void&?, stack
     if pattr == null or stackaddr == null or stacksize < PTHREAD_STACK_MIN:
         return POSIX_EINVAL
     # Caller's stack address stored into the caller-owned attr struct.
-    trusted Unsafe.StaleRef:
+    can Unsafe.StaleRef:
         pattr.stackaddr_attr <- stackaddr
     pattr.stacksize_attr <- stacksize
     return 0
@@ -313,7 +313,7 @@ def posix_pthread_attr_getstackaddr(attr: void&?&?, stackaddr: mutable void&?&) 
     if pattr == null:
         return POSIX_EINVAL
     # Out-pointer write of the attr's stored stack address (caller/guest memory).
-    trusted Unsafe.StaleRef:
+    can Unsafe.StaleRef:
         stackaddr[0] <- pattr.stackaddr_attr
     return 0
 
@@ -323,7 +323,7 @@ def posix_pthread_attr_setstackaddr(attr: mutable void&?&?, stackaddr: void&?) -
     if pattr == null or stackaddr == null:
         return POSIX_EINVAL
     # Caller's stack address stored into the caller-owned attr struct.
-    trusted Unsafe.StaleRef:
+    can Unsafe.StaleRef:
         pattr.stackaddr_attr <- stackaddr
     return 0
 
@@ -394,7 +394,7 @@ def posix_pthread_attr_setaffinity_np(attr: mutable void&?&?, cpusetsize: u64, c
         return 0
     pattr.cpusetsize <- cpusetsize
     # Caller's cpuset pointer stored into the caller-owned attr struct.
-    trusted Unsafe.StaleRef:
+    can Unsafe.StaleRef:
         pattr.cpuset <- cpusetp
     return 0
 
@@ -510,7 +510,7 @@ def threads_bootstrap_runtime() -> void:
 
 def threads_handle_to_id(thread: void&?) -> int:
     i: mutable int = 1
-    trusted Unsafe.AssumeProgress:
+    can Unsafe.AssumeProgress:
         while i < FAKE_THREADS_MAX:
             if g_fake_threads_alive[i] == true and g_fake_threads_host_handle[i] == thread:
                 return i
@@ -620,7 +620,7 @@ def posix_pthread_exit(status: void&?) -> void:
     g_fake_cancel_enable <- false
     g_fake_cancel_pending <- false
     # Thread retval is a guest pointer held in the runtime's thread table for the thread's lifetime.
-    trusted Unsafe.StaleRef:
+    can Unsafe.StaleRef:
         g_fake_threads_retval[g_fake_thread_id] <- status
     g_fake_threads_exited[g_fake_thread_id] <- true
     threads_run_cleanup_handlers()
@@ -658,7 +658,7 @@ def posix_pthread_join(pthread: void&?, thread_return: mutable void&?&) -> int:
             if host_res != 0:
                 return host_res
             # Joined thread's retval (guest pointer) recorded in the runtime thread table.
-            trusted Unsafe.StaleRef:
+            can Unsafe.StaleRef:
                 g_fake_threads_retval[id] <- host_ret
         g_fake_threads_has_joiner[id] <- true
         if thread_return != null:
@@ -702,7 +702,7 @@ def posix_pthread_timedjoin_np(pthread: void&?, thread_return: mutable void&?&, 
             if host_res != 0:
                 return host_res
             # Joined thread's retval (guest pointer) recorded in the runtime thread table.
-            trusted Unsafe.StaleRef:
+            can Unsafe.StaleRef:
                 g_fake_threads_retval[id] <- host_ret
             if thread_return != null:
                 thread_return[0] <- g_fake_threads_retval[id]
@@ -748,23 +748,23 @@ def posix_pthread_create(thread: mutable void&?&, attr: void&?, start_routine: v
                 g_fake_threads_exited[id] <- false
                 return create_res
             # OS thread handle recorded in the runtime table; OS-owned, lives until join/detach.
-            trusted Unsafe.StaleRef:
+            can Unsafe.StaleRef:
                 g_fake_threads_host_handle[id] <- host_thread
             g_fake_threads_host_backed[id] <- true
             # Out-pointer: hand the OS thread handle back to the caller.
-            trusted Unsafe.StaleRef:
+            can Unsafe.StaleRef:
                 thread[0] <- host_thread
             if g_fake_threads_detached[id] == true:
                 _ = elisa_kernel_thread_detach(host_thread)
             return 0
         if g_fake_threads_autocomplete == true:
             # Synchronous-run path: the guest entry arg becomes the retval (guest pointer) in the table.
-            trusted Unsafe.StaleRef:
+            can Unsafe.StaleRef:
                 g_fake_threads_retval[id] <- arg
             g_fake_threads_running[id] <- false
             g_fake_threads_exited[id] <- true
         # Out-pointer: hand the synthesized thread id (as an opaque handle) back to the caller.
-        trusted Unsafe.StaleRef:
+        can Unsafe.StaleRef:
             thread[0] <- id.cast[void&?]
         return 0
 
@@ -814,7 +814,7 @@ def posix_pthread_cancel(thread: void&?) -> int:
         if host_res != 0:
             return host_res
     # Sentinel CANCELED retval (a constant pointer value) recorded in the runtime table.
-    trusted Unsafe.StaleRef:
+    can Unsafe.StaleRef:
         g_fake_threads_retval[id] <- POSIX_PTHREAD_CANCELED_VALUE.cast[void&?]
     g_fake_threads_exited[id] <- true
     g_fake_threads_running[id] <- false
@@ -1034,7 +1034,7 @@ def posix_sched_yield_shim() -> int:
 # @port core/libraries/kernel/threads/pthread.cpp::_sceKernelSetThreadDtors sha256=5ce893b08baa49c7 oracle@a3773841
 def _sceKernelSetThreadDtors(dtor: void&?) -> void:
     # Guest destructor function pointer held by the runtime for the process lifetime.
-    trusted Unsafe.StaleRef:
+    can Unsafe.StaleRef:
         g_fake_thread_dtors <- dtor
     return
 

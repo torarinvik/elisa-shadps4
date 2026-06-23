@@ -428,3 +428,156 @@ Verified: x64 boot smoke 9/9; deferred-init boot still runs the libc bootstrap a
 reaches the gap-3 host-malloc fault (0x68); default boot unchanged. (The
 kernel-memory-parity-tests target fails to compile both before and after this change
 -- a pre-existing target-include issue, not a regression.)
+
+---
+
+# UPDATE 8: gap-3 root-caused to the boundary thunk restoring host %fs but NOT host %gs (macOS); gated %gs-restore added
+
+## Root cause (confirmed by source audit; see "environment blocker" below for why it's not yet runtime-verified)
+
+On macOS x86-64 the HOST thread-local-storage register is **%gs**, not %fs
+(libpthread / errno / the malloc per-thread cache all live at `%gs:disp`). The PS4
+GUEST uses **%fs** for its TLS. Elisa's whole segment model reflects only half of
+that asymmetry:
+
+- `core/tls.elisa` installs/swaps the GUEST TCB exclusively through the **%fs** LDT
+  selector (`TLS_PrepareTcbBase` -> `i386_set_ldt` -> `ElisaTls_LoadGuestFsSelectorAsm`).
+  There is no `ElisaTls_ReadGsSelectorAsm` / `...LoadGs...` anywhere -- **%gs is never
+  read, saved, or restored** by any Elisa path.
+- The HLE boundary thunk (`Linker_CreateNativeHleBoundaryThunk`,
+  `core/linker.elisa:1496`) that wraps every guest->HLE import call saves the live
+  guest **%fs** selector, loads the captured **host %fs** selector
+  (`movw $host_selector,%r10w ; movw %r10w,%fs`, full[127..135]), runs the HLE body,
+  then restores guest %fs on the way out. It does the same for %fs **but emits no %gs
+  instruction at all**.
+
+So when the libc PREINIT bootstrap (deferred-init / trampoline path, UPDATE 6) calls
+an HLE that reaches a HOST `malloc`/CRT routine, that host routine does its normal
+`mov ...,%gs:0x68` (the macOS pthread-TLS slot used by the malloc fast path). If %gs's
+base is at a guest/zero value at that moment, the access resolves to linear address
+`0x68` and faults -- **exactly the observed `fault_addr=0x68`** (a bare small offset =>
+segment base 0). The signal handler's own fault-classifier already anticipated this
+case: `core/guest_exec.elisa:2489-2497` decodes whether the faulting TLS deref used
+`%fs (0x64)` vs `%gs (0x65)` and looks for "a %gs-relative per-thread default-zone
+read". The fix the thunk was missing is the %gs counterpart of its existing %fs
+restore.
+
+Why this only bites on the deferred-init path and not the default boot: the default
+cusa path crashes earlier (null singleton, pre-UPDATE-6) and never reaches a
+host-malloc-from-HLE during libc heap setup. UPDATE 6 advanced the boot *into* libc's
+heap bootstrap, which is the first code that calls host malloc from an HLE while the
+segment state is transitional -- surfacing the latent %gs gap.
+
+## The change (working tree, `core/linker.elisa`, fully gated)
+
+Added an opt-in host-%gs restore to the boundary thunk, mirroring the existing %fs
+restore:
+
+- New env flag `ELISA_RESTORE_HOST_GS` -> `linker_restore_host_gs` (read in
+  `Linker_Execute` next to `ELISA_DEFER_PRX_INIT`). New global
+  `linker_host_gs_selector` (default `0x6F`, the macOS userland %gs selector).
+- When the flag is set, `Linker_CreateNativeHleBoundaryThunk` emits 9 extra bytes
+  right after the %fs restore and before `movabs $target,%r11`:
+  `movw $host_gs_selector,%r10w ; movw %r10w,%gs` (`66 41 BA <imm16>` + `66 41 8E EA`;
+  ModRM.reg=5 selects %gs vs reg=4=%fs). The guest never uses %gs, so no guest-%gs
+  save is needed -- the thunk just forces host %gs before the HLE body runs.
+- The whole tail (target movabs / call / return-slot restore / %fs-pop / ret) is now
+  emitted at a computed base `t = 136 + gs_extra`. With the flag OFF, `gs_extra=0`,
+  `t=136`, `thunk_size=174`, and every byte is identical to the original layout, so
+  the default tree is byte-for-byte unchanged.
+
+## ENVIRONMENT BLOCKER -- could not compile/run to validate
+
+The project HEAD (committed 2026-06-22, the "verify: dogfood contracted protocols"
+series) now uses compiler features that **no elisacore binary present in this
+environment supports**: `protocol`/`law` declarations (`core/ord.elisa`) and bracketed
+annotation lists `@[noalloc, nolock]` (`core/address_space.elisa`). Every installed
+binary (`../compiler/bin/elisacore` Jun 3; `Go projects/Elisa-core/bin/elisacore`
+Jun 16) rejects these with parse errors, so `elisacore test emulator-cusa07399-x64-exec`
+fails at the front-end before any guest code runs. The compiler source under
+`Go projects/Elisa-core/compiler/src/parser/` DOES implement `law`/`protocol`, i.e. the
+binaries are simply older than the source; but rebuilding the compiler is out of scope
+(read-only constraint). Consequently the gap-3 fault could not be reproduced and the
+%gs fix could not be runtime-verified in this session. The change is reasoned
+byte-correct and gated to be inert by default; it must be validated with a compiler
+built from current source via:
+
+```
+ELISA_GUEST_EXEC_NO_FORK=1 ELISA_DEFER_PRX_INIT=1 ELISA_RESTORE_HOST_GS=1 \
+  <fresh-elisacore> test emulator-cusa07399-x64-exec --project .
+```
+
+## Verification recipe (for the next session, once a current compiler is available)
+
+1. Reproduce gap-3 with `ELISA_DEFER_PRX_INIT=1` and confirm `fault_addr=0x68` plus,
+   from the `GE_EV_SIGNAL_SEGMENTS` tape mark (guest_exec.elisa:2509, fs/gs base at
+   mcontext ss+152/+160), that **%gs base is 0/guest** while %fs base is host at the
+   fault -- this nails "host %gs clobbered" vs any other 0x68 source.
+2. Re-run adding `ELISA_RESTORE_HOST_GS=1`. Expected: the host-malloc fault is gone and
+   boot advances past libc heap setup (next frontier likely the eboot's own
+   DirectMemory calls / `_start`).
+3. If `0x6F` is wrong for this macOS build, read the live host %gs selector off the
+   `GE_EV_SIGNAL_SEGMENTS` mark on a working (non-deferred) HLE and set
+   `linker_host_gs_selector` to it -- or, better, add an `ElisaTls_ReadGsSelectorAsm`
+   extern (compiler-runtime change) and capture it like the %fs selector instead of
+   hardcoding. Hardcoding is the only option that stays within the
+   shadPS4-repo-only / no-compiler-edit constraints of this session.
+
+## Confidence
+
+Root cause (host %gs never restored at the HLE boundary on macOS, and host malloc
+reads %gs:0x68) is **high-confidence from the source + the fault signature + the
+existing in-code %gs-fault-classifier comment**. The specific fix shape (force host
+%gs in the thunk) directly addresses it. The residual uncertainty is purely the
+unhardcoded host %gs selector value and the lack of runtime validation, both owing to
+the compiler-version blocker.
+
+---
+
+# UPDATE 9: host %gs selector now runtime-captured (hardening); runtime validation still pending
+
+Two corrections to UPDATE 8's caveats, plus the remaining open item.
+
+## The %gs selector is no longer hardcoded
+
+UPDATE 8 said hardcoding `0x6F` was "the only option that stays within the
+shadPS4-repo-only / no-compiler-edit constraints." That was wrong: the `ElisaTls_*Asm`
+externs are implemented in `easm/guest_exec_x86_64.easm`, which is **in the shadPS4
+repo** (not the compiler), so a `%gs` read extern is addable here. Done:
+
+- `easm/guest_exec_x86_64.easm`: new `ElisaTls_ReadGsSelectorAsm() -> u16` (`movw %gs,%ax;
+  ret`), mirroring the existing `ElisaTls_ReadFsSelectorAsm`.
+- `core/tls.elisa`: `TLS_CaptureHostGsSelector()` / `TLS_HostGsSelector()` + the
+  `tls_host_gs_selector(_captured)` globals, mirroring the host-%fs capture. Captured on a
+  host thread (module init, before any guest %gs swap), so %gs still holds the host
+  selector at capture time.
+- `core/linker.elisa` (`Linker_CreateNativeHleBoundaryThunk`): when `ELISA_RESTORE_HOST_GS`
+  is set, the thunk now prefers the **runtime-captured** host %gs selector over the `0x6F`
+  default (`linker_host_gs_selector <- captured_gs` only when non-zero, so an off-platform
+  0 falls back safely). Flag OFF ⇒ thunk byte-identical to the original 174 bytes.
+
+So the "unhardcoded selector value" residual from UPDATE 8 is closed — the correct host
+%gs selector is now read from the live register rather than guessed.
+
+## Still open: runtime validation
+
+The fix is **not yet runtime-verified**. The binary blocker in UPDATE 8 was a red herring
+for *which* binary: `../compiler/bin/elisacore` (Jun 3) and the Jun-16 binary are stale,
+but `~/.local/bin/elisac` (current) compiles current source and can drive the target
+(`elisac test emulator-cusa07399-x64-exec --project .`; game files present at
+`../shadPS4/Games/CUSA07399`). The full emulator run is slow (whole-emulator build + game
+load), and capped attempts did not reach the fault within the cap, so the decisive
+before/after has not been captured.
+
+Verification recipe unchanged from UPDATE 8 (use `~/.local/bin/elisac`, not the stale
+`elisacore`): (1) `ELISA_DEFER_PRX_INIT=1` baseline → confirm `fault_addr=0x68` and, from
+the `GE_EV_SIGNAL_SEGMENTS` tape (fs/gs base at mcontext ss+152/+160), that %gs base is
+0/guest while %fs is host; (2) add `ELISA_RESTORE_HOST_GS=1` → expect the 0x68 fault gone
+and boot advancing past libc heap setup (next likely frontier: the eboot's own
+DirectMemory calls / `_start`). The selector no longer needs manual tuning.
+
+## Status
+
+Code: COMPLETE and gated (default tree unchanged by construction). Root cause:
+high-confidence. Runtime validation: the one remaining step, gated only on spending a full
+slow emulator run.

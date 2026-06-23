@@ -96,6 +96,24 @@ def AddressSpace_RangeNoOverflow(base: u64, size: u64) -> bool:
 def AddressSpace_WithinReservation(addr: u64, len: u64, base: u64, cap: u64) -> bool:
     return addr >= base and addr + len >= addr and base + cap >= base and addr + len <= base + cap
 
+# DOGFOOD (guest-exec-fault-path): the relocation backing-write window law.
+# Linker_WriteRelativeRelocationFast / MemoryManager_WriteU64BackingOnly write 8 bytes at
+# `bytes[base_offset + i]` for i in 0..<8, where base_offset = addr - backing.base and the
+# backing buffer length equals `cap` (MemoryManager_AddBacking fills bytes.count == size).
+# The write is in-bounds iff this returns true. The postcondition is the proof obligation the
+# byte-loops rely on: when accepted, `offset + 8 <= cap`, i.e. the final indexed byte
+# `base_offset + 7` is strictly inside the buffer. Proven from the guards alone (no SMT
+# needed): `offset <= cap` and `8 <= cap - offset` together give `offset + 8 <= cap` without
+# the subtraction ever underflowing. This is the same no-underflow shape FindBackingIndex uses.
+@[noalloc, nolock]
+def AddressSpace_RelocWriteWindowFits(addr: u64, cap_base: u64, cap: u64) -> bool:
+    ensure (not result) or (addr >= cap_base)
+    ensure (not result) or (addr - cap_base <= cap)
+    if addr < cap_base:
+        return false
+    offset: u64 = addr - cap_base
+    return offset <= cap and 8 <= (cap - offset)
+
 @[noalloc, nolock]
 def AddressSpace_RangesOverlap(a_base: u64, a_size: u64, b_base: u64, b_size: u64) -> bool:
     if a_size == 0 or b_size == 0:
@@ -315,10 +333,12 @@ def AddressSpace_Unmap(self: mutable AddressSpace&, virtual_addr: VAddr, size: u
         return
     i: mutable usize = 0
     while i < self.mapped_ranges.count:
+        decreases self.mapped_ranges.count - i
         entry: AddressRange = self.mapped_ranges[i]
         if entry.begin == virtual_addr and entry.size == size:
             j: mutable usize = i
             while j + 1 < self.mapped_ranges.count:
+                decreases self.mapped_ranges.count - j
                 self.mapped_ranges[j] <- self.mapped_ranges[j + 1]
                 j <- j + 1
             self.mapped_ranges.count <- self.mapped_ranges.count - 1

@@ -383,7 +383,7 @@ def Module_CallGuestInitEntry(entry_addr: VAddr, args: u64, argp: void&?, param:
             guard: FsGuard = TLS_InstallGuestSegment()
             ge_emergency_mark(GE_EV_MODULE_INIT_ENTRY_AFTER_INSTALL, entry_addr, args.uintptr(), argp.uintptr(), param.uintptr())
             fn: mutable void&? = null
-            trusted Unsafe.PointerCast:
+            can Unsafe.PointerCast:
                 fn <- entry_addr.cast[void&?]
             if fn != null:
                 stack_top: VAddr = GuestExec_MainStackTop()
@@ -409,7 +409,7 @@ def Module_CallGuestInitArrayEntry(entry_addr: VAddr) -> void can[Unsafe.Segment
             guard: FsGuard = TLS_InstallGuestSegment()
             ge_emergency_mark(GE_EV_MODULE_INIT_ARRAY_AFTER_INSTALL, entry_addr, 0.uintptr(), 0.uintptr(), 0.uintptr())
             fn: mutable void&? = null
-            trusted Unsafe.PointerCast:
+            can Unsafe.PointerCast:
                 fn <- entry_addr.cast[void&?]
             if fn != null:
                 stack_top: VAddr = GuestExec_MainStackTop()
@@ -599,7 +599,8 @@ def Module_LoadElfSegments(self: mutable Module&, elf: mutable Elf&, memory: mut
                 dyn_size: usize = phdr.p_filesz.usize()
                 in perm:
                     while self.dynamic_segment.count < dyn_base + dyn_size:
-                        self.dynamic_segment.push(0)
+                        can Unsafe.AssumeProgress:
+                            self.dynamic_segment.push(0)
                 # Fatal: the dynamic segment drives relocation/imports. `try` widens
                 # ElfError into this function's combined error set.
                 try Elf_LoadSegmentBytes(elf, self.dynamic_segment, dyn_base, phdr.p_offset, dyn_size)
@@ -610,7 +611,8 @@ def Module_LoadElfSegments(self: mutable Module&, elf: mutable Elf&, memory: mut
                 data_size: usize = phdr.p_filesz.usize()
                 in perm:
                     while self.dynamic_data.count < data_base + data_size:
-                        self.dynamic_data.push(0)
+                        can Unsafe.AssumeProgress:
+                            self.dynamic_data.push(0)
                 # Best-effort: a missing dynlibdata table is tolerated. `match ... as`
                 # consumes the error union with an explicit ok/else split.
                 match Elf_LoadSegmentBytes(elf, self.dynamic_data, data_base, phdr.p_offset, data_size) as ok:
@@ -845,7 +847,7 @@ def Module_ProtectImageSegment(self: mutable Module&, memory: mutable MemoryMana
     if MemoryManager_Protect(memory, segment_vaddr, segment_size, prot) != 0:
         raise ModuleError.ProtectFailed(segment_vaddr.u64())
     if (prot & MemoryProt_CpuExec) != 0 and GuestExec_IsEnabled() and GuestExec_IsSupported():
-        trusted Unsafe.ExecutableCodePublish:
+        can Unsafe.ExecutableCodePublish:
             if not GuestExec_PublishExecutableCode(segment_vaddr, segment_size):
                 raise ModuleError.PublishFailed(segment_vaddr.u64())
     return
@@ -885,7 +887,8 @@ def Module_PrepareLoadImage(self: mutable Module&, elf: mutable Elf&) -> void:
         image_target: usize = self.image_virtual_size.usize()
         in perm:
             while self.image.count < image_target:
-                self.image.push(0)
+                can Unsafe.AssumeProgress:
+                    self.image.push(0)
 
 def Module_LoadImageSegment(self: mutable Module&, elf: mutable Elf&, memory: mutable MemoryManager&, phdr: elf_program_header&) -> void error[ModuleError, ElfError]:
     can Memory.Allocate:
@@ -904,7 +907,8 @@ def Module_LoadImageSegment(self: mutable Module&, elf: mutable Elf&, memory: mu
         seg_size: usize = phdr.p_filesz.usize()
         segment: mutable darray[u8] = []
         while segment.count < seg_size:
-            segment.push(0)
+            can Unsafe.AssumeProgress:
+                segment.push(0)
         # `try` widens the loader's ElfError into this function's combined error set.
         try Elf_LoadSegmentBytes(elf, segment, 0, phdr.p_offset, seg_size)
         for i in 0..<segment.count:
@@ -1060,6 +1064,7 @@ def Module_SymbolNameAndNidAt(self: Module&, offset: u32, out_name: mutable stat
         seg: view[u8] = self.dynamic_data[base:self.dynamic_data.count]
         name_len: mutable usize = 0
         while name_len < seg.len and seg[name_len] != 0:
+            decreases seg.len - name_len
             name_len <- name_len + 1
         if name_len == 0:
             return false
@@ -1068,6 +1073,7 @@ def Module_SymbolNameAndNidAt(self: Module&, offset: u32, out_name: mutable stat
         hash_index: mutable usize = name_len
         i: mutable usize = 0
         while i < name_seg.len:
+            decreases name_seg.len - i
             if name_seg[i] == 35:
                 hash_index <- i
                 i <- name_seg.len
@@ -1086,11 +1092,11 @@ def Module_CopySlice(input: cstr, start: usize, end_exclusive: usize) -> static 
     seg: sview = input[start:end_exclusive]
     out: mutable dstr = []
     can Memory.Allocate, Abort.Panic:
-        trusted Unsafe.MutableGlobal:
+        can Unsafe.MutableGlobal:
             out <- clone[dstr](seg)
             out.push(0)
     # Bytes live in the persistent metadata arena; out is non-empty here.
-    trusted Unsafe.PointerCast, Unsafe.UncheckedIndex:
+    can Unsafe.PointerCast, Unsafe.UncheckedIndex:
         return (&out[0]).cast[static u8&]
 
 # Copy dynamic-data bytes [start, end_exclusive) into a fresh heap-owned,
@@ -1110,12 +1116,12 @@ def Module_CopyDynDataSlice(self: Module&, start: usize, end_exclusive: usize) -
     seg: view[u8] = self.dynamic_data[start:end_bounded]
     out: mutable dstr = []
     can Memory.Allocate, Abort.Panic:
-        trusted Unsafe.MutableGlobal:
+        can Unsafe.MutableGlobal:
             out <- clone[dstr](seg)
             out.push(0)
     # The bytes live in the persistent metadata arena, valid for the module's
     # lifetime; the cast asserts that managed lifetime. out is non-empty here.
-    trusted Unsafe.PointerCast, Unsafe.UncheckedIndex:
+    can Unsafe.PointerCast, Unsafe.UncheckedIndex:
         return (&out[0]).cast[static u8&]
 
 # Bounded NUL-terminated copy of the dynamic-data string starting at offset,
@@ -1126,6 +1132,7 @@ def Module_CopyDynDataString(self: Module&, offset: usize) -> static u8&:
             return ""
         end: mutable usize = offset
         while end < self.dynamic_data.count and self.dynamic_data[end] != 0:
+            decreases self.dynamic_data.count - end
             end <- end + 1
         return Module_CopyDynDataSlice((&self).cast[Module&], offset, end)
 
@@ -1195,7 +1202,7 @@ def Module_EncodeId(value: u16) -> static u8&:
     codes: static u8& = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+-"
     out: mutable dstr = []
     can Memory.Allocate, Abort.Panic:
-        trusted Unsafe.MutableGlobal:
+        can Unsafe.MutableGlobal:
             if value.u64() < 0x40:
                 out.push(codes[value.usize()])
             elif value.u64() < 0x1000:
@@ -1206,7 +1213,7 @@ def Module_EncodeId(value: u16) -> static u8&:
                 out.push(codes[((value >> 6) & 0x3f).usize()])
                 out.push(codes[(value & 0x3f).usize()])
             out.push(0)
-    trusted Unsafe.PointerCast, Unsafe.UncheckedIndex:
+    can Unsafe.PointerCast, Unsafe.UncheckedIndex:
         return (&out[0]).cast[static u8&]
 
 def Module_SymbolNidAt(self: Module&, symbol_name: static u8&) -> static u8&:
@@ -1340,6 +1347,7 @@ def Module_LoadSymbols(self: mutable Module&) -> void:
         if not Module_U64SpanEnd(self.dynamic_info.symbol_table_offset, self.dynamic_info.symbol_table_total_size, sym_end):
             return
         while Module_DynamicDataRangeInBounds(sym_offset, size_of(elf_symbol).u64(), self.dynamic_data.count.u64()) and sym_offset < sym_end:
+            decreases sym_end - sym_offset
             sym: elf_symbol = Module_ReadSymbolAt(self, sym_offset.usize())
             bind: u8 = ElfSymbol_GetBind(sym)
             typ: u8 = ElfSymbol_GetType(sym)
@@ -1404,7 +1412,7 @@ def Module_GetSymbolByIndex(self: Module&, symbol_index: u32, out_symbol: mutabl
 def Module_CstrHash(s: static u8&) -> u64:
     h: mutable u64 = 0xcbf29ce484222325
     n: usize = static_strlen(s)
-    trusted Unsafe.UncheckedIndex:
+    can Unsafe.UncheckedIndex:
         i: mutable usize = 0
         while i < n:
             h <- (h ^ s[i].u64()) * 0x100000001b3
@@ -1449,6 +1457,7 @@ def Module_BuildExportSymbolIndex(self: mutable Module&) -> void:
         qualifying: mutable u64 = 0
         scan_off: mutable u64 = self.dynamic_info.symbol_table_offset
         while scan_off < sym_end and Module_DynamicDataRangeInBounds(scan_off, size_of(elf_symbol).u64(), self.dynamic_data.count.u64()):
+            decreases sym_end - scan_off
             sym: elf_symbol = Module_ReadSymbolAt((&self).cast[Module&], scan_off.usize())
             bind: u8 = ElfSymbol_GetBind(sym)
             typ: u8 = ElfSymbol_GetType(sym)
@@ -1462,6 +1471,7 @@ def Module_BuildExportSymbolIndex(self: mutable Module&) -> void:
             return
         capacity: mutable u64 = 16
         while capacity < (qualifying * 4):
+            decreases (qualifying * 4) - capacity
             capacity <- capacity * 2
         mask: u64 = capacity - 1
         in perm:
@@ -1471,6 +1481,7 @@ def Module_BuildExportSymbolIndex(self: mutable Module&) -> void:
                 slot_i <- slot_i + 1
             sym_offset: mutable u64 = self.dynamic_info.symbol_table_offset
             while sym_offset < sym_end and Module_DynamicDataRangeInBounds(sym_offset, size_of(elf_symbol).u64(), self.dynamic_data.count.u64()):
+                decreases sym_end - sym_offset
                 sym: elf_symbol = Module_ReadSymbolAt((&self).cast[Module&], sym_offset.usize())
                 bind: u8 = ElfSymbol_GetBind(sym)
                 typ: u8 = ElfSymbol_GetType(sym)
@@ -1540,6 +1551,7 @@ def Module_FindDefinedQualifiedSymbolAddress(self: Module&, nid: static u8&, lib
             return false
         sym_offset: mutable u64 = self.dynamic_info.symbol_table_offset
         while sym_offset < sym_end and Module_DynamicDataRangeInBounds(sym_offset, size_of(elf_symbol).u64(), self.dynamic_data.count.u64()):
+            decreases sym_end - sym_offset
             sym: elf_symbol = Module_ReadSymbolAt(self, sym_offset.usize())
             bind: u8 = ElfSymbol_GetBind(sym)
             typ: u8 = ElfSymbol_GetType(sym)

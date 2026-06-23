@@ -259,7 +259,7 @@ def kt_mutex_lock(handle: void&?) -> int:
         if err != 0:
             return kt_thread_errno(err)
         # Owner is the current thread handle (runtime-managed, outlives the mutex state).
-        trusted Unsafe.StaleRef:
+        can Unsafe.StaleRef:
             state.owner <- self
         state.locked <- 1
         state.recursion <- 1
@@ -280,7 +280,7 @@ def kt_mutex_trylock(handle: void&?) -> int:
     if err != 0:
         return kt_thread_errno(err)
     # Owner is the current thread handle (runtime-managed, outlives the mutex state).
-    trusted Unsafe.StaleRef:
+    can Unsafe.StaleRef:
         state.owner <- self
     state.locked <- 1
     state.recursion <- 1
@@ -460,7 +460,7 @@ def kt_cond_wait(cond_handle: void&?, mutex_handle: void&?) -> int:
         if err != 0:
             return kt_thread_errno(err)
         # Owner is the current thread handle (runtime-managed, outlives the mutex state).
-        trusted Unsafe.StaleRef:
+        can Unsafe.StaleRef:
             mutex.owner <- kt_pthread_self()
         mutex.locked <- 1
         mutex.recursion <- 1
@@ -482,7 +482,7 @@ def kt_cond_timedwait(cond_handle: void&?, mutex_handle: void&?, tv_sec: i64, tv
     mutex.recursion <- 0
     err: int = kt_pthread_cond_timedwait((&cond.pcond[0]).cast[void&], (&mutex.pmutex[0]).cast[void&], (&ts).cast[void&])
     # Owner is the current thread handle (runtime-managed, outlives the mutex state).
-    trusted Unsafe.StaleRef:
+    can Unsafe.StaleRef:
         mutex.owner <- kt_pthread_self()
     mutex.locked <- 1
     mutex.recursion <- 1
@@ -680,22 +680,23 @@ def kt_sem_wait(handle: void&?, need_count: int) -> int:
         kt_raw_mutex_lock(pm)
         state.waiters <- state.waiters + 1
         while state.value < need_count:
-            if state.deleted != 0:
-                state.waiters <- state.waiters - 1
-                should_finalize: bool = state.destroy_requested != 0 and state.waiters == 0
-                kt_raw_mutex_unlock(pm)
-                if should_finalize:
-                    kt_raw_mutex_destroy(pm)
-                    kt_raw_cond_destroy(pc)
-                    kt_heap_free(handle)
-                return KT_PS4_EDELETED
-            if state.canceled != 0:
-                state.waiters <- state.waiters - 1
-                if state.waiters == 0:
-                    state.canceled <- 0
-                kt_raw_mutex_unlock(pm)
-                return KT_PS4_ECANCELED
-            _ = kt_raw_cond_wait(pc, pm)
+            can Unsafe.AssumeProgress:
+                if state.deleted != 0:
+                    state.waiters <- state.waiters - 1
+                    should_finalize: bool = state.destroy_requested != 0 and state.waiters == 0
+                    kt_raw_mutex_unlock(pm)
+                    if should_finalize:
+                        kt_raw_mutex_destroy(pm)
+                        kt_raw_cond_destroy(pc)
+                        kt_heap_free(handle)
+                    return KT_PS4_EDELETED
+                if state.canceled != 0:
+                    state.waiters <- state.waiters - 1
+                    if state.waiters == 0:
+                        state.canceled <- 0
+                    kt_raw_mutex_unlock(pm)
+                    return KT_PS4_ECANCELED
+                _ = kt_raw_cond_wait(pc, pm)
         state.value <- state.value - need_count
         state.waiters <- state.waiters - 1
         kt_raw_mutex_unlock(pm)
@@ -732,30 +733,31 @@ def kt_sem_timedwait(handle: void&?, need_count: int, usec: u64) -> int:
         kt_raw_mutex_lock(pm)
         state.waiters <- state.waiters + 1
         while state.value < need_count:
-            if state.deleted != 0:
-                state.waiters <- state.waiters - 1
-                should_finalize: bool = state.destroy_requested != 0 and state.waiters == 0
-                kt_raw_mutex_unlock(pm)
-                if should_finalize:
-                    kt_raw_mutex_destroy(pm)
-                    kt_raw_cond_destroy(pc)
-                    kt_heap_free(handle)
-                return KT_PS4_EDELETED
-            if state.canceled != 0:
-                state.waiters <- state.waiters - 1
-                if state.waiters == 0:
-                    state.canceled <- 0
-                kt_raw_mutex_unlock(pm)
-                return KT_PS4_ECANCELED
-            werr: int = kt_raw_cond_timedwait(pc, pm, ts)
-            if werr == KT_ETIMEDOUT:
-                state.waiters <- state.waiters - 1
-                kt_raw_mutex_unlock(pm)
-                return KT_PS4_ETIMEDOUT
-            if werr != 0:
-                state.waiters <- state.waiters - 1
-                kt_raw_mutex_unlock(pm)
-                return kt_thread_errno(werr)
+            can Unsafe.AssumeProgress:
+                if state.deleted != 0:
+                    state.waiters <- state.waiters - 1
+                    should_finalize: bool = state.destroy_requested != 0 and state.waiters == 0
+                    kt_raw_mutex_unlock(pm)
+                    if should_finalize:
+                        kt_raw_mutex_destroy(pm)
+                        kt_raw_cond_destroy(pc)
+                        kt_heap_free(handle)
+                    return KT_PS4_EDELETED
+                if state.canceled != 0:
+                    state.waiters <- state.waiters - 1
+                    if state.waiters == 0:
+                        state.canceled <- 0
+                    kt_raw_mutex_unlock(pm)
+                    return KT_PS4_ECANCELED
+                werr: int = kt_raw_cond_timedwait(pc, pm, ts)
+                if werr == KT_ETIMEDOUT:
+                    state.waiters <- state.waiters - 1
+                    kt_raw_mutex_unlock(pm)
+                    return KT_PS4_ETIMEDOUT
+                if werr != 0:
+                    state.waiters <- state.waiters - 1
+                    kt_raw_mutex_unlock(pm)
+                    return kt_thread_errno(werr)
         state.value <- state.value - need_count
         state.waiters <- state.waiters - 1
         kt_raw_mutex_unlock(pm)
@@ -1007,19 +1009,20 @@ def kt_event_wait(handle: void&?, pattern: u64, wait_mode: u32, out_bits: mutabl
         kt_raw_mutex_lock(pm)
         state.waiters <- state.waiters + 1
         while (not kt_event_matches(state.bits, pattern, wait_mode)) and state.canceled == 0 and state.deleted == 0:
-            werr: mutable int = 0
-            if timed:
-                werr <- kt_raw_cond_timedwait(pc, pm, ts)
-            else:
-                werr <- kt_raw_cond_wait(pc, pm)
-            if werr == KT_ETIMEDOUT:
-                state.waiters <- state.waiters - 1
-                kt_raw_mutex_unlock(pm)
-                return KT_PS4_ETIMEDOUT
-            if werr != 0:
-                state.waiters <- state.waiters - 1
-                kt_raw_mutex_unlock(pm)
-                return kt_thread_errno(werr)
+            can Unsafe.AssumeProgress:
+                werr: mutable int = 0
+                if timed:
+                    werr <- kt_raw_cond_timedwait(pc, pm, ts)
+                else:
+                    werr <- kt_raw_cond_wait(pc, pm)
+                if werr == KT_ETIMEDOUT:
+                    state.waiters <- state.waiters - 1
+                    kt_raw_mutex_unlock(pm)
+                    return KT_PS4_ETIMEDOUT
+                if werr != 0:
+                    state.waiters <- state.waiters - 1
+                    kt_raw_mutex_unlock(pm)
+                    return kt_thread_errno(werr)
         state.waiters <- state.waiters - 1
         out_bits_val: u64 = state.bits
         if out_bits != null:
@@ -1165,19 +1168,19 @@ def kt_thread_destructor(raw: void&?) -> void:
 # pthread_once init routine: create the TSD key with the destructor above.
 @callconv(c)
 def kt_tsd_key_init_routine() -> void:
-    trusted Unsafe.MutableGlobal, Unsafe.PointerCast:
+    can Unsafe.MutableGlobal, Unsafe.PointerCast:
         dtor: void&? = kt_thread_destructor.cast[void&?]
         _ = tls_pthread_key_create((&kt_tsd_key).cast[void&], dtor)
 
 # Idempotent, thread-safe key creation (pthread_once). Called on the parent
 # before spawning so the key is ready before the child sets its value.
 def kt_thread_ensure_tsd_key() -> void:
-    trusted Unsafe.MutableGlobal, Unsafe.PointerCast:
+    can Unsafe.MutableGlobal, Unsafe.PointerCast:
         init_fn: void& = kt_tsd_key_init_routine.cast[void&]
         _ = kt_pthread_once((&kt_tsd_once).cast[void&], init_fn)
 
 def kt_thread_set_tsd(raw: void&?) -> void:
-    trusted Unsafe.MutableGlobal:
+    can Unsafe.MutableGlobal:
         _ = tls_pthread_setspecific(kt_tsd_key, raw)
 
 # C-ABI worker entry handed to pthread_create. Receives the KtThread handle as
@@ -1195,10 +1198,10 @@ def kt_thread_trampoline(raw: void&?) -> void&?:
     kt_thread_set_tsd(raw)
     result: mutable void&? = null
     if state.entry != null:
-        trusted Unsafe.IndirectCall:
+        can Unsafe.IndirectCall:
             result <- state.entry.call_as[func(void&?) -> void&?](state.arg)
     # Thread result is a guest pointer held in the thread state for the thread's lifetime.
-    trusted Unsafe.StaleRef:
+    can Unsafe.StaleRef:
         state.result <- result
     state.completed_normally <- 1
     return result
@@ -1225,7 +1228,7 @@ def kt_guest_thread_trampoline(raw: void&?) -> void&?:
                 result <- TLS_CallGuestThreadEntry(guard, state.entry, state.arg)
                 TLS_RestoreHostSegment(move guard)
     # Thread result is a guest pointer held in the thread state for the thread's lifetime.
-    trusted Unsafe.StaleRef:
+    can Unsafe.StaleRef:
         state.result <- result
     state.completed_normally <- 1
     return result
@@ -1235,7 +1238,7 @@ def kt_guest_thread_trampoline(raw: void&?) -> void&?:
 def kt_pt_thread_create(state: mutable KtThread&, handle: void&?, guest_segment_entry: int) -> int:
     r: mutable int = 0
     can Thread.Spawn:
-        trusted Unsafe.PointerCast:
+        can Unsafe.PointerCast:
             entry_fn: mutable void& = kt_thread_trampoline.cast[void&]
             if guest_segment_entry != 0:
                 entry_fn <- kt_guest_thread_trampoline.cast[void&]
@@ -1267,7 +1270,7 @@ def kt_thread_create_with_segment(entry: void&?, arg: void&?, out_error: mutable
         _ = kt_raw_mutex_init((&state.pmutex[0]).cast[void&])
         _ = kt_raw_cond_init((&state.pcond[0]).cast[void&])
         # Guest entry function pointer + its arg held in the thread state for the thread's lifetime.
-        trusted Unsafe.StaleRef:
+        can Unsafe.StaleRef:
             state.entry <- entry
             state.arg <- arg
         err: int = kt_pt_thread_create(state, raw, guest_segment_entry)
@@ -1325,7 +1328,7 @@ def kt_thread_join(handle: void&?, retval: mutable void&?&) -> int:
         if err != 0:
             return kt_thread_errno(err)
         # Out-pointer: hand the joined thread's result (guest pointer) back to the caller.
-        trusted Unsafe.StaleRef:
+        can Unsafe.StaleRef:
             retval[0] <- result
         kt_raw_mutex_destroy(pm)
         kt_raw_cond_destroy(pc)
@@ -1354,13 +1357,14 @@ def kt_thread_timedjoin(handle: void&?, retval: mutable void&?&, tv_sec: i64, tv
         ts: void& = (&deadline).cast[void&]
         kt_raw_mutex_lock(pm)
         while state.finished == 0:
-            werr: int = kt_raw_cond_timedwait(pc, pm, ts)
-            if werr == KT_ETIMEDOUT:
-                kt_raw_mutex_unlock(pm)
-                return KT_PS4_ETIMEDOUT
-            if werr != 0:
-                kt_raw_mutex_unlock(pm)
-                return kt_thread_errno(werr)
+            can Unsafe.AssumeProgress:
+                werr: int = kt_raw_cond_timedwait(pc, pm, ts)
+                if werr == KT_ETIMEDOUT:
+                    kt_raw_mutex_unlock(pm)
+                    return KT_PS4_ETIMEDOUT
+                if werr != 0:
+                    kt_raw_mutex_unlock(pm)
+                    return kt_thread_errno(werr)
         state.joined <- 1
         kt_raw_mutex_unlock(pm)
         result: mutable void&? = null
@@ -1368,7 +1372,7 @@ def kt_thread_timedjoin(handle: void&?, retval: mutable void&?&, tv_sec: i64, tv
         if err != 0:
             return kt_thread_errno(err)
         # Out-pointer: hand the joined thread's result (guest pointer) back to the caller.
-        trusted Unsafe.StaleRef:
+        can Unsafe.StaleRef:
             retval[0] <- result
         kt_raw_mutex_destroy(pm)
         kt_raw_cond_destroy(pc)

@@ -117,6 +117,15 @@ global mutable linker_defer_native_relocation_writes: bool = false
 # once-guard inside the PRX prevents a later retry). shadPS4 runs these inits after
 # relocation, before RunMainEntry; this mirrors that ordering.
 global mutable linker_defer_dependency_start: bool = false
+# gap-3 (UPDATE 8): on macOS the HOST TLS register is %gs, not %fs. The HLE boundary
+# thunk restores host %fs before calling the HLE body but never restores host %gs, so
+# a host malloc/CRT reached from an HLE (e.g. libc PREINIT's internal_malloc during the
+# deferred-init bootstrap) dereferences %gs:0x68 with a clobbered base and faults at
+# fault_addr=0x68. When set (env ELISA_RESTORE_HOST_GS), the boundary thunk also forces
+# the host %gs selector before `call *%r11`. Gated so the default 174-byte thunk is
+# byte-identical (default tree stays green). macOS userland %gs selector = 0x6F.
+global mutable linker_restore_host_gs: bool = false
+global mutable linker_host_gs_selector: u16 = 0x6F
 global mutable linker_last_relocation_retryable: bool = false
 global mutable linker_hle_tiny_callable_count: u64 = 0
 global mutable linker_hle_tiny_callable_first_value: u64 = 0
@@ -396,6 +405,7 @@ def Linker_CaptureInitValuesNow(self: Module&, array_va: u64, array_size: u64) -
             linker_cap_dbg_calls <- linker_cap_dbg_calls + 1
         i: mutable u64 = 0
         while i < count and i < 2048 and linker_deferred_init_count < LINKER_DEFERRED_INIT_CAP:
+            decreases 2048 - i
             entry: u64 = MemoryManager_ReadU64(memory, (base + (i * 8)).uintptr()).u64()
             if entry != 0 and entry != 0xffffffffffffffff:
                 linker_deferred_init_fns[linker_deferred_init_count] <- entry
@@ -475,10 +485,10 @@ def Linker_BuildInitTrampoline(real_entry: u64) -> u64:
         tramp: VAddr = GuestExec_AllocateRegion(4096, 5)
         if tramp == 0.uintptr():
             return 0
-        trusted Unsafe.MachineCodeBuilder:
+        can Unsafe.MachineCodeBuilder:
             if not GuestExec_WriteBytes(tramp, (&buf[0]).cast[void&], pos.u64()):
                 return 0
-        trusted Unsafe.ExecutableCodePublish:
+        can Unsafe.ExecutableCodePublish:
             if not GuestExec_PublishExecutableCode(tramp, pos.u64()):
                 return 0
         linker_init_trampoline_addr <- tramp.u64()
@@ -761,10 +771,10 @@ def Linker_Substr(input: cstr, start: usize, len: usize) -> static u8&:
     seg: sview = input[start:start + len]
     out: mutable dstr = []
     can Memory.Allocate, Abort.Panic:
-        trusted Unsafe.MutableGlobal:
+        can Unsafe.MutableGlobal:
             out <- clone[dstr](seg)
             out.push(0)
-    trusted Unsafe.PointerCast, Unsafe.UncheckedIndex:
+    can Unsafe.PointerCast, Unsafe.UncheckedIndex:
         return (&out[0]).cast[static u8&]
 
 def Linker_Concat2(lhs: cstr, rhs: cstr) -> static u8&:
@@ -772,14 +782,14 @@ def Linker_Concat2(lhs: cstr, rhs: cstr) -> static u8&:
     rhs_view: sview = rhs[0:rhs.len]
     out: mutable dstr = []
     can Memory.Allocate, Abort.Panic:
-        trusted Unsafe.MutableGlobal:
+        can Unsafe.MutableGlobal:
             out <- clone[dstr](lhs_view)
             j: mutable usize = 0
             while j < rhs_view.len.usize():
                 out.push(rhs_view[j])
                 j <- j + 1
             out.push(0)
-    trusted Unsafe.PointerCast, Unsafe.UncheckedIndex:
+    can Unsafe.PointerCast, Unsafe.UncheckedIndex:
         return (&out[0]).cast[static u8&]
 
 def Linker_PathJoin(lhs: cstr, rhs: cstr) -> static u8&:
@@ -857,6 +867,7 @@ def _fallback_find_index(slot_va: u64) -> s32:
         return -1
     i: mutable u32 = 0
     while i < g_fallback_slot_count and i < FALLBACK_SLOT_CAP:
+        decreases FALLBACK_SLOT_CAP - i
         if g_fallback_slot_addrs[i.usize()] == slot_va:
             return i.s32()
         i <- i + 1
@@ -1242,6 +1253,7 @@ def Linker_NativeHleBoundaryThunkEnabled() -> bool:
 def Linker_FindNativeHleBoundaryThunkBase(address: u64) -> u64:
     i: mutable usize = 0
     while i < linker_native_hle_thunk_count and i < LINKER_NATIVE_HLE_THUNK_CAP:
+        decreases LINKER_NATIVE_HLE_THUNK_CAP - i
         base: u64 = linker_native_hle_thunk_addrs[i]
         if address >= base and address < base + 4096:
             return base
@@ -1251,6 +1263,7 @@ def Linker_FindNativeHleBoundaryThunkBase(address: u64) -> u64:
 def Linker_FindNativeHleBoundaryThunkTarget(address: u64) -> u64:
     i: mutable usize = 0
     while i < linker_native_hle_thunk_count and i < LINKER_NATIVE_HLE_THUNK_CAP:
+        decreases LINKER_NATIVE_HLE_THUNK_CAP - i
         base: u64 = linker_native_hle_thunk_addrs[i]
         if address >= base and address < base + 4096:
             return linker_native_hle_thunk_targets[i]
@@ -1456,9 +1469,10 @@ def Linker_ModuleRelocationBit(module: Module&, bit_index: usize) -> bool:
 def Linker_EnsureModuleRelocationBit(module: mutable Module&, bit_index: usize) -> void:
     byte_index: usize = bit_index / 8
     can Memory.Allocate:
-        trusted Unsafe.MutableGlobal:
+        can Unsafe.MutableGlobal:
             in perm:
                 while module.applied_relocation_bits.count <= byte_index:
+                    decreases byte_index - module.applied_relocation_bits.count
                     module.applied_relocation_bits.push(0)
 
 def Linker_SetModuleRelocationBit(module: mutable Module&, bit_index: usize) -> void can[Memory.Allocate]:
@@ -1501,12 +1515,31 @@ def Linker_CreateNativeHleBoundaryThunk(target: u64, symbol_name: static u8&?) -
     sym_ptr: u64 = Linker_SymbolNamePtr(symbol_name)
     cache_index: mutable usize = 0
     while cache_index < linker_native_hle_thunk_count and cache_index < LINKER_NATIVE_HLE_THUNK_CAP:
+        decreases LINKER_NATIVE_HLE_THUNK_CAP - cache_index
         if linker_native_hle_thunk_targets[cache_index] == target and linker_native_hle_thunk_symbol_ptrs[cache_index] == sym_ptr:
             return linker_native_hle_thunk_addrs[cache_index]
         cache_index <- cache_index + 1
     static if PLATFORM_APPLE and ARCH_X86_64:
         host_selector: HostFsSelector = TLS_CaptureHostFsSelector()
-        full: mutable u8[174] = zeroed
+        # gap-3 (UPDATE 9): prefer the live host %gs selector captured at runtime over the
+        # hardcoded 0x6F. The thunk is built on a host thread (module init, before any guest
+        # %gs swap), so %gs still holds the host selector here. Only override when the
+        # captured value is non-zero, so a future platform that returns 0 falls back safely.
+        if linker_restore_host_gs:
+            captured_gs: u16 = TLS_CaptureHostGsSelector()
+            if captured_gs != 0:
+                linker_host_gs_selector <- captured_gs
+        # gap-3 (UPDATE 8): optionally also force the host %gs selector before the HLE
+        # body runs, so a host malloc/CRT reached from an HLE reads host pthread TLS
+        # (%gs:0x68) instead of a guest/clobbered base. 8 extra bytes:
+        #   movw $host_gs_selector, %r10w ; movw %r10w, %gs
+        # inserted right after the %fs restore, before `movabs $target,%r11`. The guest
+        # never uses %gs, so no guest-%gs save/restore is needed. When the flag is off
+        # the emitted thunk is byte-identical to the original 174-byte layout.
+        # movw $imm16,%r10w (66 41 BA + imm16 = 5 bytes) + movw %r10w,%gs (66 41 8E EA = 4) = 9
+        gs_extra: u64 = 9 if linker_restore_host_gs else 0
+        thunk_size: u64 = 174 + gs_extra
+        full: mutable u8[183] = zeroed
         # Capture the guest return address before touching the thunk stack.
         # At thunk entry, (%rsp) is the return PC pushed by the guest call.
         # movq (%rsp), %r11
@@ -1593,45 +1626,57 @@ def Linker_CreateNativeHleBoundaryThunk(target: u64, symbol_name: static u8&?) -
         full[133] <- 0x41
         full[134] <- 0x8E
         full[135] <- 0xE2
+        # gap-3 (UPDATE 8): optional host-%gs restore. movw $sel,%r10w ; movw %r10w,%gs.
+        # 0x8E /r with ModRM.reg=5 selects %gs (vs 0xE2 = %fs which is reg=4).
+        if linker_restore_host_gs:
+            full[136] <- 0x66
+            full[137] <- 0x41
+            full[138] <- 0xBA
+            Linker_WriteU16LE((&full[0]).cast[mutable u8&], 139, linker_host_gs_selector)
+            full[141] <- 0x66
+            full[142] <- 0x41
+            full[143] <- 0x8E
+            full[144] <- 0xEA
+        t: usize = (136 + gs_extra).usize()
         # movabs $target, %r11; call *%r11
-        full[136] <- 0x49
-        full[137] <- 0xBB
-        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 138, target)
-        full[146] <- 0x41
-        full[147] <- 0xFF
-        full[148] <- 0xD3
+        full[t] <- 0x49
+        full[t + 1] <- 0xBB
+        Linker_WriteU64LE((&full[0]).cast[mutable u8&], (t + 2).u64(), target)
+        full[t + 10] <- 0x41
+        full[t + 11] <- 0xFF
+        full[t + 12] <- 0xD3
         # Restore the original guest return slot before returning. Host HLE
         # bodies run on the guest stack; preserving the call continuation here
         # prevents host prologues/epilogues from accidentally skipping guest code.
-        full[149] <- 0x49
-        full[150] <- 0xBB
-        Linker_WriteU64LE((&full[0]).cast[mutable u8&], 151, (&ge_runtime_hle_guest_return_addr).cast[void&].uintptr().u64())
-        full[159] <- 0x4D
-        full[160] <- 0x8B
-        full[161] <- 0x1B
-        full[162] <- 0x4C
-        full[163] <- 0x89
-        full[164] <- 0x5C
-        full[165] <- 0x24
-        full[166] <- 0x08
+        full[t + 13] <- 0x49
+        full[t + 14] <- 0xBB
+        Linker_WriteU64LE((&full[0]).cast[mutable u8&], (t + 15).u64(), (&ge_runtime_hle_guest_return_addr).cast[void&].uintptr().u64())
+        full[t + 23] <- 0x4D
+        full[t + 24] <- 0x8B
+        full[t + 25] <- 0x1B
+        full[t + 26] <- 0x4C
+        full[t + 27] <- 0x89
+        full[t + 28] <- 0x5C
+        full[t + 29] <- 0x24
+        full[t + 30] <- 0x08
         # pop saved selector into %r10; movw %r10w, %fs; ret
-        full[167] <- 0x41
-        full[168] <- 0x5A
-        full[169] <- 0x66
-        full[170] <- 0x41
-        full[171] <- 0x8E
-        full[172] <- 0xE2
-        full[173] <- 0xC3
+        full[t + 31] <- 0x41
+        full[t + 32] <- 0x5A
+        full[t + 33] <- 0x66
+        full[t + 34] <- 0x41
+        full[t + 35] <- 0x8E
+        full[t + 36] <- 0xE2
+        full[t + 37] <- 0xC3
         thunk: VAddr = GuestExec_AllocateRegion(4096, 5)
         if thunk == 0.uintptr():
             return target
-        trusted Unsafe.MachineCodeBuilder:
-            if not GuestExec_WriteBytes(thunk, (&full[0]).cast[void&], 174):
+        can Unsafe.MachineCodeBuilder:
+            if not GuestExec_WriteBytes(thunk, (&full[0]).cast[void&], thunk_size):
                 return target
-        trusted Unsafe.ExecutableCodePublish:
-            if not GuestExec_PublishExecutableCode(thunk, 174):
+        can Unsafe.ExecutableCodePublish:
+            if not GuestExec_PublishExecutableCode(thunk, thunk_size):
                 return target
-        GuestExec_RecordHleBoundaryThunkContract(thunk, target.uintptr(), 174, host_selector)
+        GuestExec_RecordHleBoundaryThunkContract(thunk, target.uintptr(), thunk_size, host_selector)
         # Wrap the real thunk in a recorder prefix that logs the symbol-name pointer
         # of this call into linker_hle_call_ring, then jmps through. The GOT ends up
         # pointing at the prefix; the prefix preserves %rsp and all SysV arg regs
@@ -1776,10 +1821,10 @@ def Linker_CreateHleRecorderPrefix(real_thunk: u64, sym_ptr: u64, target: u64) -
         prefix: VAddr = GuestExec_AllocateRegion(4096, 5)
         if prefix == 0.uintptr():
             return 0
-        trusted Unsafe.MachineCodeBuilder:
+        can Unsafe.MachineCodeBuilder:
             if not GuestExec_WriteBytes(prefix, (&stub[0]).cast[void&], 159):
                 return 0
-        trusted Unsafe.ExecutableCodePublish:
+        can Unsafe.ExecutableCodePublish:
             if not GuestExec_PublishExecutableCode(prefix, 159):
                 return 0
         return prefix.u64()
@@ -2150,7 +2195,7 @@ def Linker_TlsGetAddr(self: Linker&, module_index: u64, offset: u64) -> GuestVAd
     dtv_base: uintptr = !tcb.tcb_dtv
     linker_tls_last_dtv_base <- dtv_base
     if dtv_base != 0.uintptr():
-        trusted Unsafe.PointerCast:
+        can Unsafe.PointerCast:
             dtv: mutable DtvEntry& = dtv_base.cast[mutable DtvEntry&]
             num_dtvs: usize = dtv[1].counter
             if module_index + 1 < (num_dtvs.u64() + 2):
@@ -2209,7 +2254,7 @@ def Linker_AllocateTlsForThread(self: mutable Linker&, is_primary: bool) -> uint
         TLS_SetPrimaryTcbBase((&fallback).cast[mutable Tcb&].cast[uintptr].cast[SegmentSelfPointer])
         return (&fallback).cast[mutable Tcb&].cast[uintptr]
     base: uintptr = raw.cast[uintptr]
-    trusted Unsafe.PointerCast:
+    can Unsafe.PointerCast:
         bytes: mutable u8& = raw.cast[mutable u8&]
         i: mutable usize = 0
         while i < total_tls_size:
@@ -2512,6 +2557,8 @@ def Linker_Execute(self: mutable Linker&, args: darray[static u8&]) -> s32 can[U
     # the libc heap bootstrap (GetProcParam / RtldSetApplicationHeapAPI / DirectMemory)
     # dispatches before the eboot entry. Opt-in while the guarded-context host-struct
     # corruption (see docs) is resolved; default keeps the original preload-start.
+    if getenv("ELISA_RESTORE_HOST_GS".cast[u8&]) != null:
+        linker_restore_host_gs <- true
     if getenv("ELISA_DEFER_PRX_INIT".cast[u8&]) != null:
         linker_defer_dependency_start <- true
         linker_deferred_init_count <- 0
@@ -2572,6 +2619,7 @@ def Linker_Execute(self: mutable Linker&, args: darray[static u8&]) -> s32 can[U
         GuestExec_ClearEntryArgs()
         arg_index: mutable usize = 0
         while arg_index < args.count and arg_index < 33:
+            decreases 33 - arg_index
             GuestExec_SetEntryArg(arg_index, args[arg_index])
             arg_index <- arg_index + 1
         if args.count > 0:

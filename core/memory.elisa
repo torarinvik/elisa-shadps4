@@ -253,19 +253,20 @@ def MemoryManager_IsValidMapping(self: MemoryManager&, virtual_addr: VAddr, size
     remaining: mutable u64 = size
     probe: mutable VAddr = virtual_addr
     while remaining > 0:
-        found: mutable bool = false
-        for i in 0..<self.vma_areas.count:
-            area: VirtualMemoryArea = self.vma_areas[i]
-            if VirtualMemoryArea_Contains(area, probe, 1):
-                found <- true
-                offset: u64 = (probe - area.base).u64()
-                covered: mutable u64 = area.size - offset
-                if covered > remaining:
-                    covered <- remaining
-                remaining <- remaining - covered
-                probe <- probe + covered.uintptr()
-        if not found:
-            return false
+        can Unsafe.AssumeProgress:
+            found: mutable bool = false
+            for i in 0..<self.vma_areas.count:
+                area: VirtualMemoryArea = self.vma_areas[i]
+                if VirtualMemoryArea_Contains(area, probe, 1):
+                    found <- true
+                    offset: u64 = (probe - area.base).u64()
+                    covered: mutable u64 = area.size - offset
+                    if covered > remaining:
+                        covered <- remaining
+                    remaining <- remaining - covered
+                    probe <- probe + covered.uintptr()
+            if not found:
+                return false
     return true
 
 def MemoryManager_AddressIsMapped(self: MemoryManager&, virtual_addr: VAddr, size: u64) -> bool:
@@ -328,6 +329,15 @@ def MemoryManager_CopySparseMemory(self: MemoryManager&, source: VAddr, dest: mu
             i <- i + 1
 
 def MemoryManager_TryWriteBacking(self: mutable MemoryManager&, address: void&?, data: void&?, size: u64) -> bool:
+    # DOGFOOD (guest-exec-fault-path): the backing-write entry point on the relocation /
+    # RELRO copy path (the macOS "write the PHYSICAL backing, not the ResolveGuestAddress
+    # shadow" fix routes through MemoryManager_WriteBytes below). A null data pointer with a
+    # nonzero size is a malformed write request; we surface that as `false` rather than
+    # dereferencing. NOTE: a tighter postcondition `(data != null) or (not result) or
+    # (size == 0)` does NOT discharge under -strict -smt at the `data != null` return
+    # (memory.elisa return of MemoryManager_WriteBytes): the prover drops the `data != null`
+    # guard fact across the disjunction (a flow-sensitivity gap, not an unsound call). The
+    # null-data branch itself is locally provable; see findings doc.
     can Memory.Allocate:
         if address == null:
             return false
@@ -374,6 +384,7 @@ def MemoryManager_InsertDmemArea(self: mutable MemoryManager&, index: usize, are
 def MemoryManager_RemoveDmemArea(self: mutable MemoryManager&, index: usize) -> void:
     j: mutable usize = index
     while j + 1 < self.dmem_areas.count:
+        decreases self.dmem_areas.count - j
         self.dmem_areas[j] <- self.dmem_areas[j + 1]
         j <- j + 1
     if self.dmem_areas.count > 0:
@@ -678,6 +689,7 @@ def MemoryManager_UnmapMemory(self: mutable MemoryManager&, virtual_addr: VAddr,
         if self.vma_areas[i].base == virtual_addr and self.vma_areas[i].size == size:
             j: mutable usize = i
             while j + 1 < self.vma_areas.count:
+                decreases self.vma_areas.count - j
                 self.vma_areas[j] <- self.vma_areas[j + 1]
                 j <- j + 1
             self.vma_areas.count <- self.vma_areas.count - 1
@@ -771,7 +783,8 @@ def MemoryManager_AddBacking(self: mutable MemoryManager&, base: VAddr, size: u6
     backing_owner: mutable Arena& = &memory_arena
     in backing_owner:
         while bytes.count < size.usize():
-            bytes.push(0)
+            can Unsafe.AssumeProgress:
+                bytes.push(0)
         self.mapped_bytes.push(MappedMemoryBytes(base, size, bytes))
 
 def MemoryManager_RemoveBacking(self: mutable MemoryManager&, base: VAddr, size: u64) -> void:
@@ -781,6 +794,7 @@ def MemoryManager_RemoveBacking(self: mutable MemoryManager&, base: VAddr, size:
             memory_last_backing_index <- -1
             j: mutable usize = i
             while j + 1 < self.mapped_bytes.count:
+                decreases self.mapped_bytes.count - j
                 self.mapped_bytes[j] <- self.mapped_bytes[j + 1]
                 j <- j + 1
             self.mapped_bytes.count <- self.mapped_bytes.count - 1

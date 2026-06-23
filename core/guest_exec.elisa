@@ -59,10 +59,10 @@ def ge_host_native_x64_runnable() -> s32:
     if apple_silicon_hw == 1 and translated == 0:
         # Apple Silicon hardware, running natively (not under Rosetta): this build is
         # the arm64 interpreter masquerading as an x86_64 target — guest exec traps.
-        trusted Global:
+        can Global:
             ge_native_x64_runnable_cache <- 0
         return 0
-    trusted Global:
+    can Global:
         ge_native_x64_runnable_cache <- 1
     return 1
 
@@ -164,6 +164,7 @@ def ge_spawn_x64_subprocess(path: u8&?, argv: static u8&?&?) -> s32:
         ua: static u8&?& = argv.cast[static u8&?&]
         ui: mutable usize = 1
         while ui < 60:
+            decreases 60 - ui
             entry: static u8&? = ua[ui]
             if entry == null:
                 ui <- 60
@@ -525,6 +526,16 @@ def ge_flush_instruction_cache(address: uintptr, size: u64) -> void:
 
 @reentrant_safe
 def ge_region_contains(base: uintptr, rsize: u64, address: uintptr, size: u64) -> bool:
+    # DOGFOOD (guest-exec-fault-path): the published-exec containment law that gates the
+    # entry jump (ge_check_entry_published -> ge_is_published_exec -> here). The two facts
+    # the entry boundary relies on are the no-wrap of `base + rsize` and that a contained
+    # `[address, address+size)` stays inside the window. The subtraction `rsize - offset`
+    # only happens after `offset <= rsize` is established, so it never underflows; this is
+    # the same no-underflow shape as MemoryManager_FindBackingIndex and is what makes the
+    # publish-window check provably safe rather than a runtime-only guard.
+    #   result ==> address >= base                  (offset is well-defined)
+    #   result ==> size <= rsize - offset, offset <= rsize  (no over-read past window end)
+    ensure (not result) or (address.u64() >= base.u64())
     if base == 0.uintptr() or rsize == 0:
         return false
     if address.u64() < base.u64():
@@ -538,6 +549,7 @@ def ge_find_native_region(address: uintptr, size: u64) -> s32:
     best_size: mutable u64 = 0xFFFFFFFFFFFFFFFF
     i: mutable u32 = 0
     while i < ge_native_region_count and i < GE_NATIVE_REGION_CAP:
+        decreases GE_NATIVE_REGION_CAP - i
         r: GeNativeRegion = ge_native_regions[i.usize()]
         if r.active != 0 and ge_region_contains(r.base, r.size, address, size):
             if r.size < best_size:
@@ -566,6 +578,7 @@ def ge_record_native_region(base: uintptr, size: u64, prot: u32) -> void:
 def ge_forget_native_region(base: uintptr, size: u64) -> void:
     i: mutable u32 = 0
     while i < ge_native_region_count and i < GE_NATIVE_REGION_CAP:
+        decreases GE_NATIVE_REGION_CAP - i
         cur: GeNativeRegion = ge_native_regions[i.usize()]
         if cur.active != 0 and cur.base == base and cur.size == size:
             ge_native_regions[i.usize()] <- GeNativeRegion(base, size, cur.prot, 0)
@@ -614,6 +627,7 @@ def ge_dump_native_regions(lookup_addr: uintptr, lookup_size: u64) -> void:
     lookup_u: u64 = lookup_addr.u64()
     i: mutable u32 = 0
     while i < ge_native_region_count and i < GE_NATIVE_REGION_CAP:
+        decreases GE_NATIVE_REGION_CAP - i
         r: GeNativeRegion = ge_native_regions[i.usize()]
         if r.active != 0:
             active <- active + 1
@@ -641,6 +655,7 @@ def ge_dump_native_regions(lookup_addr: uintptr, lookup_size: u64) -> void:
     # Bounded forward sample for general context, skipping any already emitted above.
     i <- 0
     while i < ge_native_region_count and i < GE_NATIVE_REGION_CAP:
+        decreases GE_NATIVE_REGION_CAP - i
         r: GeNativeRegion = ge_native_regions[i.usize()]
         if r.active != 0 and i.s32() != found and i.s32() != below_idx and i.s32() != above_idx:
             if emitted >= GE_NATIVE_REGION_DUMP_CAP:
@@ -659,6 +674,7 @@ def ge_find_hle_thunk_target_from_stack_value(value: uintptr) -> uintptr:
         return 0.uintptr()
     i: mutable u64 = 0
     while i < ge_hle_thunk_contract_count and i < GE_HLE_THUNK_CONTRACT_CAP:
+        decreases GE_HLE_THUNK_CONTRACT_CAP - i
         base: uintptr = ge_hle_thunk_contract_addrs[i.usize()]
         size: mutable u64 = ge_hle_thunk_contract_sizes[i.usize()]
         if size == 0:
@@ -711,6 +727,7 @@ def ge_record_published_exec(address: PublishedExecutableAddr, size: u64) -> voi
         return
     i: mutable u32 = 0
     while i < ge_published_exec_count and i < 2048:
+        decreases 2048 - i
         if ge_published_exec_bases[i.usize()] == address:
             ge_published_exec_sizes[i.usize()] <- size
             return
@@ -725,6 +742,7 @@ def ge_is_published_exec(address: uintptr, size: u64) -> bool:
         return false
     i: mutable u32 = 0
     while i < ge_published_exec_count and i < 2048:
+        decreases 2048 - i
         base: uintptr = !ge_published_exec_bases[i.usize()]
         rsize: u64 = ge_published_exec_sizes[i.usize()]
         if ge_region_contains(base, rsize, address, size):
@@ -1201,6 +1219,7 @@ def ge_make_writable_cached(address: uintptr, size: u64) -> s32:
     end: u64 = (address.u64() + size + ps64 - 1) & mask
     page: mutable u64 = start
     while page < end:
+        decreases end - page
         if not ge_page_cached_writable(page.uintptr()):
             static if PLATFORM_WINDOWS:
                 return -1
@@ -1368,6 +1387,7 @@ def c_GuestExec_NativeRegionCount() -> u32:
     n: mutable u32 = 0
     i: mutable u32 = 0
     while i < ge_native_region_count and i < GE_NATIVE_REGION_CAP:
+        decreases GE_NATIVE_REGION_CAP - i
         if ge_native_regions[i.usize()].active != 0:
             n <- n + 1
         i <- i + 1
@@ -2588,6 +2608,7 @@ def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
             bt_page_end: u64 = ((!ge_last_guest_sp).u64() | 0xfff) + 1
             bt_i: mutable u64 = 0
             while bt_i < 32:
+                decreases 32 - bt_i
                 bt_addr: uintptr = !ge_last_guest_sp + (bt_i * 8).uintptr()
                 if bt_addr.u64() + 8 > bt_page_end:
                     bt_i <- 32
@@ -2717,7 +2738,8 @@ def ge_ensure_fork_report() -> s32:
 def ge_default_exit(code: int) -> void:
     _ = code
     while true:
-        _ = ge_pause()
+        can Unsafe.NonProgress:
+            _ = ge_pause()
 
 @c_abi(c)
 def ge_guarded_exit(code: int) -> void:
@@ -3215,7 +3237,8 @@ def ge_synthetic_add(arg0: u64, arg1: u64) -> u64:
 def ge_synthetic_spin(arg0: u64, arg1: u64) -> u64:
     sink: mutable u64 = arg0 ^ arg1
     while true:
-        sink <- sink + 1
+        can Unsafe.NonProgress:
+            sink <- sink + 1
     return sink
 
 @c_abi(c)
@@ -3669,96 +3692,97 @@ def ge_run_main_entry_guarded(params: mutable GuestEntryParams&, timeout_ms: u32
         waited_ms: mutable u32 = 0
         status: mutable int = 0
         while true:
-            result: int = ge_waitpid(child, (&status).cast[mutable int&], GE_WNOHANG)
-            if result == child:
-                ge_set_native_phase(GE_PHASE_PARENT_WAITPID_CHILD)
-                ge_last_errno <- -104
-                if ge_wif_signaled(status):
-                    ge_set_native_phase(GE_PHASE_PARENT_WIFSIGNALED)
-                    sig: int = ge_wtermsig(status)
-                    fr: ElisaGuestExecForkReport&? = ge_fork_report
-                    if fr != null:
-                        if fr.status == 0:
-                            fr.status <- (0 - sig).s32()
-                        if fr.signal == 0:
-                            fr.signal <- sig.s32()
-                    ge_absorb_fork_report()
-                    if ge_last_status == 0:
-                        ge_last_status <- (0 - sig).s32()
-                    if ge_last_signal == 0:
-                        ge_last_signal <- sig.s32()
-                    return ge_last_status
-                if ge_wif_exited(status):
-                    ge_set_native_phase(GE_PHASE_PARENT_WIFEXITED)
-                    code: int = ge_wexitstatus(status)
-                    fr2: ElisaGuestExecForkReport&? = ge_fork_report
-                    if fr2 != null:
-                        if fr2.status == 0:
-                            fr2.status <- (-11 if code == 0 else ((0 - (code - 128)) if code >= 128 else (0 - code))).s32()
-                        if code >= 128 and fr2.signal == 0:
-                            fr2.signal <- (code - 128).s32()
-                    ge_absorb_fork_report()
-                    if ge_last_status == 0:
-                        ge_last_status <- (-11 if code == 0 else (0 - code)).s32()
-                    return ge_last_status
-                if ge_wif_stopped(status):
+            can Unsafe.AssumeProgress:
+                result: int = ge_waitpid(child, (&status).cast[mutable int&], GE_WNOHANG)
+                if result == child:
+                    ge_set_native_phase(GE_PHASE_PARENT_WAITPID_CHILD)
+                    ge_last_errno <- -104
+                    if ge_wif_signaled(status):
+                        ge_set_native_phase(GE_PHASE_PARENT_WIFSIGNALED)
+                        sig: int = ge_wtermsig(status)
+                        fr: ElisaGuestExecForkReport&? = ge_fork_report
+                        if fr != null:
+                            if fr.status == 0:
+                                fr.status <- (0 - sig).s32()
+                            if fr.signal == 0:
+                                fr.signal <- sig.s32()
+                        ge_absorb_fork_report()
+                        if ge_last_status == 0:
+                            ge_last_status <- (0 - sig).s32()
+                        if ge_last_signal == 0:
+                            ge_last_signal <- sig.s32()
+                        return ge_last_status
+                    if ge_wif_exited(status):
+                        ge_set_native_phase(GE_PHASE_PARENT_WIFEXITED)
+                        code: int = ge_wexitstatus(status)
+                        fr2: ElisaGuestExecForkReport&? = ge_fork_report
+                        if fr2 != null:
+                            if fr2.status == 0:
+                                fr2.status <- (-11 if code == 0 else ((0 - (code - 128)) if code >= 128 else (0 - code))).s32()
+                            if code >= 128 and fr2.signal == 0:
+                                fr2.signal <- (code - 128).s32()
+                        ge_absorb_fork_report()
+                        if ge_last_status == 0:
+                            ge_last_status <- (-11 if code == 0 else (0 - code)).s32()
+                        return ge_last_status
+                    if ge_wif_stopped(status):
+                        ge_set_native_phase(GE_PHASE_PARENT_WAIT_STATUS_OTHER)
+                        continue
                     ge_set_native_phase(GE_PHASE_PARENT_WAIT_STATUS_OTHER)
-                    continue
-                ge_set_native_phase(GE_PHASE_PARENT_WAIT_STATUS_OTHER)
-                ge_last_errno <- status.s32()
-                ge_absorb_fork_report()
-                if ge_last_status == 0:
-                    ge_last_status <- -1
-                return ge_last_status
-            if result < 0:
-                ge_set_native_phase(GE_PHASE_PARENT_WAITPID_ERROR)
-                ge_last_errno <- -105
-                ge_absorb_fork_report()
-                if ge_last_status == 0:
-                    ge_last_status <- -1
-                return ge_last_status
-            if timeout_ms != 0 and waited_ms >= timeout_ms:
-                ge_set_native_phase(GE_PHASE_PARENT_TIMEOUT)
-                ge_timeout_fired <- 1
-                ge_last_status <- -3
-                ge_last_signal <- GE_SIG_ALRM.s32()
-                fr3: ElisaGuestExecForkReport&? = ge_fork_report
-                if fr3 != null:
-                    fr3.status <- -3
-                    fr3.signal <- GE_SIG_ALRM.s32()
-                    fr3.native_phase <- GE_PHASE_PARENT_TIMEOUT
-                # Ask the child to take a catchable signal first. Its handler
-                # snapshots RIP/RSP/registers into the shared ForkReport before
-                # the parent falls back to SIGKILL, turning timeout hangs into a
-                # concrete guest PC instead of a blind kill.
-                _ = ge_kill(child, GE_SIG_TRAP)
-                snapshot_wait_ms: mutable u32 = 0
-                while snapshot_wait_ms < 50:
-                    snapshot_result: int = ge_waitpid(child, (&status).cast[mutable int&], GE_WNOHANG)
-                    if snapshot_result == child or snapshot_result < 0:
-                        break
-                    _ = ge_usleep(1000)
-                    snapshot_wait_ms <- snapshot_wait_ms + 1
-                ge_absorb_fork_report()
-                ge_last_status <- -3
-                if ge_last_signal == 0:
+                    ge_last_errno <- status.s32()
+                    ge_absorb_fork_report()
+                    if ge_last_status == 0:
+                        ge_last_status <- -1
+                    return ge_last_status
+                if result < 0:
+                    ge_set_native_phase(GE_PHASE_PARENT_WAITPID_ERROR)
+                    ge_last_errno <- -105
+                    ge_absorb_fork_report()
+                    if ge_last_status == 0:
+                        ge_last_status <- -1
+                    return ge_last_status
+                if timeout_ms != 0 and waited_ms >= timeout_ms:
+                    ge_set_native_phase(GE_PHASE_PARENT_TIMEOUT)
+                    ge_timeout_fired <- 1
+                    ge_last_status <- -3
                     ge_last_signal <- GE_SIG_ALRM.s32()
-                if snapshot_wait_ms >= 50:
-                    _ = ge_kill(child, 9)
-                reap_wait_ms: mutable u32 = 0
-                while reap_wait_ms < 250:
-                    reap_result: int = ge_waitpid(child, (&status).cast[mutable int&], GE_WNOHANG)
-                    if reap_result == child or reap_result < 0:
-                        break
-                    _ = ge_usleep(1000)
-                    reap_wait_ms <- reap_wait_ms + 1
-                ge_absorb_fork_report()
-                ge_last_status <- -3
-                if ge_last_signal == 0:
-                    ge_last_signal <- GE_SIG_ALRM.s32()
-                return -3
-            _ = ge_usleep(1000)
-            waited_ms <- waited_ms + 1
+                    fr3: ElisaGuestExecForkReport&? = ge_fork_report
+                    if fr3 != null:
+                        fr3.status <- -3
+                        fr3.signal <- GE_SIG_ALRM.s32()
+                        fr3.native_phase <- GE_PHASE_PARENT_TIMEOUT
+                    # Ask the child to take a catchable signal first. Its handler
+                    # snapshots RIP/RSP/registers into the shared ForkReport before
+                    # the parent falls back to SIGKILL, turning timeout hangs into a
+                    # concrete guest PC instead of a blind kill.
+                    _ = ge_kill(child, GE_SIG_TRAP)
+                    snapshot_wait_ms: mutable u32 = 0
+                    while snapshot_wait_ms < 50:
+                        snapshot_result: int = ge_waitpid(child, (&status).cast[mutable int&], GE_WNOHANG)
+                        if snapshot_result == child or snapshot_result < 0:
+                            break
+                        _ = ge_usleep(1000)
+                        snapshot_wait_ms <- snapshot_wait_ms + 1
+                    ge_absorb_fork_report()
+                    ge_last_status <- -3
+                    if ge_last_signal == 0:
+                        ge_last_signal <- GE_SIG_ALRM.s32()
+                    if snapshot_wait_ms >= 50:
+                        _ = ge_kill(child, 9)
+                    reap_wait_ms: mutable u32 = 0
+                    while reap_wait_ms < 250:
+                        reap_result: int = ge_waitpid(child, (&status).cast[mutable int&], GE_WNOHANG)
+                        if reap_result == child or reap_result < 0:
+                            break
+                        _ = ge_usleep(1000)
+                        reap_wait_ms <- reap_wait_ms + 1
+                    ge_absorb_fork_report()
+                    ge_last_status <- -3
+                    if ge_last_signal == 0:
+                        ge_last_signal <- GE_SIG_ALRM.s32()
+                    return -3
+                _ = ge_usleep(1000)
+                waited_ms <- waited_ms + 1
         return ge_last_status
     static else:
         _ = timeout_ms
@@ -6381,6 +6405,7 @@ def GuestExec_DumpHleCallRing() -> void can[Console.Format, Unsafe.SegmentMutati
         GuestExec_DumpHleCallRingLine(line[0], 256, tp)
     dbgi: mutable usize = 0
     while dbgi < Linker_CaptureDbgCalls().usize() and dbgi < 16:
+        decreases 16 - dbgi
         dl: int = snprintf(line[0], 256, "CUSA07399_ARTIFACT init_dbg idx=%llu base=0x%llx preinit_size=0x%llx init_size=0x%llx preinit_va=0x%llx", dbgi.u64(), Linker_CaptureDbgBase(dbgi.u64()), Linker_CaptureDbgVa(dbgi.u64()), Linker_CaptureDbgSize(dbgi.u64()), Linker_CaptureDbgEntry0(dbgi.u64())) can Console.Format
         can Unsafe.SegmentMutation, Segment.Host:
             GuestExec_DumpHleCallRingLine(line[0], 256, dl)
@@ -6394,6 +6419,7 @@ def GuestExec_DumpHleCallRing() -> void can[Console.Format, Unsafe.SegmentMutati
         GuestExec_DumpHleCallRingLine(line[0], 256, fbw)
     fi: mutable u32 = 0
     while fi < fb_count and fi < 200:
+        decreases 200 - fi
         fbl: int = snprintf(line[0], 256, "CUSA07399_ARTIFACT fallback_slot idx=%u va=0x%llx module=%s symbol=%s rel_type=%u", fi, Linker_FallbackSlotVaAt(fi), Linker_FallbackSlotModuleAt(fi), Linker_FallbackSlotSymbolAt(fi), Linker_FallbackSlotRelTypeAt(fi)) can Console.Format
         can Unsafe.SegmentMutation, Segment.Host:
             GuestExec_DumpHleCallRingLine(line[0], 256, fbl)

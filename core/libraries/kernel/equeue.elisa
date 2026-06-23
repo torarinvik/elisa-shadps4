@@ -128,7 +128,7 @@ def equeue_add_or_update_event(handle: int, incoming: OrbisKernelEvent) -> bool:
         # Parity with C++: duplicate add updates user data and timer interval.
         # The kernel holds the guest's opaque udata pointer (parity with C++ `void*`); its lifetime
         # is the guest's, not provable here.
-        trusted Unsafe.StaleRef:
+        can Unsafe.StaleRef:
             g_equeue_events[idx].event.udata <- incoming.udata
         if incoming.filter.int() == EQUEUE_FILTER_TIMER:
             g_equeue_events[idx].timer_period_us <- incoming.data * 1000
@@ -184,7 +184,7 @@ def equeue_trigger_event(handle: int, ident: u64, filter: int, trigger_data: voi
             g_equeue_events[i].triggered <- true
             if filter == EQUEUE_FILTER_USER:
                 # Guest's opaque udata pointer held by the kernel; lifetime is the guest's.
-                trusted Unsafe.StaleRef:
+                can Unsafe.StaleRef:
                     g_equeue_events[i].event.udata <- trigger_data
             elif filter == EQUEUE_FILTER_TIMER or filter == EQUEUE_FILTER_HRTIMER:
                 g_equeue_events[i].event.data <- g_equeue_events[i].event.data + 1
@@ -207,6 +207,7 @@ def equeue_refresh_timers(handle: int) -> void:
             else:
                 # Catch up without accumulating drift.
                 while g_equeue_events[i].timer_deadline_us <= now_us and g_equeue_events[i].timer_period_us > 0:
+                    decreases now_us - g_equeue_events[i].timer_deadline_us
                     g_equeue_events[i].timer_deadline_us <- g_equeue_events[i].timer_deadline_us + g_equeue_events[i].timer_period_us
         i <- i + 1
 
@@ -214,6 +215,7 @@ def equeue_collect_triggered(handle: int, out_events: mutable OrbisKernelEvent&,
     count: mutable int = 0
     i: mutable int = 0
     while i < EQUEUE_MAX_EVENTS and count < max_count:
+        decreases EQUEUE_MAX_EVENTS - i
         if g_equeue_events[i].used and g_equeue_events[i].queue_handle == handle and g_equeue_events[i].triggered:
             out_events[count.usize()] <- g_equeue_events[i].event
             count <- count + 1
@@ -245,7 +247,7 @@ def equeue_wait_for_events(handle: int, ev: mutable OrbisKernelEvent&, num: int,
             equeue_refresh_timers(handle)
             return equeue_collect_triggered(handle, ev, num)
 
-    trusted Unsafe.AssumeProgress:
+    can Unsafe.AssumeProgress:
         while true:
             equeue_refresh_timers(handle)
             count: int = equeue_collect_triggered(handle, ev, num)
@@ -334,7 +336,7 @@ def sceKernelCreateEqueue(eq: void&?, name: u8&?) -> int:
         return ORBIS_KERNEL_ERROR_EINVAL
 
     name_len: mutable int = 0
-    trusted Unsafe.AssumeProgress:
+    can Unsafe.AssumeProgress:
         while name[name_len.usize()] != 0:
             name_len <- name_len + 1
             if name_len > EQUEUE_MAX_NAME:
@@ -352,6 +354,7 @@ def sceKernelCreateEqueue(eq: void&?, name: u8&?) -> int:
     g_equeues[slot].handle <- handle
     i: mutable int = 0
     while i < EQUEUE_MAX_NAME - 1 and name[i.usize()] != 0:
+        decreases EQUEUE_MAX_NAME - 1 - i
         g_equeues[slot].name[i.usize()] <- name[i.usize()]
         i <- i + 1
     g_equeues[slot].name[i.usize()] <- 0
