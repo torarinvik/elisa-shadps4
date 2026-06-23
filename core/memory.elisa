@@ -817,6 +817,23 @@ def MemoryManager_FindBackingIndex(self: MemoryManager&, addr: VAddr, size: u64)
                 return i.s32()
     return -1
 
+# Validate a guest [addr, addr+width) access against a resolved backing buffer and
+# return the in-buffer byte offset, or -1 if the access would fall outside the buffer.
+# The bound is the ACTUAL backing length (entry.bytes.count), not the nominal entry.size:
+# the loops below index entry.bytes, and bytes.count is the only true buffer bound. On the
+# success path the two are equal (MemoryManager_AddBacking fills bytes to size), so this is
+# byte-identical to the unchecked path; only the previously-unchecked out-of-range case
+# (addr < base, or offset+width past the buffer) now refuses instead of writing OOB.
+def MemoryManager_BackingOffset(entry: MappedMemoryBytes, addr: VAddr, width: u64) -> s64:
+    if addr < entry.base:
+        return -1
+    offset: u64 = (addr - entry.base).u64()
+    if offset > entry.bytes.count.u64():
+        return -1
+    if width > (entry.bytes.count.u64() - offset):
+        return -1
+    return offset.s64()
+
 def MemoryManager_WriteU8(self: mutable MemoryManager&, addr: VAddr, value: u8) -> bool:
     can Memory.Allocate:
         index: s32 = MemoryManager_FindBackingIndex(self, addr, 1)
@@ -827,7 +844,10 @@ def MemoryManager_WriteU8(self: mutable MemoryManager&, addr: VAddr, value: u8) 
                 return false
             if not MemoryManager_RestoreNativeProtectionAfterWrite(self, addr, 1.u64()):
                 return false
-        offset: usize = (addr - self.mapped_bytes[index.usize()].base).usize()
+        soffset: s64 = MemoryManager_BackingOffset(self.mapped_bytes[index.usize()], addr, 1)
+        if soffset < 0:
+            return false
+        offset: usize = soffset.usize()
         self.mapped_bytes[index.usize()].bytes[offset] <- value
         return true
 
@@ -841,7 +861,10 @@ def MemoryManager_ReadU8(self: MemoryManager&, addr: VAddr) -> u8:
         # at addr; the region is mapped (backing-index check) so the read is in-bounds.
         if GuestExec_IsEnabled() and GuestExec_IsSupported():
             return (GuestExec_ReadNativeU64(addr).u64() & 0xff).u8()
-        offset: usize = (addr - self.mapped_bytes[index.usize()].base).usize()
+        soffset: s64 = MemoryManager_BackingOffset(self.mapped_bytes[index.usize()], addr, 1)
+        if soffset < 0:
+            return 0
+        offset: usize = soffset.usize()
         return self.mapped_bytes[index.usize()].bytes[offset]
 
 def MemoryManager_WriteBytes(self: mutable MemoryManager&, addr: VAddr, data: u8&, size: u64) -> bool:
@@ -854,7 +877,10 @@ def MemoryManager_WriteBytes(self: mutable MemoryManager&, addr: VAddr, data: u8
                 return false
             if not MemoryManager_RestoreNativeProtectionAfterWrite(self, addr, size):
                 return false
-        base_offset: usize = (addr - self.mapped_bytes[index.usize()].base).usize()
+        sbase: s64 = MemoryManager_BackingOffset(self.mapped_bytes[index.usize()], addr, size)
+        if sbase < 0:
+            return false
+        base_offset: usize = sbase.usize()
         for i in 0..<size.usize():
             self.mapped_bytes[index.usize()].bytes[base_offset + i] <- data[i]
         return true
@@ -869,7 +895,10 @@ def MemoryManager_WriteU64(self: mutable MemoryManager&, addr: VAddr, value: u64
                 return false
             if not MemoryManager_RestoreNativeProtectionAfterWrite(self, addr, 8.u64()):
                 return false
-        base_offset: usize = (addr - self.mapped_bytes[index.usize()].base).usize()
+        sbase: s64 = MemoryManager_BackingOffset(self.mapped_bytes[index.usize()], addr, 8)
+        if sbase < 0:
+            return false
+        base_offset: usize = sbase.usize()
         for i in 0..<8:
             self.mapped_bytes[index.usize()].bytes[base_offset + i] <- ((value >> (i.u64() * 8)) & 0xff).u8()
         return true
@@ -878,7 +907,10 @@ def MemoryManager_WriteU64BackingOnly(self: mutable MemoryManager&, addr: VAddr,
     index: s32 = MemoryManager_FindBackingIndex(self, addr, 8)
     if index < 0:
         return false
-    base_offset: usize = (addr - self.mapped_bytes[index.usize()].base).usize()
+    sbase: s64 = MemoryManager_BackingOffset(self.mapped_bytes[index.usize()], addr, 8)
+    if sbase < 0:
+        return false
+    base_offset: usize = sbase.usize()
     for i in 0..<8:
         self.mapped_bytes[index.usize()].bytes[base_offset + i] <- ((value >> (i.u64() * 8)) & 0xff).u8()
     return true
@@ -896,7 +928,10 @@ def MemoryManager_ReadU64(self: MemoryManager&, addr: VAddr) -> u64:
         # mapped, so the native read is in-bounds.
         if GuestExec_IsEnabled() and GuestExec_IsSupported():
             return GuestExec_ReadNativeU64(addr).u64()
-        base_offset: usize = (addr - self.mapped_bytes[index.usize()].base).usize()
+        sbase: s64 = MemoryManager_BackingOffset(self.mapped_bytes[index.usize()], addr, 8)
+        if sbase < 0:
+            return 0
+        base_offset: usize = sbase.usize()
         value: mutable u64 = 0
         for i in 0..<8:
             value <- value | (self.mapped_bytes[index.usize()].bytes[base_offset + i].u64() << (i.u64() * 8))
