@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Cross-platform compile-check for the emulator. Each OS runner's default target
+# selects that platform's `static if PLATFORM_*` branches, so the three runners
+# together verify the macOS / Linux / Windows code paths compile. We use
+# `-emit semantic` (typecheck only) so we are not blocked by the native-bridge
+# link step (the *Elisa_* FFI impls are resolved only at final exe link).
+jobs:
+  emulator-compile:
+    name: emulator compile / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Enable git long paths (Windows)
+        if: runner.os == 'Windows'
+        run: git config --global core.longpaths true
+
+      - name: Checkout emulator
+        uses: actions/checkout@v4
+        with:
+          path: emulator
+
+      - name: Checkout compiler (Elisa-core)
+        uses: actions/checkout@v4
+        with:
+          repository: torarinvik/Elisa-core
+          path: Elisa-core
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: Elisa-core/compiler/go.sum
+
+      # ---- LLVM / clang per platform (to build elisac) ----
+      - name: Install LLVM 19 + clang (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-19-dev clang-19
+          sudo ln -sf libLLVM.so /usr/lib/llvm-19/lib/libLLVM-C.so
+          sudo ln -sf /usr/bin/clang-19 /usr/local/bin/clang
+
+      - name: Install LLVM (macOS)
+        if: runner.os == 'macOS'
+        run: brew install llvm
+
+      - name: Install MinGW gcc + LLVM (Windows; MSYS2 preinstalled at C:\msys64)
+        if: runner.os == 'Windows'
+        run: |
+          C:/msys64/usr/bin/bash.exe -lc "pacman -Sy --noconfirm && pacman -S --noconfirm --needed mingw-w64-x86_64-gcc mingw-w64-x86_64-llvm"
+
+      - name: Install z3 4.16 (Linux / macOS)
+        if: runner.os != 'Windows'
+        run: |
+          python3 - <<'PY'
+          import urllib.request, json, zipfile, io, os, sys, platform
+          def get(u):
+              return urllib.request.urlopen(urllib.request.Request(u, headers={'User-Agent':'ci'})).read()
+          mach = platform.machine().lower()
+          def want(n):
+              n = n.lower()
+              if not n.endswith('.zip'):
+                  return False
+              if sys.platform.startswith('linux'):
+                  return 'x64-glibc' in n
+              if sys.platform == 'darwin':
+                  return 'osx' in n and (('arm64' in n) if mach in ('arm64', 'aarch64') else ('x64' in n))
+              return False
+          rel = json.loads(get('https://api.github.com/repos/Z3Prover/z3/releases/tags/z3-4.16.0'))
+          asset = next(a for a in rel['assets'] if want(a['name']))
+          z = zipfile.ZipFile(io.BytesIO(get(asset['browser_download_url'])))
+          member = [m for m in z.namelist() if m.endswith('bin/z3')][0]
+          dest = os.path.join(os.getcwd(), 'z3bin'); os.makedirs(dest, exist_ok=True)
+          out = os.path.join(dest, 'z3'); open(out, 'wb').write(z.read(member)); os.chmod(out, 0o755)
+          open(os.environ['GITHUB_PATH'], 'a').write(dest + '\n')
+          print('z3 asset:', asset['name'])
+          PY
+
+      - name: Build elisac (Linux / macOS)
+        if: runner.os != 'Windows'
+        run: |
+          cd Elisa-core/compiler
+          go build -o "$RUNNER_TEMP/elisac" ./src
+
+      - name: Build elisac (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:CGO_ENABLED = "1"
+          $env:CC = "C:\msys64\mingw64\bin\gcc.exe"
+          $env:PATH = "C:\msys64\mingw64\bin;$env:PATH"
+          Set-Location Elisa-core/compiler
+          go build -o "$env:RUNNER_TEMP\elisac.exe" ./src
+
+      # The emulator includes ../../compiler/runtime/... (file-relative from
+      # emulator/<dir>/file.elisa -> <workspace>/compiler/runtime/...).
+      - name: Provide compiler runtime for includes
+        run: |
+          mkdir -p compiler
+          cp -r Elisa-core/compiler/runtime compiler/runtime
+
+      - name: Compile-check emulator (Linux / macOS)
+        if: runner.os != 'Windows'
+        run: |
+          cd emulator
+          "$RUNNER_TEMP/elisac" -emit semantic elisa_tests/emulator_core_boot_smoke.elisa
+
+      - name: Compile-check emulator (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:PATH = "C:\msys64\mingw64\bin;$env:PATH"   # libLLVM-22.dll for elisac startup
+          Set-Location emulator
+          & "$env:RUNNER_TEMP\elisac.exe" -emit semantic elisa_tests/emulator_core_boot_smoke.elisa
