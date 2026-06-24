@@ -131,11 +131,9 @@ struct MemoryManager:
 # all outlive the calls that grow them, so they must NOT be grown inside a
 # transient local arena (which is freed on return, leaving the guest memory map
 # and GOT in use-after-free storage and making guest execution nondeterministic).
-global mutable memory_arena: Arena = zeroed
 global mutable memory_last_backing_index: s32 = -1
 
 def Memory_ResetArena() -> void:
-    memory_arena <- zeroed
     memory_last_backing_index <- -1
 
 global mutable memory_singleton: MemoryManager = MemoryManager(
@@ -366,14 +364,12 @@ def MemoryManager_SetupMemoryRegions(self: mutable MemoryManager&, flexible_size
         self.total_flexible_size <- flexible_size
     self.pool_budget <- self.total_flexible_size
     self.flexible_usage <- 0
-    owner: mutable Arena& = &memory_arena
-    in owner:
+    in perm:
         self.dmem_areas.count <- 0
         self.dmem_areas.push(PhysicalMemoryArea(0.uintptr(), self.total_direct_size, 0, PhysicalMemoryType_Free))
 
 def MemoryManager_InsertDmemArea(self: mutable MemoryManager&, index: usize, area: PhysicalMemoryArea) -> void:
-    owner: mutable Arena& = &memory_arena
-    in owner:
+    in perm:
         self.dmem_areas.push(area)
     j: mutable usize = self.dmem_areas.count - 1
     while j > index:
@@ -401,8 +397,7 @@ def MemoryManager_Allocate(self: mutable MemoryManager&, search_start: PAddr, se
     align: mutable u64 = alignment
     if align == 0:
         align <- 16 * 1024
-    owner: mutable Arena& = &memory_arena
-    in owner:
+    in perm:
         for i in 0..<self.dmem_areas.count:
             area: PhysicalMemoryArea = self.dmem_areas[i]
             if area.dma_type != PhysicalMemoryType_Free:
@@ -534,8 +529,7 @@ def MemoryManager_MarkDirectMapped(self: mutable MemoryManager&, phys_addr: PAdd
     mark_end: u64 = mark_start + size
     if mark_end <= mark_start:
         return false
-    owner: mutable Arena& = &memory_arena
-    in owner:
+    in perm:
         for i in 0..<self.dmem_areas.count:
             area: PhysicalMemoryArea = self.dmem_areas[i]
             area_start: u64 = area.base.u64()
@@ -612,8 +606,7 @@ def MemoryManager_MapCommit(self: mutable MemoryManager&, txn: MapTxn, vma_type:
     m: VAddr = txn.mapped
     sz: u64 = txn.size
     _ = move txn
-    map_owner: mutable Arena& = &memory_arena
-    in map_owner:
+    in perm:
         self.vma_areas.push(VirtualMemoryArea(m, sz, vma_type, effective_prot, name, 0, false, false))
     # AddBacking fills a MappedMemoryBytes buffer one byte at a time. For the guest's own
     # large runtime regions (libc heap / direct-memory pools, hundreds of MB to GBs) that
@@ -671,8 +664,7 @@ def MemoryManager_MapFileCommit(self: mutable MemoryManager&, txn: MapTxn, effec
     m: VAddr = txn.mapped
     sz: u64 = txn.size
     _ = move txn
-    file_owner: mutable Arena& = &memory_arena
-    in file_owner:
+    in perm:
         self.vma_areas.push(VirtualMemoryArea(m, sz, VMAType_File, effective_prot, "file", fd, false, false))
     MemoryManager_AddBacking((&self).cast[mutable MemoryManager&], m, sz)
 
@@ -779,9 +771,14 @@ def MemoryManager_InvalidateMemory(self: MemoryManager&, addr: VAddr, size: u64)
 def MemoryManager_AddBacking(self: mutable MemoryManager&, base: VAddr, size: u64) -> void:
     if size == 0:
         return
-    bytes: mutable darray[u8] = []
-    backing_owner: mutable Arena& = &memory_arena
-    in backing_owner:
+    # Program-lifetime backing in `perm`, allocated ONCE at full size: a single darray
+    # allocation never relocates (even under chained backing), so the header stored in
+    # mapped_bytes stays address-valid for the mapping's lifetime. The old byte-by-byte
+    # growth in memory_arena relocated the buffer on every doubling -- the dangling
+    # MappedMemoryBytes.bytes pointer that crashed the relocation write.
+    in perm:
+        bytes: mutable darray[u8] = []
+        _ = bytes.reserve(size.usize())
         while bytes.count < size.usize():
             can Unsafe.AssumeProgress:
                 bytes.push(0)
