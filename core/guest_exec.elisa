@@ -163,15 +163,16 @@ def ge_spawn_x64_subprocess(path: u8&?, argv: static u8&?&?) -> s32:
     if argv != null:
         ua: static u8&?& = argv.cast[static u8&?&]
         ui: mutable usize = 1
-        while ui < 60:
-            decreases 60 - ui
-            entry: static u8&? = ua[ui]
-            if entry == null:
-                ui <- 60
-            else:
-                spawn_argv[n] <- entry
-                n <- n + 1
-                ui <- ui + 1
+        can Unsafe.AssumeProgress:
+            while ui < 60:
+                decreases 60 - ui
+                entry: static u8&? = ua[ui]
+                if entry == null:
+                    ui <- 60
+                else:
+                    spawn_argv[n] <- entry
+                    n <- n + 1
+                    ui <- ui + 1
     spawn_argv[n] <- null
     child: int = ge_spawn_fork()
     if child < 0:
@@ -548,14 +549,15 @@ def ge_find_native_region(address: uintptr, size: u64) -> s32:
     best: mutable s32 = -1
     best_size: mutable u64 = 0xFFFFFFFFFFFFFFFF
     i: mutable u32 = 0
-    while i < ge_native_region_count and i < GE_NATIVE_REGION_CAP:
-        decreases GE_NATIVE_REGION_CAP - i
-        r: GeNativeRegion = ge_native_regions[i.usize()]
-        if r.active != 0 and ge_region_contains(r.base, r.size, address, size):
-            if r.size < best_size:
-                best <- i.s32()
-                best_size <- r.size
-        i <- i + 1
+    can Unsafe.AssumeProgress:
+        while i < ge_native_region_count and i < GE_NATIVE_REGION_CAP:
+            decreases GE_NATIVE_REGION_CAP - i
+            r: GeNativeRegion = ge_native_regions[i.usize()]
+            if r.active != 0 and ge_region_contains(r.base, r.size, address, size):
+                if r.size < best_size:
+                    best <- i.s32()
+                    best_size <- r.size
+            i <- i + 1
     return best
 
 def ge_record_native_region(base: uintptr, size: u64, prot: u32) -> void:
@@ -577,13 +579,14 @@ def ge_record_native_region(base: uintptr, size: u64, prot: u32) -> void:
 
 def ge_forget_native_region(base: uintptr, size: u64) -> void:
     i: mutable u32 = 0
-    while i < ge_native_region_count and i < GE_NATIVE_REGION_CAP:
-        decreases GE_NATIVE_REGION_CAP - i
-        cur: GeNativeRegion = ge_native_regions[i.usize()]
-        if cur.active != 0 and cur.base == base and cur.size == size:
-            ge_native_regions[i.usize()] <- GeNativeRegion(base, size, cur.prot, 0)
-            return
-        i <- i + 1
+    can Unsafe.AssumeProgress:
+        while i < ge_native_region_count and i < GE_NATIVE_REGION_CAP:
+            decreases GE_NATIVE_REGION_CAP - i
+            cur: GeNativeRegion = ge_native_regions[i.usize()]
+            if cur.active != 0 and cur.base == base and cur.size == size:
+                ge_native_regions[i.usize()] <- GeNativeRegion(base, size, cur.prot, 0)
+                return
+            i <- i + 1
 
 @reentrant_safe
 def ge_native_prot_at(address: uintptr, size: u64) -> u32:
@@ -626,19 +629,20 @@ def ge_dump_native_regions(lookup_addr: uintptr, lookup_size: u64) -> void:
     above_base: mutable u64 = 0xFFFFFFFFFFFFFFFF
     lookup_u: u64 = lookup_addr.u64()
     i: mutable u32 = 0
-    while i < ge_native_region_count and i < GE_NATIVE_REGION_CAP:
-        decreases GE_NATIVE_REGION_CAP - i
-        r: GeNativeRegion = ge_native_regions[i.usize()]
-        if r.active != 0:
-            active <- active + 1
-            b: u64 = r.base.u64()
-            if b <= lookup_u and b >= below_base:
-                below_base <- b
-                below_idx <- i.s32()
-            if b > lookup_u and b <= above_base:
-                above_base <- b
-                above_idx <- i.s32()
-        i <- i + 1
+    can Unsafe.AssumeProgress:
+        while i < ge_native_region_count and i < GE_NATIVE_REGION_CAP:
+            decreases GE_NATIVE_REGION_CAP - i
+            r: GeNativeRegion = ge_native_regions[i.usize()]
+            if r.active != 0:
+                active <- active + 1
+                b: u64 = r.base.u64()
+                if b <= lookup_u and b >= below_base:
+                    below_base <- b
+                    below_idx <- i.s32()
+                if b > lookup_u and b <= above_base:
+                    above_base <- b
+                    above_idx <- i.s32()
+            i <- i + 1
     _ = ge_raw_write(2, "GE_NATIVE_REGIONS dump\n".cast[void&], 23)
     ge_emergency_mark(GE_EV_NATIVE_REGION_META, active.u64().uintptr(), lookup_addr, lookup_size.uintptr(), found_index.uintptr())
     emitted: mutable u32 = 0
@@ -654,17 +658,18 @@ def ge_dump_native_regions(lookup_addr: uintptr, lookup_size: u64) -> void:
         emitted <- emitted + 1
     # Bounded forward sample for general context, skipping any already emitted above.
     i <- 0
-    while i < ge_native_region_count and i < GE_NATIVE_REGION_CAP:
-        decreases GE_NATIVE_REGION_CAP - i
-        r: GeNativeRegion = ge_native_regions[i.usize()]
-        if r.active != 0 and i.s32() != found and i.s32() != below_idx and i.s32() != above_idx:
-            if emitted >= GE_NATIVE_REGION_DUMP_CAP:
-                ge_emergency_mark(GE_EV_NATIVE_REGION_TRUNC, emitted.u64().uintptr(), active.u64().uintptr(), 0.uintptr(), 0.uintptr())
-                ge_emergency_mark(GE_EV_NATIVE_REGION_META, active.u64().uintptr(), lookup_addr, lookup_size.uintptr(), found_index.uintptr())
-                return
-            ge_emit_native_region_entry(i)
-            emitted <- emitted + 1
-        i <- i + 1
+    can Unsafe.AssumeProgress:
+        while i < ge_native_region_count and i < GE_NATIVE_REGION_CAP:
+            decreases GE_NATIVE_REGION_CAP - i
+            r: GeNativeRegion = ge_native_regions[i.usize()]
+            if r.active != 0 and i.s32() != found and i.s32() != below_idx and i.s32() != above_idx:
+                if emitted >= GE_NATIVE_REGION_DUMP_CAP:
+                    ge_emergency_mark(GE_EV_NATIVE_REGION_TRUNC, emitted.u64().uintptr(), active.u64().uintptr(), 0.uintptr(), 0.uintptr())
+                    ge_emergency_mark(GE_EV_NATIVE_REGION_META, active.u64().uintptr(), lookup_addr, lookup_size.uintptr(), found_index.uintptr())
+                    return
+                ge_emit_native_region_entry(i)
+                emitted <- emitted + 1
+            i <- i + 1
     # Re-emit META last so latest(META) always resolves even without truncation.
     ge_emergency_mark(GE_EV_NATIVE_REGION_META, active.u64().uintptr(), lookup_addr, lookup_size.uintptr(), found_index.uintptr())
 
@@ -673,15 +678,16 @@ def ge_find_hle_thunk_target_from_stack_value(value: uintptr) -> uintptr:
     if value == 0.uintptr():
         return 0.uintptr()
     i: mutable u64 = 0
-    while i < ge_hle_thunk_contract_count and i < GE_HLE_THUNK_CONTRACT_CAP:
-        decreases GE_HLE_THUNK_CONTRACT_CAP - i
-        base: uintptr = ge_hle_thunk_contract_addrs[i.usize()]
-        size: mutable u64 = ge_hle_thunk_contract_sizes[i.usize()]
-        if size == 0:
-            size <- 4096
-        if base != 0.uintptr() and value >= base and value < base + size.uintptr():
-            return ge_hle_thunk_contract_targets[i.usize()]
-        i <- i + 1
+    can Unsafe.AssumeProgress:
+        while i < ge_hle_thunk_contract_count and i < GE_HLE_THUNK_CONTRACT_CAP:
+            decreases GE_HLE_THUNK_CONTRACT_CAP - i
+            base: uintptr = ge_hle_thunk_contract_addrs[i.usize()]
+            size: mutable u64 = ge_hle_thunk_contract_sizes[i.usize()]
+            if size == 0:
+                size <- 4096
+            if base != 0.uintptr() and value >= base and value < base + size.uintptr():
+                return ge_hle_thunk_contract_targets[i.usize()]
+            i <- i + 1
     return 0.uintptr()
 
 def ge_boundary_guard_reason_for_value(value: uintptr) -> u64:
@@ -726,12 +732,13 @@ def ge_record_published_exec(address: PublishedExecutableAddr, size: u64) -> voi
     if !address == 0.uintptr() or size == 0:
         return
     i: mutable u32 = 0
-    while i < ge_published_exec_count and i < 2048:
-        decreases 2048 - i
-        if ge_published_exec_bases[i.usize()] == address:
-            ge_published_exec_sizes[i.usize()] <- size
-            return
-        i <- i + 1
+    can Unsafe.AssumeProgress:
+        while i < ge_published_exec_count and i < 2048:
+            decreases 2048 - i
+            if ge_published_exec_bases[i.usize()] == address:
+                ge_published_exec_sizes[i.usize()] <- size
+                return
+            i <- i + 1
     if ge_published_exec_count < 2048:
         ge_published_exec_bases[ge_published_exec_count.usize()] <- address
         ge_published_exec_sizes[ge_published_exec_count.usize()] <- size
@@ -741,13 +748,14 @@ def ge_is_published_exec(address: uintptr, size: u64) -> bool:
     if address == 0.uintptr() or size == 0:
         return false
     i: mutable u32 = 0
-    while i < ge_published_exec_count and i < 2048:
-        decreases 2048 - i
-        base: uintptr = !ge_published_exec_bases[i.usize()]
-        rsize: u64 = ge_published_exec_sizes[i.usize()]
-        if ge_region_contains(base, rsize, address, size):
-            return true
-        i <- i + 1
+    can Unsafe.AssumeProgress:
+        while i < ge_published_exec_count and i < 2048:
+            decreases 2048 - i
+            base: uintptr = !ge_published_exec_bases[i.usize()]
+            rsize: u64 = ge_published_exec_sizes[i.usize()]
+            if ge_region_contains(base, rsize, address, size):
+                return true
+            i <- i + 1
     return false
 
 def ge_check_entry_published(entry_addr: uintptr) -> bool:
@@ -1218,16 +1226,17 @@ def ge_make_writable_cached(address: uintptr, size: u64) -> s32:
     start: u64 = address.u64() & mask
     end: u64 = (address.u64() + size + ps64 - 1) & mask
     page: mutable u64 = start
-    while page < end:
-        decreases end - page
-        if not ge_page_cached_writable(page.uintptr()):
-            static if PLATFORM_WINDOWS:
-                return -1
-            static else:
-                if ge_mprotect(page.uintptr(), ps.usize(), 7) != 0:
+    can Unsafe.AssumeProgress:
+        while page < end:
+            decreases end - page
+            if not ge_page_cached_writable(page.uintptr()):
+                static if PLATFORM_WINDOWS:
                     return -1
-            ge_cache_writable_page(page.uintptr())
-        page <- page + ps64
+                static else:
+                    if ge_mprotect(page.uintptr(), ps.usize(), 7) != 0:
+                        return -1
+                ge_cache_writable_page(page.uintptr())
+            page <- page + ps64
     return 0
 
 def c_GuestExec_MapRegion(address: uintptr, size: u64, prot: u32) -> s32:
@@ -1386,11 +1395,12 @@ def c_GuestExec_PublishExecutableCode(address: uintptr, size: u64) -> s32 can[Un
 def c_GuestExec_NativeRegionCount() -> u32:
     n: mutable u32 = 0
     i: mutable u32 = 0
-    while i < ge_native_region_count and i < GE_NATIVE_REGION_CAP:
-        decreases GE_NATIVE_REGION_CAP - i
-        if ge_native_regions[i.usize()].active != 0:
-            n <- n + 1
-        i <- i + 1
+    can Unsafe.AssumeProgress:
+        while i < ge_native_region_count and i < GE_NATIVE_REGION_CAP:
+            decreases GE_NATIVE_REGION_CAP - i
+            if ge_native_regions[i.usize()].active != 0:
+                n <- n + 1
+            i <- i + 1
     return n
 
 def c_GuestExec_AddressNativeProt(address: uintptr) -> u32:
@@ -2607,18 +2617,19 @@ def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
             # guard page above it (which would fault recursively inside the handler).
             bt_page_end: u64 = ((!ge_last_guest_sp).u64() | 0xfff) + 1
             bt_i: mutable u64 = 0
-            while bt_i < 32:
-                decreases 32 - bt_i
-                bt_addr: uintptr = !ge_last_guest_sp + (bt_i * 8).uintptr()
-                if bt_addr.u64() + 8 > bt_page_end:
-                    bt_i <- 32
-                else:
-                    bt_word: uintptr = ge_read_context_word(bt_addr)
-                    ge_emergency_mark(GE_EV_STACK_DUMP, bt_i.uintptr(), bt_addr, bt_word, 0.uintptr())
-                    bt_target: uintptr = ge_find_hle_thunk_target_from_stack_value(bt_word)
-                    if bt_target != 0.uintptr():
-                        ge_emergency_mark(GE_EV_SIGNAL_CALL_TARGET, bt_word, bt_target, bt_i.uintptr(), ge_native_prot_at(bt_target, 8).u64().uintptr())
-                    bt_i <- bt_i + 1
+            can Unsafe.AssumeProgress:
+                while bt_i < 32:
+                    decreases 32 - bt_i
+                    bt_addr: uintptr = !ge_last_guest_sp + (bt_i * 8).uintptr()
+                    if bt_addr.u64() + 8 > bt_page_end:
+                        bt_i <- 32
+                    else:
+                        bt_word: uintptr = ge_read_context_word(bt_addr)
+                        ge_emergency_mark(GE_EV_STACK_DUMP, bt_i.uintptr(), bt_addr, bt_word, 0.uintptr())
+                        bt_target: uintptr = ge_find_hle_thunk_target_from_stack_value(bt_word)
+                        if bt_target != 0.uintptr():
+                            ge_emergency_mark(GE_EV_SIGNAL_CALL_TARGET, bt_word, bt_target, bt_i.uintptr(), ge_native_prot_at(bt_target, 8).u64().uintptr())
+                        bt_i <- bt_i + 1
         return_call_start: mutable uintptr = 0.uintptr()
         return_direct_target: mutable uintptr = 0.uintptr()
         return_callsite_window: mutable uintptr = 0.uintptr()
@@ -6404,12 +6415,13 @@ def GuestExec_DumpHleCallRing() -> void can[Console.Format, Unsafe.SegmentMutati
     can Unsafe.SegmentMutation, Segment.Host:
         GuestExec_DumpHleCallRingLine(line[0], 256, tp)
     dbgi: mutable usize = 0
-    while dbgi < Linker_CaptureDbgCalls().usize() and dbgi < 16:
-        decreases 16 - dbgi
-        dl: int = snprintf(line[0], 256, "CUSA07399_ARTIFACT init_dbg idx=%llu base=0x%llx preinit_size=0x%llx init_size=0x%llx preinit_va=0x%llx", dbgi.u64(), Linker_CaptureDbgBase(dbgi.u64()), Linker_CaptureDbgVa(dbgi.u64()), Linker_CaptureDbgSize(dbgi.u64()), Linker_CaptureDbgEntry0(dbgi.u64())) can Console.Format
-        can Unsafe.SegmentMutation, Segment.Host:
-            GuestExec_DumpHleCallRingLine(line[0], 256, dl)
-        dbgi <- dbgi + 1
+    can Unsafe.AssumeProgress:
+        while dbgi < Linker_CaptureDbgCalls().usize() and dbgi < 16:
+            decreases 16 - dbgi
+            dl: int = snprintf(line[0], 256, "CUSA07399_ARTIFACT init_dbg idx=%llu base=0x%llx preinit_size=0x%llx init_size=0x%llx preinit_va=0x%llx", dbgi.u64(), Linker_CaptureDbgBase(dbgi.u64()), Linker_CaptureDbgVa(dbgi.u64()), Linker_CaptureDbgSize(dbgi.u64()), Linker_CaptureDbgEntry0(dbgi.u64())) can Console.Format
+            can Unsafe.SegmentMutation, Segment.Host:
+                GuestExec_DumpHleCallRingLine(line[0], 256, dl)
+            dbgi <- dbgi + 1
     # Fallback-slot list: imports that resolved to the aerolib fallback stub
     # (i.e. Elisa could not resolve them to a real HLE/PRX export). A missing
     # libc/runtime init export here is the smoking gun for the skipped boot path.
@@ -6418,12 +6430,13 @@ def GuestExec_DumpHleCallRing() -> void can[Console.Format, Unsafe.SegmentMutati
     can Unsafe.SegmentMutation, Segment.Host:
         GuestExec_DumpHleCallRingLine(line[0], 256, fbw)
     fi: mutable u32 = 0
-    while fi < fb_count and fi < 200:
-        decreases 200 - fi
-        fbl: int = snprintf(line[0], 256, "CUSA07399_ARTIFACT fallback_slot idx=%u va=0x%llx module=%s symbol=%s rel_type=%u", fi, Linker_FallbackSlotVaAt(fi), Linker_FallbackSlotModuleAt(fi), Linker_FallbackSlotSymbolAt(fi), Linker_FallbackSlotRelTypeAt(fi)) can Console.Format
-        can Unsafe.SegmentMutation, Segment.Host:
-            GuestExec_DumpHleCallRingLine(line[0], 256, fbl)
-        fi <- fi + 1
+    can Unsafe.AssumeProgress:
+        while fi < fb_count and fi < 200:
+            decreases 200 - fi
+            fbl: int = snprintf(line[0], 256, "CUSA07399_ARTIFACT fallback_slot idx=%u va=0x%llx module=%s symbol=%s rel_type=%u", fi, Linker_FallbackSlotVaAt(fi), Linker_FallbackSlotModuleAt(fi), Linker_FallbackSlotSymbolAt(fi), Linker_FallbackSlotRelTypeAt(fi)) can Console.Format
+            can Unsafe.SegmentMutation, Segment.Host:
+                GuestExec_DumpHleCallRingLine(line[0], 256, fbl)
+            fi <- fi + 1
 
     # Module-start oracle trace: which modules ran Module_Start and their
     # init-array/DT_INIT execution. Survives the guard longjmp (global buffer),
