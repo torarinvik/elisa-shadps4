@@ -27,13 +27,13 @@ struct ZydisDecoder:
     opaque: mutable u8[256]
 
 struct ZydisFormatter:
-    opaque: mutable u8[256]
+    opaque: mutable u8[640]
 
 struct ZydisDecodedInstruction:
-    operand_count_visible: mutable usize
+    opaque: mutable u8[328]
 
 struct ZydisDecodedOperand:
-    opaque: mutable u8[64]
+    opaque: mutable u8[80]
 
 struct DecoderImpl:
     decoder: mutable ZydisDecoder
@@ -50,7 +50,7 @@ def DecoderImpl_new() -> DecoderImpl:
 global mutable decoder_format_buffer: mutable u8[256] = zeroed
 
 def DecoderImpl_disassembleInst(self: DecoderImpl&, inst: mutable ZydisDecodedInstruction&, operands: mutable ZydisDecodedOperand&, address: u64) -> u8&:
-    _ = ZydisFormatterFormatInstruction(self.formatter, inst, operands, inst.operand_count_visible, &decoder_format_buffer[0], ZYDIS_FORMAT_BUFFER_LEN, address, null)
+    _ = ZydisFormatterFormatInstruction(self.formatter, inst, operands, zyinsn_operand_count_visible(inst).usize(), &decoder_format_buffer[0], ZYDIS_FORMAT_BUFFER_LEN, address, null)
     return &decoder_format_buffer[0]
 
 def DecoderImpl_printInstruction(self: DecoderImpl&, code: void&, address: u64) -> void:
@@ -70,3 +70,65 @@ def DecoderImpl_printInst(self: DecoderImpl&, inst: mutable ZydisDecodedInstruct
 
 def DecoderImpl_decodeInstruction(self: DecoderImpl&, inst: mutable ZydisDecodedInstruction&, operands: mutable ZydisDecodedOperand&, data: void&, size: u64 = 15) -> int:
     return ZydisDecoderDecodeFull(self.decoder, data, size, inst, operands)
+
+
+# --- Zydis 4.0 decoded-field accessors (cpu-patches filters) ---
+# ZydisDecodedInstruction/Operand are opaque blobs; read scalar fields by raw
+# offset (offsetof against libzydis-dev 4.0). The ZydisDecodedOperand union means
+# reg/mem/imm overlap, so these are offset reads rather than struct fields. These
+# are platform-independent (same ABI on Linux/Windows/macOS x86_64).
+const ZYDIS_DECODED_OPERAND_SIZE: u64 = 80
+
+# ZydisRegister enum values
+const ZYREG_NONE: u32 = 0
+const ZYREG_RAX: u32 = 53
+const ZYREG_R15: u32 = 68
+const ZYREG_FS: u32 = 202
+const ZYREG_GS: u32 = 203
+const ZYREG_XMM0: u32 = 88
+const ZYREG_XMM15: u32 = 103
+# ZydisMnemonic enum values
+const ZYMNEM_MOV: u32 = 432
+const ZYMNEM_XOR: u32 = 1733
+const ZYMNEM_EXTRQ: u32 = 166
+const ZYMNEM_INSERTQ: u32 = 283
+const ZYMNEM_MOVNTSS: u32 = 458
+const ZYMNEM_MOVNTSD: u32 = 457
+# ZydisOperandType enum values
+const ZYOP_REGISTER: u32 = 1
+const ZYOP_MEMORY: u32 = 2
+const ZYOP_IMMEDIATE: u32 = 4
+
+def zyinsn_mnemonic(inst: ZydisDecodedInstruction&) -> u32:
+    return ((&inst).cast[void&].uintptr() + 4.uintptr()).cast[u32&]
+
+def zyinsn_length(inst: ZydisDecodedInstruction&) -> u8:
+    return ((&inst).cast[void&].uintptr() + 8.uintptr()).cast[u8&]
+
+def zyinsn_operand_count_visible(inst: ZydisDecodedInstruction&) -> u8:
+    return ((&inst).cast[void&].uintptr() + 25.uintptr()).cast[u8&]
+
+# Address of operand[i] within the decoded-operands array (stride 80).
+def zyop_addr(operands: ZydisDecodedOperand&, i: usize) -> uintptr:
+    return (&operands).cast[void&].uintptr() + (i.u64() * ZYDIS_DECODED_OPERAND_SIZE).uintptr()
+
+def zyop_type(operands: ZydisDecodedOperand&, i: usize) -> u32:
+    return (zyop_addr(operands, i) + 32.uintptr()).cast[u32&]
+
+def zyop_reg_value(operands: ZydisDecodedOperand&, i: usize) -> u32:
+    return (zyop_addr(operands, i) + 40.uintptr()).cast[u32&]
+
+def zyop_mem_segment(operands: ZydisDecodedOperand&, i: usize) -> u32:
+    return (zyop_addr(operands, i) + 44.uintptr()).cast[u32&]
+
+def zyop_mem_base(operands: ZydisDecodedOperand&, i: usize) -> u32:
+    return (zyop_addr(operands, i) + 48.uintptr()).cast[u32&]
+
+def zyop_mem_index(operands: ZydisDecodedOperand&, i: usize) -> u32:
+    return (zyop_addr(operands, i) + 52.uintptr()).cast[u32&]
+
+def zyop_mem_disp_value(operands: ZydisDecodedOperand&, i: usize) -> i64:
+    return (zyop_addr(operands, i) + 72.uintptr()).cast[i64&]
+
+def zyop_imm_value(operands: ZydisDecodedOperand&, i: usize) -> u64:
+    return (zyop_addr(operands, i) + 48.uintptr()).cast[u64&]

@@ -242,6 +242,14 @@ def TLS_PrepareTcbBase(image_address: void&?) -> GuestFsSelector:
     TLS_RecordPreparedTcbBase(base)
     return result
 
+# Linux guest-TCB install via arch_prctl(ARCH_SET_GS). The guest TCB lives in the
+# GS base (guest fs: accesses are rewritten to gs: by core/cpu_patches.elisa),
+# mirroring shadPS4 tls.cpp SetTcbBase. SYS_arch_prctl=158, ARCH_SET_GS=0x1001.
+@link_name(syscall)
+extern tls_arch_prctl_syscall(number: i64, code: i64, addr: u64) -> i64
+const TLS_SYS_ARCH_PRCTL: i64 = 158
+const TLS_ARCH_SET_GS: i64 = 0x1001
+
 def SetTcbBase(image_address: void&?) -> void can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest]:
     selector: mutable GuestFsSelector = 0.u32().cast[GuestFsSelector]
     selector <- TLS_PrepareTcbBase(image_address)
@@ -250,6 +258,13 @@ def SetTcbBase(image_address: void&?) -> void can[Unsafe.SegmentMutation, Unsafe
             can Unsafe.SegmentMutation, Segment.Guest:
                 ElisaTls_LoadGuestFsSelectorAsm(selector)
             tls_debug_last_fs0 <- !ElisaTls_ReadFs0Asm()
+    static elif PLATFORM_LINUX and ARCH_X86_64:
+        _ = selector
+        if image_address != null:
+            base: u64 = image_address.cast[uintptr].u64()
+            can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest:
+                _ = tls_arch_prctl_syscall(TLS_SYS_ARCH_PRCTL, TLS_ARCH_SET_GS, base)
+            tls_debug_last_fs0 <- image_address.cast[uintptr]
 
 def GetTcbBase() -> mutable Tcb&:
     static if PLATFORM_APPLE and ARCH_X86_64:
