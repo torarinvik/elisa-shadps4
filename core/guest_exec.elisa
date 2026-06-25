@@ -2073,6 +2073,11 @@ def ge_write_pc(uctx: void&?, pc: GuestPC) -> void:
     static if ARCH_X86_64 and PLATFORM_APPLE:
         mctx: uintptr = ge_uctx_word(uctx, 48)
         ge_write_context_word(mctx + 128.uintptr(), !pc)
+    static elif ARCH_X86_64 and PLATFORM_LINUX:
+        if uctx != null:
+            ge_write_context_word(uctx.uintptr() + 168.uintptr(), !pc)
+        else:
+            _ = pc
     static else:
         _ = uctx
         _ = pc
@@ -2081,6 +2086,12 @@ def ge_write_pc(uctx: void&?, pc: GuestPC) -> void:
 def ge_xmm_addr_from_mctx(mctx: uintptr, idx: u8) -> uintptr:
     static if ARCH_X86_64 and PLATFORM_APPLE:
         return mctx + 352.uintptr() + (idx.u64() * 16).uintptr()
+    static elif ARCH_X86_64 and PLATFORM_LINUX:
+        can Memory.Allocate:
+            fpregs: uintptr = ge_read_context_word(mctx + 184.uintptr())
+            if fpregs == 0.uintptr():
+                return 0.uintptr()
+            return fpregs + 160.uintptr() + (idx.u64() * 16).uintptr()
     static else:
         _ = mctx
         _ = idx
@@ -2111,7 +2122,7 @@ def ge_sse4a_mask(length_raw: u64) -> u64:
 
 @reentrant_safe
 def ge_try_handle_sse4a_sigill(uctx: void&?) -> bool:
-    static if ARCH_X86_64 and PLATFORM_APPLE:
+    static if ARCH_X86_64 and (PLATFORM_APPLE or PLATFORM_LINUX):
         mctx_ptr: MachineContextPtr = ge_extract_mctx(uctx)
         mctx: uintptr = !mctx_ptr
         pc: GuestPC = ge_extract_pc(uctx)
@@ -2659,8 +2670,9 @@ def ge_signal_handler(sig: int, info: void&?, uctx: void&?) -> void:
             ge_exit_now(1)
 
 # ---- Orchestration plumbing (atomic core, part 2a; inert until swap) ----
-@link_name(sigsetjmp)
-extern ge_sigsetjmp(env: void&?, savemask: int) -> int
+extern __sigsetjmp(env: void&?, savemask: int) -> int
+def ge_sigsetjmp(env: void&?, savemask: int) -> int:
+    return __sigsetjmp(env, savemask)
 @reentrant_safe
 extern pthread_self() -> void&?
 @link_name(_exit)
@@ -3627,6 +3639,12 @@ def ge_run_main_entry_guarded_in_process(params: mutable GuestEntryParams&, time
         ge_init_trampoline: u64 = Linker_InitTrampolineAddr()
         if ge_init_trampoline != 0:
             params.entry_addr <- ge_init_trampoline.uintptr()
+        static if PLATFORM_LINUX and ARCH_X86_64:
+            # Install the guest TCB into the GS base before entering guest code.
+            # Guest fs: accesses were rewritten to gs: by cpu_patches; mirrors shadPS4
+            # InitializeTLS()->SetTcbBase(arch_prctl ARCH_SET_GS) ahead of RunMainEntry.
+            can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest:
+                TLS_InstallPrimaryTcbBase()
         can Unsafe.SegmentMutation, Segment.Host, Segment.Guest:
             ge_jump_main_entry(params, ge_guarded_exit.cast[uintptr])
         ge_raw_breadcrumb("GE:GUARD_AFTER_JUMP\n", 20)

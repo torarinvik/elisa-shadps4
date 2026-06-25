@@ -65,13 +65,13 @@ struct AudioData:
     format: mutable u32
 
 struct ObjectState:
-    pcm_queue: mutable Deque[AudioData]
+    pcm_queue: mutable Queue[AudioData]
     persistent_attributes: mutable CxxU32Map[darray[u8]]
 
 struct Port:
     parameters: mutable OrbisAudio3dOpenParameters
-    bed_queue: mutable Deque[AudioData]
-    mixed_queue: mutable Deque[AudioData]
+    bed_queue: mutable Queue[AudioData]
+    mixed_queue: mutable Queue[AudioData]
     audioout_handles: mutable darray[s32]
     objects: mutable CxxU32Map[ObjectState]
     audio_out_handle: mutable s32
@@ -81,8 +81,55 @@ struct Audio3dState:
     ports: mutable CxxU32Map[Port]
 
 global mutable audio3d_initialized: bool = false
-global mutable audio3d_arena: Arena = zeroed
 global mutable audio3d_state: Audio3dState = zeroed
+
+def audio3d_map_put_port(map: mutable CxxU32Map[Port]&, key: u32, value: Port):
+    can Memory.Allocate, Abort.Panic:
+        index: usize = cxx_u32_map_find_index[Port](map, key)
+        if index < map.entries.count:
+            map.entries[index].value <- value
+            return
+        entry: CxxU32MapEntry[Port] = zeroed
+        entry.key <- key
+        entry.value <- value
+        in perm:
+            map.entries.push(entry)
+
+def audio3d_map_put_object(map: mutable CxxU32Map[ObjectState]&, key: u32, value: ObjectState):
+    can Memory.Allocate, Abort.Panic:
+        index: usize = cxx_u32_map_find_index[ObjectState](map, key)
+        if index < map.entries.count:
+            map.entries[index].value <- value
+            return
+        entry: CxxU32MapEntry[ObjectState] = zeroed
+        entry.key <- key
+        entry.value <- value
+        in perm:
+            map.entries.push(entry)
+
+def audio3d_map_put_blob(map: mutable CxxU32Map[darray[u8]]&, key: u32, value: darray[u8]):
+    can Memory.Allocate, Abort.Panic:
+        index: usize = cxx_u32_map_find_index[darray[u8]](map, key)
+        if index < map.entries.count:
+            map.entries[index].value <- value
+            return
+        entry: CxxU32MapEntry[darray[u8]] = zeroed
+        entry.key <- key
+        entry.value <- value
+        in perm:
+            map.entries.push(entry)
+
+def audio3d_assign_bytes(vec: mutable darray[u8]&, src: void&, size: usize):
+    can Memory.Allocate, Abort.Panic:
+        vec.count <- 0
+        if size == 0:
+            return
+        bytes: u8& = arena_u8_from_void(src)
+        i: mutable usize = 0
+        while i < size:
+            in perm:
+                vec.push(bytes[i])
+            i <- i + 1
 
 def audio3d_bytes_per_sample(format: u32) -> u32:
     return 2 if format == ORBIS_AUDIO3D_FORMAT_S16 else 4
@@ -104,10 +151,10 @@ def audio3d_free_audio_data(data: mutable AudioData&):
     data.num_channels <- 0
     data.format <- ORBIS_AUDIO3D_FORMAT_S16
 
-def audio3d_clear_audio_queue(queue: mutable Deque[AudioData]&):
+def audio3d_clear_audio_queue(queue: mutable Queue[AudioData]&):
     can Memory.Release, Abort.Panic:
         item: mutable AudioData = zeroed
-        while cxx_deque_pop_front[AudioData](queue, item):
+        while queue_pop_front[AudioData](&queue, item):
             audio3d_free_audio_data(item)
 
 def audio3d_clear_object(obj: mutable ObjectState&):
@@ -119,10 +166,10 @@ def audio3d_object_has_pcm(port: Port&) -> bool:
     false return if port.objects.entries.items == null
     items: CxxU32MapEntry[ObjectState]& = port.objects.entries.items
     for i in 0..<port.objects.entries.count:
-        true return if arena_deque_len[AudioData](items[i].value.pcm_queue) > 0
+        true return if queue_len[AudioData](&items[i].value.pcm_queue) > 0
     return false
 
-def audio3d_convert_and_enqueue(queue: mutable Deque[AudioData]&, pcm: OrbisAudio3dPcm&, num_channels: u32, granularity: u32) -> s32:
+def audio3d_convert_and_enqueue(queue: mutable Queue[AudioData]&, pcm: OrbisAudio3dPcm&, num_channels: u32, granularity: u32) -> s32:
     can Memory.Allocate, Abort.Panic:
         if pcm.sample_buffer == null or pcm.num_samples == 0:
             return ORBIS_AUDIO3D_ERROR_INVALID_PARAMETER
@@ -137,7 +184,8 @@ def audio3d_convert_and_enqueue(queue: mutable Deque[AudioData]&, pcm: OrbisAudi
             _ = arena_memcpy(arena_void_from_mutable_u8(copy.data), pcm.sample_buffer, copy_bytes)
 
         data: AudioData = AudioData(copy, granularity, num_channels, pcm.format)
-        cxx_deque_push_back[AudioData](audio3d_arena, queue, data)
+        in perm:
+            queue_push_back[AudioData](&queue, data)
         return ORBIS_OK
 
 def audio3d_read_s16(ptr: u8&, index: usize) -> s16:
@@ -167,13 +215,13 @@ def audio3d_float_to_s16(value: f32) -> s16:
     clipped: f32 = cxx_clamp_f32(value, -1.0, 1.0)
     return (clipped * 32767.0).i16()
 
-def audio3d_mix_in(queue: mutable Deque[AudioData]&, mix_float: mutable heap u8&, granularity: u32, gain: f32):
+def audio3d_mix_in(queue: mutable Queue[AudioData]&, mix_float: mutable heap u8&, granularity: u32, gain: f32):
     can Memory.Release, Abort.Panic:
-        if arena_deque_is_empty[AudioData](queue):
+        if queue_is_empty[AudioData](&queue):
             return
 
         data: mutable AudioData = zeroed
-        _ = cxx_deque_pop_front[AudioData](queue, data)
+        _ = queue_pop_front[AudioData](&queue, data)
 
         if gain == 0.0:
             audio3d_free_audio_data(data)
@@ -228,8 +276,7 @@ def sceAudio3dInitialize(reserved: s64) -> s32:
         return ORBIS_AUDIO3D_ERROR_INVALID_PARAMETER
     if audio3d_initialized:
         return ORBIS_AUDIO3D_ERROR_NOT_READY
-    audio3d_arena <- zeroed
-    audio3d_state.ports <- cxx_u32_map_new[Port](audio3d_arena, 4) can Memory.Allocate, Abort.Panic
+    audio3d_state.ports <- zeroed
     audio3d_initialized <- true
     init_ret: s32 = sceAudioOutInit()
     if init_ret < 0 and init_ret != ORBIS_AUDIO_OUT_ERROR_ALREADY_INIT:
@@ -256,12 +303,12 @@ def sceAudio3dPortOpen(user_id: s32, parameters: void&?, port_id: mutable u32&?)
     port: mutable Port = zeroed
     port.parameters <- input
     port.audio_out_handle <- -1
-    port.audioout_handles <- cxx_vector_new[s32](audio3d_arena, 4) can Memory.Allocate, Abort.Panic
-    port.objects <- cxx_u32_map_new[ObjectState](audio3d_arena, input.max_objects.usize()) can Memory.Allocate, Abort.Panic
-    port.bed_queue <- cxx_deque_new[AudioData](audio3d_arena, input.queue_depth.usize() + 1) can Memory.Allocate, Abort.Panic
-    port.mixed_queue <- cxx_deque_new[AudioData](audio3d_arena, input.queue_depth.usize() + 1) can Memory.Allocate, Abort.Panic
+    port.audioout_handles <- []
+    port.objects <- zeroed
+    port.bed_queue <- queue_new[AudioData]()
+    port.mixed_queue <- queue_new[AudioData]()
 
-    _ = cxx_u32_map_put[Port](audio3d_arena, audio3d_state.ports, id, port) can Memory.Allocate, Abort.Panic
+    audio3d_map_put_port(&audio3d_state.ports, id, port) can Memory.Allocate, Abort.Panic
     port_id[0] <- id
     return ORBIS_OK
 
@@ -275,7 +322,8 @@ def sceAudio3dAudioOutOpen(port_id: u32, user_id: s32, type: s32, index: s32, le
     handle: s32 = sceAudioOutOpen(user_id, type, index, len, freq, param)
     if handle < 0:
         return handle
-    cxx_vector_push[s32](audio3d_arena, port.audioout_handles, handle) can Memory.Allocate, Abort.Panic
+    in perm:
+        port.audioout_handles.push(handle)
     return handle
 
 def sceAudio3dAudioOutClose(handle: s32) -> s32:
@@ -347,9 +395,9 @@ def sceAudio3dObjectReserve(port_id: u32, object_id: mutable u32&?) -> s32:
                 found_id <- true
 
     obj: mutable ObjectState = zeroed
-    obj.pcm_queue <- cxx_deque_new[AudioData](audio3d_arena, port.parameters.queue_depth.usize() + 1) can Memory.Allocate, Abort.Panic
-    obj.persistent_attributes <- cxx_u32_map_new[darray[u8]](audio3d_arena, 8) can Memory.Allocate, Abort.Panic
-    _ = cxx_u32_map_put[ObjectState](audio3d_arena, port.objects, port.next_object_id, obj) can Memory.Allocate, Abort.Panic
+    obj.pcm_queue <- queue_new[AudioData]()
+    obj.persistent_attributes <- zeroed
+    audio3d_map_put_object(&port.objects, port.next_object_id, obj) can Memory.Allocate, Abort.Panic
     object_id[0] <- port.next_object_id
     return ORBIS_OK
 
@@ -370,9 +418,9 @@ def sceAudio3dObjectSetAttribute(port_id: u32, object_id: u32, attribute_id: u32
         return ORBIS_OK
 
     if attribute != null and attribute_size > 0:
-        blob: mutable darray[u8] = cxx_vector_new[u8](audio3d_arena, attribute_size.usize()) can Memory.Allocate, Abort.Panic
-        cxx_vector_assign_bytes(audio3d_arena, blob, attribute, attribute_size.usize()) can Memory.Allocate, Abort.Panic
-        _ = cxx_u32_map_put[darray[u8]](audio3d_arena, obj.persistent_attributes, attribute_id, blob) can Memory.Allocate, Abort.Panic
+        blob: mutable darray[u8] = []
+        audio3d_assign_bytes(&blob, attribute, attribute_size.usize()) can Memory.Allocate, Abort.Panic
+        audio3d_map_put_blob(&obj.persistent_attributes, attribute_id, blob) can Memory.Allocate, Abort.Panic
     return ORBIS_OK
 
 def sceAudio3dObjectSetAttributes(port_id: u32, object_id: u32, num_attributes: u64, attribute_array: void&?) -> s32:
@@ -409,9 +457,9 @@ def sceAudio3dObjectSetAttributes(port_id: u32, object_id: u32, num_attributes: 
                     return ret
         elif attr2.attribute_id != ORBIS_AUDIO3D_ATTRIBUTE_RESET_STATE:
             if attr2.value != null and attr2.value_size > 0:
-                blob2: mutable darray[u8] = cxx_vector_new[u8](audio3d_arena, attr2.value_size.usize()) can Memory.Allocate, Abort.Panic
-                cxx_vector_assign_bytes(audio3d_arena, blob2, attr2.value, attr2.value_size.usize()) can Memory.Allocate, Abort.Panic
-                _ = cxx_u32_map_put[darray[u8]](audio3d_arena, obj.persistent_attributes, attr2.attribute_id, blob2) can Memory.Allocate, Abort.Panic
+                blob2: mutable darray[u8] = []
+                audio3d_assign_bytes(&blob2, attr2.value, attr2.value_size.usize()) can Memory.Allocate, Abort.Panic
+                audio3d_map_put_blob(&obj.persistent_attributes, attr2.attribute_id, blob2) can Memory.Allocate, Abort.Panic
         i <- i + 1
     return ORBIS_OK
 
@@ -436,7 +484,7 @@ def sceAudio3dPortAdvance(port_id: u32) -> s32:
     port: mutable Port& = port_ref.cast[mutable Port&]
     if port.parameters.buffer_mode == ORBIS_AUDIO3D_BUFFER_NO_ADVANCE:
         return ORBIS_AUDIO3D_ERROR_NOT_SUPPORTED
-    if arena_deque_len[AudioData](port.mixed_queue) >= port.parameters.queue_depth.usize():
+    if queue_len[AudioData](&port.mixed_queue) >= port.parameters.queue_depth.usize():
         return ORBIS_AUDIO3D_ERROR_NOT_READY
 
     granularity: u32 = port.parameters.granularity
@@ -467,7 +515,8 @@ def sceAudio3dPortAdvance(port_id: u32) -> s32:
     cxx_heap_byte_buffer_free(mix_float) can Memory.Release
 
     mixed: AudioData = AudioData(mix_s16, granularity, AUDIO3D_OUTPUT_NUM_CHANNELS, ORBIS_AUDIO3D_FORMAT_S16)
-    cxx_deque_push_back[AudioData](audio3d_arena, port.mixed_queue, mixed) can Memory.Allocate, Abort.Panic
+    in perm:
+        queue_push_back[AudioData](&port.mixed_queue, mixed)
     return ORBIS_OK
 
 def sceAudio3dPortPush(port_id: u32, blocking: u32) -> s32:
@@ -482,11 +531,11 @@ def sceAudio3dPortPush(port_id: u32, blocking: u32) -> s32:
             port.audio_out_handle <- sceAudioOutOpen(0xff, 4, 0, port.parameters.granularity, AUDIO3D_SAMPLE_RATE, AUDIO3D_OUTPUT_FORMAT_S16_STEREO)
             if port.audio_out_handle < 0:
                 return port.audio_out_handle
-        if arena_deque_len[AudioData](port.mixed_queue) < port.parameters.queue_depth.usize():
+        if queue_len[AudioData](&port.mixed_queue) < port.parameters.queue_depth.usize():
             return ORBIS_OK
 
         frame: mutable AudioData = zeroed
-        if cxx_deque_pop_front[AudioData](port.mixed_queue, frame):
+        if queue_pop_front[AudioData](&port.mixed_queue, frame):
             ret: s32 = sceAudioOutOutput(port.audio_out_handle, frame.sample_buffer.data)
             audio3d_free_audio_data(frame)
             if ret < 0:
@@ -494,9 +543,9 @@ def sceAudio3dPortPush(port_id: u32, blocking: u32) -> s32:
 
         if blocking == ORBIS_AUDIO3D_BLOCKING_SYNC:
             draining: mutable bool = true
-            while draining and arena_deque_len[AudioData](port.mixed_queue) >= port.parameters.queue_depth.usize():
+            while draining and queue_len[AudioData](&port.mixed_queue) >= port.parameters.queue_depth.usize():
                 frame2: mutable AudioData = zeroed
-                if cxx_deque_pop_front[AudioData](port.mixed_queue, frame2):
+                if queue_pop_front[AudioData](&port.mixed_queue, frame2):
                     ret2: s32 = sceAudioOutOutput(port.audio_out_handle, frame2.sample_buffer.data)
                     audio3d_free_audio_data(frame2)
                     if ret2 < 0:
@@ -517,19 +566,19 @@ def sceAudio3dPortFlush(port_id: u32) -> s32:
                 if ret < 0:
                     return ret
             return ORBIS_OK
-        if arena_deque_is_empty[AudioData](port.mixed_queue):
-            if not arena_deque_is_empty[AudioData](port.bed_queue) or audio3d_object_has_pcm(port):
+        if queue_is_empty[AudioData](&port.mixed_queue):
+            if not queue_is_empty[AudioData](&port.bed_queue) or audio3d_object_has_pcm(port):
                 ret2: s32 = sceAudio3dPortAdvance(port_id)
                 if ret2 != ORBIS_OK and ret2 != ORBIS_AUDIO3D_ERROR_NOT_READY:
                     return ret2
-        if arena_deque_is_empty[AudioData](port.mixed_queue):
+        if queue_is_empty[AudioData](&port.mixed_queue):
             return ORBIS_OK
         if port.audio_out_handle < 0:
             port.audio_out_handle <- sceAudioOutOpen(0xff, 4, 0, port.parameters.granularity, AUDIO3D_SAMPLE_RATE, AUDIO3D_OUTPUT_FORMAT_S16_STEREO)
             if port.audio_out_handle < 0:
                 return port.audio_out_handle
         frame: mutable AudioData = zeroed
-        while cxx_deque_pop_front[AudioData](port.mixed_queue, frame):
+        while queue_pop_front[AudioData](&port.mixed_queue, frame):
             ret3: s32 = sceAudioOutOutput(port.audio_out_handle, frame.sample_buffer.data)
             audio3d_free_audio_data(frame)
             if ret3 < 0:
@@ -543,7 +592,7 @@ def sceAudio3dPortGetQueueLevel(port_id: u32, queue_level: mutable u32&?, queue_
     if queue_level == null and queue_available == null:
         return ORBIS_AUDIO3D_ERROR_INVALID_PARAMETER
     port: mutable Port& = port_ref.cast[mutable Port&]
-    size: u32 = arena_deque_len[AudioData](port.mixed_queue).u32()
+    size: u32 = queue_len[AudioData](&port.mixed_queue).u32()
     if queue_level != null:
         queue_level[0] <- size
     if queue_available != null:
@@ -575,15 +624,14 @@ def sceAudio3dTerminate() -> s32:
     can Memory.Allocate, Memory.Release, Abort.Panic:
         if not audio3d_initialized:
             return ORBIS_AUDIO3D_ERROR_NOT_READY
-        ids: mutable darray[u32] = cxx_vector_new[u32](audio3d_arena, audio3d_state.ports.entries.count)
+        ids: mutable darray[u32] = []
         if audio3d_state.ports.entries.items != null:
             ports: CxxU32MapEntry[Port]& = audio3d_state.ports.entries.items
             for i in 0..<audio3d_state.ports.entries.count:
-                cxx_vector_push[u32](audio3d_arena, ids, ports[i].key)
+                in perm:
+                    ids.push(ports[i].key)
         for j in 0..<ids.count:
             _ = sceAudio3dPortClose(ids[j])
-        arena_free(audio3d_arena)
-        audio3d_arena <- zeroed
         audio3d_state <- zeroed
         audio3d_initialized <- false
         return ORBIS_OK

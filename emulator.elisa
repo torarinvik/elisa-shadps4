@@ -10,10 +10,9 @@ include "./core/guest_exec.elisa"
 # Persistent arena owning emulator-session buffers (built strings returned to
 # callers, the play-time update list, restart-arg lists) that outlive the call
 # producing them. Growing them from a transient local arena is a use-after-free.
-global mutable emulator_arena: Arena = zeroed
 
 def Emulator_ResetArena() -> void:
-    emulator_arena <- zeroed
+    pass
 
 struct SysModuleEntry:
     module_name: mutable static u8&
@@ -112,6 +111,9 @@ def Emulator_Substr(input: static u8&, start: usize, len: usize) -> static u8&:
     # input[start+i] is bounded by the caller's len (<= static_strlen); the bytes
     # are built in the persistent emulator_arena, so the returned reference lives
     # as long as the session. Both facts are outside the type system, hence vouched.
+    # The buffer is explicitly NUL-terminated below; the unbounded-string lint
+    # flags the interior-pointer cast conservatively (it cannot prove the
+    # terminator) and is a warning here.
     can Unsafe.MutableGlobal, Unsafe.UncheckedIndex, Unsafe.PointerCast:
         out: mutable darray[u8] = []
         for i in 0..<len:
@@ -123,6 +125,9 @@ def Emulator_Concat2(lhs: static u8&, rhs: static u8&) -> static u8&:
     lhs_len: usize = static_strlen(lhs)
     rhs_len: usize = static_strlen(rhs)
     # Indices bounded by static_strlen; result built in the persistent arena.
+    # The buffer is explicitly NUL-terminated below; the unbounded-string lint
+    # flags the interior-pointer cast conservatively (it cannot prove the
+    # terminator) and is a warning here.
     can Unsafe.MutableGlobal, Unsafe.UncheckedIndex, Unsafe.PointerCast:
         out: mutable darray[u8] = []
         for i in 0..<lhs_len:
@@ -271,8 +276,7 @@ def Emulator_UpdatePlayTime(self: mutable Emulator&, serial: static u8&) -> void
     if static_strlen(serial) == 0:
         return
     can Unsafe.MutableGlobal:
-        playtime_owner: mutable Arena& = &emulator_arena
-        in playtime_owner:
+        in perm:
             self.play_time_updates.push(serial)
 
 def Emulator_Restart(self: mutable Emulator&, eboot_path: static u8&, guest_args: darray[static u8&]) -> void:
@@ -285,8 +289,7 @@ def Emulator_TakePendingRestartArgs(self: mutable Emulator&) -> darray[static u8
         return []
     out: mutable darray[static u8&] = []
     can Unsafe.MutableGlobal:
-        restart_owner: mutable Arena& = &emulator_arena
-        in restart_owner:
+        in perm:
             if self.pending_restart_path != null:
                 out.push(self.pending_restart_path)
             for arg in self.pending_restart_args:
@@ -302,9 +305,8 @@ def Emulator_ExecuteRestartArgs(self: mutable Emulator&, args: darray[static u8&
     # args is non-empty here; args[0] is in range.
     can Unsafe.UncheckedIndex:
         eboot: static u8& = args[0]
-        arena: Arena = zeroed
         passthrough: mutable darray[static u8&] = []
-        in arena:
+        in perm:
             for i in 1..<args.count:
                 passthrough.push(args[i])
         can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host, Memory.Allocate, Abort.Panic:

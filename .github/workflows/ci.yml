@@ -34,6 +34,15 @@ jobs:
         with:
           path: emulator
 
+      # Safety-surface ratchet: fail if any `trusted Unsafe.<Category>` count
+      # exceeds tools/unsafe_baseline.txt or a new category appears. Hard-fails
+      # (no continue-on-error) so the unsafe surface cannot silently grow.
+      - name: Unsafe escape-hatch ratchet (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cd emulator
+          bash tools/unsafe_ratchet.sh
+
       - name: Checkout compiler (Elisa-core)
         uses: actions/checkout@v4
         with:
@@ -100,6 +109,24 @@ jobs:
         run: |
           mkdir -p compiler
           cp -r Elisa-core/compiler/runtime compiler/runtime
+
+      # Strict safety gate: run WITHOUT -permissive so Elisa's unsafe-permission,
+      # region-discipline and progress-safety enforcement is active, and HARD-FAIL
+      # if any `error:` diagnostic appears. Advisory warnings (lints) are allowed so
+      # the gate locks in the 0-error posture without blocking on the lint backlog.
+      - name: Strict safety gate — 0 errors (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cd emulator
+          set +e
+          "$RUNNER_TEMP/elisac" -emit semantic elisa_tests/emulator_core_boot_smoke.elisa > "$RUNNER_TEMP/strict.log" 2>&1
+          set -e
+          if grep -qE '\berror:' "$RUNNER_TEMP/strict.log"; then
+            echo "::error::strict-mode semantic errors found (Elisa safety enforcement is ON):"
+            grep -nE '\berror:' "$RUNNER_TEMP/strict.log"
+            exit 1
+          fi
+          echo "Strict mode: 0 errors ($(grep -cE '\bwarning:' "$RUNNER_TEMP/strict.log") advisory warnings allowed)."
 
       - name: Compile-check emulator (Linux / macOS)
         continue-on-error: true

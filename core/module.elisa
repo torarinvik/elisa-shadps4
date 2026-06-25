@@ -398,6 +398,18 @@ def Module_CallGuestInitEntry(entry_addr: VAddr, args: u64, argp: void&?, param:
             ge_emergency_mark(GE_EV_MODULE_INIT_ENTRY_AFTER_CALL, entry_addr, result.u64().uintptr(), argp.uintptr(), param.uintptr())
             TLS_RestoreHostSegment(move guard)
             ge_emergency_mark(GE_EV_MODULE_INIT_ENTRY_AFTER_RESTORE, entry_addr, result.u64().uintptr(), argp.uintptr(), param.uintptr())
+    static elif PLATFORM_LINUX and ARCH_X86_64:
+        can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
+            guard: FsGuard = TLS_InstallGuestSegment()
+            ge_emergency_mark(GE_EV_MODULE_INIT_ENTRY_AFTER_INSTALL, entry_addr, args.uintptr(), argp.uintptr(), param.uintptr())
+            fn: mutable void&? = null
+            can Unsafe.PointerCast:
+                fn <- entry_addr.cast[void&?]
+            if fn != null:
+                result <- TLS_CallGuestInitEntry((&guard).cast[FsGuard&], fn, args, argp, param)
+            ge_emergency_mark(GE_EV_MODULE_INIT_ENTRY_AFTER_CALL, entry_addr, result.u64().uintptr(), argp.uintptr(), param.uintptr())
+            TLS_RestoreHostSegment(move guard)
+            ge_emergency_mark(GE_EV_MODULE_INIT_ENTRY_AFTER_RESTORE, entry_addr, result.u64().uintptr(), argp.uintptr(), param.uintptr())
     return result
 
 def Module_CallGuestInitArrayEntry(entry_addr: VAddr) -> void can[Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host]:
@@ -421,6 +433,18 @@ def Module_CallGuestInitArrayEntry(entry_addr: VAddr) -> void can[Unsafe.Segment
                     _ = TLS_CallGuestInitEntryOnStackWithPreparedSegment(fn, 0, null, null, stack_top, guest_selector, host_selector)
                 else:
                     TLS_CallGuestInitArrayEntry((&guard).cast[FsGuard&], fn)
+            ge_emergency_mark(GE_EV_MODULE_INIT_ARRAY_AFTER_CALL, entry_addr, 0.uintptr(), 0.uintptr(), 0.uintptr())
+            TLS_RestoreHostSegment(move guard)
+            ge_emergency_mark(GE_EV_MODULE_INIT_ARRAY_AFTER_RESTORE, entry_addr, 0.uintptr(), 0.uintptr(), 0.uintptr())
+    static elif PLATFORM_LINUX and ARCH_X86_64:
+        can Unsafe.SegmentMutation, Unsafe.GuestSegmentInstall, Segment.Guest, Segment.Host:
+            guard: FsGuard = TLS_InstallGuestSegment()
+            ge_emergency_mark(GE_EV_MODULE_INIT_ARRAY_AFTER_INSTALL, entry_addr, 0.uintptr(), 0.uintptr(), 0.uintptr())
+            fn: mutable void&? = null
+            can Unsafe.PointerCast:
+                fn <- entry_addr.cast[void&?]
+            if fn != null:
+                TLS_CallGuestInitArrayEntry((&guard).cast[FsGuard&], fn)
             ge_emergency_mark(GE_EV_MODULE_INIT_ARRAY_AFTER_CALL, entry_addr, 0.uintptr(), 0.uintptr(), 0.uintptr())
             TLS_RestoreHostSegment(move guard)
             ge_emergency_mark(GE_EV_MODULE_INIT_ARRAY_AFTER_RESTORE, entry_addr, 0.uintptr(), 0.uintptr(), 0.uintptr())
@@ -1231,6 +1255,9 @@ def Module_EncodeId(value: u16) -> static u8&:
                 out.push(codes[((value >> 6) & 0x3f).usize()])
                 out.push(codes[(value & 0x3f).usize()])
             out.push(0)
+    # Buffer is explicitly NUL-terminated above; the unbounded-string lint flags
+    # the interior-pointer cast conservatively (it cannot prove the terminator)
+    # and is a warning here. out is non-empty, so &out[0] is valid.
     can Unsafe.PointerCast, Unsafe.UncheckedIndex:
         return (&out[0]).cast[static u8&]
 

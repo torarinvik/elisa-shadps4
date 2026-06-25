@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 
 include "../common/types.elisa"
+include "../common/arch.elisa"
+include "../common/decoder.elisa"
 
 struct CpuPatchModule:
     module_ptr: mutable u64
@@ -41,10 +43,15 @@ def RegisterPatchModule(module_ptr: void&?, module_size: u64, trampoline_area_pt
 def PrePatchInstructions(segment_addr: u64, segment_size: u64) -> void:
     if segment_size == 0:
         return
-    if cpu_patch_range_count >= CPU_PATCH_MAX_RANGES:
-        return
-    cpu_patch_ranges[cpu_patch_range_count] <- CpuPatchRange(segment_addr, segment_size)
-    cpu_patch_range_count <- cpu_patch_range_count + 1
+    if cpu_patch_range_count < CPU_PATCH_MAX_RANGES:
+        cpu_patch_ranges[cpu_patch_range_count] <- CpuPatchRange(segment_addr, segment_size)
+        cpu_patch_range_count <- cpu_patch_range_count + 1
+    # Linux/FreeBSD: host FS points at valid memory, so guest fs: accesses cannot
+    # be left to fault. AOT-patch the whole segment, mirroring shadPS4
+    # PrePatchInstructions (#if !_WIN32 && !__APPLE__).
+    static if PLATFORM_LINUX or PLATFORM_FREEBSD:
+        can Unsafe.AssumeProgress, Unsafe.PointerCast:
+            cpu_patch_aot_segment(segment_addr, segment_size)
 
 def CpuPatches_Reset() -> void:
     cpu_patch_module_count <- 0
@@ -60,3 +67,158 @@ def CpuPatches_LastPrePatchRange() -> CpuPatchRange:
     if cpu_patch_range_count == 0:
         return CpuPatchRange(0, 0)
     return cpu_patch_ranges[cpu_patch_range_count - 1]
+
+# --- Instruction patch engine (faithful port of shadPS4 cpu_patches.cpp) -------
+# Same single cross-platform engine on all targets; the Patches set is gated by
+# static-if exactly like shadPS4 gates with #if: SSE4a on all platforms (Chunk D),
+# FS-segment patches on non-Apple, FS->GS Tcb rewrite in-place on non-Apple-non-Win
+# (Windows uses a trampoline, deferred to Chunk D).
+
+global mutable cpu_patch_decoder: DecoderImpl = zeroed
+global mutable cpu_patch_decoder_ready: bool = false
+global mutable cpu_patch_applied_count: u64 = 0
+
+def CpuPatches_AppliedCount() -> u64:
+    return cpu_patch_applied_count
+
+def cpu_patch_ensure_decoder() -> void:
+    if not cpu_patch_decoder_ready:
+        cpu_patch_decoder <- DecoderImpl_new()
+        cpu_patch_decoder_ready <- true
+
+# FilterTcbAccess: MOV (64-bit reg), fs:[0]
+def cpu_patch_is_tcb_access(ops: ZydisDecodedOperand&) -> bool:
+    if zyop_type(ops, 1) != ZYOP_MEMORY:
+        return false
+    if zyop_mem_segment(ops, 1) != ZYREG_FS:
+        return false
+    if zyop_mem_base(ops, 1) != ZYREG_NONE:
+        return false
+    if zyop_mem_index(ops, 1) != ZYREG_NONE:
+        return false
+    if zyop_mem_disp_value(ops, 1) != 0:
+        return false
+    rv: u32 = zyop_reg_value(ops, 0)
+    return rv >= ZYREG_RAX and rv <= ZYREG_R15
+
+# FilterStackCheck: MOV/XOR (64-bit reg), fs:[0x28]
+def cpu_patch_is_stack_check(ops: ZydisDecodedOperand&) -> bool:
+    if zyop_type(ops, 1) != ZYOP_MEMORY:
+        return false
+    if zyop_mem_segment(ops, 1) != ZYREG_FS:
+        return false
+    if zyop_mem_base(ops, 1) != ZYREG_NONE:
+        return false
+    if zyop_mem_index(ops, 1) != ZYREG_NONE:
+        return false
+    if zyop_mem_disp_value(ops, 1) != 0x28:
+        return false
+    rv: u32 = zyop_reg_value(ops, 0)
+    return rv >= ZYREG_RAX and rv <= ZYREG_R15
+
+# In-place: flip the fs (0x64) segment-override prefix to gs (0x65). Same length
+# (GenerateTcbAccess on Linux is putSeg(gs); mov dst, src), so no nop padding.
+def cpu_patch_apply_fs_to_gs(code: mutable u8&, length: u8) -> bool can[Unsafe.AssumeProgress, Unsafe.PointerCast]:
+    n: usize = length.usize()
+    i: mutable usize = 0
+    found: mutable bool = false
+    can Unsafe.AssumeProgress, Unsafe.PointerCast:
+        while i < n and i < 15:
+            decreases 15 - i
+            if (not found) and code[i] == 0x64:
+                code[i] <- 0x65
+                found <- true
+            i <- i + 1
+    return found
+
+def cpu_patch_nop_pad(code: mutable u8&, start: usize, length: u8) -> void can[Unsafe.AssumeProgress, Unsafe.PointerCast]:
+    n: usize = length.usize()
+    j: mutable usize = start
+    can Unsafe.AssumeProgress, Unsafe.PointerCast:
+        while j < n and j < 15:
+            decreases 15 - j
+            code[j] <- 0x90
+            j <- j + 1
+
+# GenerateStackCanary: mov dst, 0  -> REX.W [+B] C7 /0 id (7 bytes), nop-pad.
+def cpu_patch_apply_stack_canary(code: mutable u8&, length: u8, reg_value: u32) -> bool can[Unsafe.AssumeProgress, Unsafe.PointerCast]:
+    if length.usize() < 7:
+        return false
+    idx: u32 = reg_value - ZYREG_RAX
+    rex: mutable u8 = 0x48
+    if idx >= 8:
+        rex <- rex + 1
+    can Unsafe.AssumeProgress, Unsafe.PointerCast:
+        code[0] <- rex
+        code[1] <- 0xC7
+        code[2] <- (192 + (idx & 7)).u8()
+        code[3] <- 0
+        code[4] <- 0
+        code[5] <- 0
+        code[6] <- 0
+        cpu_patch_nop_pad(code, 7, length)
+    return true
+
+# GenerateStackCheck: xor dst, 0 -> REX.W [+B] 83 /6 ib (4 bytes), nop-pad.
+def cpu_patch_apply_stack_check(code: mutable u8&, length: u8, reg_value: u32) -> bool can[Unsafe.AssumeProgress, Unsafe.PointerCast]:
+    if length.usize() < 4:
+        return false
+    idx: u32 = reg_value - ZYREG_RAX
+    rex: mutable u8 = 0x48
+    if idx >= 8:
+        rex <- rex + 1
+    can Unsafe.AssumeProgress, Unsafe.PointerCast:
+        code[0] <- rex
+        code[1] <- 0x83
+        code[2] <- (240 + (idx & 7)).u8()
+        code[3] <- 0
+        cpu_patch_nop_pad(code, 4, length)
+    return true
+
+# TryPatch: decode one instruction; if it matches a patch filter, rewrite in
+# place. Returns the number of bytes to advance (instruction length, or 1 on a
+# decode failure) so the AOT loop can step instruction-by-instruction.
+def cpu_patch_try_one(code_addr: uintptr, max_len: u64) -> u64 can[Unsafe.AssumeProgress, Unsafe.PointerCast]:
+    inst: mutable ZydisDecodedInstruction = zeroed
+    ops: mutable array[ZydisDecodedOperand, 10]
+    status: int = DecoderImpl_decodeInstruction(cpu_patch_decoder, inst, ops[0], code_addr.cast[void&], max_len)
+    if not ZYAN_SUCCESS(status):
+        return 1
+    length: u8 = zyinsn_length(inst)
+    mnem: u32 = zyinsn_mnemonic(inst)
+    static if not PLATFORM_APPLE:
+        can Unsafe.AssumeProgress, Unsafe.PointerCast:
+            code: mutable u8& = code_addr.cast[mutable u8&]
+            if mnem == ZYMNEM_MOV:
+                handled: mutable bool = false
+                if cpu_patch_is_stack_check(ops[0]):
+                    handled <- cpu_patch_apply_stack_canary(code, length, zyop_reg_value(ops[0], 0))
+                static if not PLATFORM_WINDOWS:
+                    if (not handled) and cpu_patch_is_tcb_access(ops[0]):
+                        handled <- cpu_patch_apply_fs_to_gs(code, length)
+                if handled:
+                    cpu_patch_applied_count <- cpu_patch_applied_count + 1
+            elif mnem == ZYMNEM_XOR:
+                if cpu_patch_is_stack_check(ops[0]):
+                    if cpu_patch_apply_stack_check(code, length, zyop_reg_value(ops[0], 0)):
+                        cpu_patch_applied_count <- cpu_patch_applied_count + 1
+    static else:
+        _ = mnem
+    if length == 0:
+        return 1
+    return length.u64()
+
+# TryPatchAot: walk the segment instruction-by-instruction and patch in place.
+def cpu_patch_aot_segment(segment_addr: u64, segment_size: u64) -> void can[Unsafe.AssumeProgress, Unsafe.PointerCast]:
+    if segment_size == 0:
+        return
+    cpu_patch_ensure_decoder()
+    end: u64 = segment_addr + segment_size
+    cur: mutable u64 = segment_addr
+    can Unsafe.AssumeProgress, Unsafe.PointerCast:
+        while cur < end:
+            decreases end - cur
+            remaining: u64 = end - cur
+            adv: u64 = cpu_patch_try_one(cur.uintptr(), remaining)
+            step: u64 = adv if adv != 0 else 1
+            cur <- cur + step
