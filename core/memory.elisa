@@ -666,7 +666,13 @@ def MemoryManager_MapFileCommit(self: mutable MemoryManager&, txn: MapTxn, effec
     _ = move txn
     in perm:
         self.vma_areas.push(VirtualMemoryArea(m, sz, VMAType_File, effective_prot, "file", fd, false, false))
-    MemoryManager_AddBacking((&self).cast[mutable MemoryManager&], m, sz)
+    # Mirror MapCommit: skip the byte-by-byte host backing for large file-backed maps under
+    # guest-exec. A big file map would otherwise push hundreds of millions of bytes one at a
+    # time in AddBacking and trip the guarded-run watchdog; native MAP_FIXED is the source of
+    # truth for those regions.
+    skip_backing: bool = GuestExec_IsEnabled() and GuestExec_IsSupported() and sz >= MEMORY_NATIVE_ONLY_BACKING_THRESHOLD
+    if not skip_backing:
+        MemoryManager_AddBacking((&self).cast[mutable MemoryManager&], m, sz)
 
 def MemoryManager_PoolDecommit(self: mutable MemoryManager&, virtual_addr: VAddr, size: u64) -> s32:
     return MemoryManager_UnmapMemory((&self).cast[mutable MemoryManager&], virtual_addr, size)
@@ -903,6 +909,12 @@ def MemoryManager_WriteU64(self: mutable MemoryManager&, addr: VAddr, value: u64
 def MemoryManager_WriteU64BackingOnly(self: mutable MemoryManager&, addr: VAddr, value: u64) -> bool:
     index: s32 = MemoryManager_FindBackingIndex(self, addr, 8)
     if index < 0:
+        # No host backing (large / skip_backing'd region). Under guest-exec the native
+        # MAP_FIXED mapping is the single source of truth, so land the relocation write there
+        # instead of dropping it (which left GOT entries pointing into untouched pages -- the
+        # "relocation into a PROT_NONE gap" crash class).
+        if GuestExec_IsEnabled() and GuestExec_IsSupported():
+            return GuestExec_WriteU64(addr, value)
         return false
     sbase: s64 = MemoryManager_BackingOffset(self.mapped_bytes[index.usize()], addr, 8)
     if sbase < 0:
