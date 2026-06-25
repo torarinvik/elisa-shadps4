@@ -2158,6 +2158,45 @@ def Linker_ApplyRelocationEntry(self: mutable Linker&, module: mutable Module&, 
             return false
         Linker_RecordFailedRelocationDetail((&self).cast[mutable Linker&], 3, rel_kind, resolved_addr)
         return false
+    if rel_type == R_X86_64_DTPOFF64:
+        # Offset of the symbol WITHIN its module's TLS block. Combined at runtime
+        # with the DTV block pointer (dtv[modid+1].pointer + value) by
+        # __tls_get_addr, so it carries NO module base and NO tls.offset -- just
+        # st_value + addend.
+        dtp_symbol: mutable elf_symbol = zeroed
+        dtp_value: mutable u64 = rel.rel_addend.u64()
+        if Module_GetSymbolByIndex(module, symbol_index, dtp_symbol):
+            dtp_value <- dtp_symbol.st_value + rel.rel_addend.u64()
+        Linker_NoteRelocatedPointerValue(dtp_value, rel_virtual_addr, rel_type, null, module.name)
+        can Memory.Allocate:
+            catch Linker_WriteRelocationU64((&module).cast[mutable Module&], memory, rel_virtual_addr, dtp_value):
+                n:
+                    module.applied_relocation_count <- module.applied_relocation_count + 1
+                    return true
+                error e:
+                    true
+        Linker_RecordFailedRelocationDetail((&self).cast[mutable Linker&], 6, IMPORT_RESOLUTION_UNRESOLVED, dtp_value)
+        return false
+    if rel_type == R_X86_64_TPOFF64:
+        # Offset from the thread pointer for a STATIC-TLS symbol. The module's
+        # block ends tls.offset bytes below TP, so the symbol lives at
+        # TP - tls.offset + st_value, i.e. the (negative) TP-relative offset is
+        # st_value + addend - tls.offset.
+        tp_symbol: mutable elf_symbol = zeroed
+        tp_base: mutable u64 = rel.rel_addend.u64()
+        if Module_GetSymbolByIndex(module, symbol_index, tp_symbol):
+            tp_base <- tp_symbol.st_value + rel.rel_addend.u64()
+        tp_value: u64 = tp_base - module.tls.offset.u64()
+        Linker_NoteRelocatedPointerValue(tp_value, rel_virtual_addr, rel_type, null, module.name)
+        can Memory.Allocate:
+            catch Linker_WriteRelocationU64((&module).cast[mutable Module&], memory, rel_virtual_addr, tp_value):
+                n:
+                    module.applied_relocation_count <- module.applied_relocation_count + 1
+                    return true
+                error e:
+                    true
+        Linker_RecordFailedRelocationDetail((&self).cast[mutable Linker&], 7, IMPORT_RESOLUTION_UNRESOLVED, tp_value)
+        return false
     if rel_type == R_X86_64_DTPMOD64:
         can Memory.Allocate:
             catch Linker_WriteRelocationU64((&module).cast[mutable Module&], memory, rel_virtual_addr, module.tls.modid.u64()):
@@ -2421,19 +2460,39 @@ def Linker_AllocateTlsForThread(self: mutable Linker&, is_primary: bool) -> uint
         tcb.tcb_fiber <- 0.uintptr().cast[GuestFiberPointer]
         dtv[0].counter <- self.dtv_generation_counter.usize()
         dtv[1].counter <- self.max_tls_index.usize()
-        if self.modules.count > 0:
-            module: Module = self.modules[0]
-            if module.tls.image_size != 0 and module.tls.modid.u64() + 1 < dtv_count.u64():
-                dest_addr: uintptr = base + (tls_aligned_size - module.tls.offset.usize()).uintptr()
-                src_addr: uintptr = module.tls.image_virtual_addr
-                if src_addr != 0.uintptr():
-                    src: u8& = src_addr.cast[u8&]
-                    dest: mutable u8& = dest_addr.cast[mutable u8&]
-                    c: mutable usize = 0
-                    while c < module.tls.init_image_size.usize():
-                        dest[c] <- src[c]
-                        c <- c + 1
-                dtv[module.tls.modid.usize() + 1].pointer <- dest_addr.cast[GuestTlsBlockPointer]
+        # Populate the DTV for EVERY module carrying a TLS image, not just the
+        # main module. Each module's block sits at [TP - tls.offset], i.e.
+        # base + (tls_aligned_size - tls.offset). Its init image is copied in and
+        # its DTV slot (dtv[modid+1]) points at the block, so any dependency PRX
+        # (libc) touching its thread-locals -- via DTPMOD64/DTPOFF64 + __tls_get_addr
+        # or via a TPOFF64 %fs access -- reads a valid pointer instead of NULL.
+        mloop: mutable usize = 0
+        while mloop < self.modules.count:
+            can Unsafe.AssumeProgress:
+                modi: Module = self.modules[mloop]
+                # Hardened bounds: the block must sit fully inside the static-TLS
+                # area. offset in (0, tls_aligned_size]; copy length clamped to the
+                # module's reserved image_size AND to what remains below the block
+                # start, so a malformed dependency PRX cannot smash the TCB/DTV or
+                # the host heap past the block.
+                tls_off: usize = modi.tls.offset.usize()
+                if modi.tls.image_size != 0 and tls_off != 0 and tls_off <= tls_aligned_size and modi.tls.modid.u64() + 1 < dtv_count.u64():
+                    dest_addr: uintptr = base + (tls_aligned_size - tls_off).uintptr()
+                    copy_n: mutable usize = modi.tls.init_image_size.usize()
+                    if copy_n > modi.tls.image_size.usize():
+                        copy_n <- modi.tls.image_size.usize()
+                    if copy_n > tls_off:
+                        copy_n <- tls_off
+                    src_addr: uintptr = modi.tls.image_virtual_addr
+                    if src_addr != 0.uintptr():
+                        src: u8& = src_addr.cast[u8&]
+                        dest: mutable u8& = dest_addr.cast[mutable u8&]
+                        c: mutable usize = 0
+                        while c < copy_n:
+                            dest[c] <- src[c]
+                            c <- c + 1
+                    dtv[modi.tls.modid.usize() + 1].pointer <- dest_addr.cast[GuestTlsBlockPointer]
+            mloop <- mloop + 1
         TLS_SetPrimaryTcbBase(tcb_addr.cast[SegmentSelfPointer])
         TLS_RegisterPrimaryTemplate(base.cast[GuestTlsTemplatePointer], total_tls_size, dtv_raw.cast[uintptr].cast[GuestDtvPointer], dtv_count)
         return tcb_addr
@@ -2676,6 +2735,10 @@ def Linker_Execute(self: mutable Linker&, args: darray[static u8&]) -> s32 can[U
         self.last_start_result <- -1
         self.last_entry_addr <- 0.uintptr()
         return -1
+    # Provisional static-TLS size from the main module; the authoritative
+    # multi-module layout (which assigns each module a distinct tls.offset and
+    # the final static_tls_size) runs AFTER the dependency closure loads libc &
+    # friends -- their TLS images do not exist yet at this point.
     self.static_tls_size <- self.modules[0].tls.image_size.usize()
     self.modules[0].tls.offset <- self.modules[0].tls.image_size
     memory: mutable MemoryManager& = Memory_Instance()
@@ -2707,6 +2770,25 @@ def Linker_Execute(self: mutable Linker&, args: darray[static u8&]) -> s32 can[U
         Linker_PreloadLibkernelGameModules((&self).cast[mutable Linker&])
         Linker_LoadDependencyClosure((&self).cast[mutable Linker&])
     ge_emergency_mark(GE_EV_EXEC_AFTER_DEP_CLOSURE, self.modules.count.uintptr(), (1 if self.relocated_all_imports else 0).uintptr(), 0.uintptr(), 0.uintptr())
+    # Static-TLS layout (shadPS4 model), computed now that the FULL module set
+    # (eboot + libkernel + libc + ...) is loaded. Each static-TLS module's block
+    # is stacked below the thread pointer: tls.offset is the distance below TP at
+    # which the module's block ENDS, so it occupies [TP - offset, TP - offset +
+    # image_size). Accumulating aligned image sizes over every TLS-bearing module
+    # gives each (libc included) a distinct, non-overlapping slot, a correct
+    # tls.offset for TPOFF64 relocations, and the final static_tls_size for the
+    # per-thread TLS allocation + DTV below.
+    tls_running_offset: mutable u32 = 0
+    tmi: mutable usize = 0
+    while tmi < self.modules.count:
+        can Unsafe.AssumeProgress:
+            if self.modules[tmi].tls.image_size != 0:
+                t_align: u32 = self.modules[tmi].tls.align if self.modules[tmi].tls.align != 0 else 1
+                t_aligned: u32 = Module_AlignUp(self.modules[tmi].tls.image_size.u64(), t_align.u64()).u32()
+                tls_running_offset <- tls_running_offset + t_aligned
+                self.modules[tmi].tls.offset <- tls_running_offset
+        tmi <- tmi + 1
+    self.static_tls_size <- tls_running_offset.usize()
     GuestExec_RecordLoad()
     if not self.relocated_all_imports:
         ge_emergency_mark(GE_EV_EXEC_RELOC_ALL_BEGIN, self.modules.count.uintptr(), self.last_relocated_import_count.u64().uintptr(), 0.uintptr(), 0.uintptr())
