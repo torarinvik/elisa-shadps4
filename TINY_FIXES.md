@@ -7,7 +7,7 @@
   All 47 targets verified clean vs baseline.
 - ⏭️ **Category B (#54–61) SKIPPED (audited, intentional)** — all 8 are the
   same correct pattern: build a NUL-terminated buffer in a persistent arena,
-  then `return out[0].ref[static u8&]` (a C-string contract). Already inside
+  then `return out[0].cast[static u8&]` (a C-string contract). Already inside
   `trusted Unsafe.*` with vouching comments. The linter flags the index-rooted
   cast for audit; it has been audited. No tiny fix exists — clearing it needs
   either a return-type change (ripples to all callers) or a centralizing helper
