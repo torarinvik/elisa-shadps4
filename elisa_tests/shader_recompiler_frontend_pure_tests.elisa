@@ -33,6 +33,10 @@ def _encode_vop2(op: u32, src0: u32, vsrc1: u32, vdst: u32) -> u32:
     return ((op & 0x3F) << 25) | ((vdst & 0xFF) << 17) | ((vsrc1 & 0xFF) << 9) | (src0 & 0x1FF)
 
 
+def _encode_vintrp(op: u32, vsrc: u32, chan: u32, attr: u32, vdst: u32) -> u32:
+    return INST_ENCODING_VINTRP | ((vdst & 0xFF) << 18) | ((op & 0x3) << 16) | ((attr & 0x3F) << 10) | ((chan & 0x3) << 8) | (vsrc & 0xFF)
+
+
 def _encode_smrd(op: u32, sbase: u32, sdst: u32, offset: u32, imm: bool) -> u32:
     imm_bit: mutable u32 = 0
     if imm:
@@ -178,6 +182,63 @@ def shader_frontend_scalar_memory_decode_preserves_refined_register_indices() ->
         assert inst.dst[0].code == 100
         assert inst.dst[0].has_refined_sgpr
         assert InstOperand_RefinedScalarRegister(inst.dst[0]) == 100
+
+
+@test
+def shader_frontend_decode_modifier_paths_preserve_refined_register_indices() -> void:
+    can Abort.Panic:
+        words: mutable u32[8] = zeroed
+        wi: mutable u32 = 0
+
+        words[wi.usize()] <- _encode_vintrp(1, 17, 2, 9, 33)
+        wi <- wi + 1
+
+        words[wi.usize()] <- _encode_vop2(37, OPERAND_FIELD_SDWA, 4, 5)
+        wi <- wi + 1
+        words[wi.usize()] <- 77
+        wi <- wi + 1
+
+        words[wi.usize()] <- _encode_vop2(37, OPERAND_FIELD_DPP, 6, 7)
+        wi <- wi + 1
+        words[wi.usize()] <- 88
+        wi <- wi + 1
+
+        slice: mutable GcnCodeSlice = zeroed
+        GcnCodeSlice_Init(slice, words[0], wi)
+        ctx: mutable GcnDecodeContext = zeroed
+
+        vintrp: GcnInst = GcnDecodeContext_decodeInstruction(ctx, slice)
+        assert vintrp.encoding == INST_ENCODING_VINTRP
+        assert vintrp.src[0].field == OPERAND_FIELD_VECTOR_GPR
+        assert vintrp.src[0].code == 17
+        assert vintrp.src[0].has_refined_vgpr
+        assert InstOperand_RefinedVectorRegister(vintrp.src[0]) == 17
+        assert vintrp.dst[0].field == OPERAND_FIELD_VECTOR_GPR
+        assert vintrp.dst[0].code == 33
+        assert vintrp.dst[0].has_refined_vgpr
+        assert InstOperand_RefinedVectorRegister(vintrp.dst[0]) == 33
+
+        sdwa: GcnInst = GcnDecodeContext_decodeInstruction(ctx, slice)
+        assert sdwa.encoding == INST_ENCODING_VOP2
+        assert sdwa.src[0].field == OPERAND_FIELD_VECTOR_GPR
+        assert sdwa.src[0].code == 77
+        assert sdwa.src[0].has_refined_vgpr
+        assert InstOperand_RefinedVectorRegister(sdwa.src[0]) == 77
+        assert sdwa.src[1].has_refined_vgpr
+        assert InstOperand_RefinedVectorRegister(sdwa.src[1]) == 4
+        assert sdwa.dst[0].has_refined_vgpr
+        assert InstOperand_RefinedVectorRegister(sdwa.dst[0]) == 5
+
+        dpp: GcnInst = GcnDecodeContext_decodeInstruction(ctx, slice)
+        assert dpp.encoding == INST_ENCODING_VOP2
+        assert dpp.src[0].field == OPERAND_FIELD_VECTOR_GPR
+        assert dpp.src[0].code == 88
+        assert dpp.src[0].has_refined_vgpr
+        assert InstOperand_RefinedVectorRegister(dpp.src[0]) == 88
+        assert dpp.src[1].has_refined_vgpr
+        assert InstOperand_RefinedVectorRegister(dpp.src[1]) == 6
+        assert dpp.dst[0].has_refined_vgpr
+        assert InstOperand_RefinedVectorRegister(dpp.dst[0]) == 7
 
 
 @test

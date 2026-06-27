@@ -212,6 +212,47 @@ def _get_operand_field(code: u32) -> u32:
     return code
 
 
+def _set_scalar_register_operand(op: mutable InstOperand&, index: u32) -> void:
+    can Abort.Panic:
+        narrowed: GcnScalarRegisterIndexOptional = GcnScalarRegisterIndex_Try(index)
+        assert narrowed.has_value
+        op.field <- OPERAND_FIELD_SCALAR_GPR
+        InstOperand_SetScalarRegisterCode(op, narrowed.value)
+
+
+def _set_vector_register_operand(op: mutable InstOperand&, index: u32) -> void:
+    can Abort.Panic:
+        narrowed: GcnVectorRegisterIndexOptional = GcnVectorRegisterIndex_Try(index)
+        assert narrowed.has_value
+        op.field <- OPERAND_FIELD_VECTOR_GPR
+        InstOperand_SetVectorRegisterCode(op, narrowed.value)
+
+
+def _set_scalar_selector_operand(op: mutable InstOperand&, selector: u32) -> void:
+    can Abort.Panic:
+        narrowed: GcnScalarOperandSelectorOptional = GcnScalarOperandSelector_Try(selector)
+        assert narrowed.has_value
+        op.field <- _get_operand_field(selector)
+        InstOperand_SetScalarSelectorCode(op, narrowed.value)
+
+
+def _set_vector_selector_operand(op: mutable InstOperand&, selector: u32) -> void:
+    can Abort.Panic:
+        narrowed: GcnVectorOperandSelectorOptional = GcnVectorOperandSelector_Try(selector)
+        assert narrowed.has_value
+        op.field <- _get_operand_field(selector)
+        if op.field == OPERAND_FIELD_VECTOR_GPR:
+            InstOperand_SetVectorSelectorAsCode(op, narrowed.value)
+        else:
+            InstOperand_SetVectorSelectorCode(op, narrowed.value)
+
+
+def _set_raw_operand_without_register_proof(op: mutable InstOperand&, field: u32, code: u32) -> void:
+    InstOperand_ClearRegisterProofs(op)
+    op.field <- field
+    op.code <- code
+
+
 def _is_vop3b_encoding(opcode: u32) -> bool:
     return opcode == OPCODE_V_ADD_I32 or opcode == OPCODE_V_ADDC_U32 or opcode == OPCODE_V_SUB_I32 or opcode == OPCODE_V_SUBB_U32 or opcode == OPCODE_V_SUBREV_I32 or opcode == OPCODE_V_SUBBREV_U32 or opcode == OPCODE_V_DIV_SCALE_F32 or opcode == OPCODE_V_DIV_SCALE_F64 or opcode == OPCODE_V_MAD_U64_U32 or opcode == OPCODE_V_MAD_I64_I32
 
@@ -320,8 +361,8 @@ def _decode_instruction_vop1(inst: mutable GcnInst&, hex_instruction: u32) -> vo
     InstOperand_SetVectorRegisterCode(inst.dst[0], vdst)
     inst.dst_count <- 1
     if inst.opcode == OPCODE_V_READFIRSTLANE_B32:
-        inst.dst[0].field <- _get_operand_field(vdst)
         inst.dst[0].type_ <- SCALAR_TYPE_UINT32
+        _set_scalar_register_operand(inst.dst[0], vdst)
 
 
 def _decode_instruction_vopc(inst: mutable GcnInst&, hex_instruction: u32) -> void:
@@ -358,11 +399,11 @@ def _decode_instruction_vop2(inst: mutable GcnInst&, hex_instruction: u32) -> vo
     InstOperand_SetVectorRegisterCode(inst.dst[0], vdst)
     inst.dst_count <- 1
     if inst.opcode == OPCODE_V_READLANE_B32:
-        inst.src[1].field <- _get_operand_field(vsrc1)
-        inst.dst[0].field <- _get_operand_field(vdst)
+        _set_scalar_selector_operand(inst.src[1], vsrc1)
         inst.dst[0].type_ <- SCALAR_TYPE_UINT32
+        _set_scalar_register_operand(inst.dst[0], vdst)
     if inst.opcode == OPCODE_V_WRITELANE_B32:
-        inst.src[1].field <- _get_operand_field(vsrc1)
+        _set_scalar_selector_operand(inst.src[1], vsrc1)
     if _is_vop3b_encoding(inst.opcode):
         inst.dst[1].field <- OPERAND_FIELD_VCC_LO
         inst.dst[1].type_ <- SCALAR_TYPE_UINT64
@@ -398,10 +439,8 @@ def _decode_instruction_vintrp(inst: mutable GcnInst&, hex_instruction: u32) -> 
     op: u32 = _bit_extract_u32(hex_instruction, 17, 16)
     vdst: u32 = _bit_extract_u32(hex_instruction, 25, 18)
     inst.opcode <- op + OP_MAP_VINTRP
-    inst.src[0].field <- OPERAND_FIELD_VECTOR_GPR
-    inst.src[0].code <- vsrc
-    inst.dst[0].field <- OPERAND_FIELD_VECTOR_GPR
-    inst.dst[0].code <- vdst
+    _set_vector_register_operand(inst.src[0], vsrc)
+    _set_vector_register_operand(inst.dst[0], vdst)
     inst.dst_count <- 1
     inst.control_vintrp_chan <- _bit_extract_u32(hex_instruction, 9, 8)
     inst.control_vintrp_attr <- _bit_extract_u32(hex_instruction, 15, 10)
@@ -445,17 +484,17 @@ def _decode_instruction_vop3(inst: mutable GcnInst&, hex_instruction: u64) -> vo
     inst.dst[0].field <- OPERAND_FIELD_VECTOR_GPR
     InstOperand_SetVectorRegisterCode(inst.dst[0], vdst)
     if _is_vop3b_encoding(inst.opcode):
-        inst.dst[1].field <- _get_operand_field(sdst)
+        inst.dst[1].field <- OPERAND_FIELD_SCALAR_GPR
         inst.dst[1].type_ <- SCALAR_TYPE_UINT64
-        inst.dst[1].code <- sdst
+        InstOperand_SetScalarRegisterCode(inst.dst[1], sdst)
     else:
         if op >= 0 and op <= 247:
-            inst.dst[1].field <- _get_operand_field(vdst)
+            inst.dst[1].field <- OPERAND_FIELD_VECTOR_GPR
             inst.dst[1].type_ <- SCALAR_TYPE_UINT64
-            inst.dst[1].code <- vdst
+            InstOperand_SetVectorRegisterCode(inst.dst[1], vdst)
         if op == 257 or op == 386:
-            inst.dst[0].field <- _get_operand_field(vdst)
             inst.dst[0].type_ <- SCALAR_TYPE_UINT32
+            _set_scalar_register_operand(inst.dst[0], vdst)
     if op >= 293 and op <= 366:
         inst.dst_count <- 2
     else:
@@ -873,39 +912,34 @@ def _decode_sdwa(inst: mutable GcnInst&, encoding: u32, code: mutable GcnCodeSli
         src0: u32 = _bit_extract_u32(raw, 7, 0)
         sdst: u32 = _bit_extract_u32(raw, 14, 8)
         sd: u32 = _bit_extract_u32(raw, 15, 15)
-        inst.src[0].field <- OPERAND_FIELD_VECTOR_GPR
+        _set_vector_register_operand(inst.src[0], src0)
         if _bit_extract_u32(raw, 23, 23) != 0:
-            inst.src[0].field <- _get_operand_field(src0)
-        inst.src[0].code <- src0
+            _set_scalar_selector_operand(inst.src[0], src0)
         inst.src[0].sdwa_sel <- _bit_extract_u32(raw, 18, 16)
         inst.src[0].input_modifier.sext <- _bit_extract_u32(raw, 19, 19) != 0
         inst.src[0].input_modifier.neg <- _bit_extract_u32(raw, 20, 20) != 0
         inst.src[0].input_modifier.abs <- _bit_extract_u32(raw, 21, 21) != 0
-        inst.src[1].field <- OPERAND_FIELD_VECTOR_GPR
         if _bit_extract_u32(raw, 31, 31) != 0:
-            inst.src[1].field <- _get_operand_field(inst.src[1].code)
+            _set_scalar_selector_operand(inst.src[1], inst.src[1].code)
         inst.src[1].sdwa_sel <- _bit_extract_u32(raw, 26, 24)
         inst.src[1].input_modifier.sext <- _bit_extract_u32(raw, 27, 27) != 0
         inst.src[1].input_modifier.neg <- _bit_extract_u32(raw, 28, 28) != 0
         inst.src[1].input_modifier.abs <- _bit_extract_u32(raw, 29, 29) != 0
         if sd != 0:
-            inst.dst[0].field <- OPERAND_FIELD_SCALAR_GPR
+            _set_scalar_register_operand(inst.dst[0], sdst)
         else:
-            inst.dst[0].field <- OPERAND_FIELD_VCC_LO
-        inst.dst[0].code <- sdst
+            _set_raw_operand_without_register_proof(inst.dst[0], OPERAND_FIELD_VCC_LO, sdst)
     if encoding == INST_ENCODING_VOP1 or encoding == INST_ENCODING_VOP2:
         src0: u32 = _bit_extract_u32(raw, 7, 0)
-        inst.src[0].field <- OPERAND_FIELD_VECTOR_GPR
+        _set_vector_register_operand(inst.src[0], src0)
         if _bit_extract_u32(raw, 23, 23) != 0:
-            inst.src[0].field <- _get_operand_field(src0)
-        inst.src[0].code <- src0
+            _set_scalar_selector_operand(inst.src[0], src0)
         inst.src[0].sdwa_sel <- _bit_extract_u32(raw, 18, 16)
         inst.src[0].input_modifier.sext <- _bit_extract_u32(raw, 19, 19) != 0
         inst.src[0].input_modifier.neg <- _bit_extract_u32(raw, 20, 20) != 0
         inst.src[0].input_modifier.abs <- _bit_extract_u32(raw, 21, 21) != 0
-        inst.src[1].field <- OPERAND_FIELD_VECTOR_GPR
         if _bit_extract_u32(raw, 31, 31) != 0:
-            inst.src[1].field <- _get_operand_field(inst.src[1].code)
+            _set_scalar_selector_operand(inst.src[1], inst.src[1].code)
         inst.src[1].sdwa_sel <- _bit_extract_u32(raw, 26, 24)
         inst.src[1].input_modifier.sext <- _bit_extract_u32(raw, 27, 27) != 0
         inst.src[1].input_modifier.neg <- _bit_extract_u32(raw, 28, 28) != 0
@@ -923,8 +957,7 @@ def _decode_dpp(inst: mutable GcnInst&, code: mutable GcnCodeSlice&) -> void:
     inst.length <- inst.length + 4
     src0: u32 = _bit_extract_u32(raw, 7, 0)
     dpp_ctrl: u32 = _bit_extract_u32(raw, 16, 8)
-    inst.src[0].field <- OPERAND_FIELD_VECTOR_GPR
-    inst.src[0].code <- src0
+    _set_vector_register_operand(inst.src[0], src0)
     inst.src[0].input_modifier.neg <- _bit_extract_u32(raw, 20, 20) != 0
     inst.src[0].input_modifier.abs <- _bit_extract_u32(raw, 21, 21) != 0
     inst.src[1].input_modifier.neg <- _bit_extract_u32(raw, 22, 22) != 0
