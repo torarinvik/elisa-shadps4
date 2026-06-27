@@ -75,6 +75,28 @@ def _encode_exp(en: u32, target: u32, vsrc0: u32, vsrc1: u32, vsrc2: u32, vsrc3:
     return v
 
 
+def _encode_vop3(op: u32, vdst: u32, sdst: u32, src0: u32, src1: u32, src2: u32) -> u64:
+    v: mutable u64 = INST_ENCODING_VOP3.u64()
+    v <- v | (vdst.u64() & 0xFF)
+    v <- v | ((sdst & 0x7F).u64() << 8)
+    v <- v | (((op >> 9) & 1).u64() << 16)
+    v <- v | ((op & 0x1FF).u64() << 17)
+    v <- v | ((src0 & 0x1FF).u64() << 32)
+    v <- v | ((src1 & 0x1FF).u64() << 41)
+    v <- v | ((src2 & 0x1FF).u64() << 50)
+    return v
+
+
+def _encode_vop3p(op: u32, vdst: u32, src0: u32, src1: u32, src2: u32) -> u64:
+    v: mutable u64 = INST_ENCODING_VOP3P.u64()
+    v <- v | (vdst.u64() & 0xFF)
+    v <- v | ((op & 0x7F).u64() << 16)
+    v <- v | ((src0 & 0x1FF).u64() << 32)
+    v <- v | ((src1 & 0x1FF).u64() << 41)
+    v <- v | ((src2 & 0x1FF).u64() << 50)
+    return v
+
+
 def _write_u64_words(words: mutable u32&, word_index: u32, value: u64) -> void:
     words[word_index.usize()] <- (value & 0xFFFFFFFF).u32()
     words[(word_index + 1).usize()] <- (value >> 32).u32()
@@ -129,6 +151,130 @@ def shader_frontend_decode_core_paths_contracts() -> void:
 
         assert GetInstructionEncoding(words[0]) == INST_ENCODING_SOPK
         assert GetEncodingLength(INST_ENCODING_MUBUF) == 8
+
+
+@test
+def shader_frontend_proven_decode_operand_fields_survive_gcninst_storage() -> void:
+    can Abort.Panic:
+        words: mutable u32[16] = zeroed
+        wi: mutable u32 = 0
+
+        sop2_word: u32 = _encode_sop2(36, 103, 208, 12)
+        words[wi.usize()] <- sop2_word
+        wi <- wi + 1
+
+        mubuf_word: u64 = _encode_mubuf(80, 0x5A5, 245, 246, 31, 255)
+        _write_u64_words(words[0], wi, mubuf_word)
+        wi <- wi + 2
+
+        exp_word: u64 = _encode_exp(0xF, 32, 11, 22, 33, 44)
+        _write_u64_words(words[0], wi, exp_word)
+        wi <- wi + 2
+
+        # VOP3 encoding of V_ADD_I32: op field maps back through the VOP2 alias window.
+        vop3_op: u32 = VOP3_TO_VOP2 + (OPCODE_V_ADD_I32 - OP_MAP_VOP2)
+        vop3_word: u64 = _encode_vop3(vop3_op, 5, 17, 260, 42, 255)
+        _write_u64_words(words[0], wi, vop3_word)
+        wi <- wi + 2
+
+        vop3p_word: u64 = _encode_vop3p(1, 7, 259, 10, 511)
+        _write_u64_words(words[0], wi, vop3p_word)
+        wi <- wi + 2
+
+        sop2: Sop2Inst = decode_sop2(sop2_word)
+        assert sop2.op == 36
+        assert sop2.sdst == 12
+        assert sop2.ssrc0 == 103
+        assert sop2.ssrc1 == 208
+
+        mubuf: Mubuf64 = decode_mubuf64(mubuf_word)
+        assert mubuf.op == 80
+        assert mubuf.vaddr == 245
+        assert mubuf.vdata == 246
+        assert mubuf.srsrc == 31
+        assert mubuf.soffset == 255
+
+        exp: Exp64 = decode_exp64(exp_word)
+        assert exp.vsrc0 == 11
+        assert exp.vsrc1 == 22
+        assert exp.vsrc2 == 33
+        assert exp.vsrc3 == 44
+
+        vop3: Vop3Operands = decode_vop3_operands(vop3_word)
+        assert vop3.vdst == 5
+        assert vop3.sdst == 17
+        assert vop3.src0 == 260
+        assert vop3.src1 == 42
+        assert vop3.src2 == 255
+
+        vop3p: Vop3pOperands = decode_vop3p_operands(vop3p_word)
+        assert vop3p.vdst == 7
+        assert vop3p.src0 == 259
+        assert vop3p.src1 == 10
+        assert vop3p.src2 == 511
+
+        slice: mutable GcnCodeSlice = zeroed
+        GcnCodeSlice_Init(slice, words[0], wi)
+        ctx: mutable GcnDecodeContext = zeroed
+
+        inst0: GcnInst = GcnDecodeContext_decodeInstruction(ctx, slice)
+        assert inst0.encoding == INST_ENCODING_SOP2
+        assert inst0.src[0].field == OPERAND_FIELD_SCALAR_GPR
+        assert inst0.src[0].code == 103
+        assert inst0.src[1].field == OPERAND_FIELD_SIGNED_CONST_INT_NEG
+        assert inst0.src[1].code == 208
+        assert inst0.dst[0].field == OPERAND_FIELD_SCALAR_GPR
+        assert inst0.dst[0].code == 12
+
+        inst1: GcnInst = GcnDecodeContext_decodeInstruction(ctx, slice)
+        assert inst1.encoding == INST_ENCODING_MUBUF
+        assert inst1.opcode == OP_MAP_MUBUF + 80
+        assert inst1.src[0].field == OPERAND_FIELD_VECTOR_GPR
+        assert inst1.src[0].code == 245
+        assert inst1.src[1].field == OPERAND_FIELD_VECTOR_GPR
+        assert inst1.src[1].code == 246
+        assert inst1.src[2].field == OPERAND_FIELD_SCALAR_GPR
+        assert inst1.src[2].code == 31
+        assert inst1.src[3].field == OPERAND_FIELD_LITERAL_CONST
+        assert inst1.src[3].code == 255
+
+        inst2: GcnInst = GcnDecodeContext_decodeInstruction(ctx, slice)
+        assert inst2.encoding == INST_ENCODING_EXP
+        assert inst2.opcode == OP_MAP_EXP
+        assert inst2.src[0].field == OPERAND_FIELD_VECTOR_GPR
+        assert inst2.src[0].code == 11
+        assert inst2.src[1].field == OPERAND_FIELD_VECTOR_GPR
+        assert inst2.src[1].code == 22
+        assert inst2.src[2].field == OPERAND_FIELD_VECTOR_GPR
+        assert inst2.src[2].code == 33
+        assert inst2.src[3].field == OPERAND_FIELD_VECTOR_GPR
+        assert inst2.src[3].code == 44
+
+        inst3: GcnInst = GcnDecodeContext_decodeInstruction(ctx, slice)
+        assert inst3.encoding == INST_ENCODING_VOP3
+        assert inst3.opcode == OPCODE_V_ADD_I32
+        assert inst3.src[0].field == OPERAND_FIELD_VECTOR_GPR
+        assert inst3.src[0].code == 4
+        assert inst3.src[1].field == OPERAND_FIELD_SCALAR_GPR
+        assert inst3.src[1].code == 42
+        assert inst3.src[2].field == OPERAND_FIELD_LITERAL_CONST
+        assert inst3.src[2].code == 255
+        assert inst3.dst[0].field == OPERAND_FIELD_VECTOR_GPR
+        assert inst3.dst[0].code == 5
+        assert inst3.dst[1].field == OPERAND_FIELD_SCALAR_GPR
+        assert inst3.dst[1].code == 17
+
+        inst4: GcnInst = GcnDecodeContext_decodeInstruction(ctx, slice)
+        assert inst4.encoding == INST_ENCODING_VOP3P
+        assert inst4.opcode == OP_MAP_VOP3P + 1
+        assert inst4.src[0].field == OPERAND_FIELD_VECTOR_GPR
+        assert inst4.src[0].code == 3
+        assert inst4.src[1].field == OPERAND_FIELD_SCALAR_GPR
+        assert inst4.src[1].code == 10
+        assert inst4.src[2].field == OPERAND_FIELD_VECTOR_GPR
+        assert inst4.src[2].code == 255
+        assert inst4.dst[0].field == OPERAND_FIELD_VECTOR_GPR
+        assert inst4.dst[0].code == 7
 
 
 @test
