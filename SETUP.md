@@ -32,3 +32,16 @@ go run ./src -strict -emit semantic "<this repo>/core_libraries_audio3d_integrat
 
 (The Wolf3D Elisa port uses direct relative includes instead, since it has only a handful
 of include sites; this repo's scale made the single symlink the lower-risk choice.)
+
+## Refined register lowered regression
+
+The repeatable lowered-output guard for refined SGPR/VGPR register bounds is:
+
+```sh
+tools/run_refined_register_lowering_regression.sh
+```
+
+Set `ELISAC=/path/to/elisac` to use a prebuilt compiler, or set `ELISA_CORE=/path/to/Elisa-core`
+to run it from source. The script refreshes the focused lowered outputs, runs
+`tools/check_refined_register_lowering.py`, and regenerates
+`verification_findings/lowered-register-bounds-audit.md`.
