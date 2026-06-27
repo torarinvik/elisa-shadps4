@@ -73,14 +73,14 @@ None.
 - `elisa_tests/shader_recompiler_ir_core_pure_tests.elisa:219` `shader_ir_emitter_refined_f32_register_adapters_are_named_and_bounded`: `assert ShaderIrValue_ScalarReg(block.insts[3].args[0]) == 103`
 - `elisa_tests/shader_recompiler_ir_core_pure_tests.elisa:221` `shader_ir_emitter_refined_f32_register_adapters_are_named_and_bounded`: `assert ShaderIrValue_VectorReg(block.insts[4].args[0]) == 255`
 - `elisa_tests/shader_recompiler_ir_core_pure_tests.elisa:225` `shader_ir_emitter_refined_f32_register_adapters_are_named_and_bounded`: `assert ShaderIrValue_VectorReg(block.insts[7].args[0]) == 255`
-- `elisa_tests/shader_recompiler_ir_core_pure_tests.elisa:237` `shader_ir_refined_register_index_boundary_elides_recheck_regression`: `assert ShaderIrScalarRegIndex_TryFromU32(103, max_sgpr)`
-- `elisa_tests/shader_recompiler_ir_core_pure_tests.elisa:238` `shader_ir_refined_register_index_boundary_elides_recheck_regression`: `assert ShaderIrVectorRegIndex_TryFromU32(255, max_vgpr)`
-- `elisa_tests/shader_recompiler_ir_core_pure_tests.elisa:242` `shader_ir_refined_register_index_boundary_elides_recheck_regression`: `assert not ShaderIrScalarRegIndex_TryFromU32(104, invalid_sgpr)`
-- `elisa_tests/shader_recompiler_ir_core_pure_tests.elisa:243` `shader_ir_refined_register_index_boundary_elides_recheck_regression`: `assert not ShaderIrVectorRegIndex_TryFromU32(256, invalid_vgpr)`
-- `elisa_tests/shader_recompiler_ir_core_pure_tests.elisa:254` `shader_ir_refined_register_index_boundary_elides_recheck_regression`: `assert ShaderIrValue_ScalarReg(block.insts[0].args[0]) == 103`
-- `elisa_tests/shader_recompiler_ir_core_pure_tests.elisa:259` `shader_ir_refined_register_index_boundary_elides_recheck_regression`: `assert ShaderIrValue_ScalarReg(block.insts[1].args[0]) == 103`
-- `elisa_tests/shader_recompiler_ir_core_pure_tests.elisa:263` `shader_ir_refined_register_index_boundary_elides_recheck_regression`: `assert ShaderIrValue_VectorReg(block.insts[2].args[0]) == 255`
-- `elisa_tests/shader_recompiler_ir_core_pure_tests.elisa:268` `shader_ir_refined_register_index_boundary_elides_recheck_regression`: `assert ShaderIrValue_VectorReg(block.insts[3].args[0]) == 255`
+- `elisa_tests/shader_recompiler_ir_core_pure_tests.elisa:239` `shader_ir_refined_register_index_boundary_elides_recheck_regression`: `assert ShaderIrScalarRegIndex_TryFromU32(103, narrowed_sgpr)`
+- `elisa_tests/shader_recompiler_ir_core_pure_tests.elisa:241` `shader_ir_refined_register_index_boundary_elides_recheck_regression`: `assert ShaderIrVectorRegIndex_TryFromU32(255, narrowed_vgpr)`
+- `elisa_tests/shader_recompiler_ir_core_pure_tests.elisa:246` `shader_ir_refined_register_index_boundary_elides_recheck_regression`: `assert not ShaderIrScalarRegIndex_TryFromU32(104, invalid_sgpr)`
+- `elisa_tests/shader_recompiler_ir_core_pure_tests.elisa:247` `shader_ir_refined_register_index_boundary_elides_recheck_regression`: `assert not ShaderIrVectorRegIndex_TryFromU32(256, invalid_vgpr)`
+- `elisa_tests/shader_recompiler_ir_core_pure_tests.elisa:258` `shader_ir_refined_register_index_boundary_elides_recheck_regression`: `assert ShaderIrValue_ScalarReg(block.insts[0].args[0]) == 103`
+- `elisa_tests/shader_recompiler_ir_core_pure_tests.elisa:263` `shader_ir_refined_register_index_boundary_elides_recheck_regression`: `assert ShaderIrValue_ScalarReg(block.insts[1].args[0]) == 103`
+- `elisa_tests/shader_recompiler_ir_core_pure_tests.elisa:267` `shader_ir_refined_register_index_boundary_elides_recheck_regression`: `assert ShaderIrValue_VectorReg(block.insts[2].args[0]) == 255`
+- `elisa_tests/shader_recompiler_ir_core_pure_tests.elisa:272` `shader_ir_refined_register_index_boundary_elides_recheck_regression`: `assert ShaderIrValue_VectorReg(block.insts[3].args[0]) == 255`
 - `elisa_tests/shader_recompiler_frontend_instruction_index_tests.elisa:26` `shader_frontend_instruction_refined_register_index_contracts`: `assert GcnReadScalarRegister(sidx.value, sgprs) == 0x1234`
 - `elisa_tests/shader_recompiler_frontend_instruction_index_tests.elisa:30` `shader_frontend_instruction_refined_register_index_contracts`: `assert GcnReadVectorRegister(vidx.value, vgprs) == 0x5678`
 - `elisa_tests/shader_recompiler_frontend_instruction_index_tests.elisa:36` `shader_frontend_instruction_refined_register_index_contracts`: `assert GcnVectorRegisterPairIndex_Try(255).has_value == false`
