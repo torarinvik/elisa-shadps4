@@ -16,9 +16,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-FOCUSED_FILES = [
-    ROOT / "shader_recompiler_ir_core_pure_tests.lowered.elisa",
-    ROOT / "shader_recompiler/ir/ir_emitter.lowered.elisa",
+DEFAULT_CORE_LOWERED = ROOT / "shader_recompiler_ir_core_pure_tests.lowered.elisa"
+DEFAULT_IR_EMITTER_LOWERED = ROOT / "shader_recompiler/ir/ir_emitter.lowered.elisa"
+DISPLAY_PATHS: dict[Path, str] = {}
+
+FOCUSED_SOURCE_FILES = [
     ROOT / "shader_recompiler/ir/ir_emitter.elisa",
     ROOT / "shader_recompiler/ir/reg.elisa",
     ROOT / "shader_recompiler/ir/value.elisa",
@@ -90,7 +92,12 @@ class Hit:
     text: str
 
     def rel(self) -> str:
-        return self.path.relative_to(ROOT).as_posix()
+        if self.path in DISPLAY_PATHS:
+            return DISPLAY_PATHS[self.path]
+        try:
+            return self.path.relative_to(ROOT).as_posix()
+        except ValueError:
+            return self.path.as_posix()
 
 
 def function_ranges(path: Path) -> dict[str, tuple[int, int]]:
@@ -150,17 +157,36 @@ def render_hits(title: str, hits: list[Hit], limit: int | None = None) -> list[s
 
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--core-lowered", type=Path, default=DEFAULT_CORE_LOWERED)
+    parser.add_argument(
+        "--core-lowered-label",
+        default=DEFAULT_CORE_LOWERED.relative_to(ROOT).as_posix(),
+    )
+    parser.add_argument("--ir-emitter-lowered", type=Path, default=DEFAULT_IR_EMITTER_LOWERED)
+    parser.add_argument(
+        "--ir-emitter-lowered-label",
+        default=DEFAULT_IR_EMITTER_LOWERED.relative_to(ROOT).as_posix(),
+    )
     parser.add_argument("--write-report", type=Path)
     args = parser.parse_args()
 
-    missing = [path for path in FOCUSED_FILES if not path.exists()]
+    DISPLAY_PATHS[args.core_lowered] = args.core_lowered_label
+    DISPLAY_PATHS[args.ir_emitter_lowered] = args.ir_emitter_lowered_label
+
+    focused_files = [
+        args.core_lowered,
+        args.ir_emitter_lowered,
+        *FOCUSED_SOURCE_FILES,
+    ]
+
+    missing = [path for path in focused_files if not path.exists()]
     if missing:
         for path in missing:
             print(f"missing focused file: {path.relative_to(ROOT)}")
         return 2
 
     refined_hits: list[Hit] = []
-    for path in FOCUSED_FILES:
+    for path in focused_files:
         for function in REFINED_PATH_FUNCTIONS:
             refined_hits.extend(scan_function(path, function))
 
@@ -169,18 +195,18 @@ def main() -> int:
     ]
 
     expected_hits: list[Hit] = []
-    for path in FOCUSED_FILES:
+    for path in focused_files:
         for function in EXPECTED_CHECK_FUNCTIONS:
             expected_hits.extend(scan_function(path, function))
 
     all_register_checks: list[Hit] = []
-    for path in FOCUSED_FILES:
+    for path in focused_files:
         all_register_checks.extend(scan_register_checks(path))
 
     lines = [
         "# Lowered refined register bounds audit",
         "",
-        "Scope: focused shader frontend/IR register-index tests and checked-in lowered output at integrated head 098ff2d.",
+        "Scope: focused shader frontend/IR register-index tests and generated lowered output.",
         "",
         "Result: refined SGPR/VGPR read/write and IR get/set register paths do not contain lowered `104`/`256` register-file bounds checks in the audited wrapper bodies.",
         "",
