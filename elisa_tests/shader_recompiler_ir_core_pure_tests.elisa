@@ -152,6 +152,48 @@ def shader_ir_values_roundtrip_refined_register_indices() -> void:
         assert not ShaderIrValue_TryVectorRegIndex(scalar_value, vector_roundtrip)
 
 @test
+def shader_ir_raw_register_values_remain_compatibility_only() -> void:
+    can Abort.Panic:
+        scalar_raw: ShaderIrValue = ShaderIrValue_FromScalarReg(104)
+        vector_raw: ShaderIrValue = ShaderIrValue_FromVectorReg(256)
+        scalar_roundtrip: mutable ShaderIrScalarRegIndex = 0
+        vector_roundtrip: mutable ShaderIrVectorRegIndex = 0
+
+        assert scalar_raw.type_bits == IR_TYPE_SCALARREG
+        assert vector_raw.type_bits == IR_TYPE_VECTORREG
+        assert ShaderIrValue_ScalarReg(scalar_raw) == 104
+        assert ShaderIrValue_VectorReg(vector_raw) == 256
+
+        assert not ShaderIrValue_TryScalarRegIndex(scalar_raw, scalar_roundtrip)
+        assert not ShaderIrValue_TryVectorRegIndex(vector_raw, vector_roundtrip)
+        assert not ShaderIrValue_TryScalarRegIndex(vector_raw, scalar_roundtrip)
+        assert not ShaderIrValue_TryVectorRegIndex(scalar_raw, vector_roundtrip)
+
+@test
+def shader_ir_raw_emitter_adapters_are_compatibility_only() -> void:
+    can Abort.Panic:
+        info: ShaderIrProgramInfo = ShaderIrProgramInfo(2, 0x6677)
+        program: mutable heap ShaderIrProgram& = ShaderIrProgram_New(info)
+        b0: u32 = ShaderIrProgram_AddBlock(program)
+        emitter: mutable ShaderIrEmitter = ShaderIrEmitter_New(b0)
+
+        _ = ShaderIrEmitter_GetScalarReg(program, emitter, ShaderIrValue_FromScalarReg(104))
+        _ = ShaderIrEmitter_SetVectorReg(program, emitter, ShaderIrValue_FromVectorReg(256), ShaderIrValue_FromU32(77))
+
+        block: ShaderIrBlock = program.blocks[b0.usize()]
+        scalar_roundtrip: mutable ShaderIrScalarRegIndex = 0
+        vector_roundtrip: mutable ShaderIrVectorRegIndex = 0
+
+        assert block.inst_count == 2
+        assert block.insts[0].opcode == IR_OPCODE_GETSCALARREGISTER
+        assert ShaderIrValue_ScalarReg(block.insts[0].args[0]) == 104
+        assert not ShaderIrValue_TryScalarRegIndex(block.insts[0].args[0], scalar_roundtrip)
+
+        assert block.insts[1].opcode == IR_OPCODE_SETVECTORREGISTER
+        assert ShaderIrValue_VectorReg(block.insts[1].args[0]) == 256
+        assert not ShaderIrValue_TryVectorRegIndex(block.insts[1].args[0], vector_roundtrip)
+
+@test
 def shader_ir_emitter_refined_f32_register_adapters_are_named_and_bounded() -> void:
     can Abort.Panic:
         info: ShaderIrProgramInfo = ShaderIrProgramInfo(2, 0x7788)
@@ -181,3 +223,50 @@ def shader_ir_emitter_refined_f32_register_adapters_are_named_and_bounded() -> v
         assert block.insts[6].opcode == IR_OPCODE_BITCASTU32F32
         assert block.insts[7].opcode == IR_OPCODE_SETVECTORREGISTER
         assert ShaderIrValue_VectorReg(block.insts[7].args[0]) == 255
+
+@test
+def shader_ir_refined_register_index_boundary_elides_recheck_regression() -> void:
+    can Abort.Panic:
+        info: ShaderIrProgramInfo = ShaderIrProgramInfo(2, 0x9900)
+        program: mutable heap ShaderIrProgram& = ShaderIrProgram_New(info)
+        b0: u32 = ShaderIrProgram_AddBlock(program)
+        emitter: mutable ShaderIrEmitter = ShaderIrEmitter_New(b0)
+
+        max_sgpr: ShaderIrScalarRegIndex = 103
+        max_vgpr: ShaderIrVectorRegIndex = 255
+        narrowed_sgpr: mutable ShaderIrScalarRegIndex = 0
+        narrowed_vgpr: mutable ShaderIrVectorRegIndex = 0
+        assert ShaderIrScalarRegIndex_TryFromU32(103, narrowed_sgpr)
+        assert narrowed_sgpr == max_sgpr
+        assert ShaderIrVectorRegIndex_TryFromU32(255, narrowed_vgpr)
+        assert narrowed_vgpr == max_vgpr
+
+        invalid_sgpr: mutable ShaderIrScalarRegIndex = 0
+        invalid_vgpr: mutable ShaderIrVectorRegIndex = 0
+        assert not ShaderIrScalarRegIndex_TryFromU32(104, invalid_sgpr)
+        assert not ShaderIrVectorRegIndex_TryFromU32(256, invalid_vgpr)
+
+        _ = ShaderIrEmitter_GetScalarRegIndex(program, emitter, max_sgpr)
+        _ = ShaderIrEmitter_SetScalarRegIndex(program, emitter, max_sgpr, ShaderIrValue_FromU32(0x12345678))
+        _ = ShaderIrEmitter_GetVectorRegIndex(program, emitter, max_vgpr)
+        _ = ShaderIrEmitter_SetVectorRegIndex(program, emitter, max_vgpr, ShaderIrValue_FromU32(0x89abcdef))
+
+        block: ShaderIrBlock = program.blocks[b0.usize()]
+        assert block.inst_count == 4
+        assert block.insts[0].opcode == IR_OPCODE_GETSCALARREGISTER
+        assert block.insts[0].args[0].type_bits == IR_TYPE_SCALARREG
+        assert ShaderIrValue_ScalarReg(block.insts[0].args[0]) == 103
+        _ = ShaderIrValue_ScalarRegIndex(block.insts[0].args[0])
+
+        assert block.insts[1].opcode == IR_OPCODE_SETSCALARREGISTER
+        assert block.insts[1].args[0].type_bits == IR_TYPE_SCALARREG
+        assert ShaderIrValue_ScalarReg(block.insts[1].args[0]) == 103
+
+        assert block.insts[2].opcode == IR_OPCODE_GETVECTORREGISTER
+        assert block.insts[2].args[0].type_bits == IR_TYPE_VECTORREG
+        assert ShaderIrValue_VectorReg(block.insts[2].args[0]) == 255
+        _ = ShaderIrValue_VectorRegIndex(block.insts[2].args[0])
+
+        assert block.insts[3].opcode == IR_OPCODE_SETVECTORREGISTER
+        assert block.insts[3].args[0].type_bits == IR_TYPE_VECTORREG
+        assert ShaderIrValue_VectorReg(block.insts[3].args[0]) == 255
